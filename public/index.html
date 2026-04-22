@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Stock Options Scanner</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d0f14;
+    --surface:   #161a22;
+    --surface2:  #1e2330;
+    --border:    #2a3040;
+    --text:      #e2e8f0;
+    --muted:     #6b7280;
+    --long:      #22c55e;
+    --long-dim:  #166534;
+    --short:     #ef4444;
+    --short-dim: #7f1d1d;
+    --accent:    #6366f1;
+    --pass:      #22c55e;
+    --fail:      #ef4444;
+    --warn:      #f59e0b;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.05em;
+    flex: 1;
+  }
+
+  .header-meta {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .controls {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 7px 12px;
+    font-family: inherit;
+    font-size: 12px;
+    width: 320px;
+    outline: none;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+  input[type="text"]::placeholder { color: var(--muted); }
+
+  button {
+    background: var(--accent);
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 18px;
+    transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-secondary {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  #status {
+    color: var(--muted);
+    font-size: 11px;
+    margin-left: auto;
+  }
+
+  main {
+    padding: 20px 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  #summary {
+    margin-bottom: 16px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  #results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 16px;
+  }
+
+  .empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 60px 0;
+    color: var(--muted);
+  }
+
+  /* ── Setup card ───────────────────────────────────────────────────────── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .ticker {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  .badge {
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 3px 10px;
+    text-transform: uppercase;
+  }
+  .badge-long  { background: var(--long-dim);  color: var(--long); }
+  .badge-short { background: var(--short-dim); color: var(--short); }
+
+  .card-body { padding: 14px 16px; }
+
+  /* price row */
+  .price-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .price-big {
+    font-size: 22px;
+    font-weight: 700;
+  }
+  .price-meta { color: var(--muted); font-size: 11px; }
+
+  /* indicator grid */
+  .ind-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .ind-cell {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 10px;
+  }
+  .ind-label { color: var(--muted); font-size: 10px; margin-bottom: 2px; }
+  .ind-value { font-size: 13px; font-weight: 600; }
+
+  /* SL/TP table */
+  .levels-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 12px;
+    font-size: 12px;
+  }
+  .levels-table th {
+    color: var(--muted);
+    font-weight: 500;
+    padding: 4px 6px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  .levels-table td {
+    padding: 5px 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .levels-table tr:last-child td { border-bottom: none; }
+  .level-sl   { color: var(--short); }
+  .level-tp   { color: var(--long); }
+  .level-entry { color: var(--warn); }
+  .rr { color: var(--muted); font-size: 11px; }
+
+  /* Option box */
+  .option-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+  }
+  .option-label {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+  .option-symbol {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+  .option-meta { color: var(--muted); font-size: 11px; }
+
+  /* Checklist */
+  .checklist {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+  }
+  .check-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    padding: 3px 0;
+  }
+  .check-item .icon { font-size: 12px; }
+  .check-item.pass  { color: var(--pass); }
+  .check-item.fail  { color: var(--fail); }
+  .check-item.warn  { color: var(--warn); }
+
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Stock Options Scanner</h1>
+  <span class="header-meta">EMA Pullback · Daily/Weekly · 2R+ minimum</span>
+</header>
+
+<div class="controls">
+  <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
+  <button id="scanBtn" onclick="runScan()">Scan</button>
+  <button class="btn-secondary" onclick="clearResults()">Clear</button>
+  <span id="status"></span>
+</div>
+
+<main>
+  <div id="summary"></div>
+  <div id="results"></div>
+</main>
+
+<script>
+const API = '';
+
+async function runScan() {
+  const btn = document.getElementById('scanBtn');
+  const status = document.getElementById('status');
+  const input = document.getElementById('tickerInput').value.trim();
+  const results = document.getElementById('results');
+  const summary = document.getElementById('summary');
+
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span>Scanning...';
+  results.innerHTML = '';
+  summary.textContent = '';
+
+  try {
+    const url = input
+      ? `${API}/api/scan?tickers=${encodeURIComponent(input)}`
+      : `${API}/api/scan`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (!Array.isArray(data) || data.length === 0) {
+      results.innerHTML = '<div class="empty">No setups found matching all conditions.</div>';
+      summary.textContent = 'Scan complete — 0 setups found.';
+    } else {
+      const longs  = data.filter(s => s.direction === 'LONG').length;
+      const shorts = data.filter(s => s.direction === 'SHORT').length;
+      summary.textContent = `${data.length} setup${data.length !== 1 ? 's' : ''} found — ${longs} LONG, ${shorts} SHORT`;
+      results.innerHTML = data.map(renderCard).join('');
+    }
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+    results.innerHTML = '<div class="empty">Scan failed — is the server running?</div>';
+  } finally {
+    btn.disabled = false;
+    status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : 'Done';
+  }
+}
+
+function clearResults() {
+  document.getElementById('results').innerHTML = '';
+  document.getElementById('summary').textContent = '';
+  document.getElementById('status').textContent = '';
+}
+
+function renderCard(s) {
+  const isLong = s.direction === 'LONG';
+  const c = s.checklist || {};
+
+  const checkItem = (pass, label) =>
+    `<div class="check-item ${pass ? 'pass' : 'fail'}">
+      <span class="icon">${pass ? '✓' : '✗'}</span>${label}
+    </div>`;
+
+  const riskPct = s.entry > 0 ? ((s.risk / s.entry) * 100).toFixed(1) : '—';
+
+  return `
+  <div class="card">
+    <div class="card-header">
+      <span class="ticker">${s.ticker}</span>
+      <span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${s.direction}</span>
+    </div>
+    <div class="card-body">
+
+      <div class="price-row">
+        <span class="price-big">$${s.price.toFixed(2)}</span>
+        <span class="price-meta">RSI ${s.rsi} · ATR $${s.atr.toFixed(2)} · ${s.distToEma20Pct}% from EMA20</span>
+      </div>
+
+      <div class="ind-grid">
+        <div class="ind-cell">
+          <div class="ind-label">EMA 20</div>
+          <div class="ind-value">$${s.ema20.toFixed(2)}</div>
+        </div>
+        <div class="ind-cell">
+          <div class="ind-label">EMA 50</div>
+          <div class="ind-value">$${s.ema50.toFixed(2)}</div>
+        </div>
+        <div class="ind-cell">
+          <div class="ind-label">EMA 200</div>
+          <div class="ind-value">$${s.ema200.toFixed(2)}</div>
+        </div>
+      </div>
+
+      <table class="levels-table">
+        <thead>
+          <tr><th>Level</th><th>Price</th><th>R:R</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="level-sl">Stop Loss</td>
+            <td class="level-sl">$${s.sl.toFixed(2)}</td>
+            <td class="rr">—</td>
+          </tr>
+          <tr>
+            <td class="level-entry">Entry</td>
+            <td class="level-entry">$${s.entry.toFixed(2)}</td>
+            <td class="rr">1R = $${s.risk.toFixed(2)} (${riskPct}%)</td>
+          </tr>
+          <tr>
+            <td class="level-tp">TP1</td>
+            <td class="level-tp">$${s.tp1.toFixed(2)}</td>
+            <td class="rr">2R</td>
+          </tr>
+          <tr>
+            <td class="level-tp">TP2</td>
+            <td class="level-tp">$${s.tp2.toFixed(2)}</td>
+            <td class="rr">3R</td>
+          </tr>
+          <tr>
+            <td class="level-tp">TP3</td>
+            <td class="level-tp">$${s.tp3.toFixed(2)}</td>
+            <td class="rr">4R</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="option-box">
+        <div class="option-label">Suggested Option · ${s.option.dte} DTE</div>
+        <div class="option-symbol">${s.option.symbol}</div>
+        <div class="option-meta">Strike $${s.option.strike} · Expiry ${s.option.expiry}</div>
+      </div>
+
+      <div class="checklist">
+        ${checkItem(c.trendAligned,    'Trend aligned (D)')}
+        ${checkItem(c.htfAligned,      'HTF aligned (W)')}
+        ${checkItem(c.emaStacked,      'EMAs stacked')}
+        ${checkItem(c.pullbackToEMA20, 'Pullback to EMA20')}
+        ${checkItem(c.rsiInZone,       'RSI in zone')}
+        ${checkItem(c.notSandwiched,   'Not sandwiched')}
+      </div>
+
+    </div>
+  </div>`;
+}
+
+// Auto-scan on load
+runScan();
+</script>
+</body>
+</html>
