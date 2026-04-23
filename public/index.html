@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Stock Options Scanner</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>" />
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -41,20 +42,37 @@
     gap: 16px;
     flex-wrap: wrap;
   }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.05em; flex: 1; }
+  .header-meta { color: var(--muted); font-size: 11px; }
 
-  header h1 {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text);
-    letter-spacing: 0.05em;
-    flex: 1;
+  /* ── Tabs ──────────────────────────────────────────────────────────────── */
+  .tab-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    gap: 4px;
   }
-
-  .header-meta {
+  .tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
     color: var(--muted);
-    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 10px 16px;
+    transition: color 0.15s, border-color 0.15s;
   }
+  .tab-btn:hover { color: var(--text); opacity: 1; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ── Controls ──────────────────────────────────────────────────────────── */
   .controls {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
@@ -65,7 +83,7 @@
     flex-wrap: wrap;
   }
 
-  input[type="text"] {
+  input[type="text"], input[type="number"], select {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -73,11 +91,15 @@
     padding: 7px 12px;
     font-family: inherit;
     font-size: 12px;
-    width: 320px;
     outline: none;
   }
-  input[type="text"]:focus { border-color: var(--accent); }
-  input[type="text"]::placeholder { color: var(--muted); }
+  input[type="text"]:focus,
+  input[type="number"]:focus,
+  select:focus { border-color: var(--accent); }
+  input::placeholder { color: var(--muted); }
+  select option { background: var(--surface2); }
+
+  #tickerInput { width: 320px; }
 
   button {
     background: var(--accent);
@@ -93,30 +115,16 @@
   }
   button:hover { opacity: 0.85; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+  .btn-sm { padding: 5px 12px; font-size: 11px; }
+  .btn-log { background: #1e3a5f; border: 1px solid #2563eb; color: #93c5fd; }
 
-  .btn-secondary {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    color: var(--text);
-  }
+  #status { color: var(--muted); font-size: 11px; margin-left: auto; }
 
-  #status {
-    color: var(--muted);
-    font-size: 11px;
-    margin-left: auto;
-  }
+  /* ── Scanner panel ─────────────────────────────────────────────────────── */
+  main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
 
-  main {
-    padding: 20px 24px;
-    max-width: 1400px;
-    margin: 0 auto;
-  }
-
-  #summary {
-    margin-bottom: 16px;
-    color: var(--muted);
-    font-size: 11px;
-  }
+  #summary { margin-bottom: 16px; color: var(--muted); font-size: 11px; }
 
   #results {
     display: grid;
@@ -124,154 +132,162 @@
     gap: 16px;
   }
 
-  .empty {
-    grid-column: 1 / -1;
-    text-align: center;
-    padding: 60px 0;
-    color: var(--muted);
-  }
+  .empty { grid-column: 1 / -1; text-align: center; padding: 60px 0; color: var(--muted); }
 
-  /* ── Setup card ───────────────────────────────────────────────────────── */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-  }
-
+  /* ── Setup card ────────────────────────────────────────────────────────── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
   }
+  .ticker { font-size: 20px; font-weight: 700; letter-spacing: 0.05em; }
+  .card-header-right { display: flex; align-items: center; gap: 8px; }
 
-  .ticker {
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-  }
-
-  .badge {
-    border-radius: 5px;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    padding: 3px 10px;
-    text-transform: uppercase;
-  }
+  .badge { border-radius: 5px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 10px; text-transform: uppercase; }
   .badge-long  { background: var(--long-dim);  color: var(--long); }
   .badge-short { background: var(--short-dim); color: var(--short); }
 
   .card-body { padding: 14px 16px; }
 
-  /* price row */
-  .price-row {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    margin-bottom: 12px;
-  }
-  .price-big {
-    font-size: 22px;
-    font-weight: 700;
-  }
+  .price-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .price-big { font-size: 22px; font-weight: 700; }
   .price-meta { color: var(--muted); font-size: 11px; }
 
-  /* indicator grid */
-  .ind-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-  .ind-cell {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 7px 10px;
-  }
+  .ind-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .ind-cell { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
   .ind-label { color: var(--muted); font-size: 10px; margin-bottom: 2px; }
   .ind-value { font-size: 13px; font-weight: 600; }
 
-  /* SL/TP table */
-  .levels-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 12px;
-    font-size: 12px;
-  }
-  .levels-table th {
-    color: var(--muted);
-    font-weight: 500;
-    padding: 4px 6px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-  }
-  .levels-table td {
-    padding: 5px 6px;
-    border-bottom: 1px solid var(--border);
-  }
+  .levels-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 12px; }
+  .levels-table th { color: var(--muted); font-weight: 500; padding: 4px 6px; text-align: left; border-bottom: 1px solid var(--border); }
+  .levels-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); }
   .levels-table tr:last-child td { border-bottom: none; }
-  .level-sl   { color: var(--short); }
-  .level-tp   { color: var(--long); }
+  .level-sl    { color: var(--short); }
+  .level-tp    { color: var(--long); }
   .level-entry { color: var(--warn); }
   .rr { color: var(--muted); font-size: 11px; }
 
-  /* Option box */
-  .option-box {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 10px 12px;
-    margin-bottom: 12px;
-  }
-  .option-label {
-    color: var(--muted);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 4px;
-  }
-  .option-symbol {
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    margin-bottom: 4px;
-  }
+  .option-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+  .option-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+  .option-symbol { font-size: 14px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 4px; }
   .option-meta { color: var(--muted); font-size: 11px; }
 
-  /* Checklist */
-  .checklist {
-    border-top: 1px solid var(--border);
-    padding-top: 10px;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 5px;
-  }
-  .check-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    padding: 3px 0;
-  }
+  .checklist { border-top: 1px solid var(--border); padding-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  .check-item { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 3px 0; }
   .check-item .icon { font-size: 12px; }
-  .check-item.pass  { color: var(--pass); }
-  .check-item.fail  { color: var(--fail); }
-  .check-item.warn  { color: var(--warn); }
+  .check-item.pass { color: var(--pass); }
+  .check-item.fail { color: var(--fail); }
+  .check-item.warn { color: var(--warn); }
 
+  .card-footer { padding: 10px 16px; border-top: 1px solid var(--border); }
+
+  /* ── Modal ─────────────────────────────────────────────────────────────── */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 480px;
+    max-width: 95vw;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+  }
+  .modal-header h2 { font-size: 14px; font-weight: 600; }
+  .modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 0 4px; }
+  .modal-close:hover { color: var(--text); opacity: 1; }
+  .modal-body { padding: 20px; }
+  .modal-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+
+  .form-row { margin-bottom: 14px; }
+  .form-row label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .form-row input[type="text"],
+  .form-row input[type="number"],
+  .form-row select { width: 100%; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  /* ── Journal panel ─────────────────────────────────────────────────────── */
+  #journal-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+
+  .journal-controls {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .journal-controls select { min-width: 120px; }
+
+  .journal-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+  }
+  .stat-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .stat-value { font-size: 20px; font-weight: 700; }
+  .stat-value.green { color: var(--long); }
+  .stat-value.red   { color: var(--short); }
+  .stat-value.muted { color: var(--muted); }
+
+  .journal-table-wrap { overflow-x: auto; }
+  .journal-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .journal-table th {
+    color: var(--muted); font-weight: 500; font-size: 11px;
+    padding: 8px 12px; text-align: left;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky; top: 0;
+  }
+  .journal-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .journal-table tr:hover td { background: var(--surface2); }
+  .journal-table tr.win  td { border-left: 3px solid var(--long); }
+  .journal-table tr.loss td { border-left: 3px solid var(--short); }
+  .journal-table tr.open td { border-left: 3px solid var(--warn); }
+
+  .result-badge {
+    border-radius: 4px; font-size: 10px; font-weight: 700;
+    padding: 2px 8px; text-transform: uppercase;
+  }
+  .result-win  { background: var(--long-dim);  color: var(--long); }
+  .result-loss { background: var(--short-dim); color: var(--short); }
+  .result-open { background: #1c1a08; color: var(--warn); }
+
+  .pnl-pos { color: var(--long); }
+  .pnl-neg { color: var(--short); }
+
+  .delete-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 6px; }
+  .delete-btn:hover { color: var(--short); opacity: 1; }
+
+  .journal-empty { text-align: center; padding: 60px 0; color: var(--muted); }
+
+  /* ── Spinner ───────────────────────────────────────────────────────────── */
   .spinner {
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-    margin-right: 6px;
+    vertical-align: middle; margin-right: 6px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -279,29 +295,141 @@
 <body>
 
 <header>
-  <h1>Stock Options Scanner</h1>
+  <h1>📈 Stock Options Scanner</h1>
   <span class="header-meta">EMA Pullback · Daily/Weekly · 2R+ minimum</span>
 </header>
 
-<div class="controls">
-  <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
-  <button id="scanBtn" onclick="runScan()">Scan</button>
-  <button class="btn-secondary" onclick="clearResults()">Clear</button>
-  <span id="status"></span>
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
+  <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
 </div>
 
-<main>
-  <div id="summary"></div>
-  <div id="results"></div>
-</main>
+<!-- ── Scanner Tab ───────────────────────────────────────────────────────── -->
+<div id="scanner-panel" class="tab-panel active">
+  <div class="controls">
+    <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
+    <button id="scanBtn" onclick="runScan()">Scan</button>
+    <button class="btn-secondary" onclick="clearResults()">Clear</button>
+    <span id="status"></span>
+  </div>
+  <main>
+    <div id="summary"></div>
+    <div id="results"></div>
+  </main>
+</div>
+
+<!-- ── Journal Tab ───────────────────────────────────────────────────────── -->
+<div id="journal-panel" class="tab-panel">
+  <div class="journal-stats" id="journalStats"></div>
+  <div class="journal-controls">
+    <input type="text" id="filterTicker" placeholder="Filter ticker..." style="width:130px" oninput="renderJournal()" />
+    <select id="filterDirection" onchange="renderJournal()">
+      <option value="">All directions</option>
+      <option value="LONG">LONG</option>
+      <option value="SHORT">SHORT</option>
+    </select>
+    <select id="filterResult" onchange="renderJournal()">
+      <option value="">All results</option>
+      <option value="Win">Win</option>
+      <option value="Loss">Loss</option>
+      <option value="Open">Open</option>
+    </select>
+    <button class="btn-secondary btn-sm" onclick="exportCSV()">Export CSV</button>
+    <button class="btn-secondary btn-sm" style="color:var(--short)" onclick="clearJournal()">Clear All</button>
+  </div>
+  <div class="journal-table-wrap">
+    <div id="journalBody"></div>
+  </div>
+</div>
+
+<!-- ── Log Trade Modal ───────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="logModal" onclick="closeModal(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>📊 Log Trade</h2>
+      <button class="modal-close" onclick="closeModalDirect()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Ticker</label>
+          <input type="text" id="f_ticker" />
+        </div>
+        <div class="form-row">
+          <label>Direction</label>
+          <select id="f_direction">
+            <option value="LONG">LONG</option>
+            <option value="SHORT">SHORT</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Option Contract</label>
+        <input type="text" id="f_option" placeholder="e.g. AAPL MAY 29 $200 C" />
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Entry Price (per contract)</label>
+          <input type="number" id="f_entry" step="0.01" placeholder="0.00" />
+        </div>
+        <div class="form-row">
+          <label>Contracts</label>
+          <input type="number" id="f_contracts" step="1" min="1" value="1" />
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Expiry Date</label>
+          <input type="text" id="f_expiry" placeholder="YYYY-MM-DD" />
+        </div>
+        <div class="form-row">
+          <label>Result</label>
+          <select id="f_result">
+            <option value="Open">Open</option>
+            <option value="Win">Win</option>
+            <option value="Loss">Loss</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Exit Price (per contract)</label>
+          <input type="number" id="f_exit" step="0.01" placeholder="0.00" />
+        </div>
+        <div class="form-row">
+          <label>P&amp;L ($)</label>
+          <input type="number" id="f_pnl" step="0.01" placeholder="auto-calc or override" />
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModalDirect()">Cancel</button>
+      <button onclick="saveJournalEntry()">Save Trade</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const API = '';
+const JOURNAL_KEY = 'stock_scanner_journal';
+
+// ── Tab switching ────────────────────────────────────────────────────────────
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach((b, i) => {
+    b.classList.toggle('active', ['scanner','journal'][i] === tab);
+  });
+  document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
+  document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
+  if (tab === 'journal') renderJournal();
+}
+
+// ── Scanner ──────────────────────────────────────────────────────────────────
 
 async function runScan() {
-  const btn = document.getElementById('scanBtn');
-  const status = document.getElementById('status');
-  const input = document.getElementById('tickerInput').value.trim();
+  const btn     = document.getElementById('scanBtn');
+  const status  = document.getElementById('status');
+  const input   = document.getElementById('tickerInput').value.trim();
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
 
@@ -314,7 +442,7 @@ async function runScan() {
     const url = input
       ? `${API}/api/scan?tickers=${encodeURIComponent(input)}`
       : `${API}/api/scan`;
-    const res = await fetch(url);
+    const res  = await fetch(url);
     const data = await res.json();
 
     if (!Array.isArray(data) || data.length === 0) {
@@ -344,95 +472,226 @@ function clearResults() {
 function renderCard(s) {
   const isLong = s.direction === 'LONG';
   const c = s.checklist || {};
-
-  const checkItem = (pass, label) =>
-    `<div class="check-item ${pass ? 'pass' : 'fail'}">
-      <span class="icon">${pass ? '✓' : '✗'}</span>${label}
-    </div>`;
-
+  const ci = (pass, label) =>
+    `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
   const riskPct = s.entry > 0 ? ((s.risk / s.entry) * 100).toFixed(1) : '—';
+  const encoded = encodeURIComponent(JSON.stringify(s));
 
   return `
   <div class="card">
     <div class="card-header">
       <span class="ticker">${s.ticker}</span>
-      <span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${s.direction}</span>
+      <div class="card-header-right">
+        <span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${s.direction}</span>
+      </div>
     </div>
     <div class="card-body">
-
       <div class="price-row">
         <span class="price-big">$${s.price.toFixed(2)}</span>
         <span class="price-meta">RSI ${s.rsi} · ATR $${s.atr.toFixed(2)} · ${s.distToEma20Pct}% from EMA20</span>
       </div>
-
       <div class="ind-grid">
-        <div class="ind-cell">
-          <div class="ind-label">EMA 20</div>
-          <div class="ind-value">$${s.ema20.toFixed(2)}</div>
-        </div>
-        <div class="ind-cell">
-          <div class="ind-label">EMA 50</div>
-          <div class="ind-value">$${s.ema50.toFixed(2)}</div>
-        </div>
-        <div class="ind-cell">
-          <div class="ind-label">EMA 200</div>
-          <div class="ind-value">$${s.ema200.toFixed(2)}</div>
-        </div>
+        <div class="ind-cell"><div class="ind-label">EMA 20</div><div class="ind-value">$${s.ema20.toFixed(2)}</div></div>
+        <div class="ind-cell"><div class="ind-label">EMA 50</div><div class="ind-value">$${s.ema50.toFixed(2)}</div></div>
+        <div class="ind-cell"><div class="ind-label">EMA 200</div><div class="ind-value">$${s.ema200.toFixed(2)}</div></div>
       </div>
-
       <table class="levels-table">
-        <thead>
-          <tr><th>Level</th><th>Price</th><th>R:R</th></tr>
-        </thead>
+        <thead><tr><th>Level</th><th>Price</th><th>R:R</th></tr></thead>
         <tbody>
-          <tr>
-            <td class="level-sl">Stop Loss</td>
-            <td class="level-sl">$${s.sl.toFixed(2)}</td>
-            <td class="rr">—</td>
-          </tr>
-          <tr>
-            <td class="level-entry">Entry</td>
-            <td class="level-entry">$${s.entry.toFixed(2)}</td>
-            <td class="rr">1R = $${s.risk.toFixed(2)} (${riskPct}%)</td>
-          </tr>
-          <tr>
-            <td class="level-tp">TP1</td>
-            <td class="level-tp">$${s.tp1.toFixed(2)}</td>
-            <td class="rr">2R</td>
-          </tr>
-          <tr>
-            <td class="level-tp">TP2</td>
-            <td class="level-tp">$${s.tp2.toFixed(2)}</td>
-            <td class="rr">3R</td>
-          </tr>
-          <tr>
-            <td class="level-tp">TP3</td>
-            <td class="level-tp">$${s.tp3.toFixed(2)}</td>
-            <td class="rr">4R</td>
-          </tr>
+          <tr><td class="level-sl">Stop Loss</td><td class="level-sl">$${s.sl.toFixed(2)}</td><td class="rr">—</td></tr>
+          <tr><td class="level-entry">Entry</td><td class="level-entry">$${s.entry.toFixed(2)}</td><td class="rr">1R = $${s.risk.toFixed(2)} (${riskPct}%)</td></tr>
+          <tr><td class="level-tp">TP1</td><td class="level-tp">$${s.tp1.toFixed(2)}</td><td class="rr">2R</td></tr>
+          <tr><td class="level-tp">TP2</td><td class="level-tp">$${s.tp2.toFixed(2)}</td><td class="rr">3R</td></tr>
+          <tr><td class="level-tp">TP3</td><td class="level-tp">$${s.tp3.toFixed(2)}</td><td class="rr">4R</td></tr>
         </tbody>
       </table>
-
       <div class="option-box">
         <div class="option-label">Suggested Option · ${s.option.dte} DTE</div>
         <div class="option-symbol">${s.option.symbol}</div>
         <div class="option-meta">Strike $${s.option.strike} · Expiry ${s.option.expiry}</div>
       </div>
-
       <div class="checklist">
-        ${checkItem(c.trendAligned,    'Trend aligned (D)')}
-        ${checkItem(c.htfAligned,      'HTF aligned (W)')}
-        ${checkItem(c.emaStacked,      'EMAs stacked')}
-        ${checkItem(c.pullbackToEMA20, 'Pullback to EMA20')}
-        ${checkItem(c.rsiInZone,       'RSI in zone')}
-        ${checkItem(c.notSandwiched,   'Not sandwiched')}
+        ${ci(c.trendAligned,    'Trend aligned (D)')}
+        ${ci(c.htfAligned,      'HTF aligned (W)')}
+        ${ci(c.emaStacked,      'EMAs stacked')}
+        ${ci(c.pullbackToEMA20, 'Pullback to EMA20')}
+        ${ci(c.rsiInZone,       'RSI in zone')}
+        ${ci(c.notSandwiched,   'Not sandwiched')}
       </div>
-
+    </div>
+    <div class="card-footer">
+      <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">📊 Log Trade</button>
     </div>
   </div>`;
 }
 
-// Auto-scan on load
+// ── Modal ────────────────────────────────────────────────────────────────────
+
+function openLogModal(setupJson) {
+  const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
+  document.getElementById('f_ticker').value    = s.ticker || '';
+  document.getElementById('f_direction').value = s.direction || 'LONG';
+  document.getElementById('f_option').value    = s.option?.symbol || '';
+  document.getElementById('f_entry').value     = s.entry || '';
+  document.getElementById('f_expiry').value    = s.option?.expiry || '';
+  document.getElementById('f_contracts').value = 1;
+  document.getElementById('f_result').value    = 'Open';
+  document.getElementById('f_exit').value      = '';
+  document.getElementById('f_pnl').value       = '';
+  document.getElementById('logModal').classList.add('open');
+}
+
+function closeModal(e) {
+  if (e.target === document.getElementById('logModal')) closeModalDirect();
+}
+function closeModalDirect() {
+  document.getElementById('logModal').classList.remove('open');
+}
+
+// Auto-calc P&L when exit price changes
+document.getElementById('f_exit').addEventListener('input', () => {
+  const entry     = parseFloat(document.getElementById('f_entry').value) || 0;
+  const exit      = parseFloat(document.getElementById('f_exit').value)  || 0;
+  const contracts = parseInt(document.getElementById('f_contracts').value) || 1;
+  const dir       = document.getElementById('f_direction').value;
+  if (entry && exit) {
+    const pnl = (dir === 'LONG' ? exit - entry : entry - exit) * contracts * 100;
+    document.getElementById('f_pnl').value = pnl.toFixed(2);
+  }
+});
+
+function saveJournalEntry() {
+  const entry = {
+    id:        Date.now(),
+    date:      new Date().toISOString().slice(0, 10),
+    ticker:    document.getElementById('f_ticker').value.trim().toUpperCase(),
+    direction: document.getElementById('f_direction').value,
+    option:    document.getElementById('f_option').value.trim(),
+    entry:     parseFloat(document.getElementById('f_entry').value)    || null,
+    exit:      parseFloat(document.getElementById('f_exit').value)     || null,
+    contracts: parseInt(document.getElementById('f_contracts').value)  || 1,
+    expiry:    document.getElementById('f_expiry').value.trim(),
+    result:    document.getElementById('f_result').value,
+    pnl:       parseFloat(document.getElementById('f_pnl').value)      || null,
+  };
+  if (!entry.ticker) { alert('Ticker is required'); return; }
+  const entries = loadJournal();
+  entries.push(entry);
+  saveJournal(entries);
+  closeModalDirect();
+}
+
+// ── Journal storage ──────────────────────────────────────────────────────────
+
+function loadJournal() {
+  try { return JSON.parse(localStorage.getItem(JOURNAL_KEY) || '[]'); }
+  catch { return []; }
+}
+function saveJournal(entries) {
+  localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+  renderJournal();
+}
+function clearJournal() {
+  if (confirm('Delete all journal entries?')) { localStorage.removeItem(JOURNAL_KEY); renderJournal(); }
+}
+function deleteEntry(id) {
+  saveJournal(loadJournal().filter(e => e.id !== id));
+}
+
+// ── Journal render ───────────────────────────────────────────────────────────
+
+function renderJournal() {
+  const all       = loadJournal();
+  const fTicker   = (document.getElementById('filterTicker')?.value   || '').toUpperCase().trim();
+  const fDir      = document.getElementById('filterDirection')?.value || '';
+  const fResult   = document.getElementById('filterResult')?.value    || '';
+
+  const filtered = all.filter(e =>
+    (!fTicker  || e.ticker.includes(fTicker)) &&
+    (!fDir     || e.direction === fDir) &&
+    (!fResult  || e.result === fResult)
+  );
+
+  // Stats (from all, not filtered)
+  const wins   = all.filter(e => e.result === 'Win').length;
+  const losses = all.filter(e => e.result === 'Loss').length;
+  const closed = wins + losses;
+  const winRate = closed > 0 ? ((wins / closed) * 100).toFixed(0) : '—';
+  const totalPnl = all.reduce((sum, e) => sum + (e.pnl || 0), 0);
+  const avgPnl   = closed > 0
+    ? (all.filter(e => e.result !== 'Open').reduce((s,e) => s + (e.pnl||0), 0) / closed)
+    : 0;
+
+  document.getElementById('journalStats').innerHTML = `
+    <div class="stat-card"><div class="stat-label">Total Trades</div><div class="stat-value">${all.length}</div></div>
+    <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value ${closed ? (wins/closed >= 0.5 ? 'green' : 'red') : 'muted'}">${winRate}${closed ? '%' : ''}</div></div>
+    <div class="stat-card"><div class="stat-label">Wins / Losses</div><div class="stat-value">${wins} / ${losses}</div></div>
+    <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value ${totalPnl >= 0 ? 'green' : 'red'}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg P&amp;L</div><div class="stat-value ${avgPnl >= 0 ? 'green' : 'red'}">${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-label">Open Trades</div><div class="stat-value muted">${all.filter(e => e.result === 'Open').length}</div></div>
+  `;
+
+  const body = document.getElementById('journalBody');
+  if (filtered.length === 0) {
+    body.innerHTML = '<div class="journal-empty">No journal entries yet. Log a trade from a scanner setup card.</div>';
+    return;
+  }
+
+  const rows = filtered.slice().reverse().map(e => {
+    const resultCls = e.result === 'Win' ? 'win' : e.result === 'Loss' ? 'loss' : 'open';
+    const badgeCls  = e.result === 'Win' ? 'result-win' : e.result === 'Loss' ? 'result-loss' : 'result-open';
+    const pnlStr = e.pnl != null
+      ? `<span class="${e.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${e.pnl >= 0 ? '+' : ''}$${e.pnl.toFixed(2)}</span>`
+      : '<span style="color:var(--muted)">—</span>';
+    const dirCls = e.direction === 'LONG' ? 'style="color:var(--long)"' : 'style="color:var(--short)"';
+    return `
+      <tr class="${resultCls}">
+        <td>${e.date}</td>
+        <td><strong>${e.ticker}</strong></td>
+        <td ${dirCls}>${e.direction}</td>
+        <td>${e.option || '—'}</td>
+        <td>${e.entry != null ? '$'+e.entry.toFixed(2) : '—'}</td>
+        <td>${e.exit  != null ? '$'+e.exit.toFixed(2)  : '—'}</td>
+        <td>${e.contracts}x</td>
+        <td>${e.expiry || '—'}</td>
+        <td>${pnlStr}</td>
+        <td><span class="result-badge ${badgeCls}">${e.result}</span></td>
+        <td><button class="delete-btn" onclick="deleteEntry(${e.id})">✕</button></td>
+      </tr>`;
+  }).join('');
+
+  body.innerHTML = `
+    <table class="journal-table">
+      <thead>
+        <tr>
+          <th>Date</th><th>Ticker</th><th>Dir</th><th>Option</th>
+          <th>Entry</th><th>Exit</th><th>Qty</th><th>Expiry</th>
+          <th>P&amp;L</th><th>Result</th><th></th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// ── CSV Export ───────────────────────────────────────────────────────────────
+
+function exportCSV() {
+  const entries = loadJournal();
+  if (!entries.length) { alert('No entries to export.'); return; }
+  const headers = ['Date','Ticker','Direction','Option','Entry','Exit','Contracts','Expiry','PnL','Result'];
+  const rows = entries.map(e => [
+    e.date, e.ticker, e.direction, `"${e.option||''}"`,
+    e.entry ?? '', e.exit ?? '', e.contracts, e.expiry,
+    e.pnl ?? '', e.result,
+  ]);
+  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = `stock_journal_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
 runScan();
 </script>
 </body>
