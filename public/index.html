@@ -278,6 +278,8 @@
 
   .delete-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 6px; }
   .delete-btn:hover { color: var(--short); opacity: 1; }
+  .edit-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 6px; }
+  .edit-btn:hover { color: var(--accent); opacity: 1; }
 
   .journal-empty { text-align: center; padding: 60px 0; color: var(--muted); }
 
@@ -346,7 +348,7 @@
 <div class="modal-overlay" id="logModal" onclick="closeModal(event)">
   <div class="modal">
     <div class="modal-header">
-      <h2>📊 Log Trade</h2>
+      <h2 id="modal-title">📊 Log Trade</h2>
       <button class="modal-close" onclick="closeModalDirect()">✕</button>
     </div>
     <div class="modal-body">
@@ -404,7 +406,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModalDirect()">Cancel</button>
-      <button onclick="saveJournalEntry()">Save Trade</button>
+      <button id="modalSaveBtn" onclick="saveJournalEntry()">Save Trade</button>
     </div>
   </div>
 </div>
@@ -527,17 +529,48 @@ function renderCard(s) {
 
 // ── Modal ────────────────────────────────────────────────────────────────────
 
+let _editId = null;
+
 function openLogModal(setupJson) {
   const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
-  document.getElementById('f_ticker').value    = s.ticker || '';
-  document.getElementById('f_direction').value = s.direction || 'LONG';
-  document.getElementById('f_option').value    = s.option?.symbol || '';
-  document.getElementById('f_entry').value     = s.entry || '';
-  document.getElementById('f_expiry').value    = s.option?.expiry || '';
-  document.getElementById('f_contracts').value = 1;
-  document.getElementById('f_result').value    = 'Open';
-  document.getElementById('f_exit').value      = '';
-  document.getElementById('f_pnl').value       = '';
+  _editId = null;
+  document.getElementById('modal-title').textContent   = '📊 Log Trade';
+  document.getElementById('modalSaveBtn').textContent  = 'Save Trade';
+  document.getElementById('f_ticker').value            = s.ticker || '';
+  document.getElementById('f_direction').value         = s.direction || 'LONG';
+  document.getElementById('f_option').value            = s.option?.symbol || '';
+  document.getElementById('f_entry').value             = s.entry || '';
+  document.getElementById('f_expiry').value            = s.option?.expiry || '';
+  document.getElementById('f_contracts').value         = 1;
+  document.getElementById('f_result').value            = 'Open';
+  document.getElementById('f_exit').value              = '';
+  document.getElementById('f_pnl').value               = '';
+  // Lock ticker/direction/option/entry for new entries from scanner
+  ['f_ticker','f_direction','f_option','f_entry','f_expiry'].forEach(id => {
+    document.getElementById(id).disabled = true;
+  });
+  document.getElementById('logModal').classList.add('open');
+}
+
+function openEditModal(id) {
+  const entry = loadJournal().find(e => e.id === id);
+  if (!entry) return;
+  _editId = id;
+  document.getElementById('modal-title').textContent  = '✏️ Edit Trade';
+  document.getElementById('modalSaveBtn').textContent = 'Update Trade';
+  document.getElementById('f_ticker').value           = entry.ticker || '';
+  document.getElementById('f_direction').value        = entry.direction || 'LONG';
+  document.getElementById('f_option').value           = entry.option || '';
+  document.getElementById('f_entry').value            = entry.entry ?? '';
+  document.getElementById('f_expiry').value           = entry.expiry || '';
+  document.getElementById('f_contracts').value        = entry.contracts || 1;
+  document.getElementById('f_result').value           = entry.result || 'Open';
+  document.getElementById('f_exit').value             = entry.exit ?? '';
+  document.getElementById('f_pnl').value              = entry.pnl ?? '';
+  // All fields editable when editing
+  ['f_ticker','f_direction','f_option','f_entry','f_expiry'].forEach(id => {
+    document.getElementById(id).disabled = false;
+  });
   document.getElementById('logModal').classList.add('open');
 }
 
@@ -561,22 +594,26 @@ document.getElementById('f_exit').addEventListener('input', () => {
 });
 
 function saveJournalEntry() {
-  const entry = {
-    id:        Date.now(),
-    date:      new Date().toISOString().slice(0, 10),
-    ticker:    document.getElementById('f_ticker').value.trim().toUpperCase(),
+  const ticker = document.getElementById('f_ticker').value.trim().toUpperCase();
+  if (!ticker) { alert('Ticker is required'); return; }
+  const updated = {
+    ticker,
     direction: document.getElementById('f_direction').value,
     option:    document.getElementById('f_option').value.trim(),
-    entry:     parseFloat(document.getElementById('f_entry').value)    || null,
-    exit:      parseFloat(document.getElementById('f_exit').value)     || null,
-    contracts: parseInt(document.getElementById('f_contracts').value)  || 1,
+    entry:     parseFloat(document.getElementById('f_entry').value)   || null,
+    exit:      parseFloat(document.getElementById('f_exit').value)    || null,
+    contracts: parseInt(document.getElementById('f_contracts').value) || 1,
     expiry:    document.getElementById('f_expiry').value.trim(),
     result:    document.getElementById('f_result').value,
-    pnl:       parseFloat(document.getElementById('f_pnl').value)      || null,
+    pnl:       parseFloat(document.getElementById('f_pnl').value)     || null,
   };
-  if (!entry.ticker) { alert('Ticker is required'); return; }
   const entries = loadJournal();
-  entries.push(entry);
+  if (_editId !== null) {
+    const idx = entries.findIndex(e => e.id === _editId);
+    if (idx !== -1) entries[idx] = { ...entries[idx], ...updated };
+  } else {
+    entries.push({ id: Date.now(), date: new Date().toISOString().slice(0, 10), ...updated });
+  }
   saveJournal(entries);
   closeModalDirect();
 }
@@ -656,7 +693,10 @@ function renderJournal() {
         <td>${e.expiry || '—'}</td>
         <td>${pnlStr}</td>
         <td><span class="result-badge ${badgeCls}">${e.result}</span></td>
-        <td><button class="delete-btn" onclick="deleteEntry(${e.id})">✕</button></td>
+        <td style="white-space:nowrap">
+          <button class="edit-btn" onclick="openEditModal(${e.id})">✏️</button>
+          <button class="delete-btn" onclick="deleteEntry(${e.id})">✕</button>
+        </td>
       </tr>`;
   }).join('');
 
