@@ -5,8 +5,14 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 WATCHLIST = [
-    "DAL", "UAL", "AAL", "CCL", "RCL", "IBM",
-    "AAPL", "MSFT", "SPY", "QQQ", "AMZN", "NVDA", "NCLH",
+    "DAL", "UAL", "AAL", "JBLU",
+    "CCL", "RCL", "NCLH",
+    "NVDA", "AMD", "META", "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN",
+    "MU", "INTC", "QCOM",
+    "XOM", "CVX", "OXY",
+    "JPM", "BAC", "GS",
+    "WMT", "TGT",
+    "SPY", "QQQ", "IWM", "GLD", "SLV", "IBM",
 ]
 
 
