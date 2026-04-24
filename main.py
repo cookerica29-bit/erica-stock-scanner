@@ -28,7 +28,8 @@ def api_scan(tickers: str = Query(default="")):
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
     else:
         watchlist = WATCHLIST
-    return scan_all(watchlist)
+    rows, near_miss = scan_all(watchlist)
+    return {"rows": rows, "near_miss": near_miss}
 
 
 @app.get("/api/scan/{ticker}")

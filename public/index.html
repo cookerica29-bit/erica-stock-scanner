@@ -298,7 +298,7 @@
 
 <header>
   <h1>📈 Stock Options Scanner</h1>
-  <span class="header-meta">EMA Pullback · Daily/Weekly · 2R+ minimum</span>
+  <span class="header-meta">BOS + Order Block · Daily · 2R+ minimum</span>
 </header>
 
 <div class="tab-bar">
@@ -317,6 +317,12 @@
   <main>
     <div id="summary"></div>
     <div id="results"></div>
+    <div id="near-miss-section" style="display:none; margin-top:28px;">
+      <div id="near-miss-header" style="color:#6b7280; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid #2a3040;">
+        Developing Setups — Near Miss
+      </div>
+      <div id="near-miss-results" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px;"></div>
+    </div>
   </main>
 </div>
 
@@ -447,14 +453,28 @@ async function runScan() {
     const res  = await fetch(url);
     const data = await res.json();
 
-    if (!Array.isArray(data) || data.length === 0) {
-      results.innerHTML = '<div class="empty">No setups found matching all conditions.</div>';
-      summary.textContent = 'Scan complete — 0 setups found.';
+    const rows     = data.rows      || [];
+    const nearMiss = data.near_miss || [];
+
+    if (rows.length === 0) {
+      results.innerHTML = '<div class="empty">No qualified setups found — check Developing section below.</div>';
+      summary.textContent = 'Scan complete — 0 qualified setups.';
     } else {
-      const longs  = data.filter(s => s.direction === 'LONG').length;
-      const shorts = data.filter(s => s.direction === 'SHORT').length;
-      summary.textContent = `${data.length} setup${data.length !== 1 ? 's' : ''} found — ${longs} LONG, ${shorts} SHORT`;
-      results.innerHTML = data.map(renderCard).join('');
+      const longs  = rows.filter(s => s.direction === 'LONG').length;
+      const shorts = rows.filter(s => s.direction === 'SHORT').length;
+      summary.textContent = `${rows.length} setup${rows.length !== 1 ? 's' : ''} found — ${longs} Long, ${shorts} Short`;
+      results.innerHTML = rows.map(renderCard).join('');
+    }
+
+    const nmSection = document.getElementById('near-miss-section');
+    const nmResults = document.getElementById('near-miss-results');
+    const nmHeader  = document.getElementById('near-miss-header');
+    if (nearMiss.length > 0) {
+      nmHeader.textContent = `Developing Setups — Near Miss (${nearMiss.length})`;
+      nmResults.innerHTML  = nearMiss.map(renderNearMissCard).join('');
+      nmSection.style.display = 'block';
+    } else {
+      nmSection.style.display = 'none';
     }
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
@@ -472,12 +492,13 @@ function clearResults() {
 }
 
 function renderCard(s) {
-  const isLong = s.direction === 'LONG';
-  const c = s.checklist || {};
-  const ci = (pass, label) =>
+  const isLong  = s.direction === 'LONG';
+  const c       = s.checklist || {};
+  const ci      = (pass, label) =>
     `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
   const riskPct = s.entry > 0 ? ((s.risk / s.entry) * 100).toFixed(1) : '—';
   const encoded = encodeURIComponent(JSON.stringify(s));
+  const obLabel = s.in_ob ? 'Inside OB' : s.near_ob ? 'Near OB' : 'At OB';
 
   return `
   <div class="card">
@@ -490,18 +511,18 @@ function renderCard(s) {
     <div class="card-body">
       <div class="price-row">
         <span class="price-big">$${s.price.toFixed(2)}</span>
-        <span class="price-meta">RSI ${s.rsi} · ATR $${s.atr.toFixed(2)} · ${s.distToEma20Pct}% from EMA20</span>
+        <span class="price-meta">RSI ${s.rsi} · ATR $${s.atr.toFixed(2)} · ${obLabel}</span>
       </div>
       <div class="ind-grid">
-        <div class="ind-cell"><div class="ind-label">EMA 20</div><div class="ind-value">$${s.ema20.toFixed(2)}</div></div>
-        <div class="ind-cell"><div class="ind-label">EMA 50</div><div class="ind-value">$${s.ema50.toFixed(2)}</div></div>
-        <div class="ind-cell"><div class="ind-label">EMA 200</div><div class="ind-value">$${s.ema200.toFixed(2)}</div></div>
+        <div class="ind-cell"><div class="ind-label">BOS Level</div><div class="ind-value">$${s.bos_level != null ? s.bos_level.toFixed(2) : '—'}</div></div>
+        <div class="ind-cell"><div class="ind-label">OB High</div><div class="ind-value">$${s.ob_high != null ? s.ob_high.toFixed(2) : '—'}</div></div>
+        <div class="ind-cell"><div class="ind-label">OB Low</div><div class="ind-value">$${s.ob_low != null ? s.ob_low.toFixed(2) : '—'}</div></div>
       </div>
       <table class="levels-table">
         <thead><tr><th>Level</th><th>Price</th><th>R:R</th></tr></thead>
         <tbody>
           <tr><td class="level-sl">Stop Loss</td><td class="level-sl">$${s.sl.toFixed(2)}</td><td class="rr">—</td></tr>
-          <tr><td class="level-entry">Entry</td><td class="level-entry">$${s.entry.toFixed(2)}</td><td class="rr">1R = $${s.risk.toFixed(2)} (${riskPct}%)</td></tr>
+          <tr><td class="level-entry">Entry (OB mid)</td><td class="level-entry">$${s.entry.toFixed(2)}</td><td class="rr">1R = $${s.risk.toFixed(2)} (${riskPct}%)</td></tr>
           <tr><td class="level-tp">TP1</td><td class="level-tp">$${s.tp1.toFixed(2)}</td><td class="rr">2R</td></tr>
           <tr><td class="level-tp">TP2</td><td class="level-tp">$${s.tp2.toFixed(2)}</td><td class="rr">3R</td></tr>
           <tr><td class="level-tp">TP3</td><td class="level-tp">$${s.tp3.toFixed(2)}</td><td class="rr">4R</td></tr>
@@ -513,16 +534,60 @@ function renderCard(s) {
         <div class="option-meta">Strike $${s.option.strike} · Expiry ${s.option.expiry}</div>
       </div>
       <div class="checklist">
-        ${ci(c.trendAligned,    'Trend aligned (D)')}
-        ${ci(c.htfAligned,      'HTF aligned (W)')}
-        ${ci(c.emaStacked,      'EMAs stacked')}
-        ${ci(c.pullbackToEMA20, 'Pullback to EMA20')}
-        ${ci(c.rsiInZone,       'RSI in zone')}
-        ${ci(c.notSandwiched,   'Not sandwiched')}
+        ${ci(c.trendConfirmed, 'Trend confirmed')}
+        ${ci(c.bosConfirmed,   'BOS confirmed')}
+        ${ci(c.obFound,        'OB identified')}
+        ${ci(c.priceAtOb,      'Price at OB zone')}
       </div>
     </div>
     <div class="card-footer">
       <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">📊 Log Trade</button>
+    </div>
+  </div>`;
+}
+
+function renderNearMissCard(s) {
+  const isLong    = s.direction === 'LONG';
+  const hasTrend  = s.trend && s.trend !== 'NEUTRAL';
+  const hasBOS    = s.bos_confirmed;
+  const hasOB     = s.ob_high != null && s.ob_low != null;
+  const atOB      = s.in_ob || s.near_ob;
+  const ci        = (pass, label) =>
+    `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
+
+  let missing = '';
+  if (!hasBOS)      missing = 'Waiting for BOS — no confirmed break of structure yet.';
+  else if (!hasOB)  missing = 'BOS confirmed but no OB identified in recent structure.';
+  else if (!atOB)   missing = `Waiting for pullback into OB zone ($${s.ob_low?.toFixed(2)} – $${s.ob_high?.toFixed(2)}).`;
+
+  const dirColor = isLong ? 'var(--long)' : 'var(--short)';
+  const dirBg    = isLong ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)';
+
+  return `
+  <div class="card" style="opacity:0.88; border-color: rgba(251,191,36,0.25);">
+    <div class="card-header" style="border-color: rgba(251,191,36,0.15);">
+      <span class="ticker">${s.ticker}</span>
+      <div class="card-header-right">
+        ${hasTrend ? `<span class="badge" style="background:${dirBg}; color:${dirColor};">${s.direction}</span>` : ''}
+        <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">DEVELOPING</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="price-row">
+        <span class="price-big">$${s.price.toFixed(2)}</span>
+        <span class="price-meta">RSI ${s.rsi} · ATR $${s.atr.toFixed(2)}</span>
+      </div>
+      <div class="checklist" style="border-top:none; padding-top:0; margin-bottom:10px;">
+        ${ci(hasTrend, `Trend confirmed (${s.trend || 'NEUTRAL'})`)}
+        ${ci(hasBOS,   'BOS confirmed')}
+        ${ci(hasOB,    'OB identified')}
+        ${ci(atOB,     s.in_ob ? 'Price inside OB' : s.near_ob ? 'Price near OB' : 'Price at OB zone')}
+      </div>
+      ${missing ? `<div style="font-size:11px; color:#fca5a5; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); border-radius:5px; padding:6px 10px; margin-bottom:8px;">${missing}</div>` : ''}
+      <div style="display:flex; gap:14px; font-size:11px; color:var(--muted); flex-wrap:wrap;">
+        ${hasBOS && s.bos_level ? `<span>BOS @ $${s.bos_level.toFixed(2)}</span>` : ''}
+        ${hasOB ? `<span>OB $${s.ob_low?.toFixed(2)}–$${s.ob_high?.toFixed(2)}</span>` : ''}
+      </div>
     </div>
   </div>`;
 }

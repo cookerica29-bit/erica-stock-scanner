@@ -1,3 +1,4 @@
+# v2 — BOS + Order Block strategy (replaces EMA pullback)
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -12,19 +13,14 @@ WATCHLIST = [
     "XOM", "CVX", "OXY",
     "JPM", "BAC", "GS",
     "WMT", "TGT",
-    "SPY", "QQQ", "IWM", "GLD", "SLV", "IBM",
+    "SPY", "QQQ", "IWM",
 ]
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Flatten MultiIndex columns that yfinance returns for single-ticker downloads."""
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
-
-
-def _compute_ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
 
 
 def _compute_rsi(series: pd.Series, period: int = 14) -> float:
@@ -39,30 +35,26 @@ def _compute_rsi(series: pd.Series, period: int = 14) -> float:
 
 
 def _compute_atr(df: pd.DataFrame, period: int = 14) -> float:
-    high = df["High"]
-    low = df["Low"]
-    prev_close = df["Close"].shift(1)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    prev_close = df["Close"].astype(float).shift(1)
     tr = pd.concat([
         high - low,
         (high - prev_close).abs(),
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
-    atr = tr.ewm(span=period, adjust=False).mean()
-    return float(atr.iloc[-1])
+    return float(tr.ewm(span=period, adjust=False).mean().iloc[-1])
 
 
 def _next_friday(days_out: int = 37) -> datetime:
-    """Return the Friday closest to `days_out` days from today."""
     target = datetime.now() + timedelta(days=days_out)
     days_to_friday = (4 - target.weekday()) % 7
     return target + timedelta(days=days_to_friday)
 
 
 def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
-    """Suggest an ATM option strike with 30-45 DTE."""
     expiry = _next_friday(37)
     dte = (expiry - datetime.now()).days
-
     if entry < 20:
         increment = 0.5
     elif entry < 100:
@@ -71,9 +63,7 @@ def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
         increment = 5.0
     else:
         increment = 10.0
-
     atm_strike = round(entry / increment) * increment
-
     return {
         "type":   "CALL" if direction == "LONG" else "PUT",
         "strike": atm_strike,
@@ -83,115 +73,194 @@ def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
     }
 
 
+# ── Price Action Functions ────────────────────────────────────────────────────
+
+def _find_swings(df: pd.DataFrame, margin: int = 3) -> list:
+    highs = df["High"].values
+    lows  = df["Low"].values
+    swings = []
+    for i in range(margin, len(df) - margin):
+        window_h = highs[i - margin : i + margin + 1]
+        window_l = lows[i  - margin : i + margin + 1]
+        if highs[i] == window_h.max():
+            swings.append({"index": i, "price": float(highs[i]), "type": "high"})
+        elif lows[i] == window_l.min():
+            swings.append({"index": i, "price": float(lows[i]),  "type": "low"})
+    return swings
+
+
+def _get_trend(swings: list) -> str:
+    highs = [s for s in swings if s["type"] == "high"]
+    lows  = [s for s in swings if s["type"] == "low"]
+    if len(highs) < 2 or len(lows) < 2:
+        return "NEUTRAL"
+    hh = highs[-1]["price"] > highs[-2]["price"]
+    hl = lows[-1]["price"]  > lows[-2]["price"]
+    lh = highs[-1]["price"] < highs[-2]["price"]
+    ll = lows[-1]["price"]  < lows[-2]["price"]
+    if hh and hl:
+        return "LONG"
+    if lh and ll:
+        return "SHORT"
+    return "NEUTRAL"
+
+
+def _detect_bos(df: pd.DataFrame, swings: list, direction: str, lookback: int = 40):
+    n        = len(df)
+    closes   = df["Close"].values
+    highs_sw = [s for s in swings if s["type"] == "high"]
+    lows_sw  = [s for s in swings if s["type"] == "low"]
+    min_idx  = max(0, n - 1 - lookback)
+
+    if direction == "LONG" and len(highs_sw) >= 2:
+        prev_high = highs_sw[-2]
+        for i in range(max(prev_high["index"] + 1, min_idx), n):
+            if closes[i] > prev_high["price"]:
+                return True, float(prev_high["price"])
+
+    if direction == "SHORT" and len(lows_sw) >= 2:
+        prev_low = lows_sw[-2]
+        for i in range(max(prev_low["index"] + 1, min_idx), n):
+            if closes[i] < prev_low["price"]:
+                return True, float(prev_low["price"])
+
+    return False, 0.0
+
+
+def _find_order_block(df: pd.DataFrame, direction: str, swings: list) -> Optional[dict]:
+    n      = len(df)
+    opens  = df["Open"].values
+    closes = df["Close"].values
+    highs  = df["High"].values
+    lows   = df["Low"].values
+
+    if direction == "LONG":
+        lows_sw = [s for s in swings if s["type"] == "low"]
+        if not lows_sw:
+            return None
+        last_swing_low = lows_sw[-1]
+        for i in range(n - 2, last_swing_low["index"] - 1, -1):
+            if closes[i] < opens[i]:  # bearish candle before bullish impulse
+                return {"high": float(highs[i]), "low": float(lows[i]), "index": i}
+
+    if direction == "SHORT":
+        highs_sw = [s for s in swings if s["type"] == "high"]
+        if not highs_sw:
+            return None
+        last_swing_high = highs_sw[-1]
+        for i in range(n - 2, last_swing_high["index"] - 1, -1):
+            if closes[i] > opens[i]:  # bullish candle before bearish impulse
+                return {"high": float(highs[i]), "low": float(lows[i]), "index": i}
+
+    return None
+
+
+# ── Main Analysis ─────────────────────────────────────────────────────────────
+
 def analyze_ticker(ticker: str) -> Optional[dict]:
     try:
-        daily_raw  = yf.download(ticker, period="1y",  interval="1d",  progress=False, auto_adjust=True)
-        weekly_raw = yf.download(ticker, period="2y",  interval="1wk", progress=False, auto_adjust=True)
+        raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+        df  = _flatten_columns(raw)
 
-        daily  = _flatten_columns(daily_raw)
-        weekly = _flatten_columns(weekly_raw)
-
-        if len(daily) < 60 or len(weekly) < 20:
+        if len(df) < 50:
             return None
 
-        # ── Daily indicators ─────────────────────────────────────────────────────
-        close  = daily["Close"].astype(float)
-        ema20  = _compute_ema(close, 20)
-        ema50  = _compute_ema(close, 50)
-        ema200 = _compute_ema(close, 200)
-        atr    = _compute_atr(daily.astype(float))
-        rsi    = _compute_rsi(close)
-
+        df    = df.astype(float)
+        close = df["Close"]
         price = float(close.iloc[-1])
-        e20   = float(ema20.iloc[-1])
-        e50   = float(ema50.iloc[-1])
-        e200  = float(ema200.iloc[-1])
 
-        # ── Daily trend ───────────────────────────────────────────────────────────
-        if price > e20 and e20 > e50 and e50 > e200:
-            direction = "LONG"
-        elif price < e20 and e20 < e50 and e50 < e200:
-            direction = "SHORT"
-        else:
-            return None  # no clean trend alignment
-
-        # ── No-man's-land: price sandwiched between EMA20 and EMA50 ──────────────
-        if direction == "LONG"  and e50 < price < e20:
+        # Ticker quality filters
+        if price < 5:
             return None
-        if direction == "SHORT" and e20 < price < e50:
+        avg_dollar_vol = float((df["Close"] * df["Volume"]).iloc[-20:].mean())
+        if avg_dollar_vol < 5_000_000:
+            return None
+        daily_range_pct = (float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1])) / price * 100
+        if daily_range_pct < 1.0:
             return None
 
-        # ── Pullback to EMA20: price within 0.5×ATR ──────────────────────────────
-        dist_to_ema20 = abs(price - e20)
-        pullback = dist_to_ema20 <= 0.5 * atr
-        if not pullback:
-            return None
+        atr = _compute_atr(df)
+        rsi = round(_compute_rsi(close), 1)
 
-        # ── RSI filter ────────────────────────────────────────────────────────────
-        rsi_ok = (40 <= rsi <= 68) if direction == "LONG" else (35 <= rsi <= 60)
-        if not rsi_ok:
-            return None
+        # Price action
+        swings        = _find_swings(df)
+        trend         = _get_trend(swings)
+        bos_confirmed = False
+        bos_level     = 0.0
+        ob            = None
+        in_ob = near_ob = False
 
-        # ── Weekly HTF alignment ──────────────────────────────────────────────────
-        w_close = weekly["Close"].astype(float)
-        w_ema20 = _compute_ema(w_close, 20)
-        w_ema50 = _compute_ema(w_close, 50)
-        w_price = float(w_close.iloc[-1])
-        w_e20   = float(w_ema20.iloc[-1])
-        w_e50   = float(w_ema50.iloc[-1])
+        if trend != "NEUTRAL":
+            bos_confirmed, bos_level = _detect_bos(df, swings, trend)
+            if bos_confirmed:
+                ob = _find_order_block(df, trend, swings)
+                if ob:
+                    in_ob = ob["low"] <= price <= ob["high"]
+                    near_ob = not in_ob and (
+                        (trend == "LONG"  and price < ob["high"] and price > ob["low"] - atr) or
+                        (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + atr)
+                    )
 
-        htf_aligned = (
-            (w_price > w_e20 and w_price > w_e50) if direction == "LONG"
-            else (w_price < w_e20 and w_price < w_e50)
-        )
-        if not htf_aligned:
-            return None
+        # ── Near-miss: has direction but setup is incomplete ──────────────────
+        if trend == "NEUTRAL" or not bos_confirmed or (not in_ob and not near_ob):
+            return {
+                "ticker":        ticker,
+                "direction":     trend if trend != "NEUTRAL" else None,
+                "price":         round(price, 2),
+                "atr":           round(atr, 2),
+                "rsi":           rsi,
+                "trend":         trend,
+                "bos_confirmed": bos_confirmed,
+                "bos_level":     round(bos_level, 2) if bos_level else None,
+                "ob_high":       round(ob["high"], 2) if ob else None,
+                "ob_low":        round(ob["low"],  2) if ob else None,
+                "in_ob":         in_ob,
+                "near_ob":       near_ob,
+                "setup_status":  "DEVELOPING" if trend != "NEUTRAL" else "SKIPPED",
+                "scannedAt":     datetime.utcnow().isoformat() + "Z",
+            }
 
-        # ── Entry / SL / TP ───────────────────────────────────────────────────────
-        entry = price
-        risk  = 1.5 * atr  # SL distance = 1.5×ATR
+        # ── Qualified setup: BOS confirmed + price at/near OB ────────────────
+        ob_mid = (ob["high"] + ob["low"]) / 2
+        entry  = round(ob_mid, 2)
+        sl     = round(ob["low"] - 0.5 * atr, 2) if trend == "LONG" else round(ob["high"] + 0.5 * atr, 2)
+        risk   = round(abs(entry - sl), 2)
+        tp1    = round(entry + 2 * risk, 2) if trend == "LONG" else round(entry - 2 * risk, 2)
+        tp2    = round(entry + 3 * risk, 2) if trend == "LONG" else round(entry - 3 * risk, 2)
+        tp3    = round(entry + 4 * risk, 2) if trend == "LONG" else round(entry - 4 * risk, 2)
 
-        if direction == "LONG":
-            sl  = entry - risk
-            tp1 = entry + 2.0 * risk
-            tp2 = entry + 3.0 * risk
-            tp3 = entry + 4.0 * risk
-        else:
-            sl  = entry + risk
-            tp1 = entry - 2.0 * risk
-            tp2 = entry - 3.0 * risk
-            tp3 = entry - 4.0 * risk
-
-        option = _suggest_option(ticker, direction, entry)
+        option = _suggest_option(ticker, trend, entry)
 
         checklist = {
-            "trendAligned":    True,          # passed above
-            "emaStacked":      True,          # e20>e50>e200 (or inverse)
-            "pullbackToEMA20": pullback,
-            "htfAligned":      htf_aligned,
-            "rsiInZone":       rsi_ok,
-            "notSandwiched":   True,          # passed above
+            "trendConfirmed": True,
+            "bosConfirmed":   bos_confirmed,
+            "obFound":        ob is not None,
+            "priceAtOb":      in_ob or near_ob,
         }
 
         return {
-            "ticker":    ticker,
-            "direction": direction,
-            "price":     round(price, 2),
-            "ema20":     round(e20, 2),
-            "ema50":     round(e50, 2),
-            "ema200":    round(e200, 2),
-            "atr":       round(atr, 2),
-            "rsi":       round(rsi, 1),
-            "entry":     round(entry, 2),
-            "sl":        round(sl, 2),
-            "tp1":       round(tp1, 2),
-            "tp2":       round(tp2, 2),
-            "tp3":       round(tp3, 2),
-            "risk":      round(risk, 2),
-            "distToEma20Pct": round(dist_to_ema20 / price * 100, 2),
-            "option":    option,
-            "checklist": checklist,
-            "scannedAt": datetime.utcnow().isoformat() + "Z",
+            "ticker":        ticker,
+            "direction":     trend,
+            "price":         round(price, 2),
+            "atr":           round(atr, 2),
+            "rsi":           rsi,
+            "trend":         trend,
+            "bos_confirmed": bos_confirmed,
+            "bos_level":     round(bos_level, 2),
+            "ob_high":       round(ob["high"], 2),
+            "ob_low":        round(ob["low"],  2),
+            "in_ob":         in_ob,
+            "near_ob":       near_ob,
+            "entry":         entry,
+            "sl":            sl,
+            "tp1":           tp1,
+            "tp2":           tp2,
+            "tp3":           tp3,
+            "risk":          risk,
+            "option":        option,
+            "checklist":     checklist,
+            "setup_status":  "QUALIFIED",
+            "scannedAt":     datetime.utcnow().isoformat() + "Z",
         }
 
     except Exception as e:
@@ -199,13 +268,17 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         return None
 
 
-def scan_all(watchlist: list[str] = WATCHLIST) -> list[dict]:
-    results = []
+def scan_all(watchlist: list = WATCHLIST) -> tuple:
+    rows, near_miss = [], []
     for ticker in watchlist:
         r = analyze_ticker(ticker)
-        if r:
-            results.append(r)
-    return results
+        if r is None:
+            continue
+        if r.get("setup_status") == "QUALIFIED":
+            rows.append(r)
+        elif r.get("setup_status") == "DEVELOPING":
+            near_miss.append(r)
+    return rows, near_miss
 
 
 def scan_ticker(ticker: str) -> Optional[dict]:
