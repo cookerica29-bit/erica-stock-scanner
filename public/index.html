@@ -83,7 +83,7 @@
     flex-wrap: wrap;
   }
 
-  input[type="text"], input[type="number"], select {
+  input[type="text"], input[type="number"], select, textarea {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -95,8 +95,10 @@
   }
   input[type="text"]:focus,
   input[type="number"]:focus,
-  select:focus { border-color: var(--accent); }
+  select:focus,
+  textarea:focus { border-color: var(--accent); }
   input::placeholder { color: var(--muted); }
+  textarea { min-height: 74px; resize: vertical; width: 100%; }
   select option { background: var(--surface2); }
 
   #tickerInput { width: 320px; }
@@ -244,8 +246,21 @@
   .form-row label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.06em; }
   .form-row input[type="text"],
   .form-row input[type="number"],
-  .form-row select { width: 100%; }
+  .form-row select,
+  .form-row textarea { width: 100%; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .setup-review {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+  }
+  .setup-review strong { color: var(--text); }
 
   /* ── Journal panel ─────────────────────────────────────────────────────── */
   #journal-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
@@ -415,6 +430,17 @@
   <div class="journal-stats" id="journalStats"></div>
   <div class="journal-controls">
     <input type="text" id="filterTicker" placeholder="Filter ticker..." style="width:130px" oninput="renderJournal()" />
+    <select id="filterGrade" onchange="renderJournal()">
+      <option value="">All grades</option>
+      <option value="A+">A+</option>
+      <option value="A">A</option>
+      <option value="B+">B+</option>
+      <option value="B">B</option>
+      <option value="C+">C+</option>
+      <option value="C">C</option>
+      <option value="D">D</option>
+      <option value="Untracked">Untracked</option>
+    </select>
     <select id="filterDirection" onchange="renderJournal()">
       <option value="">All directions</option>
       <option value="LONG">LONG</option>
@@ -425,6 +451,13 @@
       <option value="Win">Win</option>
       <option value="Loss">Loss</option>
       <option value="Open">Open</option>
+    </select>
+    <select id="filterQuality" onchange="renderJournal()">
+      <option value="">All quality</option>
+      <option value="Good Trade">Good Trade</option>
+      <option value="Bad Trade">Bad Trade</option>
+      <option value="Good Idea, Bad Execution">Good Idea, Bad Execution</option>
+      <option value="Unreviewed">Unreviewed</option>
     </select>
     <button class="btn-secondary btn-sm" onclick="exportCSV()">Export CSV</button>
     <button class="btn-secondary btn-sm" style="color:var(--short)" onclick="clearJournal()">Clear All</button>
@@ -451,6 +484,14 @@
       <div id="analyticsByTicker"></div>
     </div>
     <div class="analytics-card">
+      <h3>Review Quality</h3>
+      <div id="analyticsByQuality"></div>
+    </div>
+    <div class="analytics-card">
+      <h3>Mistake Types</h3>
+      <div id="analyticsByMistake"></div>
+    </div>
+    <div class="analytics-card">
       <h3>Open Trades</h3>
       <div id="analyticsOpenTrades"></div>
     </div>
@@ -465,6 +506,10 @@
       <button class="modal-close" onclick="closeModalDirect()">✕</button>
     </div>
     <div class="modal-body">
+      <div class="setup-review" id="setupReviewBox">
+        <strong>Setup context</strong><br />
+        Log from a scanner setup to attach grade, score, and coach context.
+      </div>
       <div class="form-grid">
         <div class="form-row">
           <label>Ticker</label>
@@ -484,12 +529,26 @@
       </div>
       <div class="form-grid">
         <div class="form-row">
-          <label>Entry Price (per contract)</label>
+          <label>Entry / Planned Level</label>
           <input type="number" id="f_entry" step="0.01" placeholder="0.00" />
         </div>
         <div class="form-row">
           <label>Contracts</label>
           <input type="number" id="f_contracts" step="1" min="1" value="1" />
+        </div>
+      </div>
+      <div class="form-grid-3">
+        <div class="form-row">
+          <label>Planned Stop</label>
+          <input type="number" id="f_plannedStop" step="0.01" placeholder="0.00" />
+        </div>
+        <div class="form-row">
+          <label>Planned TP1</label>
+          <input type="number" id="f_plannedTp1" step="0.01" placeholder="0.00" />
+        </div>
+        <div class="form-row">
+          <label>R Result</label>
+          <input type="number" id="f_rResult" step="0.01" placeholder="auto / manual" />
         </div>
       </div>
       <div class="form-grid">
@@ -508,13 +567,64 @@
       </div>
       <div class="form-grid">
         <div class="form-row">
-          <label>Exit Price (per contract)</label>
+          <label>Exit / Close Level</label>
           <input type="number" id="f_exit" step="0.01" placeholder="0.00" />
         </div>
         <div class="form-row">
           <label>P&amp;L ($)</label>
           <input type="number" id="f_pnl" step="0.01" placeholder="auto-calc or override" />
         </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Trade Quality</label>
+          <select id="f_tradeQuality">
+            <option value="Unreviewed">Unreviewed</option>
+            <option value="Good Trade">Good Trade</option>
+            <option value="Bad Trade">Bad Trade</option>
+            <option value="Good Idea, Bad Execution">Good Idea, Bad Execution</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Followed Plan</label>
+          <select id="f_followedPlan">
+            <option value="Unreviewed">Unreviewed</option>
+            <option value="Yes">Yes</option>
+            <option value="No">No</option>
+            <option value="Partial">Partial</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Outcome</label>
+          <select id="f_outcome">
+            <option value="Open">Open</option>
+            <option value="TP1">TP1</option>
+            <option value="TP2">TP2</option>
+            <option value="TP3">TP3</option>
+            <option value="Stop Loss">Stop Loss</option>
+            <option value="Manual Close">Manual Close</option>
+            <option value="Expired">Expired</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Mistake Type</label>
+          <select id="f_mistakeType">
+            <option value="">None / not reviewed</option>
+            <option value="Early Entry">Early Entry</option>
+            <option value="Late Entry">Late Entry</option>
+            <option value="Chased">Chased</option>
+            <option value="Ignored Warning">Ignored Warning</option>
+            <option value="Bad Exit">Bad Exit</option>
+            <option value="Size Too Large">Size Too Large</option>
+            <option value="Emotional Trade">Emotional Trade</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Review Notes</label>
+        <textarea id="f_notes" placeholder="What did you see, what did you do, and what should you repeat or avoid?"></textarea>
       </div>
     </div>
     <div class="modal-footer">
@@ -790,21 +900,53 @@ function renderNearMissCard(s) {
 let _editId = null;
 let _pendingSetup = null;
 
+function setSetupReviewBox(entryOrSetup = null) {
+  const q = entryOrSetup?.quality || null;
+  const grade = q?.grade || entryOrSetup?.setupGrade || null;
+  const score = q?.score ?? entryOrSetup?.setupScore ?? null;
+  const warning = q?.warning || entryOrSetup?.setupWarning || '';
+  const coach = q?.coach_note || entryOrSetup?.setupCoachNote || '';
+  const box = document.getElementById('setupReviewBox');
+  if (!box) return;
+  if (!entryOrSetup || (!grade && !warning && !coach)) {
+    box.innerHTML = '<strong>Setup context</strong><br />Log from a scanner setup to attach grade, score, and coach context.';
+    return;
+  }
+  box.innerHTML = `
+    <strong>${grade ? `Grade ${grade}` : 'Setup context'}${score != null ? ` · ${score}/100` : ''}</strong><br />
+    ${warning ? `Warning: ${warning}<br />` : ''}
+    ${coach ? `Coach: ${coach}` : ''}`;
+}
+
+function setValue(id, value = '') {
+  const el = document.getElementById(id);
+  if (el) el.value = value ?? '';
+}
+
 function openLogModal(setupJson) {
   const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
   _editId = null;
   _pendingSetup = s;
+  setSetupReviewBox(s);
   document.getElementById('modal-title').textContent   = '📊 Log Trade';
   document.getElementById('modalSaveBtn').textContent  = 'Save Trade';
-  document.getElementById('f_ticker').value            = s.ticker || '';
-  document.getElementById('f_direction').value         = s.direction || 'LONG';
-  document.getElementById('f_option').value            = s.option?.symbol || '';
-  document.getElementById('f_entry').value             = s.entry || '';
-  document.getElementById('f_expiry').value            = s.option?.expiry || '';
-  document.getElementById('f_contracts').value         = 1;
-  document.getElementById('f_result').value            = 'Open';
-  document.getElementById('f_exit').value              = '';
-  document.getElementById('f_pnl').value               = '';
+  setValue('f_ticker', s.ticker || '');
+  setValue('f_direction', s.direction || 'LONG');
+  setValue('f_option', s.option?.symbol || '');
+  setValue('f_entry', s.entry || '');
+  setValue('f_plannedStop', s.sl || '');
+  setValue('f_plannedTp1', s.tp1 || '');
+  setValue('f_rResult', '');
+  setValue('f_expiry', s.option?.expiry || '');
+  setValue('f_contracts', 1);
+  setValue('f_result', 'Open');
+  setValue('f_exit', '');
+  setValue('f_pnl', '');
+  setValue('f_tradeQuality', 'Unreviewed');
+  setValue('f_followedPlan', 'Unreviewed');
+  setValue('f_outcome', 'Open');
+  setValue('f_mistakeType', '');
+  setValue('f_notes', '');
   // Lock ticker/direction/option/entry for new entries from scanner
   ['f_ticker','f_direction','f_option','f_entry','f_expiry'].forEach(id => {
     document.getElementById(id).disabled = true;
@@ -817,17 +959,26 @@ function openEditModal(id) {
   if (!entry) return;
   _editId = id;
   _pendingSetup = null;
+  setSetupReviewBox(entry);
   document.getElementById('modal-title').textContent  = '✏️ Edit Trade';
   document.getElementById('modalSaveBtn').textContent = 'Update Trade';
-  document.getElementById('f_ticker').value           = entry.ticker || '';
-  document.getElementById('f_direction').value        = entry.direction || 'LONG';
-  document.getElementById('f_option').value           = entry.option || '';
-  document.getElementById('f_entry').value            = entry.entry ?? '';
-  document.getElementById('f_expiry').value           = entry.expiry || '';
-  document.getElementById('f_contracts').value        = entry.contracts || 1;
-  document.getElementById('f_result').value           = entry.result || 'Open';
-  document.getElementById('f_exit').value             = entry.exit ?? '';
-  document.getElementById('f_pnl').value              = entry.pnl ?? '';
+  setValue('f_ticker', entry.ticker || '');
+  setValue('f_direction', entry.direction || 'LONG');
+  setValue('f_option', entry.option || '');
+  setValue('f_entry', entry.entry ?? '');
+  setValue('f_plannedStop', entry.plannedStop ?? '');
+  setValue('f_plannedTp1', entry.plannedTp1 ?? '');
+  setValue('f_rResult', entry.rResult ?? '');
+  setValue('f_expiry', entry.expiry || '');
+  setValue('f_contracts', entry.contracts || 1);
+  setValue('f_result', entry.result || 'Open');
+  setValue('f_exit', entry.exit ?? '');
+  setValue('f_pnl', entry.pnl ?? '');
+  setValue('f_tradeQuality', entry.tradeQuality || 'Unreviewed');
+  setValue('f_followedPlan', entry.followedPlan || 'Unreviewed');
+  setValue('f_outcome', entry.outcome || entry.result || 'Open');
+  setValue('f_mistakeType', entry.mistakeType || '');
+  setValue('f_notes', entry.notes || '');
   // All fields editable when editing
   ['f_ticker','f_direction','f_option','f_entry','f_expiry'].forEach(id => {
     document.getElementById(id).disabled = false;
@@ -840,20 +991,40 @@ function closeModal(e) {
 }
 function closeModalDirect() {
   _pendingSetup = null;
+  setSetupReviewBox();
   document.getElementById('logModal').classList.remove('open');
 }
 
-// Auto-calc P&L when exit price changes
-document.getElementById('f_exit').addEventListener('input', () => {
+function syncResultFromOutcome() {
+  const outcome = document.getElementById('f_outcome').value;
+  const result = document.getElementById('f_result');
+  if (outcome === 'Open') result.value = 'Open';
+  else if (outcome === 'Stop Loss' || outcome === 'Expired') result.value = 'Loss';
+  else if (['TP1', 'TP2', 'TP3'].includes(outcome)) result.value = 'Win';
+}
+
+function recalcTradeMath() {
   const entry     = parseFloat(document.getElementById('f_entry').value) || 0;
   const exit      = parseFloat(document.getElementById('f_exit').value)  || 0;
+  const stop      = parseFloat(document.getElementById('f_plannedStop').value) || 0;
   const contracts = parseInt(document.getElementById('f_contracts').value) || 1;
   const dir       = document.getElementById('f_direction').value;
   if (entry && exit) {
     const pnl = (dir === 'LONG' ? exit - entry : entry - exit) * contracts * 100;
     document.getElementById('f_pnl').value = pnl.toFixed(2);
   }
+  if (entry && exit && stop && Math.abs(entry - stop) > 0) {
+    const risk = Math.abs(entry - stop);
+    const r = dir === 'LONG' ? (exit - entry) / risk : (entry - exit) / risk;
+    document.getElementById('f_rResult').value = r.toFixed(2);
+  }
+}
+
+// Auto-calc P&L and R when trade levels change
+['f_exit','f_entry','f_plannedStop','f_contracts','f_direction'].forEach(id => {
+  document.getElementById(id).addEventListener('input', recalcTradeMath);
 });
+document.getElementById('f_outcome').addEventListener('change', syncResultFromOutcome);
 
 function saveJournalEntry() {
   const ticker = document.getElementById('f_ticker').value.trim().toUpperCase();
@@ -863,11 +1034,19 @@ function saveJournalEntry() {
     direction: document.getElementById('f_direction').value,
     option:    document.getElementById('f_option').value.trim(),
     entry:     parseFloat(document.getElementById('f_entry').value)   || null,
+    plannedStop: parseFloat(document.getElementById('f_plannedStop').value) || null,
+    plannedTp1:  parseFloat(document.getElementById('f_plannedTp1').value)  || null,
     exit:      parseFloat(document.getElementById('f_exit').value)    || null,
     contracts: parseInt(document.getElementById('f_contracts').value) || 1,
     expiry:    document.getElementById('f_expiry').value.trim(),
     result:    document.getElementById('f_result').value,
     pnl:       parseFloat(document.getElementById('f_pnl').value)     || null,
+    rResult:   parseFloat(document.getElementById('f_rResult').value) || null,
+    tradeQuality: document.getElementById('f_tradeQuality').value,
+    followedPlan: document.getElementById('f_followedPlan').value,
+    outcome: document.getElementById('f_outcome').value,
+    mistakeType: document.getElementById('f_mistakeType').value,
+    notes: document.getElementById('f_notes').value.trim(),
   };
   if (_pendingSetup?.quality) {
     updated.setupGrade = _pendingSetup.quality.grade || null;
@@ -879,6 +1058,10 @@ function saveJournalEntry() {
     updated.setupRoom = _pendingSetup.quality.room_to_target || '';
     updated.setupWarning = _pendingSetup.quality.warning || '';
     updated.setupCoachNote = _pendingSetup.quality.coach_note || '';
+    updated.plannedStop = _pendingSetup.sl ?? updated.plannedStop;
+    updated.plannedTp1 = _pendingSetup.tp1 ?? updated.plannedTp1;
+    updated.plannedTp2 = _pendingSetup.tp2 ?? null;
+    updated.plannedTp3 = _pendingSetup.tp3 ?? null;
   }
   const entries = loadJournal();
   if (_editId !== null) {
@@ -914,13 +1097,17 @@ function deleteEntry(id) {
 function renderJournal() {
   const all       = loadJournal();
   const fTicker   = (document.getElementById('filterTicker')?.value   || '').toUpperCase().trim();
+  const fGrade    = document.getElementById('filterGrade')?.value || '';
   const fDir      = document.getElementById('filterDirection')?.value || '';
   const fResult   = document.getElementById('filterResult')?.value    || '';
+  const fQuality  = document.getElementById('filterQuality')?.value   || '';
 
   const filtered = all.filter(e =>
     (!fTicker  || e.ticker.includes(fTicker)) &&
+    (!fGrade   || (fGrade === 'Untracked' ? !e.setupGrade : e.setupGrade === fGrade)) &&
     (!fDir     || e.direction === fDir) &&
-    (!fResult  || e.result === fResult)
+    (!fResult  || e.result === fResult) &&
+    (!fQuality || (e.tradeQuality || 'Unreviewed') === fQuality)
   );
 
   // Stats (from all, not filtered)
@@ -929,6 +1116,7 @@ function renderJournal() {
   const closed = wins + losses;
   const winRate = closed > 0 ? ((wins / closed) * 100).toFixed(0) : '—';
   const totalPnl = all.reduce((sum, e) => sum + (e.pnl || 0), 0);
+  const reviewed = all.filter(e => e.tradeQuality && e.tradeQuality !== 'Unreviewed').length;
   const avgPnl   = closed > 0
     ? (all.filter(e => e.result !== 'Open').reduce((s,e) => s + (e.pnl||0), 0) / closed)
     : 0;
@@ -939,7 +1127,7 @@ function renderJournal() {
     <div class="stat-card"><div class="stat-label">Wins / Losses</div><div class="stat-value">${wins} / ${losses}</div></div>
     <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value ${totalPnl >= 0 ? 'green' : 'red'}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(0)}</div></div>
     <div class="stat-card"><div class="stat-label">Avg P&amp;L</div><div class="stat-value ${avgPnl >= 0 ? 'green' : 'red'}">${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(0)}</div></div>
-    <div class="stat-card"><div class="stat-label">Open Trades</div><div class="stat-value muted">${all.filter(e => e.result === 'Open').length}</div></div>
+    <div class="stat-card"><div class="stat-label">Reviewed</div><div class="stat-value muted">${reviewed}</div></div>
   `;
 
   const body = document.getElementById('journalBody');
@@ -964,9 +1152,12 @@ function renderJournal() {
         <td>${e.option || '—'}</td>
         <td>${e.entry != null ? '$'+e.entry.toFixed(2) : '—'}</td>
         <td>${e.exit  != null ? '$'+e.exit.toFixed(2)  : '—'}</td>
+        <td>${e.rResult != null ? e.rResult.toFixed(2)+'R' : '—'}</td>
         <td>${e.contracts}x</td>
         <td>${e.expiry || '—'}</td>
         <td>${pnlStr}</td>
+        <td>${e.tradeQuality || 'Unreviewed'}</td>
+        <td>${e.mistakeType || '—'}</td>
         <td><span class="result-badge ${badgeCls}">${e.result}</span></td>
         <td style="white-space:nowrap">
           <button class="edit-btn" onclick="openEditModal(${e.id})">✏️</button>
@@ -980,8 +1171,8 @@ function renderJournal() {
       <thead>
         <tr>
           <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Option</th>
-          <th>Entry</th><th>Exit</th><th>Qty</th><th>Expiry</th>
-          <th>P&amp;L</th><th>Result</th><th></th>
+          <th>Entry</th><th>Exit</th><th>R</th><th>Qty</th><th>Expiry</th>
+          <th>P&amp;L</th><th>Quality</th><th>Mistake</th><th>Result</th><th></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -1057,6 +1248,10 @@ function renderAnalytics() {
   const tickerRows = groupStats(all, e => e.ticker)
     .sort((a, b) => b.trades - a.trades || b.totalPnl - a.totalPnl)
     .slice(0, 8);
+  const qualityRows = groupStats(all, e => e.tradeQuality || 'Unreviewed')
+    .sort((a, b) => b.trades - a.trades);
+  const mistakeRows = groupStats(all.filter(e => e.mistakeType), e => e.mistakeType)
+    .sort((a, b) => b.trades - a.trades);
   const openRows = groupStats(all.filter(e => e.result === 'Open'), e => e.setupGrade || 'Untracked')
     .sort((a, b) => gradeRank(b.key) - gradeRank(a.key));
 
@@ -1072,6 +1267,8 @@ function renderAnalytics() {
   document.getElementById('analyticsByGrade').innerHTML = renderAnalyticsTable(gradeRows, 'Grade');
   document.getElementById('analyticsByDirection').innerHTML = renderAnalyticsTable(directionRows, 'Direction');
   document.getElementById('analyticsByTicker').innerHTML = renderAnalyticsTable(tickerRows, 'Ticker');
+  document.getElementById('analyticsByQuality').innerHTML = renderAnalyticsTable(qualityRows, 'Quality');
+  document.getElementById('analyticsByMistake').innerHTML = renderAnalyticsTable(mistakeRows, 'Mistake');
   document.getElementById('analyticsOpenTrades').innerHTML = renderAnalyticsTable(openRows, 'Grade');
 }
 
@@ -1080,13 +1277,13 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['Date','Ticker','Direction','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','Option','Entry','Exit','Contracts','Expiry','PnL','Result'];
+  const headers = ['Date','Ticker','Direction','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','Option','Entry','Stop','TP1','Exit','R','Contracts','Expiry','PnL','TradeQuality','FollowedPlan','Outcome','Mistake','Notes','Result'];
   const rows = entries.map(e => [
     e.date, e.ticker, e.direction, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
     `"${e.option||''}"`,
-    e.entry ?? '', e.exit ?? '', e.contracts, e.expiry,
-    e.pnl ?? '', e.result,
+    e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.rResult ?? '', e.contracts, e.expiry,
+    e.pnl ?? '', `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
   ]);
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
   const a = document.createElement('a');
