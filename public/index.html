@@ -100,6 +100,7 @@
   select option { background: var(--surface2); }
 
   #tickerInput { width: 320px; }
+  #gradeFilter, #sortMode { min-width: 150px; }
 
   button {
     background: var(--accent);
@@ -338,6 +339,20 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
+    <select id="gradeFilter" onchange="renderScannerResults()">
+      <option value="all">All grades</option>
+      <option value="a">A range only</option>
+      <option value="bplus">B+ and up</option>
+      <option value="b">B and up</option>
+      <option value="hide-c">Hide C/D</option>
+      <option value="learning">Best learning setups</option>
+    </select>
+    <select id="sortMode" onchange="renderScannerResults()">
+      <option value="quality">Sort by quality</option>
+      <option value="ticker">Sort by ticker</option>
+      <option value="direction">Sort by direction</option>
+      <option value="price">Sort by price</option>
+    </select>
     <button id="scanBtn" onclick="runScan()">Scan</button>
     <button class="btn-secondary" onclick="clearResults()">Clear</button>
     <span id="status"></span>
@@ -448,6 +463,8 @@
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
+let scannerRows = [];
+let scannerNearMiss = [];
 
 // ── Tab switching ────────────────────────────────────────────────────────────
 
@@ -481,29 +498,9 @@ async function runScan() {
     const res  = await fetch(url);
     const data = await res.json();
 
-    const rows     = data.rows      || [];
-    const nearMiss = data.near_miss || [];
-
-    if (rows.length === 0) {
-      results.innerHTML = '<div class="empty">No qualified setups found — check Developing section below.</div>';
-      summary.textContent = 'Scan complete — 0 qualified setups.';
-    } else {
-      const longs  = rows.filter(s => s.direction === 'LONG').length;
-      const shorts = rows.filter(s => s.direction === 'SHORT').length;
-      summary.textContent = `${rows.length} setup${rows.length !== 1 ? 's' : ''} found — ${longs} Long, ${shorts} Short`;
-      results.innerHTML = rows.map(renderCard).join('');
-    }
-
-    const nmSection = document.getElementById('near-miss-section');
-    const nmResults = document.getElementById('near-miss-results');
-    const nmHeader  = document.getElementById('near-miss-header');
-    if (nearMiss.length > 0) {
-      nmHeader.textContent = `Developing Setups — Near Miss (${nearMiss.length})`;
-      nmResults.innerHTML  = nearMiss.map(renderNearMissCard).join('');
-      nmSection.style.display = 'block';
-    } else {
-      nmSection.style.display = 'none';
-    }
+    scannerRows = data.rows || [];
+    scannerNearMiss = data.near_miss || [];
+    renderScannerResults();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
     results.innerHTML = '<div class="empty">Scan failed — is the server running?</div>';
@@ -514,9 +511,75 @@ async function runScan() {
 }
 
 function clearResults() {
+  scannerRows = [];
+  scannerNearMiss = [];
   document.getElementById('results').innerHTML = '';
+  document.getElementById('near-miss-results').innerHTML = '';
+  document.getElementById('near-miss-section').style.display = 'none';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
+}
+
+function gradeRank(grade) {
+  return { 'A+': 6, 'A': 5, 'B+': 4, 'B': 3, 'C+': 2, 'C': 1, 'D': 0 }[grade] ?? 0;
+}
+
+function setupRank(s) {
+  return gradeRank(s.quality?.grade);
+}
+
+function passesGradeFilter(s, filter) {
+  const q = s.quality || {};
+  const rank = setupRank(s);
+  if (filter === 'a') return rank >= gradeRank('A');
+  if (filter === 'bplus') return rank >= gradeRank('B+');
+  if (filter === 'b' || filter === 'hide-c') return rank >= gradeRank('B');
+  if (filter === 'learning') {
+    return rank >= gradeRank('B') && Boolean(q.warning) && q.warning !== 'No major visual warning; still wait for the chart to confirm the plan.';
+  }
+  return true;
+}
+
+function sortSetups(rows, mode) {
+  return rows.slice().sort((a, b) => {
+    if (mode === 'ticker') return a.ticker.localeCompare(b.ticker);
+    if (mode === 'direction') return `${a.direction || ''}-${a.ticker}`.localeCompare(`${b.direction || ''}-${b.ticker}`);
+    if (mode === 'price') return (b.price || 0) - (a.price || 0);
+    return (b.quality?.score || 0) - (a.quality?.score || 0);
+  });
+}
+
+function renderScannerResults() {
+  const results = document.getElementById('results');
+  const summary = document.getElementById('summary');
+  const filter = document.getElementById('gradeFilter')?.value || 'all';
+  const sortMode = document.getElementById('sortMode')?.value || 'quality';
+
+  const rows = sortSetups(scannerRows.filter(s => passesGradeFilter(s, filter)), sortMode);
+  const nearMiss = sortSetups(scannerNearMiss.filter(s => passesGradeFilter(s, filter)), sortMode);
+  const totalVisible = rows.length + nearMiss.length;
+
+  if (rows.length === 0) {
+    results.innerHTML = '<div class="empty">No qualified setups match this filter — check Developing section below.</div>';
+  } else {
+    results.innerHTML = rows.map(renderCard).join('');
+  }
+
+  const longs = rows.filter(s => s.direction === 'LONG').length;
+  const shorts = rows.filter(s => s.direction === 'SHORT').length;
+  const filterLabel = document.getElementById('gradeFilter')?.selectedOptions?.[0]?.textContent || 'All grades';
+  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} shown — ${longs} Long, ${shorts} Short · ${filterLabel} · ${totalVisible} total including developing`;
+
+  const nmSection = document.getElementById('near-miss-section');
+  const nmResults = document.getElementById('near-miss-results');
+  const nmHeader = document.getElementById('near-miss-header');
+  if (nearMiss.length > 0) {
+    nmHeader.textContent = `Developing Setups — Near Miss (${nearMiss.length})`;
+    nmResults.innerHTML = nearMiss.map(renderNearMissCard).join('');
+    nmSection.style.display = 'block';
+  } else {
+    nmSection.style.display = 'none';
+  }
 }
 
 function renderCard(s) {
