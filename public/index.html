@@ -312,6 +312,46 @@
 
   .journal-empty { text-align: center; padding: 60px 0; color: var(--muted); }
 
+  /* ── Analytics panel ──────────────────────────────────────────────────── */
+  #analytics-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  .analytics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .analytics-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .analytics-card h3 {
+    color: var(--text);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+  .analytics-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .analytics-table th {
+    color: var(--muted);
+    font-weight: 500;
+    padding: 6px 4px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  .analytics-table td {
+    padding: 7px 4px;
+    border-bottom: 1px solid rgba(42,48,64,0.75);
+  }
+  .analytics-table tr:last-child td { border-bottom: none; }
+  .analytics-empty { color: var(--muted); padding: 32px 0; text-align: center; }
+
   /* ── Spinner ───────────────────────────────────────────────────────────── */
   .spinner {
     display: inline-block; width: 14px; height: 14px;
@@ -333,6 +373,7 @@
 <div class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
+  <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
 </div>
 
 <!-- ── Scanner Tab ───────────────────────────────────────────────────────── -->
@@ -390,6 +431,29 @@
   </div>
   <div class="journal-table-wrap">
     <div id="journalBody"></div>
+  </div>
+</div>
+
+<!-- ── Analytics Tab ─────────────────────────────────────────────────────── -->
+<div id="analytics-panel" class="tab-panel">
+  <div class="journal-stats" id="analyticsStats"></div>
+  <div class="analytics-grid">
+    <div class="analytics-card">
+      <h3>By Grade</h3>
+      <div id="analyticsByGrade"></div>
+    </div>
+    <div class="analytics-card">
+      <h3>By Direction</h3>
+      <div id="analyticsByDirection"></div>
+    </div>
+    <div class="analytics-card">
+      <h3>Top Tickers</h3>
+      <div id="analyticsByTicker"></div>
+    </div>
+    <div class="analytics-card">
+      <h3>Open Trades</h3>
+      <div id="analyticsOpenTrades"></div>
+    </div>
   </div>
 </div>
 
@@ -470,11 +534,13 @@ let scannerNearMiss = [];
 
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    b.classList.toggle('active', ['scanner','journal'][i] === tab);
+    b.classList.toggle('active', ['scanner','journal','analytics'][i] === tab);
   });
   document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
+  document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
   if (tab === 'journal') renderJournal();
+  if (tab === 'analytics') renderAnalytics();
 }
 
 // ── Scanner ──────────────────────────────────────────────────────────────────
@@ -522,6 +588,10 @@ function clearResults() {
 
 function gradeRank(grade) {
   return { 'A+': 6, 'A': 5, 'B+': 4, 'B': 3, 'C+': 2, 'C': 1, 'D': 0 }[grade] ?? 0;
+}
+
+function gradeClass(grade) {
+  return grade?.startsWith('A') ? 'grade-a' : grade?.startsWith('B') ? 'grade-b' : grade?.startsWith('C') ? 'grade-c' : 'grade-d';
 }
 
 function setupRank(s) {
@@ -587,7 +657,7 @@ function renderCard(s) {
   const c       = s.checklist || {};
   const q       = s.quality || {};
   const grade   = q.grade || 'C';
-  const gradeCls = grade.startsWith('A') ? 'grade-a' : grade.startsWith('B') ? 'grade-b' : grade.startsWith('C') ? 'grade-c' : 'grade-d';
+  const gradeCls = gradeClass(grade);
   const ci      = (pass, label) =>
     `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
   const riskPct = s.entry > 0 ? ((s.risk / s.entry) * 100).toFixed(1) : '—';
@@ -672,7 +742,7 @@ function renderNearMissCard(s) {
   const atOB      = s.in_ob || s.near_ob;
   const q          = s.quality || {};
   const grade      = q.grade || 'D';
-  const gradeCls   = grade.startsWith('A') ? 'grade-a' : grade.startsWith('B') ? 'grade-b' : grade.startsWith('C') ? 'grade-c' : 'grade-d';
+  const gradeCls   = gradeClass(grade);
   const ci        = (pass, label) =>
     `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
 
@@ -718,10 +788,12 @@ function renderNearMissCard(s) {
 // ── Modal ────────────────────────────────────────────────────────────────────
 
 let _editId = null;
+let _pendingSetup = null;
 
 function openLogModal(setupJson) {
   const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
   _editId = null;
+  _pendingSetup = s;
   document.getElementById('modal-title').textContent   = '📊 Log Trade';
   document.getElementById('modalSaveBtn').textContent  = 'Save Trade';
   document.getElementById('f_ticker').value            = s.ticker || '';
@@ -744,6 +816,7 @@ function openEditModal(id) {
   const entry = loadJournal().find(e => e.id === id);
   if (!entry) return;
   _editId = id;
+  _pendingSetup = null;
   document.getElementById('modal-title').textContent  = '✏️ Edit Trade';
   document.getElementById('modalSaveBtn').textContent = 'Update Trade';
   document.getElementById('f_ticker').value           = entry.ticker || '';
@@ -766,6 +839,7 @@ function closeModal(e) {
   if (e.target === document.getElementById('logModal')) closeModalDirect();
 }
 function closeModalDirect() {
+  _pendingSetup = null;
   document.getElementById('logModal').classList.remove('open');
 }
 
@@ -795,6 +869,17 @@ function saveJournalEntry() {
     result:    document.getElementById('f_result').value,
     pnl:       parseFloat(document.getElementById('f_pnl').value)     || null,
   };
+  if (_pendingSetup?.quality) {
+    updated.setupGrade = _pendingSetup.quality.grade || null;
+    updated.setupScore = _pendingSetup.quality.score ?? null;
+    updated.setupRawScore = _pendingSetup.quality.raw_score ?? null;
+    updated.setupLocation = _pendingSetup.quality.location || '';
+    updated.setupCleanliness = _pendingSetup.quality.cleanliness || '';
+    updated.setupFreshness = _pendingSetup.quality.freshness || '';
+    updated.setupRoom = _pendingSetup.quality.room_to_target || '';
+    updated.setupWarning = _pendingSetup.quality.warning || '';
+    updated.setupCoachNote = _pendingSetup.quality.coach_note || '';
+  }
   const entries = loadJournal();
   if (_editId !== null) {
     const idx = entries.findIndex(e => e.id === _editId);
@@ -815,9 +900,10 @@ function loadJournal() {
 function saveJournal(entries) {
   localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
   renderJournal();
+  renderAnalytics();
 }
 function clearJournal() {
-  if (confirm('Delete all journal entries?')) { localStorage.removeItem(JOURNAL_KEY); renderJournal(); }
+  if (confirm('Delete all journal entries?')) { localStorage.removeItem(JOURNAL_KEY); renderJournal(); renderAnalytics(); }
 }
 function deleteEntry(id) {
   saveJournal(loadJournal().filter(e => e.id !== id));
@@ -874,6 +960,7 @@ function renderJournal() {
         <td>${e.date}</td>
         <td><strong>${e.ticker}</strong></td>
         <td ${dirCls}>${e.direction}</td>
+        <td>${e.setupGrade ? `<span class="grade-badge ${gradeClass(e.setupGrade)}">${e.setupGrade}</span>` : '—'}</td>
         <td>${e.option || '—'}</td>
         <td>${e.entry != null ? '$'+e.entry.toFixed(2) : '—'}</td>
         <td>${e.exit  != null ? '$'+e.exit.toFixed(2)  : '—'}</td>
@@ -892,7 +979,7 @@ function renderJournal() {
     <table class="journal-table">
       <thead>
         <tr>
-          <th>Date</th><th>Ticker</th><th>Dir</th><th>Option</th>
+          <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Option</th>
           <th>Entry</th><th>Exit</th><th>Qty</th><th>Expiry</th>
           <th>P&amp;L</th><th>Result</th><th></th>
         </tr>
@@ -901,14 +988,103 @@ function renderJournal() {
     </table>`;
 }
 
+// ── Analytics render ────────────────────────────────────────────────────────
+
+function money(n) {
+  return `${n >= 0 ? '+' : ''}$${Number(n || 0).toFixed(0)}`;
+}
+
+function calcStats(entries) {
+  const wins = entries.filter(e => e.result === 'Win').length;
+  const losses = entries.filter(e => e.result === 'Loss').length;
+  const closed = wins + losses;
+  const totalPnl = entries.reduce((sum, e) => sum + (e.pnl || 0), 0);
+  return {
+    trades: entries.length,
+    closed,
+    wins,
+    losses,
+    open: entries.filter(e => e.result === 'Open').length,
+    winRate: closed ? Math.round((wins / closed) * 100) : null,
+    totalPnl,
+    avgPnl: closed ? totalPnl / closed : 0,
+  };
+}
+
+function groupStats(entries, keyFn) {
+  const map = new Map();
+  entries.forEach(e => {
+    const key = keyFn(e) || 'Untracked';
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(e);
+  });
+  return Array.from(map.entries()).map(([key, rows]) => ({ key, ...calcStats(rows) }));
+}
+
+function renderAnalyticsTable(rows, label = 'Group') {
+  if (!rows.length) return '<div class="analytics-empty">No matching journal data yet.</div>';
+  const body = rows.map(r => {
+    const pnlCls = r.totalPnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const avgCls = r.avgPnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+    return `
+      <tr>
+        <td><strong>${r.key}</strong></td>
+        <td>${r.trades}</td>
+        <td>${r.closed}</td>
+        <td>${r.winRate == null ? '—' : r.winRate + '%'}</td>
+        <td class="${pnlCls}">${money(r.totalPnl)}</td>
+        <td class="${avgCls}">${money(r.avgPnl)}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <table class="analytics-table">
+      <thead>
+        <tr><th>${label}</th><th>Total</th><th>Closed</th><th>Win %</th><th>P&amp;L</th><th>Avg</th></tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function renderAnalytics() {
+  const all = loadJournal();
+  const closed = all.filter(e => e.result !== 'Open');
+  const withGrade = all.filter(e => e.setupGrade);
+  const stats = calcStats(all);
+  const gradeRows = groupStats(withGrade, e => e.setupGrade)
+    .sort((a, b) => gradeRank(b.key) - gradeRank(a.key));
+  const directionRows = groupStats(all, e => e.direction)
+    .sort((a, b) => b.trades - a.trades);
+  const tickerRows = groupStats(all, e => e.ticker)
+    .sort((a, b) => b.trades - a.trades || b.totalPnl - a.totalPnl)
+    .slice(0, 8);
+  const openRows = groupStats(all.filter(e => e.result === 'Open'), e => e.setupGrade || 'Untracked')
+    .sort((a, b) => gradeRank(b.key) - gradeRank(a.key));
+
+  document.getElementById('analyticsStats').innerHTML = `
+    <div class="stat-card"><div class="stat-label">Logged Trades</div><div class="stat-value">${all.length}</div></div>
+    <div class="stat-card"><div class="stat-label">Closed Trades</div><div class="stat-value">${closed.length}</div></div>
+    <div class="stat-card"><div class="stat-label">Graded Trades</div><div class="stat-value">${withGrade.length}</div></div>
+    <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value ${stats.winRate == null ? 'muted' : stats.winRate >= 50 ? 'green' : 'red'}">${stats.winRate == null ? '—' : stats.winRate + '%'}</div></div>
+    <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value ${stats.totalPnl >= 0 ? 'green' : 'red'}">${money(stats.totalPnl)}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg Closed P&amp;L</div><div class="stat-value ${stats.avgPnl >= 0 ? 'green' : 'red'}">${money(stats.avgPnl)}</div></div>
+  `;
+
+  document.getElementById('analyticsByGrade').innerHTML = renderAnalyticsTable(gradeRows, 'Grade');
+  document.getElementById('analyticsByDirection').innerHTML = renderAnalyticsTable(directionRows, 'Direction');
+  document.getElementById('analyticsByTicker').innerHTML = renderAnalyticsTable(tickerRows, 'Ticker');
+  document.getElementById('analyticsOpenTrades').innerHTML = renderAnalyticsTable(openRows, 'Grade');
+}
+
 // ── CSV Export ───────────────────────────────────────────────────────────────
 
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['Date','Ticker','Direction','Option','Entry','Exit','Contracts','Expiry','PnL','Result'];
+  const headers = ['Date','Ticker','Direction','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','Option','Entry','Exit','Contracts','Expiry','PnL','Result'];
   const rows = entries.map(e => [
-    e.date, e.ticker, e.direction, `"${e.option||''}"`,
+    e.date, e.ticker, e.direction, e.setupGrade || '', e.setupScore ?? '',
+    `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
+    `"${e.option||''}"`,
     e.entry ?? '', e.exit ?? '', e.contracts, e.expiry,
     e.pnl ?? '', e.result,
   ]);
