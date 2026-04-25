@@ -146,6 +146,21 @@
   .badge { border-radius: 5px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 10px; text-transform: uppercase; }
   .badge-long  { background: var(--long-dim);  color: var(--long); }
   .badge-short { background: var(--short-dim); color: var(--short); }
+  .grade-badge {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    min-width: 34px;
+    padding: 3px 8px;
+    text-align: center;
+  }
+  .grade-a { background: rgba(34,197,94,0.14); border-color: rgba(34,197,94,0.35); color: #86efac; }
+  .grade-b { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.38); color: #a5b4fc; }
+  .grade-c { background: rgba(245,158,11,0.13); border-color: rgba(245,158,11,0.34); color: #fcd34d; }
+  .grade-d { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.34); color: #fca5a5; }
 
   .card-body { padding: 14px 16px; }
 
@@ -171,6 +186,18 @@
   .option-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
   .option-symbol { font-size: 14px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 4px; }
   .option-meta { color: var(--muted); font-size: 11px; }
+
+  .coach-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+  .coach-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+  .coach-title { color: var(--text); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+  .coach-score { color: var(--muted); font-size: 10px; white-space: nowrap; }
+  .coach-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:7px; margin-bottom:8px; }
+  .coach-metric { border: 1px solid rgba(42,48,64,0.75); border-radius:5px; padding:6px 8px; min-width:0; }
+  .coach-label { color: var(--muted); font-size:9px; letter-spacing:0.06em; text-transform:uppercase; margin-bottom:2px; }
+  .coach-value { color: var(--text); font-size:11px; overflow-wrap:anywhere; }
+  .coach-note { color:#bfdbfe; background:rgba(37,99,235,0.08); border:1px solid rgba(37,99,235,0.18); border-radius:5px; padding:7px 9px; font-size:11px; line-height:1.45; margin-bottom:7px; }
+  .coach-warning { color:#fca5a5; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); border-radius:5px; padding:7px 9px; font-size:11px; line-height:1.45; margin-bottom:7px; }
+  .coach-prompt { color:#fcd34d; font-size:11px; line-height:1.45; }
 
   .checklist { border-top: 1px solid var(--border); padding-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
   .check-item { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 3px 0; }
@@ -494,17 +521,22 @@ function clearResults() {
 function renderCard(s) {
   const isLong  = s.direction === 'LONG';
   const c       = s.checklist || {};
+  const q       = s.quality || {};
+  const grade   = q.grade || 'C';
+  const gradeCls = grade.startsWith('A') ? 'grade-a' : grade.startsWith('B') ? 'grade-b' : grade.startsWith('C') ? 'grade-c' : 'grade-d';
   const ci      = (pass, label) =>
     `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
   const riskPct = s.entry > 0 ? ((s.risk / s.entry) * 100).toFixed(1) : '—';
   const encoded = encodeURIComponent(JSON.stringify(s));
   const obLabel = s.in_ob ? 'Inside OB' : s.near_ob ? 'Near OB' : 'At OB';
+  const coachBox = renderCoachBox(q);
 
   return `
   <div class="card">
     <div class="card-header">
       <span class="ticker">${s.ticker}</span>
       <div class="card-header-right">
+        <span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>
         <span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${s.direction}</span>
       </div>
     </div>
@@ -533,6 +565,7 @@ function renderCard(s) {
         <div class="option-symbol">${s.option.symbol}</div>
         <div class="option-meta">Strike $${s.option.strike} · Expiry ${s.option.expiry}</div>
       </div>
+      ${coachBox}
       <div class="checklist">
         ${ci(c.trendConfirmed, 'Trend confirmed')}
         ${ci(c.bosConfirmed,   'BOS confirmed')}
@@ -546,12 +579,35 @@ function renderCard(s) {
   </div>`;
 }
 
+function renderCoachBox(q) {
+  if (!q || !q.grade) return '';
+  return `
+    <div class="coach-box">
+      <div class="coach-head">
+        <div class="coach-title">Chart Coach</div>
+        <div class="coach-score">Quality ${q.score ?? '—'}/100</div>
+      </div>
+      <div class="coach-grid">
+        <div class="coach-metric"><div class="coach-label">Location</div><div class="coach-value">${q.location || '—'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Cleanliness</div><div class="coach-value">${q.cleanliness || '—'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Freshness</div><div class="coach-value">${q.freshness || '—'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Room</div><div class="coach-value">${q.room_to_target || '—'}</div></div>
+      </div>
+      <div class="coach-note">${q.coach_note || 'Review structure, location, and reaction before entry.'}</div>
+      <div class="coach-warning">${q.warning || 'No major visual warning.'}</div>
+      <div class="coach-prompt">Training question: ${q.training_prompt || 'What would invalidate this idea?'}</div>
+    </div>`;
+}
+
 function renderNearMissCard(s) {
   const isLong    = s.direction === 'LONG';
   const hasTrend  = s.trend && s.trend !== 'NEUTRAL';
   const hasBOS    = s.bos_confirmed;
   const hasOB     = s.ob_high != null && s.ob_low != null;
   const atOB      = s.in_ob || s.near_ob;
+  const q          = s.quality || {};
+  const grade      = q.grade || 'D';
+  const gradeCls   = grade.startsWith('A') ? 'grade-a' : grade.startsWith('B') ? 'grade-b' : grade.startsWith('C') ? 'grade-c' : 'grade-d';
   const ci        = (pass, label) =>
     `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
 
@@ -568,6 +624,7 @@ function renderNearMissCard(s) {
     <div class="card-header" style="border-color: rgba(251,191,36,0.15);">
       <span class="ticker">${s.ticker}</span>
       <div class="card-header-right">
+        ${q.grade ? `<span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>` : ''}
         ${hasTrend ? `<span class="badge" style="background:${dirBg}; color:${dirColor};">${s.direction}</span>` : ''}
         <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">DEVELOPING</span>
       </div>
@@ -584,6 +641,7 @@ function renderNearMissCard(s) {
         ${ci(atOB,     s.in_ob ? 'Price inside OB' : s.near_ob ? 'Price near OB' : 'Price at OB zone')}
       </div>
       ${missing ? `<div style="font-size:11px; color:#fca5a5; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); border-radius:5px; padding:6px 10px; margin-bottom:8px;">${missing}</div>` : ''}
+      ${renderCoachBox(q)}
       <div style="display:flex; gap:14px; font-size:11px; color:var(--muted); flex-wrap:wrap;">
         ${hasBOS && s.bos_level ? `<span>BOS @ $${s.bos_level.toFixed(2)}</span>` : ''}
         ${hasOB ? `<span>OB $${s.ob_low?.toFixed(2)}–$${s.ob_high?.toFixed(2)}</span>` : ''}

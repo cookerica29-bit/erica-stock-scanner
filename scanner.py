@@ -155,6 +155,213 @@ def _find_order_block(df: pd.DataFrame, direction: str, swings: list) -> Optiona
     return None
 
 
+def _safe_ratio(numerator: float, denominator: float, fallback: float = 0.0) -> float:
+    return numerator / denominator if denominator else fallback
+
+
+def _grade_from_score(score: int) -> str:
+    if score >= 90:
+        return "A+"
+    if score >= 84:
+        return "A"
+    if score >= 78:
+        return "B+"
+    if score >= 70:
+        return "B"
+    if score >= 62:
+        return "C+"
+    if score >= 54:
+        return "C"
+    return "D"
+
+
+def _latest_swing_range(swings: list) -> Optional[dict]:
+    highs = [s for s in swings if s["type"] == "high"]
+    lows = [s for s in swings if s["type"] == "low"]
+    if not highs or not lows:
+        return None
+    high = max(highs[-3:], key=lambda s: s["price"])
+    low = min(lows[-3:], key=lambda s: s["price"])
+    if high["price"] <= low["price"]:
+        return None
+    return {"high": high["price"], "low": low["price"]}
+
+
+def _location_read(price: float, direction: str, swings: list) -> tuple:
+    swing_range = _latest_swing_range(swings)
+    if not swing_range:
+        return "Unclear", None
+
+    low = swing_range["low"]
+    high = swing_range["high"]
+    percentile = max(0.0, min(1.0, _safe_ratio(price - low, high - low)))
+
+    if percentile >= 0.67:
+        zone = "Premium"
+    elif percentile <= 0.33:
+        zone = "Discount"
+    else:
+        zone = "Midrange"
+
+    if direction == "LONG" and zone == "Premium":
+        read = "Premium - late for fresh longs"
+    elif direction == "LONG" and zone == "Discount":
+        read = "Discount - better long location"
+    elif direction == "SHORT" and zone == "Discount":
+        read = "Discount - late for fresh shorts"
+    elif direction == "SHORT" and zone == "Premium":
+        read = "Premium - better short location"
+    else:
+        read = zone
+
+    return read, round(percentile * 100, 1)
+
+
+def _ob_touch_count(df: pd.DataFrame, ob: Optional[dict]) -> int:
+    if not ob:
+        return 0
+    touches = 0
+    for i in range(ob["index"] + 1, len(df)):
+        high = float(df["High"].iloc[i])
+        low = float(df["Low"].iloc[i])
+        if high >= ob["low"] and low <= ob["high"]:
+            touches += 1
+    return touches
+
+
+def _cleanliness_read(df: pd.DataFrame, lookback: int = 12) -> tuple:
+    closes = df["Close"].astype(float).iloc[-lookback - 1:]
+    if len(closes) < 4:
+        return "Unclear", 0.0
+    net_move = abs(float(closes.iloc[-1] - closes.iloc[0]))
+    path = float(closes.diff().abs().sum())
+    efficiency = _safe_ratio(net_move, path)
+    if efficiency >= 0.58:
+        return "Clean impulse", round(efficiency, 2)
+    if efficiency <= 0.32:
+        return "Choppy / overlapping", round(efficiency, 2)
+    return "Readable but mixed", round(efficiency, 2)
+
+
+def _build_chart_coach(
+    df: pd.DataFrame,
+    swings: list,
+    direction: str,
+    price: float,
+    atr: float,
+    bos_confirmed: bool,
+    bos_level: float,
+    ob: Optional[dict],
+    in_ob: bool,
+    near_ob: bool,
+    risk: Optional[float] = None,
+    entry: Optional[float] = None,
+) -> dict:
+    score = 40
+    warnings = []
+
+    has_trend = direction in ("LONG", "SHORT")
+    if has_trend:
+        score += 12
+    if bos_confirmed:
+        score += 14
+    if ob:
+        score += 14
+    if in_ob:
+        score += 12
+    elif near_ob:
+        score += 7
+
+    location, location_pct = _location_read(price, direction, swings)
+    if "late for fresh" in location:
+        score -= 8
+        warnings.append("Location is late; avoid chasing without acceptance or a cleaner pullback.")
+    elif "better" in location:
+        score += 5
+
+    cleanliness, efficiency = _cleanliness_read(df)
+    if cleanliness == "Clean impulse":
+        score += 7
+    elif cleanliness == "Choppy / overlapping":
+        score -= 7
+        warnings.append("Recent candles are overlapping; structure may be harder to trust.")
+
+    touches = _ob_touch_count(df, ob)
+    if not ob:
+        freshness = "No order block"
+    elif touches <= 1:
+        freshness = "Fresh OB"
+        score += 6
+    elif touches == 2:
+        freshness = "Tapped once"
+    else:
+        freshness = "Heavily revisited"
+        score -= 8
+        warnings.append("Order block has been revisited multiple times; reaction quality matters more.")
+
+    bos_extension = None
+    if bos_confirmed and bos_level and atr:
+        bos_extension = abs(price - bos_level) / atr
+        if bos_extension > 3:
+            score -= 7
+            warnings.append("Price is extended from the BOS level; wait for a reset or proof of continuation.")
+
+    room_to_target = "Unclear"
+    if risk and entry and bos_level:
+        if direction == "LONG" and bos_level > entry:
+            room_r = (bos_level - entry) / risk
+            room_to_target = "Crowded overhead" if room_r < 1.2 else "Clear path to BOS"
+        elif direction == "SHORT" and bos_level < entry:
+            room_r = (entry - bos_level) / risk
+            room_to_target = "Crowded below" if room_r < 1.2 else "Clear path to BOS"
+        else:
+            room_r = 2.0
+            room_to_target = "BOS already cleared"
+        if room_to_target.startswith("Crowded"):
+            score -= 6
+            warnings.append("Nearby structure may limit room before the first reaction area.")
+
+    if not bos_confirmed:
+        coach_note = "Trend has not produced a confirmed break yet; keep this on watch instead of forcing it."
+        training_prompt = "What exact candle close would prove structure has actually broken?"
+    elif not ob:
+        coach_note = "BOS is present, but the scanner has not found a clean order block to anchor risk."
+        training_prompt = "Where is the last opposite-color candle before the displacement, and is it meaningful?"
+    elif not (in_ob or near_ob):
+        coach_note = "The idea has direction and structure, but price has not returned to the order block yet."
+        training_prompt = "What price would bring this from interesting to actionable?"
+    elif "late for fresh" in location:
+        coach_note = "Direction is valid, but location is stretched; wait for acceptance or a cleaner pullback."
+        training_prompt = "Are you seeing continuation acceptance, or are you buying/selling into the reaction area?"
+    elif cleanliness == "Choppy / overlapping":
+        coach_note = "The setup passes rules, but the path is messy; demand a cleaner reaction before committing."
+        training_prompt = "Which candle would show decisive control instead of overlap?"
+    else:
+        coach_note = "Structure, location, and order-block context are aligned enough to study closely."
+        training_prompt = "What would invalidate the order-block defense before entry?"
+
+    if not warnings:
+        warnings.append("No major visual warning; still wait for the chart to confirm the plan.")
+
+    score = int(max(0, min(100, round(score))))
+    return {
+        "score": score,
+        "grade": _grade_from_score(score),
+        "location": location,
+        "location_percentile": location_pct,
+        "cleanliness": cleanliness,
+        "efficiency": efficiency,
+        "freshness": freshness,
+        "touches": touches,
+        "room_to_target": room_to_target,
+        "bos_extension_atr": round(bos_extension, 2) if bos_extension is not None else None,
+        "warning": warnings[0],
+        "warnings": warnings,
+        "coach_note": coach_note,
+        "training_prompt": training_prompt,
+    }
+
+
 # ── Main Analysis ─────────────────────────────────────────────────────────────
 
 def analyze_ticker(ticker: str) -> Optional[dict]:
@@ -201,6 +408,19 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                         (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + atr)
                     )
 
+        quality = _build_chart_coach(
+            df=df,
+            swings=swings,
+            direction=trend,
+            price=price,
+            atr=atr,
+            bos_confirmed=bos_confirmed,
+            bos_level=bos_level,
+            ob=ob,
+            in_ob=in_ob,
+            near_ob=near_ob,
+        )
+
         # ── Near-miss: has direction but setup is incomplete ──────────────────
         if trend == "NEUTRAL" or not bos_confirmed or (not in_ob and not near_ob):
             return {
@@ -216,6 +436,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 "ob_low":        round(ob["low"],  2) if ob else None,
                 "in_ob":         in_ob,
                 "near_ob":       near_ob,
+                "quality":       quality,
                 "setup_status":  "DEVELOPING" if trend != "NEUTRAL" else "SKIPPED",
                 "scannedAt":     datetime.utcnow().isoformat() + "Z",
             }
@@ -238,6 +459,21 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             "priceAtOb":      in_ob or near_ob,
         }
 
+        quality = _build_chart_coach(
+            df=df,
+            swings=swings,
+            direction=trend,
+            price=price,
+            atr=atr,
+            bos_confirmed=bos_confirmed,
+            bos_level=bos_level,
+            ob=ob,
+            in_ob=in_ob,
+            near_ob=near_ob,
+            risk=risk,
+            entry=entry,
+        )
+
         return {
             "ticker":        ticker,
             "direction":     trend,
@@ -259,6 +495,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             "risk":          risk,
             "option":        option,
             "checklist":     checklist,
+            "quality":       quality,
             "setup_status":  "QUALIFIED",
             "scannedAt":     datetime.utcnow().isoformat() + "Z",
         }
@@ -278,6 +515,8 @@ def scan_all(watchlist: list = WATCHLIST) -> tuple:
             rows.append(r)
         elif r.get("setup_status") == "DEVELOPING":
             near_miss.append(r)
+    rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
+    near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
     return rows, near_miss
 
 
