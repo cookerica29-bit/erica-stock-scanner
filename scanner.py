@@ -175,6 +175,62 @@ def _grade_from_score(score: int) -> str:
     return "D"
 
 
+def _apply_grade_caps(
+    score: int,
+    *,
+    bos_confirmed: bool,
+    ob: Optional[dict],
+    in_ob: bool,
+    near_ob: bool,
+    location: str,
+    cleanliness: str,
+    touches: int,
+    bos_extension: Optional[float],
+    room_to_target: str,
+) -> tuple:
+    cap = 100
+    reasons = []
+
+    if not bos_confirmed:
+        cap = min(cap, 58)
+        reasons.append("No confirmed BOS caps this at C.")
+    if not ob:
+        cap = min(cap, 66)
+        reasons.append("No order block caps this at C+.")
+    if ob and not (in_ob or near_ob):
+        cap = min(cap, 72)
+        reasons.append("Price has not returned to the OB, so this is capped at B.")
+    if "late for fresh" in location:
+        cap = min(cap, 84)
+        reasons.append("Late location caps this at A.")
+    if cleanliness == "Choppy / overlapping":
+        cap = min(cap, 82)
+        reasons.append("Choppy candles cap this at B+.")
+    elif cleanliness == "Readable but mixed":
+        cap = min(cap, 91)
+        reasons.append("Mixed candles keep this below A+.")
+    if touches == 2:
+        cap = min(cap, 88)
+        reasons.append("Tapped once keeps this below A+.")
+    elif touches >= 3:
+        cap = min(cap, 76)
+        reasons.append("Repeated OB taps cap this at B.")
+    if bos_extension is not None:
+        if bos_extension > 4:
+            cap = min(cap, 78)
+            reasons.append("Very extended from BOS caps this at B+.")
+        elif bos_extension > 3:
+            cap = min(cap, 84)
+            reasons.append("Extended from BOS caps this at A.")
+    if room_to_target.startswith("Crowded"):
+        cap = min(cap, 74)
+        reasons.append("Crowded room to target caps this at B.")
+
+    final_score = min(score, cap)
+    grade_note = reasons[0] if reasons else "No grade cap applied."
+    return final_score, cap, grade_note
+
+
 def _latest_swing_range(swings: list) -> Optional[dict]:
     highs = [s for s in swings if s["type"] == "high"]
     lows = [s for s in swings if s["type"] == "low"]
@@ -321,6 +377,20 @@ def _build_chart_coach(
             score -= 6
             warnings.append("Nearby structure may limit room before the first reaction area.")
 
+    raw_score = int(max(0, min(100, round(score))))
+    score, grade_cap, grade_note = _apply_grade_caps(
+        raw_score,
+        bos_confirmed=bos_confirmed,
+        ob=ob,
+        in_ob=in_ob,
+        near_ob=near_ob,
+        location=location,
+        cleanliness=cleanliness,
+        touches=touches,
+        bos_extension=bos_extension,
+        room_to_target=room_to_target,
+    )
+
     if not bos_confirmed:
         coach_note = "Trend has not produced a confirmed break yet; keep this on watch instead of forcing it."
         training_prompt = "What exact candle close would prove structure has actually broken?"
@@ -343,10 +413,12 @@ def _build_chart_coach(
     if not warnings:
         warnings.append("No major visual warning; still wait for the chart to confirm the plan.")
 
-    score = int(max(0, min(100, round(score))))
     return {
         "score": score,
+        "raw_score": raw_score,
         "grade": _grade_from_score(score),
+        "grade_cap": grade_cap,
+        "grade_note": grade_note,
         "location": location,
         "location_percentile": location_pct,
         "cleanliness": cleanliness,

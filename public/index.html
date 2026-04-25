@@ -191,6 +191,7 @@
   .coach-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
   .coach-title { color: var(--text); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
   .coach-score { color: var(--muted); font-size: 10px; white-space: nowrap; }
+  .coach-grade-note { color: var(--muted); font-size: 10px; line-height: 1.35; margin: -2px 0 8px; }
   .coach-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:7px; margin-bottom:8px; }
   .coach-metric { border: 1px solid rgba(42,48,64,0.75); border-radius:5px; padding:6px 8px; min-width:0; }
   .coach-label { color: var(--muted); font-size:9px; letter-spacing:0.06em; text-transform:uppercase; margin-bottom:2px; }
@@ -585,8 +586,9 @@ function renderCoachBox(q) {
     <div class="coach-box">
       <div class="coach-head">
         <div class="coach-title">Chart Coach</div>
-        <div class="coach-score">Quality ${q.score ?? '—'}/100</div>
+        <div class="coach-score">Quality ${q.score ?? '—'}/100${q.raw_score && q.raw_score !== q.score ? ` · raw ${q.raw_score}` : ''}</div>
       </div>
+      ${q.grade_note ? `<div class="coach-grade-note">${q.grade_note}</div>` : ''}
       <div class="coach-grid">
         <div class="coach-metric"><div class="coach-label">Location</div><div class="coach-value">${q.location || '—'}</div></div>
         <div class="coach-metric"><div class="coach-label">Cleanliness</div><div class="coach-value">${q.cleanliness || '—'}</div></div>
