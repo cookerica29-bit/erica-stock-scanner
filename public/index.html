@@ -121,6 +121,9 @@
   .btn-secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
   .btn-sm { padding: 5px 12px; font-size: 11px; }
   .btn-log { background: #1e3a5f; border: 1px solid #2563eb; color: #93c5fd; }
+  .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .action-stack { display:flex; gap:5px; flex-wrap:wrap; min-width:160px; }
+  .action-stack button { padding: 4px 7px; font-size: 10px; }
 
   #status { color: var(--muted); font-size: 11px; margin-left: auto; }
 
@@ -261,6 +264,54 @@
     padding: 10px 12px;
   }
   .setup-review strong { color: var(--text); }
+  .risk-box {
+    background: rgba(99,102,241,0.08);
+    border: 1px solid rgba(99,102,241,0.22);
+    border-radius: 6px;
+    color: #c7d2fe;
+    font-size: 11px;
+    line-height: 1.45;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+  }
+  .check-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px 12px;
+    margin-bottom: 14px;
+  }
+  .check-control {
+    align-items: center;
+    color: var(--text);
+    display: flex;
+    font-size: 11px;
+    gap: 7px;
+  }
+  .check-control input { accent-color: var(--accent); }
+  .screenshot-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .screenshot-preview {
+    background: var(--bg);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 11px;
+    min-height: 92px;
+    overflow: hidden;
+    padding: 8px;
+  }
+  .screenshot-preview img {
+    border-radius: 4px;
+    display: block;
+    max-height: 150px;
+    object-fit: cover;
+    width: 100%;
+  }
+  .shot-link { color: #93c5fd; text-decoration: none; }
 
   /* ── Journal panel ─────────────────────────────────────────────────────── */
   #journal-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
@@ -509,6 +560,44 @@
       <div class="setup-review" id="setupReviewBox">
         <strong>Setup context</strong><br />
         Log from a scanner setup to attach grade, score, and coach context.
+      </div>
+      <div class="form-grid-3">
+        <div class="form-row">
+          <label>Account Size</label>
+          <input type="number" id="f_accountSize" step="100" placeholder="e.g. 10000" />
+        </div>
+        <div class="form-row">
+          <label>Risk %</label>
+          <input type="number" id="f_riskPct" step="0.1" placeholder="e.g. 1" />
+        </div>
+        <div class="form-row">
+          <label>Max Risk $</label>
+          <input type="number" id="f_maxRisk" step="1" placeholder="auto / manual" />
+        </div>
+      </div>
+      <div class="risk-box" id="riskBox">Risk calculator will update after entry, stop, and risk settings are filled.</div>
+      <div class="form-row">
+        <label>Pre-Trade Checklist</label>
+        <div class="check-grid">
+          <label class="check-control"><input type="checkbox" id="f_checkGrade" /> Grade acceptable</label>
+          <label class="check-control"><input type="checkbox" id="f_checkLocation" /> Location acceptable</label>
+          <label class="check-control"><input type="checkbox" id="f_checkWarning" /> Warning acknowledged</label>
+          <label class="check-control"><input type="checkbox" id="f_checkInvalidation" /> Invalidation clear</label>
+          <label class="check-control"><input type="checkbox" id="f_checkNews" /> News checked</label>
+          <label class="check-control"><input type="checkbox" id="f_checkSize" /> Position size acceptable</label>
+        </div>
+      </div>
+      <div class="screenshot-grid">
+        <div class="form-row">
+          <label>Before Screenshot</label>
+          <input type="file" id="f_beforeShot" accept="image/*" />
+          <div class="screenshot-preview" id="beforeShotPreview">No before screenshot attached.</div>
+        </div>
+        <div class="form-row">
+          <label>After Screenshot</label>
+          <input type="file" id="f_afterShot" accept="image/*" />
+          <div class="screenshot-preview" id="afterShotPreview">No after screenshot attached.</div>
+        </div>
       </div>
       <div class="form-grid">
         <div class="form-row">
@@ -899,6 +988,8 @@ function renderNearMissCard(s) {
 
 let _editId = null;
 let _pendingSetup = null;
+let _beforeShotData = '';
+let _afterShotData = '';
 
 function setSetupReviewBox(entryOrSetup = null) {
   const q = entryOrSetup?.quality || null;
@@ -923,6 +1014,46 @@ function setValue(id, value = '') {
   if (el) el.value = value ?? '';
 }
 
+function setChecked(id, value = false) {
+  const el = document.getElementById(id);
+  if (el) el.checked = Boolean(value);
+}
+
+function renderShotPreview(id, data, emptyText) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = data ? `<img src="${data}" alt="Trade screenshot" />` : emptyText;
+}
+
+function resetShotInputs() {
+  setValue('f_beforeShot', '');
+  setValue('f_afterShot', '');
+}
+
+function setShotState(before = '', after = '') {
+  _beforeShotData = before || '';
+  _afterShotData = after || '';
+  resetShotInputs();
+  renderShotPreview('beforeShotPreview', _beforeShotData, 'No before screenshot attached.');
+  renderShotPreview('afterShotPreview', _afterShotData, 'No after screenshot attached.');
+}
+
+function readShotFile(input, target) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (target === 'before') {
+      _beforeShotData = reader.result;
+      renderShotPreview('beforeShotPreview', _beforeShotData, 'No before screenshot attached.');
+    } else {
+      _afterShotData = reader.result;
+      renderShotPreview('afterShotPreview', _afterShotData, 'No after screenshot attached.');
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
 function openLogModal(setupJson) {
   const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
   _editId = null;
@@ -939,6 +1070,9 @@ function openLogModal(setupJson) {
   setValue('f_rResult', '');
   setValue('f_expiry', s.option?.expiry || '');
   setValue('f_contracts', 1);
+  setValue('f_accountSize', localStorage.getItem('stock_scanner_account_size') || '');
+  setValue('f_riskPct', localStorage.getItem('stock_scanner_risk_pct') || '');
+  setValue('f_maxRisk', '');
   setValue('f_result', 'Open');
   setValue('f_exit', '');
   setValue('f_pnl', '');
@@ -947,6 +1081,14 @@ function openLogModal(setupJson) {
   setValue('f_outcome', 'Open');
   setValue('f_mistakeType', '');
   setValue('f_notes', '');
+  setChecked('f_checkGrade', false);
+  setChecked('f_checkLocation', false);
+  setChecked('f_checkWarning', false);
+  setChecked('f_checkInvalidation', false);
+  setChecked('f_checkNews', false);
+  setChecked('f_checkSize', false);
+  setShotState('', '');
+  recalcTradeMath();
   // Lock ticker/direction/option/entry for new entries from scanner
   ['f_ticker','f_direction','f_option','f_entry','f_expiry'].forEach(id => {
     document.getElementById(id).disabled = true;
@@ -971,6 +1113,9 @@ function openEditModal(id) {
   setValue('f_rResult', entry.rResult ?? '');
   setValue('f_expiry', entry.expiry || '');
   setValue('f_contracts', entry.contracts || 1);
+  setValue('f_accountSize', entry.accountSize ?? localStorage.getItem('stock_scanner_account_size') ?? '');
+  setValue('f_riskPct', entry.riskPct ?? localStorage.getItem('stock_scanner_risk_pct') ?? '');
+  setValue('f_maxRisk', entry.maxRisk ?? '');
   setValue('f_result', entry.result || 'Open');
   setValue('f_exit', entry.exit ?? '');
   setValue('f_pnl', entry.pnl ?? '');
@@ -979,6 +1124,14 @@ function openEditModal(id) {
   setValue('f_outcome', entry.outcome || entry.result || 'Open');
   setValue('f_mistakeType', entry.mistakeType || '');
   setValue('f_notes', entry.notes || '');
+  setChecked('f_checkGrade', entry.checkGrade);
+  setChecked('f_checkLocation', entry.checkLocation);
+  setChecked('f_checkWarning', entry.checkWarning);
+  setChecked('f_checkInvalidation', entry.checkInvalidation);
+  setChecked('f_checkNews', entry.checkNews);
+  setChecked('f_checkSize', entry.checkSize);
+  setShotState(entry.beforeShot || '', entry.afterShot || '');
+  recalcTradeMath();
   // All fields editable when editing
   ['f_ticker','f_direction','f_option','f_entry','f_expiry'].forEach(id => {
     document.getElementById(id).disabled = false;
@@ -991,6 +1144,7 @@ function closeModal(e) {
 }
 function closeModalDirect() {
   _pendingSetup = null;
+  setShotState('', '');
   setSetupReviewBox();
   document.getElementById('logModal').classList.remove('open');
 }
@@ -1008,7 +1162,15 @@ function recalcTradeMath() {
   const exit      = parseFloat(document.getElementById('f_exit').value)  || 0;
   const stop      = parseFloat(document.getElementById('f_plannedStop').value) || 0;
   const contracts = parseInt(document.getElementById('f_contracts').value) || 1;
+  const accountSize = parseFloat(document.getElementById('f_accountSize').value) || 0;
+  const riskPct = parseFloat(document.getElementById('f_riskPct').value) || 0;
+  let maxRisk = parseFloat(document.getElementById('f_maxRisk').value) || 0;
   const dir       = document.getElementById('f_direction').value;
+  const riskBox = document.getElementById('riskBox');
+  if (!maxRisk && accountSize && riskPct) {
+    maxRisk = accountSize * (riskPct / 100);
+    document.getElementById('f_maxRisk').value = maxRisk.toFixed(0);
+  }
   if (entry && exit) {
     const pnl = (dir === 'LONG' ? exit - entry : entry - exit) * contracts * 100;
     document.getElementById('f_pnl').value = pnl.toFixed(2);
@@ -1018,13 +1180,28 @@ function recalcTradeMath() {
     const r = dir === 'LONG' ? (exit - entry) / risk : (entry - exit) / risk;
     document.getElementById('f_rResult').value = r.toFixed(2);
   }
+  if (entry && stop && maxRisk) {
+    const riskPerContract = Math.abs(entry - stop) * 100;
+    const suggestedContracts = riskPerContract > 0 ? Math.max(0, Math.floor(maxRisk / riskPerContract)) : 0;
+    const actualRisk = riskPerContract * contracts;
+    const riskColor = actualRisk <= maxRisk ? '#86efac' : '#fca5a5';
+    riskBox.innerHTML = `
+      Risk/contract: <strong>$${riskPerContract.toFixed(0)}</strong> ·
+      Max risk: <strong>$${maxRisk.toFixed(0)}</strong> ·
+      Suggested size: <strong>${suggestedContracts} contract${suggestedContracts === 1 ? '' : 's'}</strong> ·
+      Current risk: <strong style="color:${riskColor}">$${actualRisk.toFixed(0)}</strong>`;
+  } else {
+    riskBox.textContent = 'Risk calculator will update after entry, stop, and risk settings are filled.';
+  }
 }
 
 // Auto-calc P&L and R when trade levels change
-['f_exit','f_entry','f_plannedStop','f_contracts','f_direction'].forEach(id => {
+['f_exit','f_entry','f_plannedStop','f_contracts','f_direction','f_accountSize','f_riskPct','f_maxRisk'].forEach(id => {
   document.getElementById(id).addEventListener('input', recalcTradeMath);
 });
 document.getElementById('f_outcome').addEventListener('change', syncResultFromOutcome);
+document.getElementById('f_beforeShot').addEventListener('change', e => readShotFile(e.target, 'before'));
+document.getElementById('f_afterShot').addEventListener('change', e => readShotFile(e.target, 'after'));
 
 function saveJournalEntry() {
   const ticker = document.getElementById('f_ticker').value.trim().toUpperCase();
@@ -1038,6 +1215,9 @@ function saveJournalEntry() {
     plannedTp1:  parseFloat(document.getElementById('f_plannedTp1').value)  || null,
     exit:      parseFloat(document.getElementById('f_exit').value)    || null,
     contracts: parseInt(document.getElementById('f_contracts').value) || 1,
+    accountSize: parseFloat(document.getElementById('f_accountSize').value) || null,
+    riskPct: parseFloat(document.getElementById('f_riskPct').value) || null,
+    maxRisk: parseFloat(document.getElementById('f_maxRisk').value) || null,
     expiry:    document.getElementById('f_expiry').value.trim(),
     result:    document.getElementById('f_result').value,
     pnl:       parseFloat(document.getElementById('f_pnl').value)     || null,
@@ -1047,7 +1227,17 @@ function saveJournalEntry() {
     outcome: document.getElementById('f_outcome').value,
     mistakeType: document.getElementById('f_mistakeType').value,
     notes: document.getElementById('f_notes').value.trim(),
+    checkGrade: document.getElementById('f_checkGrade').checked,
+    checkLocation: document.getElementById('f_checkLocation').checked,
+    checkWarning: document.getElementById('f_checkWarning').checked,
+    checkInvalidation: document.getElementById('f_checkInvalidation').checked,
+    checkNews: document.getElementById('f_checkNews').checked,
+    checkSize: document.getElementById('f_checkSize').checked,
+    beforeShot: _beforeShotData,
+    afterShot: _afterShotData,
   };
+  if (updated.accountSize) localStorage.setItem('stock_scanner_account_size', updated.accountSize);
+  if (updated.riskPct) localStorage.setItem('stock_scanner_risk_pct', updated.riskPct);
   if (_pendingSetup?.quality) {
     updated.setupGrade = _pendingSetup.quality.grade || null;
     updated.setupScore = _pendingSetup.quality.score ?? null;
@@ -1090,6 +1280,49 @@ function clearJournal() {
 }
 function deleteEntry(id) {
   saveJournal(loadJournal().filter(e => e.id !== id));
+}
+
+function calcPnlFromLevels(entry) {
+  if (!entry.entry || !entry.exit) return entry.pnl ?? null;
+  const contracts = entry.contracts || 1;
+  return (entry.direction === 'LONG' ? entry.exit - entry.entry : entry.entry - entry.exit) * contracts * 100;
+}
+
+function calcRFromLevels(entry) {
+  if (!entry.entry || !entry.exit || !entry.plannedStop || Math.abs(entry.entry - entry.plannedStop) === 0) {
+    return entry.rResult ?? null;
+  }
+  const risk = Math.abs(entry.entry - entry.plannedStop);
+  return entry.direction === 'LONG' ? (entry.exit - entry.entry) / risk : (entry.entry - entry.exit) / risk;
+}
+
+function updateEntryLifecycle(id, action) {
+  const entries = loadJournal();
+  const idx = entries.findIndex(e => e.id === id);
+  if (idx === -1) return;
+  const e = { ...entries[idx] };
+  if (action === 'tp1') {
+    e.outcome = 'TP1';
+    e.result = 'Win';
+    e.exit = e.plannedTp1 || e.exit;
+    e.rResult = e.rResult ?? 2;
+  } else if (action === 'stop') {
+    e.outcome = 'Stop Loss';
+    e.result = 'Loss';
+    e.exit = e.plannedStop || e.exit;
+    e.rResult = -1;
+  } else if (action === 'breakeven') {
+    e.plannedStop = e.entry || e.plannedStop;
+    e.outcome = e.outcome === 'Open' ? 'Open' : e.outcome;
+    e.notes = `${e.notes ? e.notes + '\n' : ''}Stop moved to breakeven.`;
+  } else if (action === 'manual') {
+    openEditModal(id);
+    return;
+  }
+  e.pnl = calcPnlFromLevels(e);
+  e.rResult = calcRFromLevels(e);
+  entries[idx] = e;
+  saveJournal(entries);
 }
 
 // ── Journal render ───────────────────────────────────────────────────────────
@@ -1143,6 +1376,15 @@ function renderJournal() {
       ? `<span class="${e.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${e.pnl >= 0 ? '+' : ''}$${e.pnl.toFixed(2)}</span>`
       : '<span style="color:var(--muted)">—</span>';
     const dirCls = e.direction === 'LONG' ? 'style="color:var(--long)"' : 'style="color:var(--short)"';
+    const shots = `${e.beforeShot ? `<a class="shot-link" href="${e.beforeShot}" target="_blank">Before</a>` : '—'}${e.afterShot ? ` / <a class="shot-link" href="${e.afterShot}" target="_blank">After</a>` : ''}`;
+    const actions = e.result === 'Open'
+      ? `<div class="action-stack">
+          <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'tp1')">TP1</button>
+          <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'breakeven')">BE</button>
+          <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'stop')">Stop</button>
+          <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'manual')">Close</button>
+        </div>`
+      : '<span style="color:var(--muted)">Closed</span>';
     return `
       <tr class="${resultCls}">
         <td>${e.date}</td>
@@ -1153,12 +1395,14 @@ function renderJournal() {
         <td>${e.entry != null ? '$'+e.entry.toFixed(2) : '—'}</td>
         <td>${e.exit  != null ? '$'+e.exit.toFixed(2)  : '—'}</td>
         <td>${e.rResult != null ? e.rResult.toFixed(2)+'R' : '—'}</td>
+        <td>${shots}</td>
         <td>${e.contracts}x</td>
         <td>${e.expiry || '—'}</td>
         <td>${pnlStr}</td>
         <td>${e.tradeQuality || 'Unreviewed'}</td>
         <td>${e.mistakeType || '—'}</td>
         <td><span class="result-badge ${badgeCls}">${e.result}</span></td>
+        <td>${actions}</td>
         <td style="white-space:nowrap">
           <button class="edit-btn" onclick="openEditModal(${e.id})">✏️</button>
           <button class="delete-btn" onclick="deleteEntry(${e.id})">✕</button>
@@ -1171,8 +1415,8 @@ function renderJournal() {
       <thead>
         <tr>
           <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Option</th>
-          <th>Entry</th><th>Exit</th><th>R</th><th>Qty</th><th>Expiry</th>
-          <th>P&amp;L</th><th>Quality</th><th>Mistake</th><th>Result</th><th></th>
+          <th>Entry</th><th>Exit</th><th>R</th><th>Shots</th><th>Qty</th><th>Expiry</th>
+          <th>P&amp;L</th><th>Quality</th><th>Mistake</th><th>Result</th><th>Manage</th><th></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -1200,6 +1444,17 @@ function calcStats(entries) {
     totalPnl,
     avgPnl: closed ? totalPnl / closed : 0,
   };
+}
+
+function checklistComplete(e) {
+  return Boolean(
+    e.checkGrade &&
+    e.checkLocation &&
+    e.checkWarning &&
+    e.checkInvalidation &&
+    e.checkNews &&
+    e.checkSize
+  );
 }
 
 function groupStats(entries, keyFn) {
@@ -1277,13 +1532,15 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['Date','Ticker','Direction','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','Option','Entry','Stop','TP1','Exit','R','Contracts','Expiry','PnL','TradeQuality','FollowedPlan','Outcome','Mistake','Notes','Result'];
+  const headers = ['Date','Ticker','Direction','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','Option','Entry','Stop','TP1','Exit','R','Contracts','AccountSize','RiskPct','MaxRisk','Expiry','PnL','ChecklistComplete','BeforeShot','AfterShot','TradeQuality','FollowedPlan','Outcome','Mistake','Notes','Result'];
   const rows = entries.map(e => [
     e.date, e.ticker, e.direction, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
     `"${e.option||''}"`,
-    e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.rResult ?? '', e.contracts, e.expiry,
-    e.pnl ?? '', `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
+    e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.rResult ?? '', e.contracts,
+    e.accountSize ?? '', e.riskPct ?? '', e.maxRisk ?? '', e.expiry,
+    e.pnl ?? '', checklistComplete(e) ? 'Yes' : 'No', e.beforeShot ? 'Yes' : 'No', e.afterShot ? 'Yes' : 'No',
+    `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
   ]);
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
   const a = document.createElement('a');
