@@ -672,12 +672,11 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         )
         print(f"[{ticker}] {macro_label}")
 
-        # ── Macro bias hard block ─────────────────────────────────────────────
+        # ── Macro bias hard block (LONG only) ────────────────────────────────
+        # Suppress buying into macro downtrends. Never block shorts based on macro
+        # bias — short signals use local structure detection only.
         if macro_bias == "Macro Bearish" and trend == "LONG":
             print(f"[{ticker}] Macro Bearish override — LONG signal suppressed")
-            return None
-        if macro_bias == "Macro Bullish" and trend == "SHORT":
-            print(f"[{ticker}] Macro Bullish override — SHORT signal suppressed")
             return None
 
         # Market structure defaults
