@@ -155,42 +155,132 @@ def _find_order_block(df: pd.DataFrame, direction: str, swings: list) -> Optiona
     return None
 
 
-def _market_structure(swings: list) -> str:
-    """Classify last 60-candle structure: 'bullish', 'bearish', or 'ranging'."""
+def _market_structure(swings: list, price: float, df: pd.DataFrame) -> tuple:
+    """
+    Classify structure as 'bullish', 'bearish', or 'ranging' using a weighted vote system.
+    Returns (classification: str, reasons: list[str]).
+
+    Votes (each weighted):
+      +2 bearish: price below EMA200
+      +2 bearish: most recent swing high < previous (LH)
+      +2 bearish: most recent swing low < previous (LL)
+      +2 bearish: 3-swing LH/LL sequence confirmed
+      Mirror weights for bullish.
+    """
+    reasons: list = []
+    bearish_score = 0
+    bullish_score = 0
+
     highs = [s["price"] for s in swings if s["type"] == "high"]
     lows  = [s["price"] for s in swings if s["type"] == "low"]
-    bearish = (len(highs) >= 3 and highs[-3] > highs[-2] > highs[-1]
-               and len(lows) >= 2 and lows[-2] > lows[-1])
-    bullish = (len(lows) >= 3 and lows[-3] < lows[-2] < lows[-1]
-               and len(highs) >= 2 and highs[-2] < highs[-1])
-    if bearish:
-        return "bearish"
-    if bullish:
-        return "bullish"
-    return "ranging"
+
+    # ── EMA200 bias (weight 2) ────────────────────────────────────────────────
+    if len(df) >= 200:
+        ema200 = float(df["Close"].ewm(span=200, adjust=False).mean().iloc[-1])
+        if price < ema200:
+            bearish_score += 2
+            reasons.append(f"price ${price:.2f} below EMA200 ${ema200:.2f} [bearish +2]")
+        else:
+            bullish_score += 2
+            reasons.append(f"price ${price:.2f} above EMA200 ${ema200:.2f} [bullish +2]")
+
+    # ── Recent swing high comparison (weight 2) ───────────────────────────────
+    if len(highs) >= 2:
+        if highs[-1] < highs[-2]:
+            bearish_score += 2
+            reasons.append(f"LH: {highs[-1]:.2f} < {highs[-2]:.2f} [bearish +2]")
+        else:
+            bullish_score += 2
+            reasons.append(f"HH: {highs[-1]:.2f} >= {highs[-2]:.2f} [bullish +2]")
+
+    # ── Recent swing low comparison (weight 2) ────────────────────────────────
+    if len(lows) >= 2:
+        if lows[-1] < lows[-2]:
+            bearish_score += 2
+            reasons.append(f"LL: {lows[-1]:.2f} < {lows[-2]:.2f} [bearish +2]")
+        else:
+            bullish_score += 2
+            reasons.append(f"HL: {lows[-1]:.2f} >= {lows[-2]:.2f} [bullish +2]")
+
+    # ── 3-swing pattern (weight 2) ────────────────────────────────────────────
+    if len(highs) >= 3 and highs[-3] > highs[-2] > highs[-1] and len(lows) >= 2 and lows[-2] > lows[-1]:
+        bearish_score += 2
+        reasons.append(f"3-swing LH/LL sequence confirmed [bearish +2]")
+    elif len(lows) >= 3 and lows[-3] < lows[-2] < lows[-1] and len(highs) >= 2 and highs[-2] < highs[-1]:
+        bullish_score += 2
+        reasons.append(f"3-swing HH/HL sequence confirmed [bullish +2]")
+
+    if bearish_score > bullish_score:
+        result = "bearish"
+    elif bullish_score > bearish_score:
+        result = "bullish"
+    else:
+        result = "ranging"
+
+    reasons.append(f"→ scores: bearish={bearish_score} bullish={bullish_score} → {result}")
+    return result, reasons
 
 
-def _detect_choch(swings: list, direction: str) -> bool:
+def _detect_choch(swings: list, direction: str) -> tuple:
     """
-    Bearish CHoCH (suppress LONG): broke a prior swing low after a lower high.
-    Bullish CHoCH (suppress SHORT): broke a prior swing high after a higher low.
+    Scan ALL swing pairs for CHoCH events and return the most recent one.
+    Most recent CHoCH takes priority over earlier reversals (handles bounces after a real break).
+    Returns (suppress: bool, reason: str).
+      suppress=True means this CHoCH conflicts with `direction` → filter the setup.
     """
     highs = [s for s in swings if s["type"] == "high"]
     lows  = [s for s in swings if s["type"] == "low"]
-    if direction == "LONG":
-        if len(lows) < 2 or lows[-1]["price"] >= lows[-2]["price"]:
-            return False
-        between_highs = [h for h in highs if lows[-2]["index"] < h["index"] < lows[-1]["index"]]
-        prior_highs   = [h for h in highs if h["index"] < lows[-2]["index"]]
-        return bool(between_highs and prior_highs
-                    and between_highs[-1]["price"] < prior_highs[-1]["price"])
+
+    last_bearish_idx = -1
+    last_bullish_idx = -1
+    bearish_reason   = ""
+    bullish_reason   = ""
+
+    # Bearish CHoCH: LL confirmed after a LH between the two lows
+    for i in range(1, len(lows)):
+        if lows[i]["price"] < lows[i - 1]["price"]:
+            between_highs = [h for h in highs
+                             if lows[i - 1]["index"] < h["index"] < lows[i]["index"]]
+            prior_highs   = [h for h in highs if h["index"] < lows[i - 1]["index"]]
+            if (between_highs and prior_highs
+                    and between_highs[-1]["price"] < prior_highs[-1]["price"]):
+                if lows[i]["index"] > last_bearish_idx:
+                    last_bearish_idx = lows[i]["index"]
+                    bearish_reason = (
+                        f"bearish CHoCH at swing-low {lows[i]['price']:.2f} "
+                        f"(LH {between_highs[-1]['price']:.2f} < prior {prior_highs[-1]['price']:.2f})"
+                    )
+
+    # Bullish CHoCH: HH confirmed after a HL between the two highs
+    for i in range(1, len(highs)):
+        if highs[i]["price"] > highs[i - 1]["price"]:
+            between_lows = [l for l in lows
+                            if highs[i - 1]["index"] < l["index"] < highs[i]["index"]]
+            prior_lows   = [l for l in lows if l["index"] < highs[i - 1]["index"]]
+            if (between_lows and prior_lows
+                    and between_lows[-1]["price"] > prior_lows[-1]["price"]):
+                if highs[i]["index"] > last_bullish_idx:
+                    last_bullish_idx = highs[i]["index"]
+                    bullish_reason = (
+                        f"bullish CHoCH at swing-high {highs[i]['price']:.2f} "
+                        f"(HL {between_lows[-1]['price']:.2f} > prior {prior_lows[-1]['price']:.2f})"
+                    )
+
+    # No CHoCH found at all
+    if last_bearish_idx == -1 and last_bullish_idx == -1:
+        return False, "no CHoCH detected"
+
+    # Most recent CHoCH wins regardless of short-term counter-moves
+    if last_bearish_idx >= last_bullish_idx:
+        # Most recent CHoCH is bearish — suppress LONG setups
+        if direction == "LONG":
+            return True, f"[SUPPRESS] most recent CHoCH is bearish → {bearish_reason}"
+        return False, f"bearish CHoCH present but not suppressing {direction} → {bearish_reason}"
     else:
-        if len(highs) < 2 or highs[-1]["price"] <= highs[-2]["price"]:
-            return False
-        between_lows = [l for l in lows if highs[-2]["index"] < l["index"] < highs[-1]["index"]]
-        prior_lows   = [l for l in lows if l["index"] < highs[-2]["index"]]
-        return bool(between_lows and prior_lows
-                    and between_lows[-1]["price"] > prior_lows[-1]["price"])
+        # Most recent CHoCH is bullish — suppress SHORT setups
+        if direction == "SHORT":
+            return True, f"[SUPPRESS] most recent CHoCH is bullish → {bullish_reason}"
+        return False, f"bullish CHoCH present but not suppressing {direction} → {bullish_reason}"
 
 
 def _safe_ratio(numerator: float, denominator: float, fallback: float = 0.0) -> float:
@@ -526,7 +616,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         struct_note = "🟡 Ranging market — proceed with extra confirmation"
 
         if trend in ("LONG", "SHORT"):
-            # Weekly EMA filter
+            # Weekly EMA filter (EMA20 vs EMA50)
             w_raw = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
             weekly = _flatten_columns(w_raw).astype(float)
             if len(weekly) >= 50:
@@ -534,18 +624,34 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 w_e20 = float(w_close.ewm(span=20, adjust=False).mean().iloc[-1])
                 w_e50 = float(w_close.ewm(span=50, adjust=False).mean().iloc[-1])
                 if trend == "LONG" and w_e20 < w_e50:
+                    print(f"[{ticker}] FILTERED: weekly EMA20 {w_e20:.2f} < EMA50 {w_e50:.2f} → no LONG")
                     return None
                 if trend == "SHORT" and w_e20 > w_e50:
+                    print(f"[{ticker}] FILTERED: weekly EMA20 {w_e20:.2f} > EMA50 {w_e50:.2f} → no SHORT")
                     return None
 
-            # Structure filter (60-candle lookback)
-            htf_df = df.tail(60).reset_index(drop=True)
-            htf_swings = _find_swings(htf_df, margin=3)
-            structure = _market_structure(htf_swings)
-            choch = _detect_choch(htf_swings, trend)
+            # Structure filter — 120-candle lookback, margin=5 for confirmed swings
+            htf_df     = df.tail(120).reset_index(drop=True)
+            htf_swings = _find_swings(htf_df, margin=5)
+            structure, struct_reasons = _market_structure(htf_swings, price, df)
+            choch, choch_reason       = _detect_choch(htf_swings, trend)
+
+            # Most recent CHoCH overrides structure regardless of short-term bounces
+            if "bearish CHoCH" in choch_reason:
+                structure = "bearish"
+            elif "bullish CHoCH" in choch_reason:
+                structure = "bullish"
+
+            print(f"[{ticker}] trend={trend} structure={structure} choch={choch}")
+            for r in struct_reasons:
+                print(f"  {r}")
+            print(f"  choch: {choch_reason}")
+
             if trend == "LONG" and (choch or structure == "bearish"):
+                print(f"[{ticker}] FILTERED: structure={structure}, choch={choch} → no LONG")
                 return None
             if trend == "SHORT" and (choch or structure == "bullish"):
+                print(f"[{ticker}] FILTERED: structure={structure}, choch={choch} → no SHORT")
                 return None
 
             struct_label = (
