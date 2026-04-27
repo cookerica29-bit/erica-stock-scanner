@@ -687,21 +687,21 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         struct_note = "🟡 Ranging market — proceed with extra confirmation"
 
         if trend in ("LONG", "SHORT"):
-            # Weekly EMA filter (EMA20 vs EMA50)
+            # Weekly EMA context (informational only — not a hard block)
             w_raw = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
             weekly = _flatten_columns(w_raw).astype(float)
             if len(weekly) >= 50:
                 w_close = weekly["Close"]
                 w_e20 = float(w_close.ewm(span=20, adjust=False).mean().iloc[-1])
                 w_e50 = float(w_close.ewm(span=50, adjust=False).mean().iloc[-1])
-                if trend == "LONG" and w_e20 < w_e50:
-                    print(f"[{ticker}] FILTERED: weekly EMA20 {w_e20:.2f} < EMA50 {w_e50:.2f} → no LONG")
-                    return None
-                if trend == "SHORT" and w_e20 > w_e50:
-                    print(f"[{ticker}] FILTERED: weekly EMA20 {w_e20:.2f} > EMA50 {w_e50:.2f} → no SHORT")
-                    return None
+                print(
+                    f"[{ticker}] weekly EMA20={w_e20:.2f} EMA50={w_e50:.2f} "
+                    f"({'bearish cross' if w_e20 < w_e50 else 'bullish cross'})"
+                )
 
-            # Structure filter — 200-candle lookback, margin=5 for confirmed swings
+            # Structure context — 200-candle lookback, margin=5 for confirmed swings
+            # Informational only — structure/CHoCH labels show on cards but do NOT block signals.
+            # Primary entry gate = BOS confirmed + price at/near OB.
             htf_df     = df.tail(200).reset_index(drop=True)
             htf_swings = _find_swings(htf_df, margin=5)
             structure, struct_reasons = _market_structure(
@@ -709,12 +709,12 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             )
             choch, choch_reason, bearish_choch_lvl = _detect_choch(htf_swings, trend)
 
-            # Hard override: any bearish CHoCH in the window + price still below that level
+            # Update structure label if CHoCH overrides the vote
             if bearish_choch_lvl is not None and price < bearish_choch_lvl:
                 structure = "bearish"
                 print(
-                    f"[{ticker}] OVERRIDE: price {price:.2f} below bearish CHoCH level "
-                    f"{bearish_choch_lvl:.2f} → forced bearish"
+                    f"[{ticker}] note: price {price:.2f} below bearish CHoCH level "
+                    f"{bearish_choch_lvl:.2f} → structure reads bearish"
                 )
             elif "bearish CHoCH" in choch_reason:
                 structure = "bearish"
@@ -725,13 +725,6 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             for r in struct_reasons:
                 print(f"  {r}")
             print(f"  choch: {choch_reason}")
-
-            if trend == "LONG" and (choch or structure == "bearish"):
-                print(f"[{ticker}] FILTERED: structure={structure}, choch={choch} → no LONG")
-                return None
-            if trend == "SHORT" and (choch or structure == "bullish"):
-                print(f"[{ticker}] FILTERED: structure={structure}, choch={choch} → no SHORT")
-                return None
 
             struct_label = (
                 ("🔴 Bearish ChoCH" if trend == "LONG" else "🟢 Bullish ChoCH") if choch
@@ -859,6 +852,146 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
     except Exception as e:
         print(f"[scanner] {ticker} error: {e}")
         return None
+
+
+def debug_ticker(ticker: str) -> dict:
+    """
+    Run every filter step on a single ticker and return the full reasoning.
+    Used by /api/debug/{ticker}.
+    """
+    out: dict = {"ticker": ticker.upper(), "filters": [], "passed": False}
+    try:
+        raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+        df  = _flatten_columns(raw)
+        if len(df) < 50:
+            out["filters"].append({"step": "data", "result": "FAIL", "reason": "< 50 bars"})
+            return out
+        df    = df.astype(float)
+        price = float(df["Close"].iloc[-1])
+        atr   = _compute_atr(df)
+
+        # Quality gates
+        if price < 5:
+            out["filters"].append({"step": "price", "result": "FAIL", "reason": f"price ${price:.2f} < $5"})
+            return out
+        avg_dv = float((df["Close"] * df["Volume"]).iloc[-20:].mean())
+        if avg_dv < 5_000_000:
+            out["filters"].append({"step": "volume", "result": "FAIL", "reason": f"avg dollar vol ${avg_dv/1e6:.1f}M < $5M"})
+            return out
+        dr = (float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1])) / price * 100
+        if dr < 1.0:
+            out["filters"].append({"step": "range", "result": "FAIL", "reason": f"daily range {dr:.2f}% < 1%"})
+            return out
+        out["price"] = round(price, 2)
+        out["atr"]   = round(atr, 2)
+
+        # Trend
+        swings = _find_swings(df)
+        trend  = _get_trend(swings)
+        out["trend"] = trend
+        out["filters"].append({"step": "trend", "result": "OK", "reason": trend})
+
+        # BOS
+        bos_confirmed, bos_level = (False, 0.0)
+        ob = None
+        in_ob = near_ob = False
+        if trend != "NEUTRAL":
+            bos_confirmed, bos_level = _detect_bos(df, swings, trend)
+            if bos_confirmed:
+                ob = _find_order_block(df, trend, swings)
+                if ob:
+                    in_ob   = ob["low"] <= price <= ob["high"]
+                    near_ob = not in_ob and (
+                        (trend == "LONG"  and price < ob["high"] and price > ob["low"] - atr) or
+                        (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + atr)
+                    )
+        out["bos_confirmed"] = bos_confirmed
+        out["bos_level"]     = round(bos_level, 2) if bos_level else None
+        out["ob"]            = {"high": round(ob["high"], 2), "low": round(ob["low"], 2)} if ob else None
+        out["in_ob"]         = in_ob
+        out["near_ob"]       = near_ob
+        out["filters"].append({
+            "step": "bos_ob",
+            "result": "OK" if bos_confirmed else "WARN",
+            "reason": f"BOS={'yes' if bos_confirmed else 'no'} OB={'yes' if ob else 'no'} in_ob={in_ob} near_ob={near_ob}",
+        })
+
+        # Macro bias
+        macro_bias, pct_from_52w, wk52_high, window_high = _macro_bias(price, df)
+        out["macro_bias"]     = macro_bias
+        out["wk52_high"]      = wk52_high
+        out["pct_from_52w"]   = f"{pct_from_52w:.1%}"
+        macro_block = macro_bias == "Macro Bearish" and trend == "LONG"
+        out["filters"].append({
+            "step": "macro_bias",
+            "result": "FAIL" if macro_block else "OK",
+            "reason": (
+                f"{macro_bias} ({pct_from_52w:.1%} below 52w high ${wk52_high:.2f})"
+                + (" → LONG suppressed" if macro_block else "")
+            ),
+        })
+        if macro_block:
+            return out
+
+        # Weekly EMA
+        w_raw  = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
+        weekly = _flatten_columns(w_raw).astype(float)
+        w_e20 = w_e50 = None
+        if len(weekly) >= 50:
+            w_close = weekly["Close"]
+            w_e20 = round(float(w_close.ewm(span=20, adjust=False).mean().iloc[-1]), 2)
+            w_e50 = round(float(w_close.ewm(span=50, adjust=False).mean().iloc[-1]), 2)
+        out["weekly_ema20"] = w_e20
+        out["weekly_ema50"] = w_e50
+        out["filters"].append({
+            "step": "weekly_ema",
+            "result": "INFO",
+            "reason": (
+                f"EMA20={w_e20} EMA50={w_e50} "
+                f"({'bearish cross' if w_e20 and w_e20 < w_e50 else 'bullish cross'})"
+                if w_e20 else "not enough weekly data"
+            ),
+        })
+
+        # Local structure + CHoCH
+        htf_df     = df.tail(200).reset_index(drop=True)
+        htf_swings = _find_swings(htf_df, margin=5)
+        structure, struct_reasons = _market_structure(
+            htf_swings, price, df, macro_bias=macro_bias, window_high=window_high
+        )
+        choch, choch_reason, bearish_choch_lvl = _detect_choch(htf_swings, trend)
+        if bearish_choch_lvl is not None and price < bearish_choch_lvl:
+            structure = "bearish"
+        elif "bearish CHoCH" in choch_reason:
+            structure = "bearish"
+        elif "bullish CHoCH" in choch_reason:
+            structure = "bullish"
+        out["structure"]        = structure
+        out["choch"]            = choch
+        out["choch_reason"]     = choch_reason
+        out["struct_reasons"]   = struct_reasons
+        out["filters"].append({
+            "step": "structure",
+            "result": "INFO",
+            "reason": f"structure={structure} choch={choch} | {choch_reason}",
+        })
+
+        # Final gate: BOS + OB
+        if not bos_confirmed:
+            out["filters"].append({"step": "final", "result": "FAIL", "reason": "no BOS confirmed"})
+            return out
+        if not (in_ob or near_ob):
+            out["filters"].append({
+                "step": "final", "result": "FAIL",
+                "reason": f"price not at/near OB (ob={out['ob']})",
+            })
+            return out
+
+        out["passed"] = True
+        out["filters"].append({"step": "final", "result": "PASS", "reason": "BOS + OB confirmed"})
+    except Exception as e:
+        out["filters"].append({"step": "error", "result": "ERROR", "reason": str(e)})
+    return out
 
 
 def scan_all(watchlist: list = WATCHLIST) -> tuple:

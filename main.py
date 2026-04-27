@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from scanner import scan_all, scan_ticker, WATCHLIST
+from scanner import scan_all, scan_ticker, debug_ticker, WATCHLIST
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -38,6 +38,12 @@ def api_scan_single(ticker: str):
     if result is None:
         return {"setup": None, "reason": "No valid setup found"}
     return result
+
+
+@app.get("/api/debug/{ticker}")
+def api_debug(ticker: str):
+    """Return full filter reasoning for a single ticker — every step pass/fail."""
+    return debug_ticker(ticker)
 
 
 @app.get("/api/watchlist")
