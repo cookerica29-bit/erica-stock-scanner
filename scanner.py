@@ -155,17 +155,47 @@ def _find_order_block(df: pd.DataFrame, direction: str, swings: list) -> Optiona
     return None
 
 
-def _market_structure(swings: list, price: float, df: pd.DataFrame) -> tuple:
+def _macro_bias(price: float, df: pd.DataFrame) -> tuple:
+    """
+    Compute macro trend bias using 52-week high and 200-candle window high.
+    Returns (bias, pct_from_52w_high, wk52_high, window_high).
+      Macro Bearish : price > 15% below 52-week high
+      Macro Bullish : price within 5% of 52-week high
+      Macro Neutral : everything else
+    """
+    closes = df["Close"].astype(float)
+    wk52_high    = float(closes.iloc[-252:].max()) if len(closes) >= 252 else float(closes.max())
+    window_high  = float(closes.iloc[-200:].max()) if len(closes) >= 200 else float(closes.max())
+    pct_from_52w = (wk52_high - price) / wk52_high if wk52_high > 0 else 0.0
+
+    if pct_from_52w > 0.15:
+        bias = "Macro Bearish"
+    elif pct_from_52w < 0.05:
+        bias = "Macro Bullish"
+    else:
+        bias = "Macro Neutral"
+
+    return bias, round(pct_from_52w, 3), round(wk52_high, 2), round(window_high, 2)
+
+
+def _market_structure(
+    swings: list,
+    price: float,
+    df: pd.DataFrame,
+    macro_bias: str = "",
+    window_high: float = 0.0,
+) -> tuple:
     """
     Classify structure as 'bullish', 'bearish', or 'ranging' using a weighted vote system.
     Returns (classification: str, reasons: list[str]).
 
-    Votes (each weighted):
-      +2 bearish: price below EMA200
-      +2 bearish: most recent swing high < previous (LH)
-      +2 bearish: most recent swing low < previous (LL)
-      +2 bearish: 3-swing LH/LL sequence confirmed
-      Mirror weights for bullish.
+    Weights:
+      +4 bearish/bullish : macro bias (52w high check) — hard override
+      +2 bearish/bullish : price vs EMA200
+      +2 bearish/bullish : recent swing high comparison (LH vs HH)
+      +2 bearish/bullish : recent swing low comparison (LL vs HL)
+      +2 bearish/bullish : 3-swing LH/LL or HH/HL sequence
+      +2 bearish         : price > 15% below 200-candle window high
     """
     reasons: list = []
     bearish_score = 0
@@ -173,6 +203,24 @@ def _market_structure(swings: list, price: float, df: pd.DataFrame) -> tuple:
 
     highs = [s["price"] for s in swings if s["type"] == "high"]
     lows  = [s["price"] for s in swings if s["type"] == "low"]
+
+    # ── Macro bias override (weight 4) ───────────────────────────────────────
+    if macro_bias == "Macro Bearish":
+        bearish_score += 4
+        reasons.append(f"macro bias: price >15% below 52w high [bearish +4]")
+    elif macro_bias == "Macro Bullish":
+        bullish_score += 4
+        reasons.append(f"macro bias: price within 5% of 52w high [bullish +4]")
+
+    # ── 200-candle window high check (weight 2) ───────────────────────────────
+    if window_high > 0:
+        pct_below_window = (window_high - price) / window_high
+        if pct_below_window > 0.15:
+            bearish_score += 2
+            reasons.append(
+                f"price ${price:.2f} is {pct_below_window:.1%} below "
+                f"200-bar high ${window_high:.2f} [bearish +2]"
+            )
 
     # ── EMA200 bias (weight 2) ────────────────────────────────────────────────
     if len(df) >= 200:
@@ -202,13 +250,15 @@ def _market_structure(swings: list, price: float, df: pd.DataFrame) -> tuple:
             bullish_score += 2
             reasons.append(f"HL: {lows[-1]:.2f} >= {lows[-2]:.2f} [bullish +2]")
 
-    # ── 3-swing pattern (weight 2) ────────────────────────────────────────────
-    if len(highs) >= 3 and highs[-3] > highs[-2] > highs[-1] and len(lows) >= 2 and lows[-2] > lows[-1]:
+    # ── 3-swing sequence (weight 2) ───────────────────────────────────────────
+    if (len(highs) >= 3 and highs[-3] > highs[-2] > highs[-1]
+            and len(lows) >= 2 and lows[-2] > lows[-1]):
         bearish_score += 2
-        reasons.append(f"3-swing LH/LL sequence confirmed [bearish +2]")
-    elif len(lows) >= 3 and lows[-3] < lows[-2] < lows[-1] and len(highs) >= 2 and highs[-2] < highs[-1]:
+        reasons.append("3-swing LH/LL sequence confirmed [bearish +2]")
+    elif (len(lows) >= 3 and lows[-3] < lows[-2] < lows[-1]
+            and len(highs) >= 2 and highs[-2] < highs[-1]):
         bullish_score += 2
-        reasons.append(f"3-swing HH/HL sequence confirmed [bullish +2]")
+        reasons.append("3-swing HH/HL sequence confirmed [bullish +2]")
 
     if bearish_score > bullish_score:
         result = "bearish"
@@ -224,17 +274,19 @@ def _market_structure(swings: list, price: float, df: pd.DataFrame) -> tuple:
 def _detect_choch(swings: list, direction: str) -> tuple:
     """
     Scan ALL swing pairs for CHoCH events and return the most recent one.
-    Most recent CHoCH takes priority over earlier reversals (handles bounces after a real break).
-    Returns (suppress: bool, reason: str).
-      suppress=True means this CHoCH conflicts with `direction` → filter the setup.
+    Most recent CHoCH takes priority over earlier reversals (handles short-term bounces).
+    Returns (suppress: bool, reason: str, bearish_choch_level: Optional[float]).
+      suppress=True             → this CHoCH conflicts with `direction`, filter the setup.
+      bearish_choch_level       → the prior swing-low that was broken (None if no bearish CHoCH).
     """
     highs = [s for s in swings if s["type"] == "high"]
     lows  = [s for s in swings if s["type"] == "low"]
 
-    last_bearish_idx = -1
-    last_bullish_idx = -1
-    bearish_reason   = ""
-    bullish_reason   = ""
+    last_bearish_idx   = -1
+    last_bullish_idx   = -1
+    bearish_reason     = ""
+    bullish_reason     = ""
+    bearish_choch_lvl  = None   # prior swing low that was broken = CHoCH level
 
     # Bearish CHoCH: LL confirmed after a LH between the two lows
     for i in range(1, len(lows)):
@@ -245,10 +297,12 @@ def _detect_choch(swings: list, direction: str) -> tuple:
             if (between_highs and prior_highs
                     and between_highs[-1]["price"] < prior_highs[-1]["price"]):
                 if lows[i]["index"] > last_bearish_idx:
-                    last_bearish_idx = lows[i]["index"]
+                    last_bearish_idx  = lows[i]["index"]
+                    bearish_choch_lvl = lows[i - 1]["price"]   # the level that was broken
                     bearish_reason = (
                         f"bearish CHoCH at swing-low {lows[i]['price']:.2f} "
-                        f"(LH {between_highs[-1]['price']:.2f} < prior {prior_highs[-1]['price']:.2f})"
+                        f"(broke prior low {lows[i-1]['price']:.2f} after LH "
+                        f"{between_highs[-1]['price']:.2f} < {prior_highs[-1]['price']:.2f})"
                     )
 
     # Bullish CHoCH: HH confirmed after a HL between the two highs
@@ -263,24 +317,23 @@ def _detect_choch(swings: list, direction: str) -> tuple:
                     last_bullish_idx = highs[i]["index"]
                     bullish_reason = (
                         f"bullish CHoCH at swing-high {highs[i]['price']:.2f} "
-                        f"(HL {between_lows[-1]['price']:.2f} > prior {prior_lows[-1]['price']:.2f})"
+                        f"(broke prior high {highs[i-1]['price']:.2f} after HL "
+                        f"{between_lows[-1]['price']:.2f} > {prior_lows[-1]['price']:.2f})"
                     )
 
     # No CHoCH found at all
     if last_bearish_idx == -1 and last_bullish_idx == -1:
-        return False, "no CHoCH detected"
+        return False, "no CHoCH detected", None
 
     # Most recent CHoCH wins regardless of short-term counter-moves
     if last_bearish_idx >= last_bullish_idx:
-        # Most recent CHoCH is bearish — suppress LONG setups
         if direction == "LONG":
-            return True, f"[SUPPRESS] most recent CHoCH is bearish → {bearish_reason}"
-        return False, f"bearish CHoCH present but not suppressing {direction} → {bearish_reason}"
+            return True, f"[SUPPRESS] most recent CHoCH is bearish → {bearish_reason}", bearish_choch_lvl
+        return False, f"bearish CHoCH present but not suppressing {direction} → {bearish_reason}", bearish_choch_lvl
     else:
-        # Most recent CHoCH is bullish — suppress SHORT setups
         if direction == "SHORT":
-            return True, f"[SUPPRESS] most recent CHoCH is bullish → {bullish_reason}"
-        return False, f"bullish CHoCH present but not suppressing {direction} → {bullish_reason}"
+            return True, f"[SUPPRESS] most recent CHoCH is bullish → {bullish_reason}", None
+        return False, f"bullish CHoCH present but not suppressing {direction} → {bullish_reason}", None
 
 
 def _safe_ratio(numerator: float, denominator: float, fallback: float = 0.0) -> float:
@@ -608,6 +661,17 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                         (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + atr)
                     )
 
+        # ── Macro bias (52-week high context) ────────────────────────────────────
+        macro_bias, pct_from_52w, wk52_high, window_high = _macro_bias(price, df)
+        macro_label = (
+            f"📉 {macro_bias} ({pct_from_52w:.0%} below 52w high ${wk52_high:.2f})"
+            if macro_bias == "Macro Bearish"
+            else f"📈 {macro_bias} (within {pct_from_52w:.0%} of 52w high ${wk52_high:.2f})"
+            if macro_bias == "Macro Bullish"
+            else f"〰️ {macro_bias} ({pct_from_52w:.0%} below 52w high ${wk52_high:.2f})"
+        )
+        print(f"[{ticker}] {macro_label}")
+
         # Market structure defaults
         structure = "ranging"
         choch = False
@@ -630,14 +694,22 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                     print(f"[{ticker}] FILTERED: weekly EMA20 {w_e20:.2f} > EMA50 {w_e50:.2f} → no SHORT")
                     return None
 
-            # Structure filter — 120-candle lookback, margin=5 for confirmed swings
-            htf_df     = df.tail(120).reset_index(drop=True)
+            # Structure filter — 200-candle lookback, margin=5 for confirmed swings
+            htf_df     = df.tail(200).reset_index(drop=True)
             htf_swings = _find_swings(htf_df, margin=5)
-            structure, struct_reasons = _market_structure(htf_swings, price, df)
-            choch, choch_reason       = _detect_choch(htf_swings, trend)
+            structure, struct_reasons = _market_structure(
+                htf_swings, price, df, macro_bias=macro_bias, window_high=window_high
+            )
+            choch, choch_reason, bearish_choch_lvl = _detect_choch(htf_swings, trend)
 
-            # Most recent CHoCH overrides structure regardless of short-term bounces
-            if "bearish CHoCH" in choch_reason:
+            # Hard override: any bearish CHoCH in the window + price still below that level
+            if bearish_choch_lvl is not None and price < bearish_choch_lvl:
+                structure = "bearish"
+                print(
+                    f"[{ticker}] OVERRIDE: price {price:.2f} below bearish CHoCH level "
+                    f"{bearish_choch_lvl:.2f} → forced bearish"
+                )
+            elif "bearish CHoCH" in choch_reason:
                 structure = "bearish"
             elif "bullish CHoCH" in choch_reason:
                 structure = "bullish"
@@ -701,6 +773,10 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 "structure":      structure,
                 "structureLabel": struct_label,
                 "structureNote":  struct_note,
+                "macroBias":      macro_bias,
+                "macroLabel":     macro_label,
+                "wk52High":       wk52_high,
+                "pctFromHigh":    pct_from_52w,
                 "setup_status":   "DEVELOPING" if trend != "NEUTRAL" else "SKIPPED",
                 "scannedAt":      datetime.utcnow().isoformat() + "Z",
             }
@@ -765,6 +841,10 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             "structure":      structure,
             "structureLabel": struct_label,
             "structureNote":  struct_note,
+            "macroBias":      macro_bias,
+            "macroLabel":     macro_label,
+            "wk52High":       wk52_high,
+            "pctFromHigh":    pct_from_52w,
             "setup_status":   "QUALIFIED",
             "scannedAt":      datetime.utcnow().isoformat() + "Z",
         }
