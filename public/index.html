@@ -870,6 +870,7 @@ function renderCard(s) {
       <span class="ticker">${s.ticker}</span>
       <div class="card-header-right">
         <span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>
+        ${s.structureLabel ? `<span style="font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(99,102,241,0.13);border:1px solid rgba(99,102,241,0.28);color:#c7d2fe;">${s.structureLabel}</span>` : ''}
         <span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${s.direction}</span>
       </div>
     </div>
@@ -899,11 +900,18 @@ function renderCard(s) {
         <div class="option-meta">Strike $${s.option.strike} · Expiry ${s.option.expiry}</div>
       </div>
       ${coachBox}
+      ${s.structureNote ? `<div style="font-size:11px;padding:6px 10px;border-radius:5px;margin-bottom:10px;${
+        s.structureNote.startsWith('✅') ? 'background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.22);color:#86efac;' :
+        s.structureNote.startsWith('⚠️') ? 'background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);color:#fcd34d;' :
+        'background:rgba(99,102,241,0.07);border:1px solid rgba(99,102,241,0.2);color:#c7d2fe;'
+      }">${s.structureNote}</div>` : ''}
       <div class="checklist">
-        ${ci(c.trendConfirmed, 'Trend confirmed')}
-        ${ci(c.bosConfirmed,   'BOS confirmed')}
-        ${ci(c.obFound,        'OB identified')}
-        ${ci(c.priceAtOb,      'Price at OB zone')}
+        ${ci(c.trendConfirmed,  'Trend confirmed')}
+        ${ci(c.bosConfirmed,    'BOS confirmed')}
+        ${ci(c.obFound,         'OB identified')}
+        ${ci(c.priceAtOb,       'Price at OB zone')}
+        ${ci(c.structureAligned,'Structure aligned')}
+        ${ci(c.chochClear,      'No counter CHoCH')}
       </div>
     </div>
     <div class="card-footer">
@@ -959,6 +967,7 @@ function renderNearMissCard(s) {
       <span class="ticker">${s.ticker}</span>
       <div class="card-header-right">
         ${q.grade ? `<span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>` : ''}
+        ${s.structureLabel ? `<span style="font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(99,102,241,0.13);border:1px solid rgba(99,102,241,0.28);color:#c7d2fe;">${s.structureLabel}</span>` : ''}
         ${hasTrend ? `<span class="badge" style="background:${dirBg}; color:${dirColor};">${s.direction}</span>` : ''}
         <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">DEVELOPING</span>
       </div>

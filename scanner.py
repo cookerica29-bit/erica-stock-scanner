@@ -155,6 +155,44 @@ def _find_order_block(df: pd.DataFrame, direction: str, swings: list) -> Optiona
     return None
 
 
+def _market_structure(swings: list) -> str:
+    """Classify last 60-candle structure: 'bullish', 'bearish', or 'ranging'."""
+    highs = [s["price"] for s in swings if s["type"] == "high"]
+    lows  = [s["price"] for s in swings if s["type"] == "low"]
+    bearish = (len(highs) >= 3 and highs[-3] > highs[-2] > highs[-1]
+               and len(lows) >= 2 and lows[-2] > lows[-1])
+    bullish = (len(lows) >= 3 and lows[-3] < lows[-2] < lows[-1]
+               and len(highs) >= 2 and highs[-2] < highs[-1])
+    if bearish:
+        return "bearish"
+    if bullish:
+        return "bullish"
+    return "ranging"
+
+
+def _detect_choch(swings: list, direction: str) -> bool:
+    """
+    Bearish CHoCH (suppress LONG): broke a prior swing low after a lower high.
+    Bullish CHoCH (suppress SHORT): broke a prior swing high after a higher low.
+    """
+    highs = [s for s in swings if s["type"] == "high"]
+    lows  = [s for s in swings if s["type"] == "low"]
+    if direction == "LONG":
+        if len(lows) < 2 or lows[-1]["price"] >= lows[-2]["price"]:
+            return False
+        between_highs = [h for h in highs if lows[-2]["index"] < h["index"] < lows[-1]["index"]]
+        prior_highs   = [h for h in highs if h["index"] < lows[-2]["index"]]
+        return bool(between_highs and prior_highs
+                    and between_highs[-1]["price"] < prior_highs[-1]["price"])
+    else:
+        if len(highs) < 2 or highs[-1]["price"] <= highs[-2]["price"]:
+            return False
+        between_lows = [l for l in lows if highs[-2]["index"] < l["index"] < highs[-1]["index"]]
+        prior_lows   = [l for l in lows if l["index"] < highs[-2]["index"]]
+        return bool(between_lows and prior_lows
+                    and between_lows[-1]["price"] > prior_lows[-1]["price"])
+
+
 def _safe_ratio(numerator: float, denominator: float, fallback: float = 0.0) -> float:
     return numerator / denominator if denominator else fallback
 
@@ -480,6 +518,51 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                         (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + atr)
                     )
 
+        # Market structure defaults
+        structure = "ranging"
+        choch = False
+        struct_label = "🟡 Ranging"
+        struct_aligned = False
+        struct_note = "🟡 Ranging market — proceed with extra confirmation"
+
+        if trend in ("LONG", "SHORT"):
+            # Weekly EMA filter
+            w_raw = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
+            weekly = _flatten_columns(w_raw).astype(float)
+            if len(weekly) >= 50:
+                w_close = weekly["Close"]
+                w_e20 = float(w_close.ewm(span=20, adjust=False).mean().iloc[-1])
+                w_e50 = float(w_close.ewm(span=50, adjust=False).mean().iloc[-1])
+                if trend == "LONG" and w_e20 < w_e50:
+                    return None
+                if trend == "SHORT" and w_e20 > w_e50:
+                    return None
+
+            # Structure filter (60-candle lookback)
+            htf_df = df.tail(60).reset_index(drop=True)
+            htf_swings = _find_swings(htf_df, margin=3)
+            structure = _market_structure(htf_swings)
+            choch = _detect_choch(htf_swings, trend)
+            if trend == "LONG" and (choch or structure == "bearish"):
+                return None
+            if trend == "SHORT" and (choch or structure == "bullish"):
+                return None
+
+            struct_label = (
+                ("🔴 Bearish ChoCH" if trend == "LONG" else "🟢 Bullish ChoCH") if choch
+                else ("🔴 Bearish Structure" if structure == "bearish"
+                      else ("🟢 Bullish Structure" if structure == "bullish" else "🟡 Ranging"))
+            )
+            struct_aligned = (
+                (trend == "LONG" and structure == "bullish")
+                or (trend == "SHORT" and structure == "bearish")
+            )
+            struct_note = (
+                "✅ Structure aligned with " + trend + " setup" if struct_aligned
+                else "🟡 Ranging market — proceed with extra confirmation" if structure == "ranging"
+                else "⚠️ Counter-trend setup — structure is " + structure + ", proceed with caution"
+            )
+
         quality = _build_chart_coach(
             df=df,
             swings=swings,
@@ -508,9 +591,12 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 "ob_low":        round(ob["low"],  2) if ob else None,
                 "in_ob":         in_ob,
                 "near_ob":       near_ob,
-                "quality":       quality,
-                "setup_status":  "DEVELOPING" if trend != "NEUTRAL" else "SKIPPED",
-                "scannedAt":     datetime.utcnow().isoformat() + "Z",
+                "quality":        quality,
+                "structure":      structure,
+                "structureLabel": struct_label,
+                "structureNote":  struct_note,
+                "setup_status":   "DEVELOPING" if trend != "NEUTRAL" else "SKIPPED",
+                "scannedAt":      datetime.utcnow().isoformat() + "Z",
             }
 
         # ── Qualified setup: BOS confirmed + price at/near OB ────────────────
@@ -525,10 +611,12 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         option = _suggest_option(ticker, trend, entry)
 
         checklist = {
-            "trendConfirmed": True,
-            "bosConfirmed":   bos_confirmed,
-            "obFound":        ob is not None,
-            "priceAtOb":      in_ob or near_ob,
+            "trendConfirmed":  True,
+            "bosConfirmed":    bos_confirmed,
+            "obFound":         ob is not None,
+            "priceAtOb":       in_ob or near_ob,
+            "structureAligned": struct_aligned,
+            "chochClear":      not choch,
         }
 
         quality = _build_chart_coach(
@@ -566,10 +654,13 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             "tp3":           tp3,
             "risk":          risk,
             "option":        option,
-            "checklist":     checklist,
-            "quality":       quality,
-            "setup_status":  "QUALIFIED",
-            "scannedAt":     datetime.utcnow().isoformat() + "Z",
+            "checklist":      checklist,
+            "quality":        quality,
+            "structure":      structure,
+            "structureLabel": struct_label,
+            "structureNote":  struct_note,
+            "setup_status":   "QUALIFIED",
+            "scannedAt":      datetime.utcnow().isoformat() + "Z",
         }
 
     except Exception as e:
