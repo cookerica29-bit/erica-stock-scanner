@@ -726,6 +726,14 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 print(f"  {r}")
             print(f"  choch: {choch_reason}")
 
+            # Hard block: CHoCH direction conflicts with signal
+            if choch and trend == "LONG":
+                print(f"[{ticker}] bearish CHoCH hard block — LONG signal suppressed")
+                return None
+            if choch and trend == "SHORT":
+                print(f"[{ticker}] bullish CHoCH hard block — SHORT signal suppressed")
+                return None
+
             struct_label = (
                 ("🔴 Bearish ChoCH" if trend == "LONG" else "🟢 Bullish ChoCH") if choch
                 else ("🔴 Bearish Structure" if structure == "bearish"
