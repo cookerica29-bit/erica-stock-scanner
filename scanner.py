@@ -597,6 +597,8 @@ def _build_trade_stage_eval(
     entry: Optional[float] = None,
     stop: Optional[float] = None,
     fallback_target: float = 0.0,
+    macro_conflict: bool = False,
+    context_conflict: bool = False,
 ) -> dict:
     location, location_pct = _strict_location(price, swings)
     structure_quality = _structure_quality(trend, bos_confirmed, cleanliness)
@@ -610,12 +612,34 @@ def _build_trade_stage_eval(
         or (trend == "SHORT" and location == "NEAR PREMIUM")
     )
 
+    htf_bias_clear = trend in ("LONG", "SHORT")
+    htf_aligned = htf_bias_clear and not macro_conflict and not context_conflict
+    structure_event_forming = bool(bos_confirmed or sweep_taken or ob or near_ob or in_ob)
+
     if bos_confirmed and ob and (in_ob or near_ob):
         setup_type = "CONTINUATION: BOS + retest"
     elif sweep_taken and displacement in ("WEAK", "STRONG"):
         setup_type = "REVERSAL: sweep + displacement"
     else:
         setup_type = "NONE"
+
+    missing_for_a_plus = []
+    if not sweep_taken and setup_type != "CONTINUATION: BOS + retest":
+        missing_for_a_plus.append("Needs liquidity sweep")
+    if displacement != "STRONG":
+        missing_for_a_plus.append("Needs strong displacement")
+    if not bos_confirmed:
+        missing_for_a_plus.append("Needs real BOS")
+    if setup_type != "CONTINUATION: BOS + retest" and bos_confirmed:
+        missing_for_a_plus.append("Needs retest")
+    if not valid_zone:
+        missing_for_a_plus.append("Needs cleaner location")
+    if room.get("blocked") or (room.get("estimated_rr") is not None and room.get("estimated_rr") < 2.0):
+        missing_for_a_plus.append("Needs 1:2 RR")
+    if not room.get("clear"):
+        missing_for_a_plus.append("Needs clean path to target")
+    if not htf_aligned:
+        missing_for_a_plus.append("Needs macro/context alignment")
 
     coaching = []
     if location == "MIDRANGE":
@@ -630,37 +654,60 @@ def _build_trade_stage_eval(
         coaching.append("Wait for all A+ conditions to remain true through the trigger candle.")
 
     no_trade_reasons = []
+    if not htf_bias_clear:
+        no_trade_reasons.append("No clear HTF bias")
     if location == "MIDRANGE":
         no_trade_reasons.append("MIDRANGE location")
-    if not bos_confirmed:
-        no_trade_reasons.append("No confirmed BOS")
     if structure_quality == "CHOPPY / INTERNAL ONLY":
         no_trade_reasons.append("Choppy/internal structure")
-    if displacement == "NONE":
-        no_trade_reasons.append("No displacement")
     if room.get("blocked"):
         no_trade_reasons.append("RR < 1:2")
+    if macro_conflict or context_conflict:
+        no_trade_reasons.append("Macro/context conflict")
+    if setup_type == "NONE" and not structure_event_forming:
+        no_trade_reasons.append("No setup type or forming structure event")
+
+    trigger_confirmed = (
+        (setup_type == "CONTINUATION: BOS + retest" and bos_confirmed and ob and (in_ob or near_ob))
+        or (setup_type == "REVERSAL: sweep + displacement" and sweep_taken and displacement == "STRONG")
+    )
 
     a_plus_ready = (
-        valid_zone
+        htf_aligned
+        and valid_zone
         and structure_quality == "CLEAN BOS"
         and displacement == "STRONG"
         and setup_type in ("CONTINUATION: BOS + retest", "REVERSAL: sweep + displacement")
         and room.get("clear") is True
         and (room.get("estimated_rr") is None or room.get("estimated_rr") >= 2.0)
+        and trigger_confirmed
+    )
+
+    worth_watching = (
+        htf_bias_clear
+        and valid_zone
+        and structure_event_forming
+        and not room.get("blocked")
+        and (room.get("clear") or room.get("target") is not None or room.get("estimated_rr") is None)
+        and 1 <= len(missing_for_a_plus) <= 3
     )
 
     if no_trade_reasons:
         trade_stage = "RANGE / NO TRADE"
     elif a_plus_ready:
         trade_stage = "A+ READY"
-    elif bos_confirmed and displacement in ("WEAK", "STRONG") and setup_type != "NONE":
-        trade_stage = "CONFIRMATION NEEDED"
+    elif worth_watching:
+        trade_stage = "BUILDING / WATCHLIST"
     else:
-        trade_stage = "SETUP FORMING"
+        trade_stage = "RANGE / NO TRADE"
 
     return {
         "trade_stage": trade_stage,
+        "stage_badge": (
+            "🟢 A+ READY" if trade_stage == "A+ READY"
+            else "🟡 BUILDING / WATCHLIST" if trade_stage == "BUILDING / WATCHLIST"
+            else "🔴 RANGE / NO TRADE"
+        ),
         "location": location,
         "location_percentile": location_pct,
         "structure_quality": structure_quality,
@@ -670,6 +717,11 @@ def _build_trade_stage_eval(
         "room_to_target": room,
         "valid_zone": valid_zone,
         "sweep_taken": sweep_taken,
+        "htf_bias_clear": htf_bias_clear,
+        "htf_aligned": htf_aligned,
+        "structure_event_forming": structure_event_forming,
+        "trigger_confirmed": trigger_confirmed,
+        "missing_for_a_plus": missing_for_a_plus,
         "no_trade_reasons": no_trade_reasons,
         "a_plus_ready": a_plus_ready,
         "coaching": coaching,
@@ -995,6 +1047,8 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             near_ob=near_ob,
             cleanliness=quality.get("cleanliness", "Unclear"),
             fallback_target=window_high,
+            macro_conflict=macro_block,
+            context_conflict=choch_block,
         )
         if trade_eval["no_trade_reasons"]:
             quality = _cap_quality_to_c(quality, "Strict scout rules cap this at C.")
@@ -1086,6 +1140,8 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             entry=entry,
             stop=sl,
             fallback_target=window_high,
+            macro_conflict=macro_block,
+            context_conflict=choch_block,
         )
         if trade_eval["no_trade_reasons"]:
             quality = _cap_quality_to_c(quality, "Strict scout rules cap this at C.")

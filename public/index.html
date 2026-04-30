@@ -220,6 +220,9 @@
   .stage-value.blocked { color:#fca5a5; }
   .coaching-box { background:rgba(245,158,11,0.07); border:1px solid rgba(245,158,11,0.22); border-radius:5px; padding:7px 9px; color:#fcd34d; font-size:11px; line-height:1.45; }
   .coaching-box div + div { margin-top:4px; }
+  .missing-box { background:rgba(99,102,241,0.06); border:1px solid rgba(99,102,241,0.2); border-radius:5px; padding:7px 9px; color:#c7d2fe; font-size:11px; line-height:1.45; margin-bottom:8px; }
+  .missing-box-title { color:var(--text); font-weight:800; letter-spacing:0.06em; text-transform:uppercase; font-size:10px; margin-bottom:5px; }
+  .missing-box div + div { margin-top:3px; }
 
   .checklist { border-top: 1px solid var(--border); padding-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
   .check-item { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 3px 0; }
@@ -949,18 +952,23 @@ function renderTradeStageBox(ev) {
   const stageCls =
     stage === 'A+ READY' ? 'ready' :
     stage === 'RANGE / NO TRADE' ? 'no-trade' :
-    stage === 'CONFIRMATION NEEDED' ? 'confirm' : 'forming';
+    stage === 'BUILDING / WATCHLIST' ? 'forming' : 'confirm';
   const target = room.target != null ? `$${Number(room.target).toFixed(2)}` : '—';
   const pct = room.percent_to_target != null ? `${room.percent_to_target}%` : '—';
   const rr = room.estimated_rr != null ? `${Number(room.estimated_rr).toFixed(2)}R` : '—';
   const roomText = `${pct} to ${target} · RR ${rr}`;
   const coaching = (ev.coaching || []).map(x => `<div>${x}</div>`).join('');
+  const missing = (ev.missing_for_a_plus || []).map(x => `<div>${x}</div>`).join('');
+  const stageNote =
+    stage === 'A+ READY' ? 'Manual review for execution. No auto-buy.' :
+    stage === 'BUILDING / WATCHLIST' ? 'Not tradeable yet. Watch closely.' :
+    'Discipline filter: no trade.';
 
   return `
     <div class="stage-box">
       <div class="stage-head">
         <div class="stage-title">Trade-Stage Scout</div>
-        <div class="stage-pill ${stageCls}">${stage}</div>
+        <div class="stage-pill ${stageCls}">${ev.stage_badge || stage}</div>
       </div>
       <div class="stage-grid">
         <div class="stage-metric"><div class="stage-label">Location</div><div class="stage-value">${ev.location || 'MIDRANGE'}${ev.location_percentile != null ? ` · ${ev.location_percentile}%` : ''}</div></div>
@@ -969,6 +977,8 @@ function renderTradeStageBox(ev) {
         <div class="stage-metric"><div class="stage-label">Setup Type</div><div class="stage-value">${ev.setup_type || 'NONE'}</div></div>
         <div class="stage-metric" style="grid-column:1 / -1;"><div class="stage-label">Room to Target</div><div class="stage-value ${room.blocked ? 'blocked' : ''}">${roomText}${room.blocked ? ' · BLOCKED' : room.clear ? ' · CLEAR' : ''}</div></div>
       </div>
+      <div style="color:var(--muted);font-size:10px;margin:-2px 0 8px;">${stageNote}</div>
+      ${missing ? `<div class="missing-box"><div class="missing-box-title">Missing for A+</div>${missing}</div>` : ''}
       <div class="coaching-box">
         <strong>What would make this tradeable?</strong>
         ${coaching || '<div>Wait for a clean premium/discount location, confirmed BOS, displacement, and clear 1:2 room.</div>'}
@@ -1026,7 +1036,7 @@ function renderNearMissCard(s) {
         ${q.grade ? `<span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>` : ''}
         ${s.structureLabel ? `<span style="font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(99,102,241,0.13);border:1px solid rgba(99,102,241,0.28);color:#c7d2fe;">${s.structureLabel}</span>` : ''}
         ${hasTrend ? `<span class="badge" style="background:${dirBg}; color:${dirColor};">${s.direction}</span>` : ''}
-        <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">${s.trade_eval?.trade_stage || 'DEVELOPING'}</span>
+        <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">${s.trade_eval?.stage_badge || s.trade_eval?.trade_stage || 'DEVELOPING'}</span>
       </div>
     </div>
     <div class="card-body">
