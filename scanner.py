@@ -482,36 +482,100 @@ def _structure_quality(trend: str, bos_confirmed: bool, cleanliness: str) -> str
     return "DEVELOPING"
 
 
-def _displacement_read(df: pd.DataFrame, atr: float, bos_confirmed: bool) -> tuple:
-    if not bos_confirmed or len(df) < 3 or atr <= 0:
+def _directional_candles(df: pd.DataFrame, direction: str, lookback: int = 3) -> pd.DataFrame:
+    recent = df.tail(lookback)
+    if direction == "LONG":
+        return recent[recent["Close"] > recent["Open"]]
+    if direction == "SHORT":
+        return recent[recent["Close"] < recent["Open"]]
+    return recent.iloc[0:0]
+
+
+def detect_displacement(df: pd.DataFrame, atr: float, direction: str, bos_confirmed: bool) -> tuple:
+    if not bos_confirmed or direction not in ("LONG", "SHORT") or len(df) < 3 or atr <= 0:
         return "NONE", 0.0
 
     recent = df.tail(3)
-    bodies = (recent["Close"] - recent["Open"]).abs()
-    avg_body_atr = float(bodies.mean() / atr)
-    last_range_atr = float((recent["High"].iloc[-1] - recent["Low"].iloc[-1]) / atr)
+    directional = _directional_candles(df, direction, lookback=3)
+    if directional.empty:
+        return "NONE", 0.0
 
-    if avg_body_atr >= 0.7 or last_range_atr >= 1.2:
+    bodies = (directional["Close"] - directional["Open"]).abs()
+    avg_body_atr = float(bodies.mean() / atr)
+    last = recent.iloc[-1]
+    last_is_directional = (
+        (direction == "LONG" and float(last["Close"]) > float(last["Open"]))
+        or (direction == "SHORT" and float(last["Close"]) < float(last["Open"]))
+    )
+    last_range_atr = float((last["High"] - last["Low"]) / atr) if last_is_directional else 0.0
+    directional_majority = len(directional) >= 2
+
+    if directional_majority and (avg_body_atr >= 0.7 or last_range_atr >= 1.2):
         return "STRONG", round(max(avg_body_atr, last_range_atr), 2)
     if avg_body_atr >= 0.35 or last_range_atr >= 0.75:
         return "WEAK", round(max(avg_body_atr, last_range_atr), 2)
     return "NONE", round(max(avg_body_atr, last_range_atr), 2)
 
 
-def _detect_liquidity_sweep(df: pd.DataFrame, swings: list, direction: str, lookback: int = 12) -> bool:
+def _displacement_read(df: pd.DataFrame, atr: float, bos_confirmed: bool, direction: str = "NEUTRAL") -> tuple:
+    return detect_displacement(df, atr, direction, bos_confirmed)
+
+
+def detect_liquidity_sweep(df: pd.DataFrame, swings: list, direction: str, lookback: int = 12) -> tuple:
     if direction not in ("LONG", "SHORT") or len(df) < 3:
-        return False
+        return False, None
     recent = df.tail(lookback)
     highs = [s for s in swings if s["type"] == "high"]
     lows = [s for s in swings if s["type"] == "low"]
 
     if direction == "LONG" and lows:
         level = lows[-1]["price"]
-        return bool((recent["Low"] < level).any() and float(df["Close"].iloc[-1]) > level)
+        swept = bool((recent["Low"] < level).any())
+        return bool(swept), float(level)
     if direction == "SHORT" and highs:
         level = highs[-1]["price"]
-        return bool((recent["High"] > level).any() and float(df["Close"].iloc[-1]) < level)
+        swept = bool((recent["High"] > level).any())
+        return bool(swept), float(level)
+    return False, None
+
+
+def _detect_liquidity_sweep(df: pd.DataFrame, swings: list, direction: str, lookback: int = 12) -> bool:
+    swept, _ = detect_liquidity_sweep(df, swings, direction, lookback=lookback)
+    return swept
+
+
+def detect_rejection(df: pd.DataFrame, direction: str, sweep_level: Optional[float], lookback: int = 5) -> bool:
+    if direction not in ("LONG", "SHORT") or sweep_level is None or len(df) < 2:
+        return False
+
+    recent = df.tail(lookback)
+    for _, candle in recent.iterrows():
+        high = float(candle["High"])
+        low = float(candle["Low"])
+        open_ = float(candle["Open"])
+        close = float(candle["Close"])
+        body = abs(close - open_)
+        candle_range = high - low
+        if candle_range <= 0:
+            continue
+
+        upper_wick = high - max(open_, close)
+        lower_wick = min(open_, close) - low
+        if direction == "LONG":
+            closed_back_above = low < sweep_level and close > sweep_level
+            lower_wick_failure = low < sweep_level and lower_wick >= max(body * 1.25, candle_range * 0.35)
+            if closed_back_above or (lower_wick_failure and close > open_):
+                return True
+        elif direction == "SHORT":
+            closed_back_below = high > sweep_level and close < sweep_level
+            upper_wick_failure = high > sweep_level and upper_wick >= max(body * 1.25, candle_range * 0.35)
+            if closed_back_below or (upper_wick_failure and close < open_):
+                return True
     return False
+
+
+def detect_structure_break(df: pd.DataFrame, swings: list, direction: str, lookback: int = 40) -> tuple:
+    return _detect_bos(df, swings, direction, lookback=lookback)
 
 
 def _nearest_target(price: float, direction: str, swings: list, fallback: float = 0.0) -> Optional[float]:
@@ -601,49 +665,64 @@ def _build_trade_stage_eval(
     context_conflict: bool = False,
 ) -> dict:
     location, location_pct = _strict_location(price, swings)
+    bos_confirmed, bos_level = detect_structure_break(df, swings, trend)
     structure_quality = _structure_quality(trend, bos_confirmed, cleanliness)
-    displacement, displacement_score = _displacement_read(df, atr, bos_confirmed)
-    sweep_taken = _detect_liquidity_sweep(df, swings, trend)
+    displacement, displacement_score = detect_displacement(df, atr, trend, bos_confirmed)
+    sweep_taken, sweep_level = detect_liquidity_sweep(df, swings, trend)
+    rejection_confirmed = detect_rejection(df, trend, sweep_level)
     room = _room_to_target(price, trend, swings, entry, stop, fallback_target)
 
-    valid_zone = (
-        location == "AT EXTREME"
-        or (trend == "LONG" and location == "NEAR DISCOUNT")
-        or (trend == "SHORT" and location == "NEAR PREMIUM")
-    )
+    if location_pct is None:
+        valid_zone = False
+        preferred_fib_zone = False
+    elif trend == "LONG":
+        valid_zone = location_pct <= 50.0
+        preferred_fib_zone = 21.0 <= location_pct <= 50.0
+    elif trend == "SHORT":
+        valid_zone = location_pct >= 50.0
+        preferred_fib_zone = 50.0 <= location_pct <= 79.0
+    else:
+        valid_zone = False
+        preferred_fib_zone = False
 
     htf_bias_clear = trend in ("LONG", "SHORT")
     htf_aligned = htf_bias_clear and not macro_conflict and not context_conflict
-    structure_event_forming = bool(bos_confirmed or sweep_taken or ob or near_ob or in_ob)
+    rr_ok = room.get("estimated_rr") is not None and room.get("estimated_rr") >= 2.0
+    room_clear = room.get("clear") is True and not room.get("blocked")
+    structure_event_forming = bool(bos_confirmed or sweep_taken or rejection_confirmed or ob or near_ob or in_ob)
 
     if bos_confirmed and ob and (in_ob or near_ob):
         setup_type = "CONTINUATION: BOS + retest"
-    elif sweep_taken and displacement in ("WEAK", "STRONG"):
-        setup_type = "REVERSAL: sweep + displacement"
+    elif sweep_taken and rejection_confirmed and displacement in ("WEAK", "STRONG"):
+        setup_type = "REVERSAL: sweep + rejection + displacement"
     else:
         setup_type = "NONE"
 
     missing_for_a_plus = []
-    if not sweep_taken and setup_type != "CONTINUATION: BOS + retest":
+    if not sweep_taken:
         missing_for_a_plus.append("Needs liquidity sweep")
+    if not rejection_confirmed:
+        missing_for_a_plus.append("Needs rejection")
     if displacement != "STRONG":
         missing_for_a_plus.append("Needs strong displacement")
     if not bos_confirmed:
         missing_for_a_plus.append("Needs real BOS")
-    if setup_type != "CONTINUATION: BOS + retest" and bos_confirmed:
-        missing_for_a_plus.append("Needs retest")
     if not valid_zone:
-        missing_for_a_plus.append("Needs cleaner location")
-    if room.get("blocked") or (room.get("estimated_rr") is not None and room.get("estimated_rr") < 2.0):
+        missing_for_a_plus.append("Needs valid premium/discount location")
+    if not rr_ok or room.get("blocked"):
         missing_for_a_plus.append("Needs 1:2 RR")
-    if not room.get("clear"):
-        missing_for_a_plus.append("Needs clean path to target")
     if not htf_aligned:
-        missing_for_a_plus.append("Needs macro/context alignment")
+        missing_for_a_plus.append("Needs HTF alignment")
 
     coaching = []
-    if location == "MIDRANGE":
-        coaching.append("Wait for price to reach premium/discount extreme.")
+    if not valid_zone:
+        coaching.append("Wait for valid premium/discount location.")
+    elif not preferred_fib_zone and location_pct is not None:
+        coaching.append("Best A+ location is usually the 50-79 fib retracement zone.")
+    if not sweep_taken:
+        coaching.append("Wait for a liquidity sweep before calling this A+.")
+    if not rejection_confirmed:
+        coaching.append("Wait for rejection back through the swept level.")
     if not bos_confirmed:
         coaching.append("Wait for strong candle close beyond structure.")
     if displacement == "NONE":
@@ -656,8 +735,8 @@ def _build_trade_stage_eval(
     no_trade_reasons = []
     if not htf_bias_clear:
         no_trade_reasons.append("No clear HTF bias")
-    if location == "MIDRANGE":
-        no_trade_reasons.append("MIDRANGE location")
+    if not valid_zone:
+        no_trade_reasons.append("Poor premium/discount location")
     if structure_quality == "CHOPPY / INTERNAL ONLY":
         no_trade_reasons.append("Choppy/internal structure")
     if room.get("blocked"):
@@ -667,19 +746,23 @@ def _build_trade_stage_eval(
     if setup_type == "NONE" and not structure_event_forming:
         no_trade_reasons.append("No setup type or forming structure event")
 
-    trigger_confirmed = (
-        (setup_type == "CONTINUATION: BOS + retest" and bos_confirmed and ob and (in_ob or near_ob))
-        or (setup_type == "REVERSAL: sweep + displacement" and sweep_taken and displacement == "STRONG")
+    trigger_confirmed = bool(
+        sweep_taken
+        and rejection_confirmed
+        and displacement == "STRONG"
+        and bos_confirmed
     )
 
     a_plus_ready = (
         htf_aligned
         and valid_zone
         and structure_quality == "CLEAN BOS"
+        and sweep_taken
+        and rejection_confirmed
         and displacement == "STRONG"
-        and setup_type in ("CONTINUATION: BOS + retest", "REVERSAL: sweep + displacement")
-        and room.get("clear") is True
-        and (room.get("estimated_rr") is None or room.get("estimated_rr") >= 2.0)
+        and setup_type in ("CONTINUATION: BOS + retest", "REVERSAL: sweep + rejection + displacement")
+        and room_clear
+        and rr_ok
         and trigger_confirmed
     )
 
@@ -688,7 +771,7 @@ def _build_trade_stage_eval(
         and valid_zone
         and structure_event_forming
         and not room.get("blocked")
-        and (room.get("clear") or room.get("target") is not None or room.get("estimated_rr") is None)
+        and (room_clear or room.get("target") is not None or room.get("estimated_rr") is None)
         and 1 <= len(missing_for_a_plus) <= 3
     )
 
@@ -716,7 +799,10 @@ def _build_trade_stage_eval(
         "setup_type": setup_type,
         "room_to_target": room,
         "valid_zone": valid_zone,
+        "preferred_fib_zone": preferred_fib_zone,
         "sweep_taken": sweep_taken,
+        "sweep_level": round(sweep_level, 2) if sweep_level is not None else None,
+        "rejection_confirmed": rejection_confirmed,
         "htf_bias_clear": htf_bias_clear,
         "htf_aligned": htf_aligned,
         "structure_event_forming": structure_event_forming,
