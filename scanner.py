@@ -454,6 +454,228 @@ def _location_read(price: float, direction: str, swings: list) -> tuple:
     return read, round(percentile * 100, 1)
 
 
+def _strict_location(price: float, swings: list) -> tuple:
+    swing_range = _latest_swing_range(swings)
+    if not swing_range:
+        return "MIDRANGE", None
+
+    low = swing_range["low"]
+    high = swing_range["high"]
+    percentile = max(0.0, min(1.0, _safe_ratio(price - low, high - low)))
+
+    if percentile <= 0.18 or percentile >= 0.82:
+        location = "AT EXTREME"
+    elif percentile <= 0.35:
+        location = "NEAR DISCOUNT"
+    elif percentile >= 0.65:
+        location = "NEAR PREMIUM"
+    else:
+        location = "MIDRANGE"
+    return location, round(percentile * 100, 1)
+
+
+def _structure_quality(trend: str, bos_confirmed: bool, cleanliness: str) -> str:
+    if cleanliness == "Choppy / overlapping" or trend == "NEUTRAL":
+        return "CHOPPY / INTERNAL ONLY"
+    if bos_confirmed:
+        return "CLEAN BOS"
+    return "DEVELOPING"
+
+
+def _displacement_read(df: pd.DataFrame, atr: float, bos_confirmed: bool) -> tuple:
+    if not bos_confirmed or len(df) < 3 or atr <= 0:
+        return "NONE", 0.0
+
+    recent = df.tail(3)
+    bodies = (recent["Close"] - recent["Open"]).abs()
+    avg_body_atr = float(bodies.mean() / atr)
+    last_range_atr = float((recent["High"].iloc[-1] - recent["Low"].iloc[-1]) / atr)
+
+    if avg_body_atr >= 0.7 or last_range_atr >= 1.2:
+        return "STRONG", round(max(avg_body_atr, last_range_atr), 2)
+    if avg_body_atr >= 0.35 or last_range_atr >= 0.75:
+        return "WEAK", round(max(avg_body_atr, last_range_atr), 2)
+    return "NONE", round(max(avg_body_atr, last_range_atr), 2)
+
+
+def _detect_liquidity_sweep(df: pd.DataFrame, swings: list, direction: str, lookback: int = 12) -> bool:
+    if direction not in ("LONG", "SHORT") or len(df) < 3:
+        return False
+    recent = df.tail(lookback)
+    highs = [s for s in swings if s["type"] == "high"]
+    lows = [s for s in swings if s["type"] == "low"]
+
+    if direction == "LONG" and lows:
+        level = lows[-1]["price"]
+        return bool((recent["Low"] < level).any() and float(df["Close"].iloc[-1]) > level)
+    if direction == "SHORT" and highs:
+        level = highs[-1]["price"]
+        return bool((recent["High"] > level).any() and float(df["Close"].iloc[-1]) < level)
+    return False
+
+
+def _nearest_target(price: float, direction: str, swings: list, fallback: float = 0.0) -> Optional[float]:
+    highs = sorted([s["price"] for s in swings if s["type"] == "high" and s["price"] > price])
+    lows = sorted([s["price"] for s in swings if s["type"] == "low" and s["price"] < price], reverse=True)
+    if direction == "LONG":
+        if highs:
+            return float(highs[0])
+        return float(fallback) if fallback and fallback > price else None
+    if direction == "SHORT":
+        if lows:
+            return float(lows[0])
+        return float(fallback) if fallback and fallback < price else None
+    return None
+
+
+def _room_to_target(
+    price: float,
+    direction: str,
+    swings: list,
+    entry: Optional[float] = None,
+    stop: Optional[float] = None,
+    fallback_target: float = 0.0,
+) -> dict:
+    target = _nearest_target(price, direction, swings, fallback_target)
+    if target is None or direction not in ("LONG", "SHORT"):
+        return {
+            "target": None,
+            "percent_to_target": None,
+            "estimated_rr": None,
+            "blocked": False,
+            "clear": False,
+            "label": "No clean structural target",
+        }
+
+    distance = (target - price) if direction == "LONG" else (price - target)
+    pct = _safe_ratio(distance, price) * 100
+    estimated_rr = None
+    blocked = False
+    if entry is not None and stop is not None:
+        risk = abs(entry - stop)
+        reward = (target - entry) if direction == "LONG" else (entry - target)
+        if risk > 0 and reward > 0:
+            estimated_rr = reward / risk
+            blocked = estimated_rr < 2.0
+        elif risk > 0:
+            estimated_rr = 0.0
+            blocked = True
+
+    return {
+        "target": round(target, 2),
+        "percent_to_target": round(max(0.0, pct), 1),
+        "estimated_rr": round(estimated_rr, 2) if estimated_rr is not None else None,
+        "blocked": blocked,
+        "clear": distance > 0 and not blocked,
+        "label": "Blocked: RR < 1:2" if blocked else "Clear path to target",
+    }
+
+
+def _cap_quality_to_c(quality: dict, reason: str) -> dict:
+    capped = dict(quality or {})
+    if capped.get("score", 0) > 58:
+        capped["score"] = 58
+    capped["grade"] = "C"
+    capped["grade_cap"] = min(capped.get("grade_cap", 100), 58)
+    prior = capped.get("grade_note", "")
+    capped["grade_note"] = reason if not prior or prior == "No grade cap applied." else f"{reason} {prior}"
+    return capped
+
+
+def _build_trade_stage_eval(
+    *,
+    df: pd.DataFrame,
+    swings: list,
+    trend: str,
+    price: float,
+    atr: float,
+    bos_confirmed: bool,
+    ob: Optional[dict],
+    in_ob: bool,
+    near_ob: bool,
+    cleanliness: str,
+    entry: Optional[float] = None,
+    stop: Optional[float] = None,
+    fallback_target: float = 0.0,
+) -> dict:
+    location, location_pct = _strict_location(price, swings)
+    structure_quality = _structure_quality(trend, bos_confirmed, cleanliness)
+    displacement, displacement_score = _displacement_read(df, atr, bos_confirmed)
+    sweep_taken = _detect_liquidity_sweep(df, swings, trend)
+    room = _room_to_target(price, trend, swings, entry, stop, fallback_target)
+
+    valid_zone = (
+        location == "AT EXTREME"
+        or (trend == "LONG" and location == "NEAR DISCOUNT")
+        or (trend == "SHORT" and location == "NEAR PREMIUM")
+    )
+
+    if bos_confirmed and ob and (in_ob or near_ob):
+        setup_type = "CONTINUATION: BOS + retest"
+    elif sweep_taken and displacement in ("WEAK", "STRONG"):
+        setup_type = "REVERSAL: sweep + displacement"
+    else:
+        setup_type = "NONE"
+
+    coaching = []
+    if location == "MIDRANGE":
+        coaching.append("Wait for price to reach premium/discount extreme.")
+    if not bos_confirmed:
+        coaching.append("Wait for strong candle close beyond structure.")
+    if displacement == "NONE":
+        coaching.append("Wait for impulse move showing control.")
+    if room.get("blocked"):
+        coaching.append("Wait for better entry or wider target.")
+    if not coaching:
+        coaching.append("Wait for all A+ conditions to remain true through the trigger candle.")
+
+    no_trade_reasons = []
+    if location == "MIDRANGE":
+        no_trade_reasons.append("MIDRANGE location")
+    if not bos_confirmed:
+        no_trade_reasons.append("No confirmed BOS")
+    if structure_quality == "CHOPPY / INTERNAL ONLY":
+        no_trade_reasons.append("Choppy/internal structure")
+    if displacement == "NONE":
+        no_trade_reasons.append("No displacement")
+    if room.get("blocked"):
+        no_trade_reasons.append("RR < 1:2")
+
+    a_plus_ready = (
+        valid_zone
+        and structure_quality == "CLEAN BOS"
+        and displacement == "STRONG"
+        and setup_type in ("CONTINUATION: BOS + retest", "REVERSAL: sweep + displacement")
+        and room.get("clear") is True
+        and (room.get("estimated_rr") is None or room.get("estimated_rr") >= 2.0)
+    )
+
+    if no_trade_reasons:
+        trade_stage = "RANGE / NO TRADE"
+    elif a_plus_ready:
+        trade_stage = "A+ READY"
+    elif bos_confirmed and displacement in ("WEAK", "STRONG") and setup_type != "NONE":
+        trade_stage = "CONFIRMATION NEEDED"
+    else:
+        trade_stage = "SETUP FORMING"
+
+    return {
+        "trade_stage": trade_stage,
+        "location": location,
+        "location_percentile": location_pct,
+        "structure_quality": structure_quality,
+        "displacement": displacement,
+        "displacement_score": displacement_score,
+        "setup_type": setup_type,
+        "room_to_target": room,
+        "valid_zone": valid_zone,
+        "sweep_taken": sweep_taken,
+        "no_trade_reasons": no_trade_reasons,
+        "a_plus_ready": a_plus_ready,
+        "coaching": coaching,
+    }
+
+
 def _ob_touch_count(df: pd.DataFrame, ob: Optional[dict]) -> int:
     if not ob:
         return 0
@@ -675,9 +897,9 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         # ── Macro bias hard block (LONG only) ────────────────────────────────
         # Suppress buying into macro downtrends. Never block shorts based on macro
         # bias — short signals use local structure detection only.
-        if macro_bias == "Macro Bearish" and trend == "LONG":
-            print(f"[{ticker}] Macro Bearish override — LONG signal suppressed")
-            return None
+        macro_block = macro_bias == "Macro Bearish" and trend == "LONG"
+        if macro_block:
+            print(f"[{ticker}] Macro Bearish override — LONG marked no trade")
 
         # Market structure defaults
         structure = "ranging"
@@ -686,6 +908,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         struct_aligned = False
         struct_note = "🟡 Ranging market — proceed with extra confirmation"
 
+        choch_block = False
         if trend in ("LONG", "SHORT"):
             # Weekly EMA context (informational only — not a hard block)
             w_raw = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
@@ -727,12 +950,11 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             print(f"  choch: {choch_reason}")
 
             # Hard block: CHoCH direction conflicts with signal
+            choch_block = bool(choch and trend in ("LONG", "SHORT"))
             if choch and trend == "LONG":
-                print(f"[{ticker}] bearish CHoCH hard block — LONG signal suppressed")
-                return None
+                print(f"[{ticker}] bearish CHoCH conflict — LONG marked no trade")
             if choch and trend == "SHORT":
-                print(f"[{ticker}] bullish CHoCH hard block — SHORT signal suppressed")
-                return None
+                print(f"[{ticker}] bullish CHoCH conflict — SHORT marked no trade")
 
             struct_label = (
                 ("🔴 Bearish ChoCH" if trend == "LONG" else "🟢 Bullish ChoCH") if choch
@@ -761,6 +983,32 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             in_ob=in_ob,
             near_ob=near_ob,
         )
+        trade_eval = _build_trade_stage_eval(
+            df=df,
+            swings=swings,
+            trend=trend,
+            price=price,
+            atr=atr,
+            bos_confirmed=bos_confirmed,
+            ob=ob,
+            in_ob=in_ob,
+            near_ob=near_ob,
+            cleanliness=quality.get("cleanliness", "Unclear"),
+            fallback_target=window_high,
+        )
+        if trade_eval["no_trade_reasons"]:
+            quality = _cap_quality_to_c(quality, "Strict scout rules cap this at C.")
+        if macro_block or choch_block:
+            reason = "Macro/CHoCH conflict caps this at C."
+            quality = _cap_quality_to_c(quality, reason)
+            if macro_block:
+                trade_eval["no_trade_reasons"].append("Macro bearish conflict")
+                trade_eval["coaching"].append("Wait for macro context to stop fighting the long idea.")
+            if choch_block:
+                trade_eval["no_trade_reasons"].append("Counter CHoCH conflict")
+                trade_eval["coaching"].append("Wait for structure to realign after the CHoCH.")
+            trade_eval["trade_stage"] = "RANGE / NO TRADE"
+            trade_eval["a_plus_ready"] = False
 
         # ── Near-miss: has direction but setup is incomplete ──────────────────
         if trend == "NEUTRAL" or not bos_confirmed or (not in_ob and not near_ob):
@@ -778,6 +1026,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 "in_ob":         in_ob,
                 "near_ob":       near_ob,
                 "quality":        quality,
+                "trade_eval":     trade_eval,
                 "structure":      structure,
                 "structureLabel": struct_label,
                 "structureNote":  struct_note,
@@ -823,6 +1072,63 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             risk=risk,
             entry=entry,
         )
+        trade_eval = _build_trade_stage_eval(
+            df=df,
+            swings=swings,
+            trend=trend,
+            price=price,
+            atr=atr,
+            bos_confirmed=bos_confirmed,
+            ob=ob,
+            in_ob=in_ob,
+            near_ob=near_ob,
+            cleanliness=quality.get("cleanliness", "Unclear"),
+            entry=entry,
+            stop=sl,
+            fallback_target=window_high,
+        )
+        if trade_eval["no_trade_reasons"]:
+            quality = _cap_quality_to_c(quality, "Strict scout rules cap this at C.")
+        if macro_block or choch_block:
+            reason = "Macro/CHoCH conflict caps this at C."
+            quality = _cap_quality_to_c(quality, reason)
+            if macro_block:
+                trade_eval["no_trade_reasons"].append("Macro bearish conflict")
+                trade_eval["coaching"].append("Wait for macro context to stop fighting the long idea.")
+            if choch_block:
+                trade_eval["no_trade_reasons"].append("Counter CHoCH conflict")
+                trade_eval["coaching"].append("Wait for structure to realign after the CHoCH.")
+            trade_eval["trade_stage"] = "RANGE / NO TRADE"
+            trade_eval["a_plus_ready"] = False
+
+        # Keep this scanner as a scout: do not publish generated entry/option
+        # levels unless all A+ readiness rules are satisfied.
+        if not trade_eval["a_plus_ready"]:
+            return {
+                "ticker":        ticker,
+                "direction":     trend,
+                "price":         round(price, 2),
+                "atr":           round(atr, 2),
+                "rsi":           rsi,
+                "trend":         trend,
+                "bos_confirmed": bos_confirmed,
+                "bos_level":     round(bos_level, 2),
+                "ob_high":       round(ob["high"], 2),
+                "ob_low":        round(ob["low"],  2),
+                "in_ob":         in_ob,
+                "near_ob":       near_ob,
+                "quality":        quality,
+                "trade_eval":     trade_eval,
+                "structure":      structure,
+                "structureLabel": struct_label,
+                "structureNote":  struct_note,
+                "macroBias":      macro_bias,
+                "macroLabel":     macro_label,
+                "wk52High":       wk52_high,
+                "pctFromHigh":    pct_from_52w,
+                "setup_status":   "DEVELOPING",
+                "scannedAt":      datetime.utcnow().isoformat() + "Z",
+            }
 
         return {
             "ticker":        ticker,
@@ -846,6 +1152,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             "option":        option,
             "checklist":      checklist,
             "quality":        quality,
+            "trade_eval":     trade_eval,
             "structure":      structure,
             "structureLabel": struct_label,
             "structureNote":  struct_note,
@@ -1010,7 +1317,7 @@ def scan_all(watchlist: list = WATCHLIST) -> tuple:
             continue
         if r.get("setup_status") == "QUALIFIED":
             rows.append(r)
-        elif r.get("setup_status") == "DEVELOPING":
+        else:
             near_miss.append(r)
     rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
     near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)

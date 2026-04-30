@@ -205,6 +205,21 @@
   .coach-note { color:#bfdbfe; background:rgba(37,99,235,0.08); border:1px solid rgba(37,99,235,0.18); border-radius:5px; padding:7px 9px; font-size:11px; line-height:1.45; margin-bottom:7px; }
   .coach-warning { color:#fca5a5; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); border-radius:5px; padding:7px 9px; font-size:11px; line-height:1.45; margin-bottom:7px; }
   .coach-prompt { color:#fcd34d; font-size:11px; line-height:1.45; }
+  .stage-box { background: var(--bg); border: 1px solid rgba(99,102,241,0.2); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+  .stage-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:9px; }
+  .stage-title { color: var(--text); font-size:11px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
+  .stage-pill { border-radius:99px; border:1px solid var(--border); color:var(--muted); font-size:10px; font-weight:900; padding:3px 9px; text-transform:uppercase; white-space:nowrap; }
+  .stage-pill.ready { color:var(--long); border-color:rgba(34,197,94,0.4); background:rgba(34,197,94,0.1); }
+  .stage-pill.no-trade { color:var(--short); border-color:rgba(239,68,68,0.36); background:rgba(239,68,68,0.08); }
+  .stage-pill.forming { color:var(--warn); border-color:rgba(245,158,11,0.36); background:rgba(245,158,11,0.08); }
+  .stage-pill.confirm { color:#93c5fd; border-color:rgba(37,99,235,0.35); background:rgba(37,99,235,0.08); }
+  .stage-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; margin-bottom:9px; }
+  .stage-metric { border:1px solid rgba(42,48,64,0.75); border-radius:5px; padding:6px 8px; min-width:0; }
+  .stage-label { color:var(--muted); font-size:9px; letter-spacing:0.06em; text-transform:uppercase; margin-bottom:2px; }
+  .stage-value { color:var(--text); font-size:11px; line-height:1.35; overflow-wrap:anywhere; }
+  .stage-value.blocked { color:#fca5a5; }
+  .coaching-box { background:rgba(245,158,11,0.07); border:1px solid rgba(245,158,11,0.22); border-radius:5px; padding:7px 9px; color:#fcd34d; font-size:11px; line-height:1.45; }
+  .coaching-box div + div { margin-top:4px; }
 
   .checklist { border-top: 1px solid var(--border); padding-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
   .check-item { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 3px 0; }
@@ -469,7 +484,7 @@
     <div id="results"></div>
     <div id="near-miss-section" style="display:none; margin-top:28px;">
       <div id="near-miss-header" style="color:#6b7280; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid #2a3040;">
-        Developing Setups — Near Miss
+        Scout Cards — Developing / No Trade
       </div>
       <div id="near-miss-results" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px;"></div>
     </div>
@@ -843,7 +858,7 @@ function renderScannerResults() {
   const nmResults = document.getElementById('near-miss-results');
   const nmHeader = document.getElementById('near-miss-header');
   if (nearMiss.length > 0) {
-    nmHeader.textContent = `Developing Setups — Near Miss (${nearMiss.length})`;
+    nmHeader.textContent = `Scout Cards — Developing / No Trade (${nearMiss.length})`;
     nmResults.innerHTML = nearMiss.map(renderNearMissCard).join('');
     nmSection.style.display = 'block';
   } else {
@@ -863,6 +878,7 @@ function renderCard(s) {
   const encoded = encodeURIComponent(JSON.stringify(s));
   const obLabel = s.in_ob ? 'Inside OB' : s.near_ob ? 'Near OB' : 'At OB';
   const coachBox = renderCoachBox(q);
+  const stageBox = renderTradeStageBox(s.trade_eval);
 
   return `
   <div class="card">
@@ -884,6 +900,7 @@ function renderCard(s) {
         <div class="ind-cell"><div class="ind-label">OB High</div><div class="ind-value">$${s.ob_high != null ? s.ob_high.toFixed(2) : '—'}</div></div>
         <div class="ind-cell"><div class="ind-label">OB Low</div><div class="ind-value">$${s.ob_low != null ? s.ob_low.toFixed(2) : '—'}</div></div>
       </div>
+      ${stageBox}
       <table class="levels-table">
         <thead><tr><th>Level</th><th>Price</th><th>R:R</th></tr></thead>
         <tbody>
@@ -925,6 +942,40 @@ function renderCard(s) {
   </div>`;
 }
 
+function renderTradeStageBox(ev) {
+  if (!ev) return '';
+  const room = ev.room_to_target || {};
+  const stage = ev.trade_stage || 'RANGE / NO TRADE';
+  const stageCls =
+    stage === 'A+ READY' ? 'ready' :
+    stage === 'RANGE / NO TRADE' ? 'no-trade' :
+    stage === 'CONFIRMATION NEEDED' ? 'confirm' : 'forming';
+  const target = room.target != null ? `$${Number(room.target).toFixed(2)}` : '—';
+  const pct = room.percent_to_target != null ? `${room.percent_to_target}%` : '—';
+  const rr = room.estimated_rr != null ? `${Number(room.estimated_rr).toFixed(2)}R` : '—';
+  const roomText = `${pct} to ${target} · RR ${rr}`;
+  const coaching = (ev.coaching || []).map(x => `<div>${x}</div>`).join('');
+
+  return `
+    <div class="stage-box">
+      <div class="stage-head">
+        <div class="stage-title">Trade-Stage Scout</div>
+        <div class="stage-pill ${stageCls}">${stage}</div>
+      </div>
+      <div class="stage-grid">
+        <div class="stage-metric"><div class="stage-label">Location</div><div class="stage-value">${ev.location || 'MIDRANGE'}${ev.location_percentile != null ? ` · ${ev.location_percentile}%` : ''}</div></div>
+        <div class="stage-metric"><div class="stage-label">Structure Quality</div><div class="stage-value">${ev.structure_quality || 'CHOPPY / INTERNAL ONLY'}</div></div>
+        <div class="stage-metric"><div class="stage-label">Displacement</div><div class="stage-value">${ev.displacement || 'NONE'}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>
+        <div class="stage-metric"><div class="stage-label">Setup Type</div><div class="stage-value">${ev.setup_type || 'NONE'}</div></div>
+        <div class="stage-metric" style="grid-column:1 / -1;"><div class="stage-label">Room to Target</div><div class="stage-value ${room.blocked ? 'blocked' : ''}">${roomText}${room.blocked ? ' · BLOCKED' : room.clear ? ' · CLEAR' : ''}</div></div>
+      </div>
+      <div class="coaching-box">
+        <strong>What would make this tradeable?</strong>
+        ${coaching || '<div>Wait for a clean premium/discount location, confirmed BOS, displacement, and clear 1:2 room.</div>'}
+      </div>
+    </div>`;
+}
+
 function renderCoachBox(q) {
   if (!q || !q.grade) return '';
   return `
@@ -955,6 +1006,7 @@ function renderNearMissCard(s) {
   const q          = s.quality || {};
   const grade      = q.grade || 'D';
   const gradeCls   = gradeClass(grade);
+  const stageBox   = renderTradeStageBox(s.trade_eval);
   const ci        = (pass, label) =>
     `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
 
@@ -974,7 +1026,7 @@ function renderNearMissCard(s) {
         ${q.grade ? `<span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>` : ''}
         ${s.structureLabel ? `<span style="font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(99,102,241,0.13);border:1px solid rgba(99,102,241,0.28);color:#c7d2fe;">${s.structureLabel}</span>` : ''}
         ${hasTrend ? `<span class="badge" style="background:${dirBg}; color:${dirColor};">${s.direction}</span>` : ''}
-        <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">DEVELOPING</span>
+        <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">${s.trade_eval?.trade_stage || 'DEVELOPING'}</span>
       </div>
     </div>
     <div class="card-body">
@@ -988,6 +1040,7 @@ function renderNearMissCard(s) {
         ${ci(hasOB,    'OB identified')}
         ${ci(atOB,     s.in_ob ? 'Price inside OB' : s.near_ob ? 'Price near OB' : 'Price at OB zone')}
       </div>
+      ${stageBox}
       ${missing ? `<div style="font-size:11px; color:#fca5a5; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); border-radius:5px; padding:6px 10px; margin-bottom:8px;">${missing}</div>` : ''}
       ${renderCoachBox(q)}
       <div style="display:flex; gap:14px; font-size:11px; color:var(--muted); flex-wrap:wrap;">
