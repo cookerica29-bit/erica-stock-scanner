@@ -616,17 +616,20 @@ def detect_structure_break(df: pd.DataFrame, swings: list, direction: str, lookb
     return _detect_bos(df, swings, direction, lookback=lookback)
 
 
-def _nearest_target(price: float, direction: str, swings: list, fallback: float = 0.0) -> Optional[float]:
-    highs = sorted([s["price"] for s in swings if s["type"] == "high" and s["price"] > price])
-    lows = sorted([s["price"] for s in swings if s["type"] == "low" and s["price"] < price], reverse=True)
+def _nearest_target(price: float, direction: str, swings: list, fallback: float = 0.0, min_target: float = 0.0) -> Optional[float]:
+    # Use entry as floor/ceiling so we don't pick a target below/above where we'd enter
     if direction == "LONG":
+        floor = max(price, min_target)
+        highs = sorted([s["price"] for s in swings if s["type"] == "high" and s["price"] > floor])
         if highs:
             return float(highs[0])
-        return float(fallback) if fallback and fallback > price else None
+        return float(fallback) if fallback and fallback > floor else None
     if direction == "SHORT":
+        ceiling = min(price, min_target) if min_target > 0 else price
+        lows = sorted([s["price"] for s in swings if s["type"] == "low" and s["price"] < ceiling], reverse=True)
         if lows:
             return float(lows[0])
-        return float(fallback) if fallback and fallback < price else None
+        return float(fallback) if fallback and fallback < ceiling else None
     return None
 
 
@@ -638,7 +641,7 @@ def _room_to_target(
     stop: Optional[float] = None,
     fallback_target: float = 0.0,
 ) -> dict:
-    target = _nearest_target(price, direction, swings, fallback_target)
+    target = _nearest_target(price, direction, swings, fallback_target, min_target=entry if entry is not None else 0.0)
     if target is None or direction not in ("LONG", "SHORT"):
         return {
             "target": None,
@@ -658,7 +661,7 @@ def _room_to_target(
         reward = (target - entry) if direction == "LONG" else (entry - target)
         if risk > 0 and reward > 0:
             estimated_rr = reward / risk
-            blocked = estimated_rr < 2.0
+            blocked = estimated_rr < 1.5
         elif risk > 0:
             estimated_rr = 0.0
             blocked = True
