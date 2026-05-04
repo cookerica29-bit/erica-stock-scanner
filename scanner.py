@@ -104,7 +104,7 @@ def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
 
 # ── Price Action Functions ────────────────────────────────────────────────────
 
-def _find_swings(df: pd.DataFrame, margin: int = 3) -> list:
+def _find_swings(df: pd.DataFrame, margin: int = 4) -> list:
     highs = df["High"].values
     lows  = df["Low"].values
     swings = []
@@ -1113,7 +1113,7 @@ def analyze_ticker(
         if avg_dollar_vol < 5_000_000:
             return None
         daily_range_pct = (float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1])) / price * 100
-        if daily_range_pct < 1.0:
+        if daily_range_pct < 0.5:
             return None
 
         atr = _compute_atr(df)
@@ -1134,8 +1134,8 @@ def analyze_ticker(
                 if ob:
                     in_ob = ob["low"] <= price <= ob["high"]
                     near_ob = not in_ob and (
-                        (trend == "LONG"  and price < ob["high"] and price > ob["low"] - atr) or
-                        (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + atr)
+                        (trend == "LONG"  and price < ob["high"] and price > ob["low"] - 0.75 * atr) or
+                        (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + 0.75 * atr)
                     )
 
         # ── Macro bias (52-week high context) ────────────────────────────────────
@@ -1471,8 +1471,8 @@ def debug_ticker(ticker: str) -> dict:
             out["filters"].append({"step": "volume", "result": "FAIL", "reason": f"avg dollar vol ${avg_dv/1e6:.1f}M < $5M"})
             return out
         dr = (float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1])) / price * 100
-        if dr < 1.0:
-            out["filters"].append({"step": "range", "result": "FAIL", "reason": f"daily range {dr:.2f}% < 1%"})
+        if dr < 0.5:
+            out["filters"].append({"step": "range", "result": "FAIL", "reason": f"daily range {dr:.2f}% < 0.5%"})
             return out
         out["price"] = round(price, 2)
         out["atr"]   = round(atr, 2)
@@ -1494,8 +1494,8 @@ def debug_ticker(ticker: str) -> dict:
                 if ob:
                     in_ob   = ob["low"] <= price <= ob["high"]
                     near_ob = not in_ob and (
-                        (trend == "LONG"  and price < ob["high"] and price > ob["low"] - atr) or
-                        (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + atr)
+                        (trend == "LONG"  and price < ob["high"] and price > ob["low"] - 0.75 * atr) or
+                        (trend == "SHORT" and price > ob["low"]  and price < ob["high"] + 0.75 * atr)
                     )
         out["bos_confirmed"] = bos_confirmed
         out["bos_level"]     = round(bos_level, 2) if bos_level else None
