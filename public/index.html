@@ -142,6 +142,18 @@
 
   /* ── Setup card ────────────────────────────────────────────────────────── */
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .card.a-plus-alert {
+    border-color: rgba(34,197,94,0.85);
+    box-shadow: 0 0 0 1px rgba(34,197,94,0.45), 0 0 24px rgba(34,197,94,0.22);
+    animation: aPlusReadyPulse 1.4s ease-in-out 3;
+  }
+  .card.a-plus-alert .card-header {
+    background: rgba(34,197,94,0.08);
+  }
+  @keyframes aPlusReadyPulse {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(34,197,94,0.45), 0 0 18px rgba(34,197,94,0.16); }
+    50% { box-shadow: 0 0 0 2px rgba(34,197,94,0.78), 0 0 30px rgba(34,197,94,0.34); }
+  }
   .card-header {
     display: flex; align-items: center; justify-content: space-between;
     padding: 12px 16px; border-bottom: 1px solid var(--border);
@@ -210,9 +222,14 @@
   .stage-title { color: var(--text); font-size:11px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
   .stage-pill { border-radius:99px; border:1px solid var(--border); color:var(--muted); font-size:10px; font-weight:900; padding:3px 9px; text-transform:uppercase; white-space:nowrap; }
   .stage-pill.ready { color:var(--long); border-color:rgba(34,197,94,0.4); background:rgba(34,197,94,0.1); }
+  .stage-pill.b-plus { color:#a78bfa; border-color:rgba(139,92,246,0.45); background:rgba(139,92,246,0.1); }
   .stage-pill.no-trade { color:var(--short); border-color:rgba(239,68,68,0.36); background:rgba(239,68,68,0.08); }
   .stage-pill.forming { color:var(--warn); border-color:rgba(245,158,11,0.36); background:rgba(245,158,11,0.08); }
   .stage-pill.confirm { color:#93c5fd; border-color:rgba(37,99,235,0.35); background:rgba(37,99,235,0.08); }
+  .card.b-plus-alert {
+    border-color: rgba(139,92,246,0.75);
+    box-shadow: 0 0 0 1px rgba(139,92,246,0.35), 0 0 20px rgba(139,92,246,0.16);
+  }
   .stage-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; margin-bottom:9px; }
   .stage-metric { border:1px solid rgba(42,48,64,0.75); border-radius:5px; padding:6px 8px; min-width:0; }
   .stage-label { color:var(--muted); font-size:9px; letter-spacing:0.06em; text-transform:uppercase; margin-bottom:2px; }
@@ -231,7 +248,35 @@
   .check-item.fail { color: var(--fail); }
   .check-item.warn { color: var(--warn); }
 
-  .card-footer { padding: 10px 16px; border-top: 1px solid var(--border); }
+  .card-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .toast {
+    background: rgba(15,23,42,0.96);
+    border: 1px solid rgba(34,197,94,0.45);
+    border-radius: 6px;
+    bottom: 18px;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.35);
+    color: #86efac;
+    font-size: 12px;
+    font-weight: 700;
+    opacity: 0;
+    padding: 10px 14px;
+    pointer-events: none;
+    position: fixed;
+    right: 18px;
+    transform: translateY(8px);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    z-index: 200;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
 
   /* ── Modal ─────────────────────────────────────────────────────────────── */
   .modal-overlay {
@@ -465,11 +510,11 @@
   <div class="controls">
     <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
     <select id="gradeFilter" onchange="renderScannerResults()">
-      <option value="all">All grades</option>
-      <option value="a">A range only</option>
-      <option value="bplus">B+ and up</option>
-      <option value="b">B and up</option>
-      <option value="hide-c">Hide C/D</option>
+      <option value="all">All</option>
+      <option value="stage-bplus" selected>B+ TRADEABLE and up</option>
+      <option value="stage-aplus">A+ READY only</option>
+      <option value="bplus">Quality B+ and up</option>
+      <option value="a">Quality A range only</option>
       <option value="learning">Best learning setups</option>
     </select>
     <select id="sortMode" onchange="renderScannerResults()">
@@ -741,11 +786,17 @@
   </div>
 </div>
 
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
+const SCANNER_JOURNAL_KEY = 'stock_journal';
 let scannerRows = [];
 let scannerNearMiss = [];
+let previousTradeStages = new Map();
+let aPlusReadyAlerts = new Set();
+let toastTimer = null;
 
 // ── Tab switching ────────────────────────────────────────────────────────────
 
@@ -781,8 +832,14 @@ async function runScan() {
     const res  = await fetch(url);
     const data = await res.json();
 
-    scannerRows = data.rows || [];
-    scannerNearMiss = data.near_miss || [];
+    const nextRows = data.rows || [];
+    const nextNearMiss = data.near_miss || [];
+    const alerts = detectAPlusReadyTransitions([...nextRows, ...nextNearMiss]);
+    aPlusReadyAlerts = new Set(alerts.map(a => a.ticker));
+    alerts.forEach(handleAPlusReadyAlert);
+
+    scannerRows = nextRows;
+    scannerNearMiss = nextNearMiss;
     renderScannerResults();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
@@ -796,11 +853,125 @@ async function runScan() {
 function clearResults() {
   scannerRows = [];
   scannerNearMiss = [];
+  previousTradeStages = new Map();
+  aPlusReadyAlerts = new Set();
   document.getElementById('results').innerHTML = '';
   document.getElementById('near-miss-results').innerHTML = '';
   document.getElementById('near-miss-section').style.display = 'none';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
+}
+
+function getTradeStage(setup) {
+  return setup?.trade_eval?.trade_stage || 'RANGE / NO TRADE';
+}
+
+function getStageKey(setup) {
+  return String(setup?.ticker || '').trim().toUpperCase();
+}
+
+function detectAPlusReadyTransitions(setups) {
+  const nextStages = new Map();
+  const alerts = [];
+  const tradeableStages = new Set(['A+ READY', 'B+ TRADEABLE']);
+
+  setups.forEach(setup => {
+    const ticker = getStageKey(setup);
+    if (!ticker) return;
+
+    const currentStage = getTradeStage(setup);
+    const previousStage = previousTradeStages.get(ticker);
+    nextStages.set(ticker, currentStage);
+
+    if (
+      previousStage !== undefined &&
+      !tradeableStages.has(previousStage) &&
+      tradeableStages.has(currentStage)
+    ) {
+      alerts.push({ ticker, setup, previousStage, currentStage });
+    }
+  });
+
+  previousTradeStages = nextStages;
+  return alerts;
+}
+
+function handleAPlusReadyAlert(alert) {
+  const { ticker, setup, previousStage, currentStage } = alert;
+  const price = setup?.price != null ? `$${Number(setup.price).toFixed(2)}` : 'price unavailable';
+  const direction = setup?.direction || 'direction unavailable';
+  const message = `${ticker} changed from ${previousStage} to ${currentStage} (${direction}, ${price})`;
+  console.log(`[A+ READY] ${message}`, setup);
+  maybeSendBrowserNotification(ticker, message);
+}
+
+function maybeSendBrowserNotification(ticker, message) {
+  if (!('Notification' in window)) return;
+
+  const show = () => new Notification(`${ticker} A+ READY`, {
+    body: message,
+    tag: `a-plus-ready-${ticker}`,
+    renotify: true,
+  });
+
+  if (Notification.permission === 'granted') {
+    show();
+  } else if (Notification.permission === 'default') {
+    Notification.requestPermission().then(permission => {
+      if (permission === 'granted') show();
+    }).catch(() => {});
+  }
+}
+
+function loadScannerJournal() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SCANNER_JOURNAL_KEY) || '[]');
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
+
+function getSetupRr(setup) {
+  const rr = setup?.trade_eval?.room_to_target?.estimated_rr;
+  return rr == null ? null : Number(rr);
+}
+
+function buildScannerJournalEntry(setup) {
+  const ev = setup?.trade_eval || {};
+  const tradeStage = ev.trade_stage || 'RANGE / NO TRADE';
+  return {
+    timestamp: new Date().toISOString(),
+    ticker: setup?.ticker || '',
+    direction: setup?.direction || '',
+    trade_stage: tradeStage,
+    setup_type: ev.setup_type || '',
+    structure: setup?.structureLabel || ev.structure_quality || setup?.trend || '',
+    price: setup?.price == null ? null : Number(setup.price),
+    rr: getSetupRr(setup),
+    a_plus_ready: tradeStage === 'A+ READY',
+    missing_for_a_plus: Array.isArray(ev.missing_for_a_plus) ? ev.missing_for_a_plus : [],
+    notes: '',
+    outcome: null,
+  };
+}
+
+function addSetupToScannerJournal(setupJson) {
+  const setup = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
+  const entries = loadScannerJournal();
+  const entry = buildScannerJournalEntry(setup);
+  entries.push(entry);
+  localStorage.setItem(SCANNER_JOURNAL_KEY, JSON.stringify(entries));
+  showToast('Saved to journal');
+}
+
+function showToast(message) {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  toast.textContent = message;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
 }
 
 function gradeRank(grade) {
@@ -818,6 +989,9 @@ function setupRank(s) {
 function passesGradeFilter(s, filter) {
   const q = s.quality || {};
   const rank = setupRank(s);
+  const stage = s.trade_eval?.trade_stage || 'RANGE / NO TRADE';
+  if (filter === 'stage-bplus') return stage === 'B+ TRADEABLE' || stage === 'A+ READY';
+  if (filter === 'stage-aplus') return stage === 'A+ READY';
   if (filter === 'a') return rank >= gradeRank('A');
   if (filter === 'bplus') return rank >= gradeRank('B+');
   if (filter === 'b' || filter === 'hide-c') return rank >= gradeRank('B');
@@ -852,10 +1026,13 @@ function renderScannerResults() {
     results.innerHTML = rows.map(renderCard).join('');
   }
 
-  const longs = rows.filter(s => s.direction === 'LONG').length;
-  const shorts = rows.filter(s => s.direction === 'SHORT').length;
+  const longs   = rows.filter(s => s.direction === 'LONG').length;
+  const shorts  = rows.filter(s => s.direction === 'SHORT').length;
+  const aPlus   = rows.filter(s => s.trade_eval?.trade_stage === 'A+ READY').length;
+  const bPlus   = rows.filter(s => s.trade_eval?.trade_stage === 'B+ TRADEABLE').length;
   const filterLabel = document.getElementById('gradeFilter')?.selectedOptions?.[0]?.textContent || 'All grades';
-  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} shown — ${longs} Long, ${shorts} Short · ${filterLabel} · ${totalVisible} total including developing`;
+  const tierLabel = aPlus > 0 || bPlus > 0 ? ` (${aPlus} A+ · ${bPlus} B+)` : '';
+  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''}${tierLabel} — ${longs} Long, ${shorts} Short · ${filterLabel} · ${totalVisible} total including developing`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
@@ -883,8 +1060,11 @@ function renderCard(s) {
   const coachBox = renderCoachBox(q);
   const stageBox = renderTradeStageBox(s.trade_eval);
 
+  const isAPlusAlert = aPlusReadyAlerts.has(getStageKey(s));
+  const isBPlusCard  = s.trade_eval?.trade_stage === 'B+ TRADEABLE';
+
   return `
-  <div class="card">
+  <div class="card ${isAPlusAlert ? 'a-plus-alert' : isBPlusCard ? 'b-plus-alert' : ''}">
     <div class="card-header">
       <span class="ticker">${s.ticker}</span>
       <div class="card-header-right">
@@ -940,6 +1120,7 @@ function renderCard(s) {
       </div>
     </div>
     <div class="card-footer">
+      <button class="btn-secondary btn-sm" onclick="addSetupToScannerJournal(decodeURIComponent('${encoded}'))">Add to Journal</button>
       <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">📊 Log Trade</button>
     </div>
   </div>`;
@@ -951,6 +1132,7 @@ function renderTradeStageBox(ev) {
   const stage = ev.trade_stage || 'RANGE / NO TRADE';
   const stageCls =
     stage === 'A+ READY' ? 'ready' :
+    stage === 'B+ TRADEABLE' ? 'b-plus' :
     stage === 'RANGE / NO TRADE' ? 'no-trade' :
     stage === 'BUILDING / WATCHLIST' ? 'forming' : 'confirm';
   const target = room.target != null ? `$${Number(room.target).toFixed(2)}` : '—';
@@ -960,7 +1142,8 @@ function renderTradeStageBox(ev) {
   const coaching = (ev.coaching || []).map(x => `<div>${x}</div>`).join('');
   const missing = (ev.missing_for_a_plus || []).map(x => `<div>${x}</div>`).join('');
   const stageNote =
-    stage === 'A+ READY' ? 'Manual review for execution. No auto-buy.' :
+    stage === 'A+ READY' ? 'All conditions met — manual review before entry.' :
+    stage === 'B+ TRADEABLE' ? 'Valid B+ setup — BOS + OB + signal confirmed. Review before entry.' :
     stage === 'BUILDING / WATCHLIST' ? 'Not tradeable yet. Watch closely.' :
     'Discipline filter: no trade.';
 
@@ -1028,8 +1211,11 @@ function renderNearMissCard(s) {
   const dirColor = isLong ? 'var(--long)' : 'var(--short)';
   const dirBg    = isLong ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)';
 
+  const isAPlusAlert = aPlusReadyAlerts.has(getStageKey(s));
+  const encoded = encodeURIComponent(JSON.stringify(s));
+
   return `
-  <div class="card" style="opacity:0.88; border-color: rgba(251,191,36,0.25);">
+  <div class="card ${isAPlusAlert ? 'a-plus-alert' : ''}" style="opacity:0.88; border-color: ${isAPlusAlert ? 'rgba(34,197,94,0.85)' : 'rgba(251,191,36,0.25)'};">
     <div class="card-header" style="border-color: rgba(251,191,36,0.15);">
       <span class="ticker">${s.ticker}</span>
       <div class="card-header-right">
@@ -1057,6 +1243,9 @@ function renderNearMissCard(s) {
         ${hasBOS && s.bos_level ? `<span>BOS @ $${s.bos_level.toFixed(2)}</span>` : ''}
         ${hasOB ? `<span>OB $${s.ob_low?.toFixed(2)}–$${s.ob_high?.toFixed(2)}</span>` : ''}
       </div>
+    </div>
+    <div class="card-footer">
+      <button class="btn-secondary btn-sm" onclick="addSetupToScannerJournal(decodeURIComponent('${encoded}'))">Add to Journal</button>
     </div>
   </div>`;
 }
