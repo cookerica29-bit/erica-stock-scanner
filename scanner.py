@@ -616,19 +616,29 @@ def detect_structure_break(df: pd.DataFrame, swings: list, direction: str, lookb
     return _detect_bos(df, swings, direction, lookback=lookback)
 
 
-def _nearest_target(price: float, direction: str, swings: list, fallback: float = 0.0, min_target: float = 0.0) -> Optional[float]:
-    # Use entry as floor/ceiling so we don't pick a target below/above where we'd enter
+def _nearest_target(price: float, direction: str, swings: list, fallback: float = 0.0, min_target: float = 0.0, atr: float = 0.0) -> Optional[float]:
+    # Use entry as floor/ceiling so target is always beyond where we'd enter.
+    # Also skip swings within 1×ATR of entry — minor structure that won't give real reward.
     if direction == "LONG":
         floor = max(price, min_target)
-        highs = sorted([s["price"] for s in swings if s["type"] == "high" and s["price"] > floor])
+        skip_below = floor + atr if atr > 0 else floor
+        highs = sorted([s["price"] for s in swings if s["type"] == "high" and s["price"] > skip_below])
         if highs:
             return float(highs[0])
+        # Fallback: first swing above floor even if within 1 ATR (better than nothing)
+        highs_any = sorted([s["price"] for s in swings if s["type"] == "high" and s["price"] > floor])
+        if highs_any:
+            return float(highs_any[0])
         return float(fallback) if fallback and fallback > floor else None
     if direction == "SHORT":
         ceiling = min(price, min_target) if min_target > 0 else price
-        lows = sorted([s["price"] for s in swings if s["type"] == "low" and s["price"] < ceiling], reverse=True)
+        skip_above = ceiling - atr if atr > 0 else ceiling
+        lows = sorted([s["price"] for s in swings if s["type"] == "low" and s["price"] < skip_above], reverse=True)
         if lows:
             return float(lows[0])
+        lows_any = sorted([s["price"] for s in swings if s["type"] == "low" and s["price"] < ceiling], reverse=True)
+        if lows_any:
+            return float(lows_any[0])
         return float(fallback) if fallback and fallback < ceiling else None
     return None
 
@@ -640,8 +650,9 @@ def _room_to_target(
     entry: Optional[float] = None,
     stop: Optional[float] = None,
     fallback_target: float = 0.0,
+    atr: float = 0.0,
 ) -> dict:
-    target = _nearest_target(price, direction, swings, fallback_target, min_target=entry if entry is not None else 0.0)
+    target = _nearest_target(price, direction, swings, fallback_target, min_target=entry if entry is not None else 0.0, atr=atr)
     if target is None or direction not in ("LONG", "SHORT"):
         return {
             "target": None,
@@ -711,7 +722,7 @@ def _build_trade_stage_eval(
     displacement, displacement_score = detect_displacement(df, atr, trend, bos_confirmed)
     sweep_taken, sweep_level = detect_liquidity_sweep(df, swings, trend)
     rejection_confirmed = detect_rejection(df, trend, sweep_level)
-    room = _room_to_target(price, trend, swings, entry, stop, fallback_target)
+    room = _room_to_target(price, trend, swings, entry, stop, fallback_target, atr=atr)
 
     if location_pct is None:
         valid_zone = False
