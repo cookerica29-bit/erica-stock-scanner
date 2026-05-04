@@ -528,8 +528,10 @@
       <option value="price">Sort by price</option>
     </select>
     <button id="scanBtn" onclick="runScan()">Scan</button>
+    <button id="autoScanBtn" onclick="toggleAutoScan()" class="btn-secondary">Auto Scan: OFF</button>
     <button class="btn-secondary" onclick="clearResults()">Clear</button>
     <span id="status"></span>
+    <span id="autoScanCountdown" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>
   </div>
   <main>
     <div id="summary"></div>
@@ -801,6 +803,78 @@ let scannerNearMiss = [];
 let previousTradeStages = new Map();
 let aPlusReadyAlerts = new Set();
 let toastTimer = null;
+
+// ── Auto-scan ─────────────────────────────────────────────────────────────────
+const AUTO_SCAN_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+let autoScanEnabled = false;
+let autoScanTimer = null;
+let autoScanCountdownTimer = null;
+let nextScanAt = null;
+
+function isMarketHours() {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false;
+  // ET offset: UTC-4 (EDT) or UTC-5 (EST)
+  const jan = new Date(now.getFullYear(), 0, 1);
+  const jul = new Date(now.getFullYear(), 6, 1);
+  const stdOffset = Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+  const isDST = now.getTimezoneOffset() < stdOffset;
+  const etOffset = isDST ? 4 : 5;
+  const etHour = (now.getUTCHours() - etOffset + 24) % 24;
+  const etMinute = now.getUTCMinutes();
+  const etTime = etHour * 60 + etMinute;
+  return etTime >= 9 * 60 + 30 && etTime < 16 * 60; // 9:30–16:00 ET
+}
+
+function updateCountdown() {
+  const el = document.getElementById('autoScanCountdown');
+  if (!autoScanEnabled || !nextScanAt) { if (el) el.textContent = ''; return; }
+  const ms = nextScanAt - Date.now();
+  if (ms <= 0) { if (el) el.textContent = ''; return; }
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  if (el) el.textContent = `Next scan in ${m}:${String(s).padStart(2, '0')}`;
+}
+
+function scheduleNextAutoScan() {
+  if (!autoScanEnabled) return;
+  autoScanTimer = setTimeout(async () => {
+    if (!autoScanEnabled) return;
+    if (isMarketHours()) {
+      await runScan();
+    } else {
+      document.getElementById('status').textContent = 'Market closed — auto scan paused';
+    }
+    scheduleNextAutoScan();
+  }, AUTO_SCAN_INTERVAL_MS);
+  nextScanAt = Date.now() + AUTO_SCAN_INTERVAL_MS;
+}
+
+function toggleAutoScan() {
+  autoScanEnabled = !autoScanEnabled;
+  const btn = document.getElementById('autoScanBtn');
+  if (autoScanEnabled) {
+    btn.textContent = 'Auto Scan: ON';
+    btn.style.color = 'var(--long)';
+    btn.style.borderColor = 'var(--long)';
+    scheduleNextAutoScan();
+    autoScanCountdownTimer = setInterval(updateCountdown, 1000);
+    if (isMarketHours()) {
+      runScan();
+    } else {
+      document.getElementById('status').textContent = 'Market closed — will scan when market opens';
+    }
+  } else {
+    btn.textContent = 'Auto Scan: OFF';
+    btn.style.color = '';
+    btn.style.borderColor = '';
+    clearTimeout(autoScanTimer);
+    clearInterval(autoScanCountdownTimer);
+    nextScanAt = null;
+    updateCountdown();
+  }
+}
 
 // ── Tab switching ────────────────────────────────────────────────────────────
 
