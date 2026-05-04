@@ -490,6 +490,10 @@
     vertical-align: middle; margin-right: 6px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeInDown {
+    from { opacity: 0; transform: translateY(-16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
 </style>
 </head>
 <body>
@@ -873,7 +877,6 @@ function getStageKey(setup) {
 function detectAPlusReadyTransitions(setups) {
   const nextStages = new Map();
   const alerts = [];
-  const tradeableStages = new Set(['A+ READY', 'B+ TRADEABLE']);
 
   setups.forEach(setup => {
     const ticker = getStageKey(setup);
@@ -883,12 +886,22 @@ function detectAPlusReadyTransitions(setups) {
     const previousStage = previousTradeStages.get(ticker);
     nextStages.set(ticker, currentStage);
 
+    // Fire on any upgrade TO A+ READY (from any previous stage including B+)
     if (
       previousStage !== undefined &&
-      !tradeableStages.has(previousStage) &&
-      tradeableStages.has(currentStage)
+      previousStage !== 'A+ READY' &&
+      currentStage === 'A+ READY'
     ) {
-      alerts.push({ ticker, setup, previousStage, currentStage });
+      alerts.push({ ticker, setup, previousStage, currentStage, type: 'aplus' });
+    }
+    // Also fire on B+ TRADEABLE upgrades from non-tradeable stages
+    else if (
+      previousStage !== undefined &&
+      previousStage !== 'A+ READY' &&
+      previousStage !== 'B+ TRADEABLE' &&
+      currentStage === 'B+ TRADEABLE'
+    ) {
+      alerts.push({ ticker, setup, previousStage, currentStage, type: 'bplus' });
     }
   });
 
@@ -896,21 +909,75 @@ function detectAPlusReadyTransitions(setups) {
   return alerts;
 }
 
-function handleAPlusReadyAlert(alert) {
-  const { ticker, setup, previousStage, currentStage } = alert;
-  const price = setup?.price != null ? `$${Number(setup.price).toFixed(2)}` : 'price unavailable';
-  const direction = setup?.direction || 'direction unavailable';
-  const message = `${ticker} changed from ${previousStage} to ${currentStage} (${direction}, ${price})`;
-  console.log(`[A+ READY] ${message}`, setup);
-  maybeSendBrowserNotification(ticker, message);
+function playAlertSound(type) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    if (type === 'aplus') {
+      // Three rising tones for A+
+      [523.25, 659.25, 783.99].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0, now + i * 0.18);
+        gain.gain.linearRampToValueAtTime(0.3, now + i * 0.18 + 0.02);
+        gain.gain.linearRampToValueAtTime(0, now + i * 0.18 + 0.18);
+        osc.start(now + i * 0.18);
+        osc.stop(now + i * 0.18 + 0.2);
+      });
+    } else {
+      // Single short tone for B+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = 523.25;
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.25);
+      osc.start(now); osc.stop(now + 0.3);
+    }
+  } catch(e) {}
 }
 
-function maybeSendBrowserNotification(ticker, message) {
+function showToast(message, type) {
+  const toast = document.createElement('div');
+  toast.style.cssText = `
+    position:fixed; top:20px; right:20px; z-index:9999;
+    background:${type === 'aplus' ? 'rgba(34,197,94,0.95)' : 'rgba(99,102,241,0.95)'};
+    color:#fff; padding:14px 20px; border-radius:10px;
+    font-size:14px; font-weight:700; box-shadow:0 4px 20px rgba(0,0,0,0.4);
+    animation: fadeInDown 0.3s ease;
+  `;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 6000);
+}
+
+function handleAPlusReadyAlert(alert) {
+  const { ticker, setup, previousStage, currentStage, type } = alert;
+  const price = setup?.price != null ? `$${Number(setup.price).toFixed(2)}` : '';
+  const direction = setup?.direction || '';
+  const isAPlus = type === 'aplus';
+
+  const message = isAPlus
+    ? `🔥 ${ticker} → A+ READY ${direction} ${price}`
+    : `🔵 ${ticker} → B+ TRADEABLE ${direction} ${price}`;
+
+  console.log(`[${currentStage}] ${message}`, setup);
+  playAlertSound(type);
+  showToast(message, type);
+  maybeSendBrowserNotification(ticker, message, isAPlus);
+}
+
+function maybeSendBrowserNotification(ticker, message, isAPlus = true) {
   if (!('Notification' in window)) return;
 
-  const show = () => new Notification(`${ticker} A+ READY`, {
+  const title = isAPlus ? `🔥 ${ticker} A+ READY` : `🔵 ${ticker} B+ TRADEABLE`;
+  const show = () => new Notification(title, {
     body: message,
-    tag: `a-plus-ready-${ticker}`,
+    tag: `stage-alert-${ticker}`,
     renotify: true,
   });
 
