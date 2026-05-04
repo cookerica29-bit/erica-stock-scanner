@@ -2,18 +2,47 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 
 WATCHLIST = [
+    # ── Airlines ──────────────────────────────────────────────────────────────
     "DAL", "UAL", "AAL", "JBLU",
+    # ── Cruise ────────────────────────────────────────────────────────────────
     "CCL", "RCL", "NCLH",
+    # ── Tech / Mega-cap ───────────────────────────────────────────────────────
     "NVDA", "AMD", "META", "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN",
-    "MU", "INTC", "QCOM",
+    # ── Semiconductors ────────────────────────────────────────────────────────
+    "MU", "INTC", "QCOM", "AVGO", "TSM", "ARM",
+    # ── Energy Majors ─────────────────────────────────────────────────────────
     "XOM", "CVX", "OXY",
-    "JPM", "BAC", "GS",
-    "WMT", "TGT",
-    "SPY", "QQQ", "IWM",
+    # ── Energy Mid-cap / Services ─────────────────────────────────────────────
+    "DVN", "MRO", "HAL", "SLB", "FANG",
+    # ── Big Banks ─────────────────────────────────────────────────────────────
+    "JPM", "BAC", "GS", "MS", "WFC",
+    # ── Payments / Fintech ────────────────────────────────────────────────────
+    "V", "MA", "AXP", "PYPL", "SQ",
+    # ── Retail / Consumer Discretionary ──────────────────────────────────────
+    "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE",
+    # ── Consumer Staples ──────────────────────────────────────────────────────
+    "PG", "KO", "PEP", "CL", "MO",
+    # ── Healthcare / Pharma ───────────────────────────────────────────────────
+    "UNH", "JNJ", "ABBV", "LLY", "PFE", "MRK", "CVS",
+    # ── Biotech ───────────────────────────────────────────────────────────────
+    "GILD", "REGN", "MRNA", "BIIB",
+    # ── Utilities ─────────────────────────────────────────────────────────────
+    "NEE", "DUK", "SO", "XEL",
+    # ── Industrials / Defense ─────────────────────────────────────────────────
+    "CAT", "DE", "HON", "BA", "GE", "LMT", "RTX",
+    # ── Materials / Commodities ───────────────────────────────────────────────
+    "FCX", "NEM", "AA", "CLF",
+    # ── Broad ETFs ────────────────────────────────────────────────────────────
+    "SPY", "QQQ", "IWM", "DIA",
+    # ── Sector ETFs ───────────────────────────────────────────────────────────
+    "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
+    # ── Commodity ETFs ────────────────────────────────────────────────────────
+    "GLD", "SLV", "USO", "UNG",
 ]
 
 
@@ -275,9 +304,10 @@ def _detect_choch(swings: list, direction: str) -> tuple:
     """
     Scan ALL swing pairs for CHoCH events and return the most recent one.
     Most recent CHoCH takes priority over earlier reversals (handles short-term bounces).
-    Returns (suppress: bool, reason: str, bearish_choch_level: Optional[float]).
+    Returns (suppress, reason, bearish_choch_level, last_choch_bar_index).
       suppress=True             → this CHoCH conflicts with `direction`, filter the setup.
       bearish_choch_level       → the prior swing-low that was broken (None if no bearish CHoCH).
+      last_choch_bar_index      → bar index of the most recent CHoCH (-1 if none found).
     """
     highs = [s for s in swings if s["type"] == "high"]
     lows  = [s for s in swings if s["type"] == "low"]
@@ -323,17 +353,25 @@ def _detect_choch(swings: list, direction: str) -> tuple:
 
     # No CHoCH found at all
     if last_bearish_idx == -1 and last_bullish_idx == -1:
-        return False, "no CHoCH detected", None
+        return False, "no CHoCH detected", None, None, -1
+
+    # Track the bullish CHoCH level (prior swing high that was broken)
+    bullish_choch_lvl: Optional[float] = None
+    if last_bullish_idx >= 0:
+        for i in range(1, len(highs)):
+            if highs[i]["index"] == last_bullish_idx:
+                bullish_choch_lvl = highs[i - 1]["price"]
+                break
 
     # Most recent CHoCH wins regardless of short-term counter-moves
     if last_bearish_idx >= last_bullish_idx:
         if direction == "LONG":
-            return True, f"[SUPPRESS] most recent CHoCH is bearish → {bearish_reason}", bearish_choch_lvl
-        return False, f"bearish CHoCH present but not suppressing {direction} → {bearish_reason}", bearish_choch_lvl
+            return True, f"[SUPPRESS] most recent CHoCH is bearish → {bearish_reason}", bearish_choch_lvl, bullish_choch_lvl, last_bearish_idx
+        return False, f"bearish CHoCH present but not suppressing {direction} → {bearish_reason}", bearish_choch_lvl, bullish_choch_lvl, last_bearish_idx
     else:
         if direction == "SHORT":
-            return True, f"[SUPPRESS] most recent CHoCH is bullish → {bullish_reason}", None
-        return False, f"bullish CHoCH present but not suppressing {direction} → {bullish_reason}", None
+            return True, f"[SUPPRESS] most recent CHoCH is bullish → {bullish_reason}", bearish_choch_lvl, bullish_choch_lvl, last_bullish_idx
+        return False, f"bullish CHoCH present but not suppressing {direction} → {bullish_reason}", bearish_choch_lvl, bullish_choch_lvl, last_bullish_idx
 
 
 def _safe_ratio(numerator: float, denominator: float, fallback: float = 0.0) -> float:
@@ -775,10 +813,41 @@ def _build_trade_stage_eval(
         and 1 <= len(missing_for_a_plus) <= 3
     )
 
-    if no_trade_reasons:
-        trade_stage = "RANGE / NO TRADE"
-    elif a_plus_ready:
+    # B+ TRADEABLE: BOS + OB at zone + at least 1 confirming signal.
+    # Relaxed location: up to 70% percentile for longs, down to 30% for shorts.
+    # A+ requires strict discount/premium (<=50% / >=50%); B+ allows midrange approach.
+    b_plus_zone = (
+        location_pct is not None and (
+            (trend == "LONG"  and location_pct <= 70.0) or
+            (trend == "SHORT" and location_pct >= 30.0)
+        )
+    )
+    directional_signals = sum([
+        bool(sweep_taken),
+        bool(rejection_confirmed),
+        displacement != "NONE",
+        structure_quality == "CLEAN BOS",
+    ])
+
+    # RR is informational for B+ — options RR differs from underlying price RR.
+    # Show the RR value on the card; do not gate B+ on it.
+    b_plus_tradeable = (
+        htf_bias_clear
+        and bos_confirmed
+        and ob is not None
+        and (in_ob or near_ob)
+        and not macro_conflict
+        and not context_conflict
+        and b_plus_zone
+        and directional_signals >= 1
+    )
+
+    if a_plus_ready:
         trade_stage = "A+ READY"
+    elif b_plus_tradeable:
+        trade_stage = "B+ TRADEABLE"
+    elif no_trade_reasons:
+        trade_stage = "RANGE / NO TRADE"
     elif worth_watching:
         trade_stage = "BUILDING / WATCHLIST"
     else:
@@ -787,10 +856,12 @@ def _build_trade_stage_eval(
     return {
         "trade_stage": trade_stage,
         "stage_badge": (
-            "🟢 A+ READY" if trade_stage == "A+ READY"
+            "🟢 A+ READY"         if trade_stage == "A+ READY"
+            else "🔵 B+ TRADEABLE"    if trade_stage == "B+ TRADEABLE"
             else "🟡 BUILDING / WATCHLIST" if trade_stage == "BUILDING / WATCHLIST"
             else "🔴 RANGE / NO TRADE"
         ),
+        "b_plus_tradeable": b_plus_tradeable,
         "location": location,
         "location_percentile": location_pct,
         "structure_quality": structure_quality,
@@ -975,12 +1046,58 @@ def _build_chart_coach(
     }
 
 
+# ── Batch data helpers ────────────────────────────────────────────────────────
+
+def _batch_download(tickers: list, period: str, interval: str) -> dict:
+    """
+    Download OHLCV data for multiple tickers in a single yfinance call.
+    Returns {ticker: DataFrame}.  Falls back gracefully on any per-ticker error.
+    """
+    if not tickers:
+        return {}
+    try:
+        raw = yf.download(
+            tickers, period=period, interval=interval,
+            progress=False, auto_adjust=True, group_by="ticker",
+        )
+    except Exception as e:
+        print(f"[batch_download] error: {e}")
+        return {}
+
+    result: dict = {}
+    single = len(tickers) == 1
+
+    for t in tickers:
+        try:
+            if single:
+                df = raw.copy()
+                if isinstance(df.columns, pd.MultiIndex):
+                    # (PriceType, Ticker) layout — drop the ticker level
+                    df.columns = df.columns.get_level_values(0)
+            else:
+                df = raw[t].copy()  # group_by='ticker' gives (Ticker, PriceType)
+            df = df.dropna(how="all")
+            if len(df) >= 10:
+                result[t] = df
+        except Exception:
+            pass
+
+    return result
+
+
 # ── Main Analysis ─────────────────────────────────────────────────────────────
 
-def analyze_ticker(ticker: str) -> Optional[dict]:
+def analyze_ticker(
+    ticker: str,
+    _daily_df: Optional[pd.DataFrame] = None,
+    _weekly_df: Optional[pd.DataFrame] = None,
+) -> Optional[dict]:
     try:
-        raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
-        df  = _flatten_columns(raw)
+        if _daily_df is not None:
+            df = _flatten_columns(_daily_df.copy())
+        else:
+            raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+            df  = _flatten_columns(raw)
 
         if len(df) < 50:
             return None
@@ -1049,8 +1166,11 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
         choch_block = False
         if trend in ("LONG", "SHORT"):
             # Weekly EMA context (informational only — not a hard block)
-            w_raw = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
-            weekly = _flatten_columns(w_raw).astype(float)
+            if _weekly_df is not None:
+                weekly = _flatten_columns(_weekly_df.copy()).astype(float)
+            else:
+                w_raw = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
+                weekly = _flatten_columns(w_raw).astype(float)
             if len(weekly) >= 50:
                 w_close = weekly["Close"]
                 w_e20 = float(w_close.ewm(span=20, adjust=False).mean().iloc[-1])
@@ -1068,7 +1188,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             structure, struct_reasons = _market_structure(
                 htf_swings, price, df, macro_bias=macro_bias, window_high=window_high
             )
-            choch, choch_reason, bearish_choch_lvl = _detect_choch(htf_swings, trend)
+            choch, choch_reason, bearish_choch_lvl, bullish_choch_lvl, choch_bar_idx = _detect_choch(htf_swings, trend)
 
             # Update structure label if CHoCH overrides the vote
             if bearish_choch_lvl is not None and price < bearish_choch_lvl:
@@ -1087,12 +1207,25 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 print(f"  {r}")
             print(f"  choch: {choch_reason}")
 
-            # Hard block: CHoCH direction conflicts with signal
-            choch_block = bool(choch and trend in ("LONG", "SHORT"))
+            # Price-based CHoCH block: only suppress if price has NOT cleared the CHoCH level.
+            # A bearish CHoCH that price has already recovered above is no longer blocking.
+            # A bullish CHoCH that price has already fallen below is no longer blocking.
             if choch and trend == "LONG":
-                print(f"[{ticker}] bearish CHoCH conflict — LONG marked no trade")
-            if choch and trend == "SHORT":
-                print(f"[{ticker}] bullish CHoCH conflict — SHORT marked no trade")
+                # Bearish CHoCH blocks longs only while price <= the broken swing-low level
+                choch_block = bearish_choch_lvl is not None and price <= bearish_choch_lvl
+                if choch and not choch_block:
+                    print(f"[{ticker}] bearish CHoCH present but price ${price:.2f} > CHoCH level ${bearish_choch_lvl:.2f} — not blocking")
+                elif choch_block:
+                    print(f"[{ticker}] bearish CHoCH conflict — LONG marked no trade")
+            elif choch and trend == "SHORT":
+                # Bullish CHoCH blocks shorts only while price >= the broken swing-high level
+                choch_block = bullish_choch_lvl is not None and price >= bullish_choch_lvl
+                if choch and not choch_block:
+                    print(f"[{ticker}] bullish CHoCH present but price ${price:.2f} < CHoCH level ${bullish_choch_lvl:.2f} — not blocking")
+                elif choch_block:
+                    print(f"[{ticker}] bullish CHoCH conflict — SHORT marked no trade")
+            else:
+                choch_block = False
 
             struct_label = (
                 ("🔴 Bearish ChoCH" if trend == "LONG" else "🟢 Bullish ChoCH") if choch
@@ -1136,7 +1269,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             macro_conflict=macro_block,
             context_conflict=choch_block,
         )
-        if trade_eval["no_trade_reasons"]:
+        if trade_eval["no_trade_reasons"] and not trade_eval.get("b_plus_tradeable"):
             quality = _cap_quality_to_c(quality, "Strict scout rules cap this at C.")
         if macro_block or choch_block:
             reason = "Macro/CHoCH conflict caps this at C."
@@ -1149,6 +1282,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 trade_eval["coaching"].append("Wait for structure to realign after the CHoCH.")
             trade_eval["trade_stage"] = "RANGE / NO TRADE"
             trade_eval["a_plus_ready"] = False
+            trade_eval["b_plus_tradeable"] = False
 
         # ── Near-miss: has direction but setup is incomplete ──────────────────
         if trend == "NEUTRAL" or not bos_confirmed or (not in_ob and not near_ob):
@@ -1229,7 +1363,7 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
             macro_conflict=macro_block,
             context_conflict=choch_block,
         )
-        if trade_eval["no_trade_reasons"]:
+        if trade_eval["no_trade_reasons"] and not trade_eval.get("b_plus_tradeable"):
             quality = _cap_quality_to_c(quality, "Strict scout rules cap this at C.")
         if macro_block or choch_block:
             reason = "Macro/CHoCH conflict caps this at C."
@@ -1242,10 +1376,11 @@ def analyze_ticker(ticker: str) -> Optional[dict]:
                 trade_eval["coaching"].append("Wait for structure to realign after the CHoCH.")
             trade_eval["trade_stage"] = "RANGE / NO TRADE"
             trade_eval["a_plus_ready"] = False
+            trade_eval["b_plus_tradeable"] = False
 
-        # Keep this scanner as a scout: do not publish generated entry/option
-        # levels unless all A+ readiness rules are satisfied.
-        if not trade_eval["a_plus_ready"]:
+        # Gate: only publish entry/option levels for A+ or B+ tradeable setups.
+        # Everything else stays in near-miss / DEVELOPING.
+        if not trade_eval["a_plus_ready"] and not trade_eval.get("b_plus_tradeable"):
             return {
                 "ticker":        ticker,
                 "direction":     trend,
@@ -1416,7 +1551,7 @@ def debug_ticker(ticker: str) -> dict:
         structure, struct_reasons = _market_structure(
             htf_swings, price, df, macro_bias=macro_bias, window_high=window_high
         )
-        choch, choch_reason, bearish_choch_lvl = _detect_choch(htf_swings, trend)
+        choch, choch_reason, bearish_choch_lvl, bullish_choch_lvl, choch_bar_idx = _detect_choch(htf_swings, trend)
         if bearish_choch_lvl is not None and price < bearish_choch_lvl:
             structure = "bearish"
         elif "bearish CHoCH" in choch_reason:
@@ -1451,16 +1586,32 @@ def debug_ticker(ticker: str) -> dict:
     return out
 
 
-def scan_all(watchlist: list = WATCHLIST) -> tuple:
+def scan_all(watchlist: list = WATCHLIST, max_workers: int = 12) -> tuple:
+    # ── Step 1: batch-download all OHLCV data (2 network calls total) ─────────
+    daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
+    weekly_data = _batch_download(watchlist, period="2y",  interval="1wk")
+
+    # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
     rows, near_miss = [], []
-    for ticker in watchlist:
-        r = analyze_ticker(ticker)
-        if r is None:
-            continue
-        if r.get("setup_status") == "QUALIFIED":
-            rows.append(r)
-        else:
-            near_miss.append(r)
+
+    def _process(ticker: str):
+        return analyze_ticker(
+            ticker,
+            _daily_df=daily_data.get(ticker),
+            _weekly_df=weekly_data.get(ticker),
+        )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_process, t): t for t in watchlist}
+        for future in as_completed(futures):
+            r = future.result()
+            if r is None:
+                continue
+            if r.get("setup_status") == "QUALIFIED":
+                rows.append(r)
+            else:
+                near_miss.append(r)
+
     rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
     near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
     return rows, near_miss
