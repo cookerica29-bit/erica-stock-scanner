@@ -211,6 +211,14 @@
   .priority-row:hover { background: var(--surface2); }
   .priority-ticker { color: var(--text); font-weight: 800; letter-spacing: 0.05em; }
   .priority-chip { color: var(--muted); font-size: 11px; }
+  .priority-alert-indicator {
+    animation: priorityBellPulse 1.4s ease-in-out infinite;
+    margin-left: auto;
+  }
+  @keyframes priorityBellPulse {
+    0%, 100% { opacity: 0.65; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.14); }
+  }
   .priority-green { color: var(--long); }
   .priority-yellow { color: #fbbf24; }
   .priority-red { color: var(--short); }
@@ -1090,9 +1098,9 @@ function handleAPlusReadyAlert(alert) {
   const direction = setup?.direction || '';
   const isAPlus = type === 'aplus';
 
-  const message = isAPlus
+  const message = alert.customMessage || (isAPlus
     ? `🔥 ${ticker} → A+ READY ${direction} ${price}`
-    : `🔵 ${ticker} → B+ TRADEABLE ${direction} ${price}`;
+    : `🔵 ${ticker} → B+ TRADEABLE ${direction} ${price}`);
 
   console.log(`[${currentStage}] ${message}`, setup);
   playAlertSound(type);
@@ -1302,6 +1310,87 @@ function priorityRrInfo(setup) {
   };
 }
 
+function priorityAlertRecentlySent(key) {
+  try {
+    const last = Number(localStorage.getItem(key));
+    return Number.isFinite(last) && Date.now() - last < 4 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
+
+function markPriorityAlertSent(key) {
+  try { localStorage.setItem(key, Date.now()); } catch {}
+}
+
+function priorityAlertObject(setup, type, customMessage) {
+  return {
+    ticker: setup.ticker,
+    setup,
+    previousStage: setup.trade_eval?.trade_stage,
+    currentStage: setup.trade_eval?.trade_stage,
+    type,
+    customMessage,
+  };
+}
+
+function firePriorityWatchlistAlerts(priority) {
+  const nextRanks = new Map();
+  priority.forEach(({ setup }, index) => {
+    const ticker = String(setup?.ticker || '').trim().toUpperCase();
+    if (!ticker || !setup?.trade_eval) return;
+
+    const rank = index + 1;
+    nextRanks.set(ticker, rank);
+    const missing = setup.trade_eval.missing_for_a_plus || [];
+    const missingCount = missing.length;
+    const clearRoom = setup.trade_eval.room_to_target?.blocked === false;
+    const stage = setup.trade_eval.trade_stage || '';
+    const tf = setup.timeframe ? `${setup.timeframe} ` : '';
+    const direction = setup.direction || '';
+
+    if (missingCount === 0 && stage === 'A+ READY') {
+      const key = `priority_alerted_${ticker}_aplus`;
+      if (!priorityAlertRecentlySent(key)) {
+        handleAPlusReadyAlert(priorityAlertObject(
+          setup,
+          'aplus',
+          `🔥 ${ticker} · ${tf}${direction} — A+ READY`
+        ));
+        markPriorityAlertSent(key);
+      }
+    } else if (missingCount === 1 && clearRoom) {
+      const key = `priority_alerted_${ticker}`;
+      if (!priorityAlertRecentlySent(key)) {
+        handleAPlusReadyAlert(priorityAlertObject(
+          setup,
+          'bplus',
+          `👀 ${ticker} · ${tf}${direction} — 1 away from A+: ${missing[0]}`
+        ));
+        markPriorityAlertSent(key);
+      }
+    }
+
+    let previousRank = NaN;
+    try { previousRank = Number(localStorage.getItem(`priority_rank_${ticker}`)); } catch {}
+    if (rank <= 2 && Number.isFinite(previousRank) && previousRank > rank) {
+      const key = `priority_rank_alerted_${ticker}`;
+      if (!priorityAlertRecentlySent(key)) {
+        handleAPlusReadyAlert(priorityAlertObject(
+          setup,
+          stage === 'A+ READY' ? 'aplus' : 'bplus',
+          `📈 ${ticker} · ${tf}${direction} moved to #${rank} Priority Watchlist`
+        ));
+        markPriorityAlertSent(key);
+      }
+    }
+  });
+
+  nextRanks.forEach((rank, ticker) => {
+    try { localStorage.setItem(`priority_rank_${ticker}`, rank); } catch {}
+  });
+}
+
 function scrollToPriorityCard(ticker) {
   const targetTicker = String(ticker || '').toUpperCase();
   const tickerEls = Array.from(document.querySelectorAll('.card .ticker'));
@@ -1322,6 +1411,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
     box.style.display = 'none';
     return;
   }
+  firePriorityWatchlistAlerts(priority);
 
   box.style.display = 'block';
   box.innerHTML = `
@@ -1338,6 +1428,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
           const missingCount = setup.trade_eval?.missing_for_a_plus?.length ?? 99;
           const isLong = setup.direction === 'LONG';
           const isAPlus = setup.trade_eval?.trade_stage === 'A+ READY';
+          const prioritySignal = isAPlus ? '🔥' : (missingCount === 1 && room.label === 'CLEAR') ? '🔔' : '';
           return `
             <div class="priority-row" onclick="scrollToPriorityCard('${String(setup.ticker || '').replace(/'/g, "\\'")}')">
               <span class="priority-ticker">${isAPlus ? '⭐ ' : ''}${setup.ticker || '—'}</span>
@@ -1347,6 +1438,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
               <span class="priority-chip">${missingCount} missing</span>
               <span class="${room.cls}">${room.label}</span>
               <span class="${rr.cls}">RR: ${rr.label}</span>
+              ${prioritySignal ? `<span class="priority-alert-indicator">${prioritySignal}</span>` : ''}
             </div>`;
         }).join('')}
       </div>
