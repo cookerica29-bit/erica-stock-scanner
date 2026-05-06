@@ -1217,7 +1217,7 @@ function renderCard(s) {
     <div class="card-body">
       <div class="price-row">
         <span class="price-big">$${s.price.toFixed(2)}</span>
-        <span class="price-meta">RSI ${s.rsi} · ATR $${s.atr.toFixed(2)} · ${obLabel}</span>
+        <span class="price-meta">ATR $${s.atr.toFixed(2)} · ${obLabel}</span>
       </div>
       <div class="ind-grid">
         <div class="ind-cell"><div class="ind-label">BOS Level</div><div class="ind-value">$${s.bos_level != null ? s.bos_level.toFixed(2) : '—'}</div></div>
@@ -1280,13 +1280,12 @@ function renderTradeStageBox(ev) {
   const pct = room.percent_to_target != null ? `${room.percent_to_target}%` : '—';
   const rr = room.estimated_rr != null ? `${Number(room.estimated_rr).toFixed(2)}R` : '—';
   const roomText = `${pct} to ${target} · RR ${rr}`;
-  const coaching = (ev.coaching || []).map(x => `<div>${x}</div>`).join('');
   const missing = (ev.missing_for_a_plus || []).map(x => `<div>${x}</div>`).join('');
-  const stageNote =
-    stage === 'A+ READY' ? 'All conditions met — manual review before entry.' :
-    stage === 'B+ TRADEABLE' ? 'Valid B+ setup — BOS + OB + signal confirmed. Review before entry.' :
-    stage === 'BUILDING / WATCHLIST' ? 'Not tradeable yet. Watch closely.' :
-    'Discipline filter: no trade.';
+  const locationText = formatLocationLabel(ev.location, ev.location_percentile);
+  const dispValue = ev.displacement || 'NONE';
+  const dispRow = dispValue !== 'NONE'
+    ? `<div class="stage-metric"><div class="stage-label">Displacement</div><div class="stage-value">${dispValue}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>`
+    : '';
 
   return `
     <div class="stage-box">
@@ -1295,19 +1294,31 @@ function renderTradeStageBox(ev) {
         <div class="stage-pill ${stageCls}">${ev.stage_badge || stage}</div>
       </div>
       <div class="stage-grid">
-        <div class="stage-metric"><div class="stage-label">Location</div><div class="stage-value">${ev.location || 'MIDRANGE'}${ev.location_percentile != null ? ` · ${ev.location_percentile}%` : ''}</div></div>
-        <div class="stage-metric"><div class="stage-label">Structure Quality</div><div class="stage-value">${ev.structure_quality || 'CHOPPY / INTERNAL ONLY'}</div></div>
-        <div class="stage-metric"><div class="stage-label">Displacement</div><div class="stage-value">${ev.displacement || 'NONE'}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>
+        <div class="stage-metric"><div class="stage-label">Location</div><div class="stage-value">${locationText}</div></div>
+        ${dispRow}
         <div class="stage-metric"><div class="stage-label">Setup Type</div><div class="stage-value">${ev.setup_type || 'NONE'}</div></div>
         <div class="stage-metric" style="grid-column:1 / -1;"><div class="stage-label">Room to Target</div><div class="stage-value ${room.blocked ? 'blocked' : ''}">${roomText}${room.blocked ? ' · BLOCKED' : room.clear ? ' · CLEAR' : ''}</div></div>
       </div>
-      <div style="color:var(--muted);font-size:10px;margin:-2px 0 8px;">${stageNote}</div>
       ${missing ? `<div class="missing-box"><div class="missing-box-title">Missing for A+</div>${missing}</div>` : ''}
-      <div class="coaching-box">
-        <strong>What would make this tradeable?</strong>
-        ${coaching || '<div>Wait for a clean premium/discount location, confirmed BOS, displacement, and clear 1:2 room.</div>'}
-      </div>
     </div>`;
+}
+
+function formatLocationLabel(location, percentile) {
+  const pct = Number(percentile);
+  if (Number.isFinite(pct)) {
+    const label = pct >= 70 ? 'PREMIUM' : pct <= 30 ? 'DISCOUNT' : 'MID';
+    const dot = label === 'PREMIUM' ? '🔴' : label === 'DISCOUNT' ? '🟢' : '🟡';
+    return `${dot} ${label} · ${Math.round(pct)}%`;
+  }
+  // fallback: use location string from scanner
+  const fallback = String(location || '').toUpperCase();
+  const dot = (fallback.includes('DISCOUNT') || fallback === 'NEAR DISCOUNT')
+    ? '🟢'
+    : (fallback.includes('PREMIUM') || fallback.includes('EXTREME'))
+    ? '🔴'
+    : '🟡';
+  const label = fallback || 'MID';
+  return `${dot} ${label}`;
 }
 
 function renderCoachBox(q) {
@@ -1326,8 +1337,7 @@ function renderCoachBox(q) {
         <div class="coach-metric"><div class="coach-label">Room</div><div class="coach-value">${q.room_to_target || '—'}</div></div>
       </div>
       <div class="coach-note">${q.coach_note || 'Review structure, location, and reaction before entry.'}</div>
-      <div class="coach-warning">${q.warning || 'No major visual warning.'}</div>
-      <div class="coach-prompt">Training question: ${q.training_prompt || 'What would invalidate this idea?'}</div>
+      ${q.warning && q.warning !== 'No major visual warning.' ? `<div class="coach-warning">${q.warning}</div>` : ''}
     </div>`;
 }
 
@@ -1369,7 +1379,7 @@ function renderNearMissCard(s) {
     <div class="card-body">
       <div class="price-row">
         <span class="price-big">$${s.price.toFixed(2)}</span>
-        <span class="price-meta">RSI ${s.rsi} · ATR $${s.atr.toFixed(2)}</span>
+        <span class="price-meta">ATR $${s.atr.toFixed(2)}</span>
       </div>
       <div class="checklist" style="border-top:none; padding-top:0; margin-bottom:10px;">
         ${ci(hasTrend, `Trend confirmed (${s.trend || 'NEUTRAL'})`)}
