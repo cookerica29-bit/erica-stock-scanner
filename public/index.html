@@ -798,9 +798,15 @@
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
 const SCANNER_JOURNAL_KEY = 'stock_journal';
+const STAGE_CACHE_KEY = 'scanner_stage_cache';
 let scannerRows = [];
 let scannerNearMiss = [];
-let previousTradeStages = new Map();
+let previousTradeStages = (() => {
+  try {
+    const saved = localStorage.getItem(STAGE_CACHE_KEY);
+    return saved ? new Map(JSON.parse(saved)) : new Map();
+  } catch { return new Map(); }
+})();
 let aPlusReadyAlerts = new Set();
 let toastTimer = null;
 
@@ -933,6 +939,7 @@ function clearResults() {
   scannerNearMiss = [];
   previousTradeStages = new Map();
   aPlusReadyAlerts = new Set();
+  try { localStorage.removeItem(STAGE_CACHE_KEY); } catch {}
   document.getElementById('results').innerHTML = '';
   document.getElementById('near-miss-results').innerHTML = '';
   document.getElementById('near-miss-section').style.display = 'none';
@@ -980,6 +987,9 @@ function detectAPlusReadyTransitions(setups) {
   });
 
   previousTradeStages = nextStages;
+  try {
+    localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify([...nextStages]));
+  } catch {}
   return alerts;
 }
 
