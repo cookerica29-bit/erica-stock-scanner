@@ -2,9 +2,12 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 WATCHLIST = [
     # ── Airlines ──────────────────────────────────────────────────────────────
@@ -44,6 +47,48 @@ WATCHLIST = [
     # ── Commodity ETFs ────────────────────────────────────────────────────────
     "GLD", "SLV", "USO", "UNG",
 ]
+
+_finviz_cache = {"tickers": [], "fetched_at": None}
+FINVIZ_CACHE_TTL = timedelta(hours=6)
+
+
+def get_finviz_watchlist() -> list:
+    now = datetime.utcnow()
+    cached_at = _finviz_cache.get("fetched_at")
+    if cached_at and now - cached_at < FINVIZ_CACHE_TTL:
+        return list(dict.fromkeys([*_finviz_cache.get("tickers", []), *WATCHLIST]))[:200]
+
+    try:
+        from finvizfinance.screener.overview import Overview
+
+        screener = Overview()
+        filters = {
+            "Market Cap.": "+Mid (over $2bln)",
+            "Average Volume": "Over 1M",
+            "Price": "Over $10",
+            "Country": "USA",
+            "Industry": "Stocks only (ex-Funds)",
+        }
+        try:
+            screener.set_filter(filters_dict=filters)
+        except Exception:
+            filters["Type"] = "Stock only"
+            screener.set_filter(filters_dict=filters)
+
+        df = screener.screener_view()
+        tickers = []
+        if df is not None and not df.empty and "Ticker" in df.columns:
+            tickers = [
+                str(t).strip().upper()
+                for t in df["Ticker"].head(150).tolist()
+                if str(t).strip()
+            ]
+        _finviz_cache["tickers"] = tickers[:150]
+        _finviz_cache["fetched_at"] = now
+        return list(dict.fromkeys([*tickers, *WATCHLIST]))[:200]
+    except Exception as e:
+        logger.error(f"[finviz] watchlist fetch failed: {e}")
+        return list(WATCHLIST)
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -136,6 +181,7 @@ def _get_trend(swings: list) -> str:
 
 def _detect_bos(df: pd.DataFrame, swings: list, direction: str, lookback: int = 40):
     n        = len(df)
+    opens    = df["Open"].values
     closes   = df["Close"].values
     highs_sw = [s for s in swings if s["type"] == "high"]
     lows_sw  = [s for s in swings if s["type"] == "low"]
@@ -144,13 +190,13 @@ def _detect_bos(df: pd.DataFrame, swings: list, direction: str, lookback: int = 
     if direction == "LONG" and len(highs_sw) >= 2:
         prev_high = highs_sw[-2]
         for i in range(max(prev_high["index"] + 1, min_idx), n):
-            if closes[i] > prev_high["price"]:
+            if closes[i] > prev_high["price"] and closes[i] > opens[i]:
                 return True, float(prev_high["price"])
 
     if direction == "SHORT" and len(lows_sw) >= 2:
         prev_low = lows_sw[-2]
         for i in range(max(prev_low["index"] + 1, min_idx), n):
-            if closes[i] < prev_low["price"]:
+            if closes[i] < prev_low["price"] and closes[i] < opens[i]:
                 return True, float(prev_low["price"])
 
     return False, 0.0
@@ -1105,6 +1151,7 @@ def analyze_ticker(
     ticker: str,
     _daily_df: Optional[pd.DataFrame] = None,
     _weekly_df: Optional[pd.DataFrame] = None,
+    timeframe: str = "1D",
 ) -> Optional[dict]:
     try:
         if _daily_df is not None:
@@ -1302,6 +1349,7 @@ def analyze_ticker(
         if trend == "NEUTRAL" or not bos_confirmed or (not in_ob and not near_ob):
             return {
                 "ticker":        ticker,
+                "timeframe":     timeframe,
                 "direction":     trend if trend != "NEUTRAL" else None,
                 "price":         round(price, 2),
                 "atr":           round(atr, 2),
@@ -1397,6 +1445,7 @@ def analyze_ticker(
         if not trade_eval["a_plus_ready"] and not trade_eval.get("b_plus_tradeable"):
             return {
                 "ticker":        ticker,
+                "timeframe":     timeframe,
                 "direction":     trend,
                 "price":         round(price, 2),
                 "atr":           round(atr, 2),
@@ -1423,6 +1472,7 @@ def analyze_ticker(
 
         return {
             "ticker":        ticker,
+            "timeframe":     timeframe,
             "direction":     trend,
             "price":         round(price, 2),
             "atr":           round(atr, 2),
@@ -1600,19 +1650,45 @@ def debug_ticker(ticker: str) -> dict:
     return out
 
 
-def scan_all(watchlist: list = WATCHLIST, max_workers: int = 12) -> tuple:
-    # ── Step 1: batch-download all OHLCV data (2 network calls total) ─────────
+def _setup_rank(result: Optional[dict]) -> tuple:
+    if not result:
+        return (-1, -1, -1, -1)
+    grade_order = {"A+": 6, "A": 5, "B+": 4, "B": 3, "C+": 2, "C": 1, "D": 0}
+    status_rank = 1 if result.get("setup_status") == "QUALIFIED" else 0
+    grade_rank = grade_order.get(result.get("quality", {}).get("grade"), 0)
+    timeframe_rank = 1 if result.get("timeframe") == "1D" else 0
+    score = result.get("quality", {}).get("score", 0)
+    return (status_rank, grade_rank, timeframe_rank, score)
+
+
+def _best_timeframe_result(daily_result: Optional[dict], h4_result: Optional[dict]) -> Optional[dict]:
+    if not daily_result:
+        return h4_result
+    if not h4_result:
+        return daily_result
+    return max([daily_result, h4_result], key=_setup_rank)
+
+
+def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
+    if watchlist is None:
+        watchlist = get_finviz_watchlist()
+    else:
+        watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))[:200]
+
+    # ── Step 1: batch-download all OHLCV data (3 network calls total) ─────────
     daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
     weekly_data = _batch_download(watchlist, period="2y",  interval="1wk")
+    h4_data     = _batch_download(watchlist, period="60d", interval="4h")
 
     # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
     rows, near_miss = [], []
 
     def _process(ticker: str):
-        return analyze_ticker(
+        return scan_ticker(
             ticker,
             _daily_df=daily_data.get(ticker),
             _weekly_df=weekly_data.get(ticker),
+            _h4_df=h4_data.get(ticker, pd.DataFrame()),
         )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1631,5 +1707,30 @@ def scan_all(watchlist: list = WATCHLIST, max_workers: int = 12) -> tuple:
     return rows, near_miss
 
 
-def scan_ticker(ticker: str) -> Optional[dict]:
-    return analyze_ticker(ticker.upper())
+def scan_ticker(
+    ticker: str,
+    _daily_df: Optional[pd.DataFrame] = None,
+    _weekly_df: Optional[pd.DataFrame] = None,
+    _h4_df: Optional[pd.DataFrame] = None,
+) -> Optional[dict]:
+    ticker = ticker.upper()
+    daily_result = analyze_ticker(
+        ticker,
+        _daily_df=_daily_df,
+        _weekly_df=_weekly_df,
+        timeframe="1D",
+    )
+
+    if _h4_df is not None:
+        h4_source = _h4_df
+    else:
+        h4_source = yf.download(ticker, period="60d", interval="4h", progress=False, auto_adjust=True)
+
+    h4_result = analyze_ticker(
+        ticker,
+        _daily_df=h4_source,
+        _weekly_df=_weekly_df,
+        timeframe="4H",
+    )
+
+    return _best_timeframe_result(daily_result, h4_result)

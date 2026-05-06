@@ -29,9 +29,9 @@ def api_scan(tickers: str = Query(default="")):
     """Scan the full watchlist or a custom comma-separated list of tickers."""
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        rows, near_miss = scan_all(watchlist)
     else:
-        watchlist = WATCHLIST
-    rows, near_miss = scan_all(watchlist)
+        rows, near_miss = scan_all()
     return {"rows": rows, "near_miss": near_miss}
 
 
