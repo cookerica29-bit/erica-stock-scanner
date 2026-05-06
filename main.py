@@ -18,7 +18,10 @@ app.mount("/static", StaticFiles(directory="public"), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse("public/index.html")
+    return FileResponse(
+        "public/index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
 
 
 @app.get("/api/scan")
