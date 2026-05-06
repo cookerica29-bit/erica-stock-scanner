@@ -210,6 +210,7 @@
   }
   .priority-row:hover { background: var(--surface2); }
   .priority-ticker { color: var(--text); font-weight: 800; letter-spacing: 0.05em; }
+  .priority-readiness { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: 0.04em; }
   .priority-chip { color: var(--muted); font-size: 11px; }
   .priority-alert-indicator {
     animation: priorityBellPulse 1.4s ease-in-out infinite;
@@ -1310,6 +1311,12 @@ function priorityRrInfo(setup) {
   };
 }
 
+function priorityReadinessLabel(missingCount) {
+  if (missingCount === 0) return '🔥 READY';
+  if (missingCount === 1) return '👀 WATCH';
+  return '🚫 WAIT';
+}
+
 function priorityAlertRecentlySent(key) {
   try {
     const last = Number(localStorage.getItem(key));
@@ -1432,6 +1439,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
           return `
             <div class="priority-row" onclick="scrollToPriorityCard('${String(setup.ticker || '').replace(/'/g, "\\'")}')">
               <span class="priority-ticker">${isAPlus ? '⭐ ' : ''}${setup.ticker || '—'}</span>
+              <span class="priority-readiness">${priorityReadinessLabel(missingCount)}</span>
               ${setup.timeframe ? `<span class="timeframe-badge">${setup.timeframe}</span>` : ''}
               ${setup.direction ? `<span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${setup.direction}</span>` : ''}
               <span class="${loc.cls}">● ${loc.label}</span>
