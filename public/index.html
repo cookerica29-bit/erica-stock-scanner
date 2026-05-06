@@ -187,6 +187,38 @@
     line-height: 1;
     padding: 3px 7px;
   }
+  .priority-watchlist {
+    background: var(--surface);
+    border: 1px solid rgba(251,191,36,0.3);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+  .priority-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+  .priority-title { color: var(--text); font-size: 14px; font-weight: 800; letter-spacing: 0.03em; }
+  .priority-subtitle { color: var(--muted); font-size: 11px; }
+  .priority-list { display: flex; flex-direction: column; gap: 6px; }
+  .priority-row {
+    align-items: center;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 12px;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .priority-row:hover { background: var(--surface2); }
+  .priority-ticker { color: var(--text); font-weight: 800; letter-spacing: 0.05em; }
+  .priority-chip { color: var(--muted); font-size: 11px; }
+  .priority-green { color: var(--long); }
+  .priority-yellow { color: #fbbf24; }
+  .priority-red { color: var(--short); }
+  .priority-muted { color: var(--muted); }
+  .card.priority-card-focus {
+    border-color: rgba(251,191,36,0.8);
+    box-shadow: 0 0 0 1px rgba(251,191,36,0.45), 0 0 24px rgba(251,191,36,0.18);
+  }
   .grade-a { background: rgba(34,197,94,0.14); border-color: rgba(34,197,94,0.35); color: #86efac; }
   .grade-b { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.38); color: #a5b4fc; }
   .grade-c { background: rgba(245,158,11,0.13); border-color: rgba(245,158,11,0.34); color: #fcd34d; }
@@ -546,6 +578,7 @@
     <span id="autoScanCountdown" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>
   </div>
   <main>
+    <div id="priority-watchlist"></div>
     <div id="summary"></div>
     <div id="results"></div>
     <div id="near-miss-section" style="display:none; margin-top:28px;">
@@ -1207,6 +1240,117 @@ function renderScannerResults() {
   } else {
     nmSection.style.display = 'none';
   }
+  renderPriorityWatchlist(scannerRows, scannerNearMiss);
+}
+
+function buildPriorityList(rows, nearMiss) {
+  const pool = [...(rows || []), ...(nearMiss || [])].filter(s => s && s.trade_eval);
+  const scoreSetup = (setup) => {
+    const ev = setup.trade_eval || {};
+    const missingCount = ev.missing_for_a_plus?.length ?? 99;
+    const pct = Number(ev.location_percentile);
+    let locationScore = 50;
+    if (Number.isFinite(pct)) {
+      if ((setup.direction === 'LONG' && pct <= 30) || (setup.direction === 'SHORT' && pct >= 70)) {
+        locationScore = 0;
+      } else if (pct > 30 && pct < 70) {
+        locationScore = 50;
+      } else {
+        locationScore = 100;
+      }
+    }
+    const blockedScore = ev.room_to_target?.blocked ? 75 : 0;
+    const rr = Number(ev.room_to_target?.estimated_rr);
+    const rrBonus = Number.isFinite(rr) ? Math.min(30, Math.round((rr - 1) * 15)) : 0;
+    const grade = setup.quality?.grade;
+    const gradeBonus = grade === 'A+' ? 50 : 0;
+    return (missingCount * 100) + locationScore + blockedScore - rrBonus - gradeBonus;
+  };
+
+  return pool
+    .map(setup => ({ setup, priorityScore: scoreSetup(setup) }))
+    .sort((a, b) => a.priorityScore - b.priorityScore)
+    .slice(0, 5);
+}
+
+function priorityLocationInfo(setup) {
+  const pct = Number(setup.trade_eval?.location_percentile);
+  if (!Number.isFinite(pct)) return { label: 'MID', cls: 'priority-yellow' };
+  const ideal = (setup.direction === 'LONG' && pct <= 30) || (setup.direction === 'SHORT' && pct >= 70);
+  const mid = pct > 30 && pct < 70;
+  const label = pct >= 70 ? 'PREMIUM' : pct <= 30 ? 'DISCOUNT' : 'MID';
+  return {
+    label,
+    cls: ideal ? 'priority-green' : mid ? 'priority-yellow' : 'priority-red',
+  };
+}
+
+function priorityRoomInfo(setup) {
+  const blocked = Boolean(setup.trade_eval?.room_to_target?.blocked);
+  return {
+    label: blocked ? 'BLOCKED' : 'CLEAR',
+    cls: blocked ? 'priority-red' : 'priority-green',
+  };
+}
+
+function priorityRrInfo(setup) {
+  const rr = Number(setup.trade_eval?.room_to_target?.estimated_rr);
+  if (!Number.isFinite(rr)) return { label: '—', cls: 'priority-muted' };
+  return {
+    label: `${rr.toFixed(2)}R`,
+    cls: rr >= 2 ? 'priority-green' : rr >= 1.5 ? 'priority-yellow' : 'priority-red',
+  };
+}
+
+function scrollToPriorityCard(ticker) {
+  const targetTicker = String(ticker || '').toUpperCase();
+  const tickerEls = Array.from(document.querySelectorAll('.card .ticker'));
+  const tickerEl = tickerEls.find(el => el.textContent.trim().toUpperCase() === targetTicker);
+  const card = tickerEl?.closest('.card');
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.add('priority-card-focus');
+  setTimeout(() => card.classList.remove('priority-card-focus'), 1800);
+}
+
+function renderPriorityWatchlist(rows, nearMiss) {
+  const box = document.getElementById('priority-watchlist');
+  if (!box) return;
+  const priority = buildPriorityList(rows, nearMiss);
+  if (!priority.length) {
+    box.innerHTML = '';
+    box.style.display = 'none';
+    return;
+  }
+
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="priority-watchlist">
+      <div class="priority-head">
+        <div class="priority-title">⭐ Priority Watchlist</div>
+        <div class="priority-subtitle">Top setups closest to A+ — ranked by readiness</div>
+      </div>
+      <div class="priority-list">
+        ${priority.map(({ setup }) => {
+          const loc = priorityLocationInfo(setup);
+          const room = priorityRoomInfo(setup);
+          const rr = priorityRrInfo(setup);
+          const missingCount = setup.trade_eval?.missing_for_a_plus?.length ?? 99;
+          const isLong = setup.direction === 'LONG';
+          const isAPlus = setup.trade_eval?.trade_stage === 'A+ READY';
+          return `
+            <div class="priority-row" onclick="scrollToPriorityCard('${String(setup.ticker || '').replace(/'/g, "\\'")}')">
+              <span class="priority-ticker">${isAPlus ? '⭐ ' : ''}${setup.ticker || '—'}</span>
+              ${setup.timeframe ? `<span class="timeframe-badge">${setup.timeframe}</span>` : ''}
+              ${setup.direction ? `<span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${setup.direction}</span>` : ''}
+              <span class="${loc.cls}">● ${loc.label}</span>
+              <span class="priority-chip">${missingCount} missing</span>
+              <span class="${room.cls}">${room.label}</span>
+              <span class="${rr.cls}">RR: ${rr.label}</span>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
 }
 
 function renderCard(s) {
