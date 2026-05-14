@@ -1346,7 +1346,7 @@ def analyze_ticker(
             trade_eval["b_plus_tradeable"] = False
 
         # ── Near-miss: has direction but setup is incomplete ──────────────────
-        if trend == "NEUTRAL" or not bos_confirmed or (not in_ob and not near_ob):
+        if trend == "NEUTRAL" or not bos_confirmed or ob is None:
             return {
                 "ticker":        ticker,
                 "timeframe":     timeframe,
@@ -1440,9 +1440,9 @@ def analyze_ticker(
             trade_eval["a_plus_ready"] = False
             trade_eval["b_plus_tradeable"] = False
 
-        # Gate: only publish entry/option levels for A+ or B+ tradeable setups.
-        # Everything else stays in near-miss / DEVELOPING.
-        if not trade_eval["a_plus_ready"] and not trade_eval.get("b_plus_tradeable"):
+        # Gate: only send to near-miss if no BOS or no OB — price location no longer blocks.
+        # Setups with BOS + OB show as QUALIFIED regardless of in_ob/near_ob status.
+        if not trade_eval["a_plus_ready"] and not trade_eval.get("b_plus_tradeable") and ob is None:
             return {
                 "ticker":        ticker,
                 "timeframe":     timeframe,
