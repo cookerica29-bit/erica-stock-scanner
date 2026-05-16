@@ -103,6 +103,7 @@
 
   #tickerInput { width: 320px; }
   #gradeFilter, #sortMode { min-width: 150px; }
+  #locationFilter { min-width: 130px; }
 
   button {
     background: var(--accent);
@@ -579,6 +580,13 @@
       <option value="ticker">Sort by ticker</option>
       <option value="direction">Sort by direction</option>
       <option value="price">Sort by price</option>
+    </select>
+    <select id="locationFilter" onchange="renderScannerResults()">
+      <option value="no-mid" selected>Hide MID</option>
+      <option value="all">All locations</option>
+      <option value="premium">Premium only</option>
+      <option value="discount">Discount only</option>
+      <option value="mid">MID only</option>
     </select>
     <button id="scanBtn" onclick="runScan()">Scan</button>
     <button id="autoScanBtn" onclick="toggleAutoScan()" class="btn-secondary">Auto Scan: OFF</button>
@@ -1265,6 +1273,26 @@ function setupRank(s) {
   return gradeRank(s.quality?.grade);
 }
 
+function getLocationBucket(s) {
+  const pct = Number(s.trade_eval?.location_percentile);
+  if (Number.isFinite(pct)) {
+    if (pct >= 70) return 'premium';
+    if (pct <= 30) return 'discount';
+    return 'mid';
+  }
+  const loc = String(s.trade_eval?.location || s.location || '').toUpperCase();
+  if (loc.includes('PREMIUM') || loc.includes('EXTREME')) return 'premium';
+  if (loc.includes('DISCOUNT')) return 'discount';
+  return 'mid';
+}
+
+function passesLocationFilter(s, locFilter) {
+  if (locFilter === 'all') return true;
+  const bucket = getLocationBucket(s);
+  if (locFilter === 'no-mid') return bucket !== 'mid';
+  return bucket === locFilter;
+}
+
 function passesGradeFilter(s, filter) {
   const q = s.quality || {};
   const rank = setupRank(s);
@@ -1294,10 +1322,14 @@ function renderScannerResults() {
   const summary = document.getElementById('summary');
   const filter = document.getElementById('gradeFilter')?.value || 'all';
   const sortMode = document.getElementById('sortMode')?.value || 'quality';
+  const locFilter = document.getElementById('locationFilter')?.value || 'no-mid';
 
-  const rows = sortSetups(scannerRows.filter(s => passesGradeFilter(s, filter)), sortMode);
-  const nearMiss = sortSetups(scannerNearMiss.filter(s => passesGradeFilter(s, filter)), sortMode);
+  const allRows = sortSetups(scannerRows.filter(s => passesGradeFilter(s, filter)), sortMode);
+  const allNearMiss = sortSetups(scannerNearMiss.filter(s => passesGradeFilter(s, filter)), sortMode);
+  const rows = allRows.filter(s => passesLocationFilter(s, locFilter));
+  const nearMiss = allNearMiss.filter(s => passesLocationFilter(s, locFilter));
   const totalVisible = rows.length + nearMiss.length;
+  const totalBeforeLocFilter = allRows.length + allNearMiss.length;
 
   if (rows.length === 0) {
     results.innerHTML = '<div class="empty">No qualified setups match this filter — check Developing section below.</div>';
@@ -1311,7 +1343,10 @@ function renderScannerResults() {
   const bPlus   = rows.filter(s => s.trade_eval?.trade_stage === 'B+ TRADEABLE').length;
   const filterLabel = document.getElementById('gradeFilter')?.selectedOptions?.[0]?.textContent || 'All grades';
   const tierLabel = aPlus > 0 || bPlus > 0 ? ` (${aPlus} A+ · ${bPlus} B+)` : '';
-  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''}${tierLabel} — ${longs} Long, ${shorts} Short · ${filterLabel} · ${totalVisible} total including developing`;
+  const showingLabel = (locFilter !== 'all' && totalBeforeLocFilter !== totalVisible)
+    ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
+    : ` · ${totalVisible} total including developing`;
+  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''}${tierLabel} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel}`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
