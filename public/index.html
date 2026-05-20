@@ -535,6 +535,51 @@
   .analytics-table tr:last-child td { border-bottom: none; }
   .analytics-empty { color: var(--muted); padding: 32px 0; text-align: center; }
 
+  /* ── Trending list panel ───────────────────────────────────────────────── */
+  #trends-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  .trend-head { display:flex; justify-content:space-between; align-items:flex-end; gap:16px; margin-bottom:12px; }
+  .trend-title { color:var(--text); font-size:15px; font-weight:800; letter-spacing:0.06em; text-transform:uppercase; }
+  .trend-refreshed { color:var(--muted); font-size:11px; }
+  .trend-note {
+    background:rgba(99,102,241,0.09);
+    border:1px solid rgba(99,102,241,0.24);
+    border-radius:8px;
+    color:#c7d2fe;
+    font-size:12px;
+    font-weight:700;
+    margin-bottom:14px;
+    padding:10px 12px;
+  }
+  .trend-table-wrap { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow-x:auto; }
+  .trend-table { width:100%; border-collapse:collapse; font-size:12px; min-width:980px; }
+  .trend-table th {
+    background:var(--surface2);
+    border-bottom:1px solid var(--border);
+    color:var(--muted);
+    font-size:10px;
+    font-weight:800;
+    letter-spacing:0.08em;
+    padding:9px 10px;
+    text-align:left;
+    text-transform:uppercase;
+  }
+  .trend-table td { border-bottom:1px solid rgba(42,48,64,0.75); padding:10px; vertical-align:top; }
+  .trend-table tr:last-child td { border-bottom:none; }
+  .trend-status {
+    border-radius:99px;
+    display:inline-flex;
+    font-size:10px;
+    font-weight:900;
+    letter-spacing:0.04em;
+    padding:4px 8px;
+    text-transform:uppercase;
+    white-space:nowrap;
+  }
+  .trend-status.strong { background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.35); color:#86efac; }
+  .trend-status.developing { background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.35); color:#fcd34d; }
+  .trend-status.choppy { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+  .trend-notes { color:#94a3b8; line-height:1.4; white-space:normal; }
+
   /* ── Spinner ───────────────────────────────────────────────────────────── */
   .spinner {
     display: inline-block; width: 14px; height: 14px;
@@ -559,6 +604,7 @@
 
 <div class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
+  <button class="tab-btn" onclick="switchTab('trends')">Trending List</button>
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
 </div>
@@ -605,6 +651,46 @@
       <div id="near-miss-results" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px;"></div>
     </div>
   </main>
+</div>
+
+<!-- ── Trending List Tab ─────────────────────────────────────────────────── -->
+<div id="trends-panel" class="tab-panel">
+  <div class="trend-head">
+    <div class="trend-title">Top 10 Clean Trends</div>
+    <div class="trend-refreshed" id="trendRefreshed">Last refreshed: Never</div>
+  </div>
+  <div class="trend-note">This tab is for manual chart review only. It does not trigger trades.</div>
+  <div class="controls" style="border:1px solid var(--border); border-radius:10px; margin-bottom:14px;">
+    <select id="trendDirection">
+      <option value="all">All directions</option>
+      <option value="bullish">Bullish only</option>
+      <option value="bearish">Bearish only</option>
+    </select>
+    <input type="number" id="trendMinScore" min="0" max="100" step="5" value="0" style="width:130px" />
+    <label class="check-control" style="margin-left:4px;"><input type="checkbox" id="trendHideChoppy" /> Hide choppy</label>
+    <button id="trendScanBtn" onclick="runTrendScan()">Scan Trends</button>
+    <span id="trendStatus" style="color:var(--muted); font-size:11px; margin-left:auto;"></span>
+  </div>
+  <div class="trend-table-wrap">
+    <table class="trend-table">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Direction</th>
+          <th>Score</th>
+          <th>Timeframe</th>
+          <th>Rel Vol</th>
+          <th>ATR Exp</th>
+          <th>Pullback</th>
+          <th>Status</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody id="trendRows">
+        <tr><td colspan="9" style="color:var(--muted); text-align:center; padding:30px;">Click Scan Trends to refresh the list.</td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 
 <!-- ── Journal Tab ───────────────────────────────────────────────────────── -->
@@ -1021,14 +1107,69 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
+  const tabs = ['scanner','trends','journal','analytics'];
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    b.classList.toggle('active', ['scanner','journal','analytics'][i] === tab);
+    b.classList.toggle('active', tabs[i] === tab);
   });
   document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
+  document.getElementById('trends-panel').classList.toggle('active', tab === 'trends');
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
   document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics') renderAnalytics();
+}
+
+// ── Trending List ───────────────────────────────────────────────────────────
+
+function trendStatusClass(status) {
+  if (status === 'Strong Trend') return 'trend-status strong';
+  if (status === 'Developing') return 'trend-status developing';
+  return 'trend-status choppy';
+}
+
+async function runTrendScan() {
+  const btn = document.getElementById('trendScanBtn');
+  const status = document.getElementById('trendStatus');
+  const body = document.getElementById('trendRows');
+  const direction = document.getElementById('trendDirection').value;
+  const minScore = document.getElementById('trendMinScore').value || '0';
+  const hideChoppy = document.getElementById('trendHideChoppy').checked ? 'true' : 'false';
+
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span>Scanning trends...';
+  body.innerHTML = '<tr><td colspan="9" style="color:var(--muted); text-align:center; padding:30px;">Scanning trend universe...</td></tr>';
+
+  try {
+    const url = `${API}/api/trends?direction=${encodeURIComponent(direction)}&min_score=${encodeURIComponent(minScore)}&hide_choppy=${hideChoppy}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const rows = data.rows || [];
+    const refreshed = data.generated_at ? new Date(data.generated_at).toLocaleString() : 'Unknown';
+    document.getElementById('trendRefreshed').textContent = `Last refreshed: ${refreshed}`;
+    status.textContent = `Showing ${rows.length} of top 10`;
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="9" style="color:var(--muted); text-align:center; padding:30px;">No trend candidates matched the filters.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(r => `
+      <tr>
+        <td><strong>${r.ticker}</strong></td>
+        <td>${r.trend_direction}</td>
+        <td><strong>${r.trend_score}</strong></td>
+        <td>${r.timeframe_alignment}</td>
+        <td>${Number(r.relative_volume || 0).toFixed(2)}x</td>
+        <td>${Number(r.atr_expansion || 0).toFixed(2)}x</td>
+        <td>${r.clean_pullback}</td>
+        <td><span class="${trendStatusClass(r.status)}">${r.status}</span></td>
+        <td class="trend-notes">${r.notes || '—'}</td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+    body.innerHTML = '<tr><td colspan="9" style="color:var(--short); text-align:center; padding:30px;">Trend scan failed.</td></tr>';
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── Scanner ──────────────────────────────────────────────────────────────────

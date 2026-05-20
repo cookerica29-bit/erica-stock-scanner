@@ -1,8 +1,9 @@
+from datetime import datetime
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from scanner import scan_all, scan_ticker, debug_ticker, WATCHLIST
+from scanner import scan_all, scan_ticker, debug_ticker, scan_trends, WATCHLIST
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -52,3 +53,15 @@ def api_debug(ticker: str):
 @app.get("/api/watchlist")
 def api_watchlist():
     return {"watchlist": WATCHLIST}
+
+
+@app.get("/api/trends")
+def api_trends(
+    direction: str = Query(default="all"),
+    min_score: int = Query(default=0, ge=0, le=100),
+    hide_choppy: bool = Query(default=False),
+):
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "rows": scan_trends(direction=direction, min_score=min_score, hide_choppy=hide_choppy),
+    }

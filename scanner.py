@@ -48,6 +48,11 @@ WATCHLIST = [
     "GLD", "SLV", "USO", "UNG",
 ]
 
+TRENDING_UNIVERSE = [
+    "IWM", "XLF", "XLE", "SOFI", "PLTR", "HOOD", "AFRM", "RIVN", "AAL",
+    "DAL", "CCL", "AMD", "NVDA", "TSLA", "META", "AMZN", "MSFT", "AAPL",
+]
+
 _finviz_cache = {"tickers": [], "fetched_at": None}
 FINVIZ_CACHE_TTL = timedelta(hours=6)
 
@@ -1143,6 +1148,178 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
             pass
 
     return result
+
+
+# ── Trending list analysis ───────────────────────────────────────────────────
+
+def _atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    prev_close = df["Close"].astype(float).shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+
+def _relative_volume(df: pd.DataFrame, lookback: int = 20) -> float:
+    if df is None or len(df) < lookback + 1:
+        return 0.0
+    current = float(df["Volume"].iloc[-1])
+    avg = float(df["Volume"].iloc[-lookback - 1:-1].mean())
+    return round(current / avg, 2) if avg > 0 else 0.0
+
+
+def _atr_expansion(df: pd.DataFrame) -> float:
+    atr = _atr_series(df).dropna()
+    if len(atr) < 15:
+        return 0.0
+    current = float(atr.iloc[-1])
+    baseline = float(atr.iloc[-15:-1].mean())
+    return round(current / baseline, 2) if baseline > 0 else 0.0
+
+
+def _ema_trend_alignment(df: pd.DataFrame) -> dict:
+    close = df["Close"].astype(float)
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    price = float(close.iloc[-1])
+    e20 = float(ema20.iloc[-1])
+    e50 = float(ema50.iloc[-1])
+    e20_prev = float(ema20.iloc[-5]) if len(ema20) >= 5 else e20
+    bullish = price > e20 > e50 and e20 > e20_prev
+    bearish = price < e20 < e50 and e20 < e20_prev
+    return {
+        "price": price,
+        "ema20": e20,
+        "ema50": e50,
+        "direction": "Bullish" if bullish else "Bearish" if bearish else "Neutral",
+    }
+
+
+def _clean_pullback(df: pd.DataFrame, direction: str, ema: dict) -> bool:
+    if direction == "Neutral" or len(df) < 25:
+        return False
+    recent = df.tail(8)
+    price = ema["price"]
+    e20 = ema["ema20"]
+    e50 = ema["ema50"]
+    if direction == "Bullish":
+        return (
+            float(recent["Low"].min()) <= e20 * 1.015
+            and float(recent["Close"].min()) >= e50 * 0.985
+            and price <= e20 * 1.08
+        )
+    return (
+        float(recent["High"].max()) >= e20 * 0.985
+        and float(recent["Close"].max()) <= e50 * 1.015
+        and price >= e20 * 0.92
+    )
+
+
+def _daily_aligns(df: Optional[pd.DataFrame], direction: str) -> bool:
+    if df is None or len(df) < 55 or direction == "Neutral":
+        return False
+    daily_ema = _ema_trend_alignment(_flatten_columns(df.copy()).astype(float))
+    return daily_ema["direction"] == direction
+
+
+def analyze_trend_ticker(ticker: str, h4_df: Optional[pd.DataFrame] = None, daily_df: Optional[pd.DataFrame] = None) -> Optional[dict]:
+    try:
+        if h4_df is None:
+            h4_df = yf.download(ticker, period="60d", interval="4h", progress=False, auto_adjust=True)
+        df = _flatten_columns(h4_df.copy()).dropna().astype(float)
+        if len(df) < 55:
+            return None
+
+        price = float(df["Close"].iloc[-1])
+        if price < 5:
+            return None
+
+        swings = _find_swings(df, margin=4)
+        structure_trend = _get_trend(swings)
+        ema = _ema_trend_alignment(df)
+        direction = ema["direction"]
+        trend_matches_structure = (
+            (direction == "Bullish" and structure_trend == "LONG")
+            or (direction == "Bearish" and structure_trend == "SHORT")
+        )
+        rel_vol = _relative_volume(df)
+        atr_x = _atr_expansion(df)
+        pullback = _clean_pullback(df, direction, ema)
+        daily_ok = _daily_aligns(daily_df, direction)
+        location, location_pct = _strict_location(price, swings)
+        cleanliness, efficiency = _cleanliness_read(df)
+        choppy = direction == "Neutral" or cleanliness == "Choppy / overlapping" or location == "MIDRANGE"
+
+        ema_score = 25 if direction != "Neutral" else 0
+        structure_score = 25 if trend_matches_structure else 8 if structure_trend != "NEUTRAL" else 0
+        timeframe_score = 15 if daily_ok else 8 if direction != "Neutral" else 0
+        volume_score = min(15, max(0, int((rel_vol - 0.8) / 0.7 * 15))) if rel_vol else 0
+        atr_score = min(15, max(0, int((atr_x - 0.9) / 0.5 * 15))) if atr_x else 0
+        pullback_score = 10 if pullback else 0
+        choppy_penalty = 18 if choppy else 0
+        score = max(0, min(100, ema_score + structure_score + timeframe_score + volume_score + atr_score + pullback_score - choppy_penalty))
+
+        status = "Strong Trend" if score >= 70 and not choppy else "Developing" if score >= 45 and direction != "Neutral" else "Choppy"
+        notes = []
+        if trend_matches_structure:
+            notes.append("4H structure agrees with EMA trend")
+        elif direction == "Neutral":
+            notes.append("No clean EMA20/EMA50 trend stack")
+        else:
+            notes.append(f"Structure reads {structure_trend}")
+        if daily_ok:
+            notes.append("Daily confirms 4H direction")
+        if pullback:
+            notes.append("Controlled pullback near EMA20")
+        if choppy:
+            notes.append("Avoid: choppy or mid-range chart")
+
+        return {
+            "ticker": ticker,
+            "trend_direction": direction,
+            "trend_score": score,
+            "timeframe_alignment": "4H + Daily" if daily_ok else "4H only" if direction != "Neutral" else "Mixed",
+            "relative_volume": rel_vol,
+            "atr_expansion": atr_x,
+            "clean_pullback": "Yes" if pullback else "No",
+            "notes": "; ".join(notes),
+            "status": status,
+            "location": location,
+            "location_percentile": location_pct,
+            "cleanliness": cleanliness,
+            "efficiency": efficiency,
+        }
+    except Exception as e:
+        print(f"[trends] {ticker} error: {e}")
+        return None
+
+
+def scan_trends(direction: str = "all", min_score: int = 0, hide_choppy: bool = False, limit: int = 10) -> list:
+    universe = list(TRENDING_UNIVERSE)
+    h4_data = _batch_download(universe, period="60d", interval="4h")
+    daily_data = _batch_download(universe, period="1y", interval="1d")
+
+    rows = []
+    for ticker in universe:
+        row = analyze_trend_ticker(ticker, h4_data.get(ticker), daily_data.get(ticker))
+        if row:
+            rows.append(row)
+
+    direction = (direction or "all").lower()
+    if direction == "bullish":
+        rows = [r for r in rows if r["trend_direction"] == "Bullish"]
+    elif direction == "bearish":
+        rows = [r for r in rows if r["trend_direction"] == "Bearish"]
+    rows = [r for r in rows if r["trend_score"] >= min_score]
+    if hide_choppy:
+        rows = [r for r in rows if r["status"] != "Choppy"]
+
+    rows.sort(key=lambda r: (-r["trend_score"], r["ticker"]))
+    return rows[:limit]
 
 
 # ── Main Analysis ─────────────────────────────────────────────────────────────
