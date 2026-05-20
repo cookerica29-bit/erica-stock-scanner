@@ -1226,6 +1226,43 @@ def _daily_aligns(df: Optional[pd.DataFrame], direction: str) -> bool:
     return daily_ema["direction"] == direction
 
 
+def _structure_direction_label(structure_trend: str) -> str:
+    if structure_trend == "LONG":
+        return "Bullish"
+    if structure_trend == "SHORT":
+        return "Bearish"
+    return "Neutral"
+
+
+def _resolve_trend_display_direction(ticker: str, ema_direction: str, structure_trend: str) -> tuple:
+    structure_direction = _structure_direction_label(structure_trend)
+    if ema_direction != "Neutral" and ema_direction == structure_direction:
+        return ema_direction, None
+
+    if ema_direction == "Neutral" and structure_direction == "Neutral":
+        return "Neutral", None
+
+    warning = (
+        f"[trends] {ticker} mixed direction: EMA={ema_direction}, "
+        f"structure={structure_direction}; displaying Neutral"
+    )
+    logger.warning(warning)
+    return "Neutral", warning
+
+
+def _validate_trend_direction_notes(ticker: str, direction: str, notes: list) -> Optional[str]:
+    notes_text = " ".join(notes).lower()
+    disagrees = (
+        (direction == "Bullish" and ("bearish" in notes_text or "short" in notes_text))
+        or (direction == "Bearish" and ("bullish" in notes_text or "long" in notes_text))
+    )
+    if not disagrees:
+        return None
+    warning = f"[trends] {ticker} direction/note disagreement: direction={direction}, notes={' | '.join(notes)}"
+    logger.warning(warning)
+    return warning
+
+
 def analyze_trend_ticker(ticker: str, h4_df: Optional[pd.DataFrame] = None, daily_df: Optional[pd.DataFrame] = None) -> Optional[dict]:
     try:
         if h4_df is None:
@@ -1242,6 +1279,7 @@ def analyze_trend_ticker(ticker: str, h4_df: Optional[pd.DataFrame] = None, dail
         structure_trend = _get_trend(swings)
         ema = _ema_trend_alignment(df)
         direction = ema["direction"]
+        display_direction, direction_warning = _resolve_trend_display_direction(ticker, direction, structure_trend)
         trend_matches_structure = (
             (direction == "Bullish" and structure_trend == "LONG")
             or (direction == "Bearish" and structure_trend == "SHORT")
@@ -1263,35 +1301,39 @@ def analyze_trend_ticker(ticker: str, h4_df: Optional[pd.DataFrame] = None, dail
         choppy_penalty = 18 if choppy else 0
         score = max(0, min(100, ema_score + structure_score + timeframe_score + volume_score + atr_score + pullback_score - choppy_penalty))
 
-        status = "Strong Trend" if score >= 70 and not choppy else "Developing" if score >= 45 and direction != "Neutral" else "Choppy"
+        display_choppy = display_direction == "Neutral" or choppy
+        status = "Strong Trend" if score >= 70 and not display_choppy else "Developing" if score >= 45 else "Choppy"
         notes = []
-        if trend_matches_structure:
+        if display_direction != "Neutral":
             notes.append("4H structure agrees with EMA trend")
-        elif direction == "Neutral":
-            notes.append("No clean EMA20/EMA50 trend stack")
+        elif direction_warning:
+            notes.append("EMA trend and 4H structure are mixed; wait for agreement")
         else:
-            notes.append(f"Structure reads {structure_trend}")
-        if daily_ok:
+            notes.append("No clean EMA20/EMA50 trend stack")
+        if daily_ok and display_direction != "Neutral":
             notes.append("Daily confirms 4H direction")
-        if pullback:
+        if pullback and display_direction != "Neutral":
             notes.append("Controlled pullback near EMA20")
         if choppy:
             notes.append("Avoid: choppy or mid-range chart")
+        note_warning = _validate_trend_direction_notes(ticker, display_direction, notes)
+        debug_warning = direction_warning or note_warning
 
         return {
             "ticker": ticker,
-            "trend_direction": direction,
+            "trend_direction": display_direction,
             "trend_score": score,
-            "timeframe_alignment": "4H + Daily" if daily_ok else "4H only" if direction != "Neutral" else "Mixed",
+            "timeframe_alignment": "4H + Daily" if daily_ok and display_direction != "Neutral" else "4H only" if display_direction != "Neutral" else "Mixed",
             "relative_volume": rel_vol,
             "atr_expansion": atr_x,
-            "clean_pullback": "Yes" if pullback else "No",
+            "clean_pullback": "Yes" if pullback and display_direction != "Neutral" else "No",
             "notes": "; ".join(notes),
             "status": status,
             "location": location,
             "location_percentile": location_pct,
             "cleanliness": cleanliness,
             "efficiency": efficiency,
+            "debug_warning": debug_warning,
         }
     except Exception as e:
         print(f"[trends] {ticker} error: {e}")
