@@ -1313,6 +1313,7 @@ async function runScan() {
 
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
+    autoJournalReadySetups([...nextRows, ...nextNearMiss]);
     renderScannerResults();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
@@ -1503,6 +1504,105 @@ function addSetupToScannerJournal(setupJson) {
   entries.push(entry);
   localStorage.setItem(SCANNER_JOURNAL_KEY, JSON.stringify(entries));
   showToast('Saved to journal');
+}
+
+const AUTO_JOURNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+
+function getAutoJournalKey(setup) {
+  const ticker = String(setup?.ticker || '').trim().toUpperCase();
+  const direction = setup?.direction || 'N/A';
+  const timeframe = setup?.timeframe || 'N/A';
+  const entry = setup?.entry == null ? 'N/A' : Number(setup.entry).toFixed(2);
+  return [ticker, direction, timeframe, entry].join('|');
+}
+
+function isSameJournalSetup(entry, setup) {
+  const tickerMatches = String(entry?.ticker || '').trim().toUpperCase() === String(setup?.ticker || '').trim().toUpperCase();
+  const directionMatches = (entry?.direction || 'N/A') === (setup?.direction || 'N/A');
+  const entryMatches = entry?.entry != null && setup?.entry != null && Math.abs(Number(entry.entry) - Number(setup.entry)) < 0.01;
+  const timeframeMatches = !entry?.timeframe || entry.timeframe === 'N/A' || entry.timeframe === (setup?.timeframe || 'N/A');
+  return tickerMatches && directionMatches && entryMatches && timeframeMatches;
+}
+
+function inferEntryType(setup) {
+  const text = `${setup?.trade_eval?.setup_type || ''} ${setup?.quality?.coach_note || ''}`.toLowerCase();
+  if (text.includes('pullback')) return 'Pullback';
+  if (text.includes('breakout') || text.includes('bos')) return 'Breakout';
+  if (text.includes('reversal')) return 'Reversal';
+  if (text.includes('continuation')) return 'Continuation';
+  return 'N/A';
+}
+
+function buildAutoJournalEntry(setup) {
+  const ev = setup?.trade_eval || {};
+  const option = setup?.option || {};
+  const createdAt = new Date().toISOString();
+  return {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    date: createdAt.slice(0, 10),
+    createdAt,
+    updatedAt: createdAt,
+    autoJournaled: true,
+    autoJournalKey: getAutoJournalKey(setup),
+    ticker: setup?.ticker || '',
+    direction: setup?.direction || 'N/A',
+    timeframe: setup?.timeframe || 'N/A',
+    scannerStatus: 'READY',
+    trendScore: setup?.quality?.score ?? null,
+    trendState: setup?.structureLabel || setup?.trend || '',
+    entryType: inferEntryType(setup),
+    relativeVolume: setup?.relative_volume ?? null,
+    atrExpansion: setup?.atr_expansion ?? null,
+    setupNotes: setup?.quality?.coach_note || 'Auto-journaled READY scanner candidate',
+    option: option.symbol || '',
+    expiry: option.expiry || '',
+    strike: option.strike ?? null,
+    optionType: option.type || (setup?.direction === 'LONG' ? 'CALL' : setup?.direction === 'SHORT' ? 'PUT' : 'N/A'),
+    askAtSelection: option.ask ?? null,
+    bidAskSpread: option.spread ?? option.spread_pct ?? null,
+    openInterest: option.open_interest ?? null,
+    optionVolume: option.volume ?? null,
+    entry: setup?.entry ?? null,
+    plannedStop: setup?.sl ?? null,
+    plannedTp1: setup?.tp1 ?? null,
+    plannedTp2: setup?.tp2 ?? null,
+    plannedTp3: setup?.tp3 ?? null,
+    exit: null,
+    pnl: null,
+    pnlPct: null,
+    rResult: null,
+    contracts: 1,
+    result: 'Open',
+    outcome: 'Open',
+    directionCorrect: 'Pending',
+    entryQuality: 'Pending',
+    reviewResult: 'Pending',
+    notes: '',
+    setupGrade: setup?.quality?.grade || null,
+    setupScore: setup?.quality?.score ?? null,
+  };
+}
+
+function autoJournalReadySetups(setups) {
+  const entries = loadJournal();
+  const now = Date.now();
+  let added = 0;
+  setups.forEach(setup => {
+    if (setup?.trade_eval?.trade_stage !== 'A+ READY') return;
+    const key = getAutoJournalKey(setup);
+    const duplicate = entries.some(entry => {
+      const entryTime = new Date(entry.createdAt || `${entry.date || ''}T00:00:00`).getTime();
+      const sameLegacyDate = !entry.createdAt && entry.date === new Date().toISOString().slice(0, 10);
+      return ((entry.autoJournalKey || getAutoJournalKey(entry)) === key || isSameJournalSetup(entry, setup)) &&
+        (sameLegacyDate || (Number.isFinite(entryTime) && now - entryTime < AUTO_JOURNAL_COOLDOWN_MS));
+    });
+    if (duplicate) return;
+    entries.push(buildAutoJournalEntry(setup));
+    added++;
+  });
+  if (!added) return;
+  saveJournal(entries);
+  showToast(`Auto-journaled ${added} READY setup${added === 1 ? '' : 's'}`);
 }
 
 function showToast(message) {
@@ -2381,7 +2481,7 @@ function saveJournalEntry() {
     if (idx !== -1) entries[idx] = { ...entries[idx], ...updated, updatedAt: new Date().toISOString() };
   } else {
     const createdAt = new Date().toISOString();
-    entries.push({ id: Date.now(), date: createdAt.slice(0, 10), createdAt, updatedAt: createdAt, ...updated });
+    entries.push({ id: Date.now(), date: createdAt.slice(0, 10), createdAt, updatedAt: createdAt, timeframe: _pendingSetup?.timeframe || 'N/A', ...updated });
   }
   saveJournal(entries);
   closeModalDirect();
@@ -2679,9 +2779,9 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','ScannerStatus','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
   const rows = entries.map(e => [
-    e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.scannerStatus || 'WATCH', e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
+    e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
     `"${e.option||''}"`, e.expiry, e.strike ?? '', e.optionType || 'N/A', e.askAtSelection ?? '', e.bidAskSpread ?? '', e.openInterest ?? '', e.optionVolume ?? '',
     e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.pnl ?? '', e.pnlPct ?? '', e.rResult ?? '', e.contracts,
