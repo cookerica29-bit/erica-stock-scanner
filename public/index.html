@@ -684,10 +684,11 @@
           <th>Pullback</th>
           <th>Status</th>
           <th>Notes</th>
+          <th>Review</th>
         </tr>
       </thead>
       <tbody id="trendRows">
-        <tr><td colspan="9" style="color:var(--muted); text-align:center; padding:30px;">Click Scan Trends to refresh the list.</td></tr>
+        <tr><td colspan="10" style="color:var(--muted); text-align:center; padding:30px;">Click Scan Trends to refresh the list.</td></tr>
       </tbody>
     </table>
   </div>
@@ -824,14 +825,91 @@
         <div class="form-row">
           <label>Direction</label>
           <select id="f_direction">
+            <option value="CALL">CALL</option>
+            <option value="PUT">PUT</option>
             <option value="LONG">LONG</option>
             <option value="SHORT">SHORT</option>
+            <option value="N/A">N/A</option>
           </select>
         </div>
+      </div>
+      <div class="form-grid-3">
+        <div class="form-row">
+          <label>Scanner Status</label>
+          <select id="f_scannerStatus">
+            <option value="READY">READY</option>
+            <option value="WATCH">WATCH</option>
+            <option value="NO TRADE">NO TRADE</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Trend Score</label>
+          <input type="number" id="f_trendScore" min="0" max="100" step="1" placeholder="0–100" />
+        </div>
+        <div class="form-row">
+          <label>Trend State</label>
+          <input type="text" id="f_trendState" placeholder="Strong Trend / Developing / Choppy" />
+        </div>
+      </div>
+      <div class="form-grid-3">
+        <div class="form-row">
+          <label>Entry Type</label>
+          <select id="f_entryType">
+            <option value="Pullback">Pullback</option>
+            <option value="Breakout">Breakout</option>
+            <option value="Continuation">Continuation</option>
+            <option value="Reversal">Reversal</option>
+            <option value="N/A">N/A</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Relative Volume</label>
+          <input type="number" id="f_relativeVolume" step="0.01" placeholder="e.g. 1.25" />
+        </div>
+        <div class="form-row">
+          <label>ATR Expansion</label>
+          <input type="number" id="f_atrExpansion" step="0.01" placeholder="e.g. 1.10" />
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Setup Notes</label>
+        <textarea id="f_setupNotes" placeholder="Why did the scanner print this candidate?"></textarea>
       </div>
       <div class="form-row">
         <label>Option Contract</label>
         <input type="text" id="f_option" placeholder="e.g. AAPL MAY 29 $200 C" />
+      </div>
+      <div class="form-grid-3">
+        <div class="form-row">
+          <label>Strike</label>
+          <input type="number" id="f_strike" step="0.01" placeholder="0.00" />
+        </div>
+        <div class="form-row">
+          <label>Call / Put</label>
+          <select id="f_optionType">
+            <option value="CALL">CALL</option>
+            <option value="PUT">PUT</option>
+            <option value="N/A">N/A</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Ask at Selection</label>
+          <input type="number" id="f_askAtSelection" step="0.01" placeholder="0.00" />
+        </div>
+      </div>
+      <div class="form-grid-3">
+        <div class="form-row">
+          <label>Bid / Ask Spread</label>
+          <input type="number" id="f_bidAskSpread" step="0.01" placeholder="0.00" />
+        </div>
+        <div class="form-row">
+          <label>Open Interest</label>
+          <input type="number" id="f_openInterest" step="1" placeholder="0" />
+        </div>
+        <div class="form-row">
+          <label>Option Volume</label>
+          <input type="number" id="f_optionVolume" step="1" placeholder="0" />
+        </div>
       </div>
       <div class="form-grid">
         <div class="form-row">
@@ -841,6 +919,39 @@
         <div class="form-row">
           <label>Contracts</label>
           <input type="number" id="f_contracts" step="1" min="1" value="1" />
+        </div>
+      </div>
+      <div class="form-grid-3">
+        <div class="form-row">
+          <label>Direction Correct?</label>
+          <select id="f_directionCorrect">
+            <option value="Pending">Pending</option>
+            <option value="Yes">Yes</option>
+            <option value="No">No</option>
+            <option value="Unclear">Unclear</option>
+            <option value="N/A">N/A</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Entry Quality</label>
+          <select id="f_entryQuality">
+            <option value="Pending">Pending</option>
+            <option value="Good">Good</option>
+            <option value="Early">Early</option>
+            <option value="Late">Late</option>
+            <option value="N/A">N/A</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Review Result</label>
+          <select id="f_reviewResult">
+            <option value="Pending">Pending</option>
+            <option value="Running">Running</option>
+            <option value="Winner">Winner</option>
+            <option value="Stopped">Stopped</option>
+            <option value="Failed">Failed</option>
+            <option value="Breakeven">Breakeven</option>
+          </select>
         </div>
       </div>
       <div class="form-grid-3">
@@ -1137,7 +1248,7 @@ async function runTrendScan() {
 
   btn.disabled = true;
   status.innerHTML = '<span class="spinner"></span>Scanning trends...';
-  body.innerHTML = '<tr><td colspan="9" style="color:var(--muted); text-align:center; padding:30px;">Scanning trend universe...</td></tr>';
+  body.innerHTML = '<tr><td colspan="10" style="color:var(--muted); text-align:center; padding:30px;">Scanning trend universe...</td></tr>';
 
   try {
     const url = `${API}/api/trends?direction=${encodeURIComponent(direction)}&min_score=${encodeURIComponent(minScore)}&hide_choppy=${hideChoppy}`;
@@ -1148,7 +1259,7 @@ async function runTrendScan() {
     document.getElementById('trendRefreshed').textContent = `Last refreshed: ${refreshed}`;
     status.textContent = `Showing ${rows.length} of top 10`;
     if (!rows.length) {
-      body.innerHTML = '<tr><td colspan="9" style="color:var(--muted); text-align:center; padding:30px;">No trend candidates matched the filters.</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" style="color:var(--muted); text-align:center; padding:30px;">No trend candidates matched the filters.</td></tr>';
       return;
     }
     body.innerHTML = rows.map(r => `
@@ -1162,11 +1273,12 @@ async function runTrendScan() {
         <td>${r.clean_pullback}</td>
         <td><span class="${trendStatusClass(r.status)}">${r.status}</span></td>
         <td class="trend-notes">${r.notes || '—'}</td>
+        <td><button class="btn-log btn-sm" onclick="openTrendReviewModal(decodeURIComponent('${encodeURIComponent(JSON.stringify(r)).replace(/'/g, '%27')}'))">Log Review</button></td>
       </tr>
     `).join('');
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
-    body.innerHTML = '<tr><td colspan="9" style="color:var(--short); text-align:center; padding:30px;">Trend scan failed.</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" style="color:var(--short); text-align:center; padding:30px;">Trend scan failed.</td></tr>';
   } finally {
     btn.disabled = false;
   }
@@ -1993,8 +2105,26 @@ function readShotFile(input, target) {
   reader.readAsDataURL(file);
 }
 
+function scannerStatusFromStage(stage = '') {
+  if (stage === 'A+ READY') return 'READY';
+  if (stage === 'RANGE / NO TRADE') return 'NO TRADE';
+  return 'WATCH';
+}
+
+function openTrendReviewModal(trendJson) {
+  const row = typeof trendJson === 'string' ? JSON.parse(trendJson) : trendJson;
+  openLogModal({
+    ticker: row.ticker,
+    direction: row.trend_direction === 'Bullish' ? 'LONG' : row.trend_direction === 'Bearish' ? 'SHORT' : 'N/A',
+    trendReview: row,
+    trade_eval: { trade_stage: 'BUILDING / WATCHLIST' },
+  });
+}
+
 function openLogModal(setupJson) {
   const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
+  const ev = s.trade_eval || {};
+  const trendReview = s.trendReview || {};
   _editId = null;
   _pendingSetup = s;
   setSetupReviewBox(s);
@@ -2003,6 +2133,19 @@ function openLogModal(setupJson) {
   setValue('f_ticker', s.ticker || '');
   setValue('f_direction', s.direction || 'LONG');
   setValue('f_option', s.option?.symbol || '');
+  setValue('f_scannerStatus', scannerStatusFromStage(ev.trade_stage));
+  setValue('f_trendScore', trendReview.trend_score ?? s.quality?.score ?? '');
+  setValue('f_trendState', trendReview.status || s.structureLabel || s.trend || '');
+  setValue('f_entryType', trendReview.clean_pullback === 'Yes' ? 'Pullback' : 'N/A');
+  setValue('f_relativeVolume', trendReview.relative_volume ?? '');
+  setValue('f_atrExpansion', trendReview.atr_expansion ?? '');
+  setValue('f_setupNotes', trendReview.notes || s.quality?.coach_note || '');
+  setValue('f_strike', s.option?.strike ?? '');
+  setValue('f_optionType', s.option?.type || (s.direction === 'LONG' ? 'CALL' : s.direction === 'SHORT' ? 'PUT' : 'N/A'));
+  setValue('f_askAtSelection', s.option?.ask ?? '');
+  setValue('f_bidAskSpread', s.option?.spread ?? s.option?.spread_pct ?? '');
+  setValue('f_openInterest', s.option?.open_interest ?? '');
+  setValue('f_optionVolume', s.option?.volume ?? '');
   setValue('f_entry', s.entry || '');
   setValue('f_plannedStop', s.sl || '');
   setValue('f_plannedTp1', s.tp1 || '');
@@ -2018,6 +2161,9 @@ function openLogModal(setupJson) {
   setValue('f_tradeQuality', 'Unreviewed');
   setValue('f_followedPlan', 'Unreviewed');
   setValue('f_outcome', 'Open');
+  setValue('f_directionCorrect', 'Pending');
+  setValue('f_entryQuality', 'Pending');
+  setValue('f_reviewResult', 'Pending');
   setValue('f_mistakeType', '');
   setValue('f_notes', '');
   setChecked('f_checkGrade', false);
@@ -2046,6 +2192,19 @@ function openEditModal(id) {
   setValue('f_ticker', entry.ticker || '');
   setValue('f_direction', entry.direction || 'LONG');
   setValue('f_option', entry.option || '');
+  setValue('f_scannerStatus', entry.scannerStatus || 'WATCH');
+  setValue('f_trendScore', entry.trendScore ?? '');
+  setValue('f_trendState', entry.trendState || '');
+  setValue('f_entryType', entry.entryType || 'N/A');
+  setValue('f_relativeVolume', entry.relativeVolume ?? '');
+  setValue('f_atrExpansion', entry.atrExpansion ?? '');
+  setValue('f_setupNotes', entry.setupNotes || '');
+  setValue('f_strike', entry.strike ?? '');
+  setValue('f_optionType', entry.optionType || 'N/A');
+  setValue('f_askAtSelection', entry.askAtSelection ?? '');
+  setValue('f_bidAskSpread', entry.bidAskSpread ?? '');
+  setValue('f_openInterest', entry.openInterest ?? '');
+  setValue('f_optionVolume', entry.optionVolume ?? '');
   setValue('f_entry', entry.entry ?? '');
   setValue('f_plannedStop', entry.plannedStop ?? '');
   setValue('f_plannedTp1', entry.plannedTp1 ?? '');
@@ -2061,6 +2220,9 @@ function openEditModal(id) {
   setValue('f_tradeQuality', entry.tradeQuality || 'Unreviewed');
   setValue('f_followedPlan', entry.followedPlan || 'Unreviewed');
   setValue('f_outcome', entry.outcome || entry.result || 'Open');
+  setValue('f_directionCorrect', entry.directionCorrect || 'Pending');
+  setValue('f_entryQuality', entry.entryQuality || 'Pending');
+  setValue('f_reviewResult', entry.reviewResult || 'Pending');
   setValue('f_mistakeType', entry.mistakeType || '');
   setValue('f_notes', entry.notes || '');
   setChecked('f_checkGrade', entry.checkGrade);
@@ -2110,13 +2272,14 @@ function recalcTradeMath() {
     maxRisk = accountSize * (riskPct / 100);
     document.getElementById('f_maxRisk').value = maxRisk.toFixed(0);
   }
+  const bullish = dir === 'LONG' || dir === 'CALL';
   if (entry && exit) {
-    const pnl = (dir === 'LONG' ? exit - entry : entry - exit) * contracts * 100;
+    const pnl = (bullish ? exit - entry : entry - exit) * contracts * 100;
     document.getElementById('f_pnl').value = pnl.toFixed(2);
   }
   if (entry && exit && stop && Math.abs(entry - stop) > 0) {
     const risk = Math.abs(entry - stop);
-    const r = dir === 'LONG' ? (exit - entry) / risk : (entry - exit) / risk;
+    const r = bullish ? (exit - entry) / risk : (entry - exit) / risk;
     document.getElementById('f_rResult').value = r.toFixed(2);
   }
   if (entry && stop && maxRisk) {
@@ -2148,7 +2311,20 @@ function saveJournalEntry() {
   const updated = {
     ticker,
     direction: document.getElementById('f_direction').value,
+    scannerStatus: document.getElementById('f_scannerStatus').value,
+    trendScore: parseFloat(document.getElementById('f_trendScore').value) || null,
+    trendState: document.getElementById('f_trendState').value.trim(),
+    entryType: document.getElementById('f_entryType').value,
+    relativeVolume: parseFloat(document.getElementById('f_relativeVolume').value) || null,
+    atrExpansion: parseFloat(document.getElementById('f_atrExpansion').value) || null,
+    setupNotes: document.getElementById('f_setupNotes').value.trim(),
     option:    document.getElementById('f_option').value.trim(),
+    strike: parseFloat(document.getElementById('f_strike').value) || null,
+    optionType: document.getElementById('f_optionType').value,
+    askAtSelection: parseFloat(document.getElementById('f_askAtSelection').value) || null,
+    bidAskSpread: parseFloat(document.getElementById('f_bidAskSpread').value) || null,
+    openInterest: parseInt(document.getElementById('f_openInterest').value) || null,
+    optionVolume: parseInt(document.getElementById('f_optionVolume').value) || null,
     entry:     parseFloat(document.getElementById('f_entry').value)   || null,
     plannedStop: parseFloat(document.getElementById('f_plannedStop').value) || null,
     plannedTp1:  parseFloat(document.getElementById('f_plannedTp1').value)  || null,
@@ -2160,10 +2336,14 @@ function saveJournalEntry() {
     expiry:    document.getElementById('f_expiry').value.trim(),
     result:    document.getElementById('f_result').value,
     pnl:       parseFloat(document.getElementById('f_pnl').value)     || null,
+    pnlPct:    null,
     rResult:   parseFloat(document.getElementById('f_rResult').value) || null,
     tradeQuality: document.getElementById('f_tradeQuality').value,
     followedPlan: document.getElementById('f_followedPlan').value,
     outcome: document.getElementById('f_outcome').value,
+    directionCorrect: document.getElementById('f_directionCorrect').value,
+    entryQuality: document.getElementById('f_entryQuality').value,
+    reviewResult: document.getElementById('f_reviewResult').value,
     mistakeType: document.getElementById('f_mistakeType').value,
     notes: document.getElementById('f_notes').value.trim(),
     checkGrade: document.getElementById('f_checkGrade').checked,
@@ -2175,6 +2355,9 @@ function saveJournalEntry() {
     beforeShot: _beforeShotData,
     afterShot: _afterShotData,
   };
+  updated.pnlPct = updated.entry && updated.exit
+    ? (((updated.direction === 'LONG' || updated.direction === 'CALL') ? updated.exit - updated.entry : updated.entry - updated.exit) / updated.entry) * 100
+    : null;
   if (updated.accountSize) localStorage.setItem('stock_scanner_account_size', updated.accountSize);
   if (updated.riskPct) localStorage.setItem('stock_scanner_risk_pct', updated.riskPct);
   if (_pendingSetup?.quality) {
@@ -2195,9 +2378,10 @@ function saveJournalEntry() {
   const entries = loadJournal();
   if (_editId !== null) {
     const idx = entries.findIndex(e => e.id === _editId);
-    if (idx !== -1) entries[idx] = { ...entries[idx], ...updated };
+    if (idx !== -1) entries[idx] = { ...entries[idx], ...updated, updatedAt: new Date().toISOString() };
   } else {
-    entries.push({ id: Date.now(), date: new Date().toISOString().slice(0, 10), ...updated });
+    const createdAt = new Date().toISOString();
+    entries.push({ id: Date.now(), date: createdAt.slice(0, 10), createdAt, updatedAt: createdAt, ...updated });
   }
   saveJournal(entries);
   closeModalDirect();
@@ -2224,7 +2408,7 @@ function deleteEntry(id) {
 function calcPnlFromLevels(entry) {
   if (!entry.entry || !entry.exit) return entry.pnl ?? null;
   const contracts = entry.contracts || 1;
-  return (entry.direction === 'LONG' ? entry.exit - entry.entry : entry.entry - entry.exit) * contracts * 100;
+  return ((entry.direction === 'LONG' || entry.direction === 'CALL') ? entry.exit - entry.entry : entry.entry - entry.exit) * contracts * 100;
 }
 
 function calcRFromLevels(entry) {
@@ -2232,7 +2416,15 @@ function calcRFromLevels(entry) {
     return entry.rResult ?? null;
   }
   const risk = Math.abs(entry.entry - entry.plannedStop);
-  return entry.direction === 'LONG' ? (entry.exit - entry.entry) / risk : (entry.entry - entry.exit) / risk;
+  return (entry.direction === 'LONG' || entry.direction === 'CALL') ? (entry.exit - entry.entry) / risk : (entry.entry - entry.exit) / risk;
+}
+
+function calcPnlPctFromLevels(entry) {
+  if (!entry.entry || !entry.exit) return entry.pnlPct ?? null;
+  const move = (entry.direction === 'LONG' || entry.direction === 'CALL')
+    ? entry.exit - entry.entry
+    : entry.entry - entry.exit;
+  return (move / entry.entry) * 100;
 }
 
 function updateEntryLifecycle(id, action) {
@@ -2245,11 +2437,13 @@ function updateEntryLifecycle(id, action) {
     e.result = 'Win';
     e.exit = e.plannedTp1 || e.exit;
     e.rResult = e.rResult ?? 2;
+    e.reviewResult = 'Winner';
   } else if (action === 'stop') {
     e.outcome = 'Stop Loss';
     e.result = 'Loss';
     e.exit = e.plannedStop || e.exit;
     e.rResult = -1;
+    e.reviewResult = 'Stopped';
   } else if (action === 'breakeven') {
     e.plannedStop = e.entry || e.plannedStop;
     e.outcome = e.outcome === 'Open' ? 'Open' : e.outcome;
@@ -2259,6 +2453,7 @@ function updateEntryLifecycle(id, action) {
     return;
   }
   e.pnl = calcPnlFromLevels(e);
+  e.pnlPct = calcPnlPctFromLevels(e);
   e.rResult = calcRFromLevels(e);
   entries[idx] = e;
   saveJournal(entries);
@@ -2326,11 +2521,19 @@ function renderJournal() {
       : '<span style="color:var(--muted)">Closed</span>';
     return `
       <tr class="${resultCls}">
-        <td>${e.date}</td>
+        <td>${e.createdAt ? new Date(e.createdAt).toLocaleString() : e.date}</td>
         <td><strong>${e.ticker}</strong></td>
         <td ${dirCls}>${e.direction}</td>
         <td>${e.setupGrade ? `<span class="grade-badge ${gradeClass(e.setupGrade)}">${e.setupGrade}</span>` : '—'}</td>
+        <td>${e.scannerStatus || 'WATCH'}</td>
+        <td>${e.trendScore ?? '—'}<br /><span style="color:var(--muted)">${e.trendState || '—'}</span></td>
+        <td>${e.entryType || 'N/A'}</td>
+        <td>${e.relativeVolume ?? '—'}</td>
+        <td>${e.atrExpansion ?? '—'}</td>
+        <td>${e.setupNotes || '—'}</td>
         <td>${e.option || '—'}</td>
+        <td>${e.strike ?? '—'} ${e.optionType || 'N/A'}<br /><span style="color:var(--muted)">Ask ${e.askAtSelection ?? '—'} · Spr ${e.bidAskSpread ?? '—'}</span></td>
+        <td>${e.openInterest ?? '—'} / ${e.optionVolume ?? '—'}</td>
         <td>${e.entry != null ? '$'+e.entry.toFixed(2) : '—'}</td>
         <td>${e.exit  != null ? '$'+e.exit.toFixed(2)  : '—'}</td>
         <td>${e.rResult != null ? e.rResult.toFixed(2)+'R' : '—'}</td>
@@ -2338,8 +2541,13 @@ function renderJournal() {
         <td>${e.contracts}x</td>
         <td>${e.expiry || '—'}</td>
         <td>${pnlStr}</td>
+        <td>${e.pnlPct != null ? Number(e.pnlPct).toFixed(2)+'%' : '—'}</td>
         <td>${e.tradeQuality || 'Unreviewed'}</td>
         <td>${e.mistakeType || '—'}</td>
+        <td>${e.directionCorrect || 'Pending'}</td>
+        <td>${e.entryQuality || 'Pending'}</td>
+        <td>${e.reviewResult || 'Pending'}</td>
+        <td>${e.notes || '—'}</td>
         <td><span class="result-badge ${badgeCls}">${e.result}</span></td>
         <td>${actions}</td>
         <td style="white-space:nowrap">
@@ -2353,9 +2561,9 @@ function renderJournal() {
     <table class="journal-table">
       <thead>
         <tr>
-          <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Option</th>
+          <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Scanner</th><th>Trend</th><th>Entry Type</th><th>Rel Vol</th><th>ATR Exp</th><th>Setup Notes</th><th>Option</th><th>Strike / Type</th><th>OI / Vol</th>
           <th>Entry</th><th>Exit</th><th>R</th><th>Shots</th><th>Qty</th><th>Expiry</th>
-          <th>P&amp;L</th><th>Quality</th><th>Mistake</th><th>Result</th><th>Manage</th><th></th>
+          <th>P&amp;L</th><th>P&amp;L %</th><th>Quality</th><th>Mistake</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Result</th><th>Review Notes</th><th>Legacy Result</th><th>Manage</th><th></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -2471,15 +2679,15 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['Date','Ticker','Direction','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','Option','Entry','Stop','TP1','Exit','R','Contracts','AccountSize','RiskPct','MaxRisk','Expiry','PnL','ChecklistComplete','BeforeShot','AfterShot','TradeQuality','FollowedPlan','Outcome','Mistake','Notes','Result'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','ScannerStatus','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
   const rows = entries.map(e => [
-    e.date, e.ticker, e.direction, e.setupGrade || '', e.setupScore ?? '',
+    e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.scannerStatus || 'WATCH', e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
-    `"${e.option||''}"`,
-    e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.rResult ?? '', e.contracts,
-    e.accountSize ?? '', e.riskPct ?? '', e.maxRisk ?? '', e.expiry,
-    e.pnl ?? '', checklistComplete(e) ? 'Yes' : 'No', e.beforeShot ? 'Yes' : 'No', e.afterShot ? 'Yes' : 'No',
-    `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
+    `"${e.option||''}"`, e.expiry, e.strike ?? '', e.optionType || 'N/A', e.askAtSelection ?? '', e.bidAskSpread ?? '', e.openInterest ?? '', e.optionVolume ?? '',
+    e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.pnl ?? '', e.pnlPct ?? '', e.rResult ?? '', e.contracts,
+    e.accountSize ?? '', e.riskPct ?? '', e.maxRisk ?? '',
+    checklistComplete(e) ? 'Yes' : 'No', e.beforeShot ? 'Yes' : 'No', e.afterShot ? 'Yes' : 'No',
+    e.directionCorrect || 'Pending', e.entryQuality || 'Pending', e.reviewResult || 'Pending', `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
   ]);
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
   const a = document.createElement('a');
