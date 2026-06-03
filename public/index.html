@@ -771,7 +771,7 @@
 <div class="modal-overlay" id="logModal" onclick="closeModal(event)">
   <div class="modal">
     <div class="modal-header">
-      <h2 id="modal-title">📊 Log Trade</h2>
+      <h2 id="modal-title">Log Review</h2>
       <button class="modal-close" onclick="closeModalDirect()">✕</button>
     </div>
     <div class="modal-body">
@@ -1056,7 +1056,6 @@
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
-const SCANNER_JOURNAL_KEY = 'stock_journal';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
 let scannerRows = [];
 let scannerNearMiss = [];
@@ -1313,7 +1312,7 @@ async function runScan() {
 
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
-    autoJournalReadySetups([...nextRows, ...nextNearMiss]);
+    autoJournalHighQualitySetups([...nextRows, ...nextNearMiss]);
     renderScannerResults();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
@@ -1464,46 +1463,8 @@ function maybeSendBrowserNotification(ticker, message, isAPlus = true) {
   }
 }
 
-function loadScannerJournal() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(SCANNER_JOURNAL_KEY) || '[]');
-    return Array.isArray(saved) ? saved : [];
-  } catch {
-    return [];
-  }
-}
-
-function getSetupRr(setup) {
-  const rr = setup?.trade_eval?.room_to_target?.estimated_rr;
-  return rr == null ? null : Number(rr);
-}
-
-function buildScannerJournalEntry(setup) {
-  const ev = setup?.trade_eval || {};
-  const tradeStage = ev.trade_stage || 'RANGE / NO TRADE';
-  return {
-    timestamp: new Date().toISOString(),
-    ticker: setup?.ticker || '',
-    direction: setup?.direction || '',
-    trade_stage: tradeStage,
-    setup_type: ev.setup_type || '',
-    structure: setup?.structureLabel || ev.structure_quality || setup?.trend || '',
-    price: setup?.price == null ? null : Number(setup.price),
-    rr: getSetupRr(setup),
-    a_plus_ready: tradeStage === 'A+ READY',
-    missing_for_a_plus: Array.isArray(ev.missing_for_a_plus) ? ev.missing_for_a_plus : [],
-    notes: '',
-    outcome: null,
-  };
-}
-
-function addSetupToScannerJournal(setupJson) {
-  const setup = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
-  const entries = loadScannerJournal();
-  const entry = buildScannerJournalEntry(setup);
-  entries.push(entry);
-  localStorage.setItem(SCANNER_JOURNAL_KEY, JSON.stringify(entries));
-  showToast('Saved to journal');
+function isAutoJournalStage(setup) {
+  return ['A+ READY', 'B+ TRADEABLE'].includes(getTradeStage(setup));
 }
 
 const AUTO_JOURNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000;
@@ -1547,13 +1508,13 @@ function buildAutoJournalEntry(setup) {
     ticker: setup?.ticker || '',
     direction: setup?.direction || 'N/A',
     timeframe: setup?.timeframe || 'N/A',
-    scannerStatus: 'READY',
+    scannerStatus: scannerStatusFromStage(ev.trade_stage),
     trendScore: setup?.quality?.score ?? null,
     trendState: setup?.structureLabel || setup?.trend || '',
     entryType: inferEntryType(setup),
     relativeVolume: setup?.relative_volume ?? null,
     atrExpansion: setup?.atr_expansion ?? null,
-    setupNotes: setup?.quality?.coach_note || 'Auto-journaled READY scanner candidate',
+    setupNotes: setup?.quality?.coach_note || `Auto-journaled ${ev.trade_stage || 'stock'} scanner candidate`,
     option: option.symbol || '',
     expiry: option.expiry || '',
     strike: option.strike ?? null,
@@ -1583,12 +1544,12 @@ function buildAutoJournalEntry(setup) {
   };
 }
 
-function autoJournalReadySetups(setups) {
+function autoJournalHighQualitySetups(setups) {
   const entries = loadJournal();
   const now = Date.now();
   let added = 0;
   setups.forEach(setup => {
-    if (setup?.trade_eval?.trade_stage !== 'A+ READY') return;
+    if (!isAutoJournalStage(setup)) return;
     const key = getAutoJournalKey(setup);
     const duplicate = entries.some(entry => {
       const entryTime = new Date(entry.createdAt || `${entry.date || ''}T00:00:00`).getTime();
@@ -1602,7 +1563,7 @@ function autoJournalReadySetups(setups) {
   });
   if (!added) return;
   saveJournal(entries);
-  showToast(`Auto-journaled ${added} READY setup${added === 1 ? '' : 's'}`);
+  showToast(`Auto-journaled ${added} high-quality setup${added === 1 ? '' : 's'}`);
 }
 
 function showToast(message) {
@@ -1992,8 +1953,7 @@ function renderCard(s) {
       </div>
     </div>
     <div class="card-footer">
-      <button class="btn-secondary btn-sm" onclick="addSetupToScannerJournal(decodeURIComponent('${encoded}'))">Add to Journal</button>
-      <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">📊 Log Trade</button>
+      <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">Log Review</button>
     </div>
   </div>`;
 }
@@ -2130,7 +2090,7 @@ function renderNearMissCard(s) {
       </div>
     </div>
     <div class="card-footer">
-      <button class="btn-secondary btn-sm" onclick="addSetupToScannerJournal(decodeURIComponent('${encoded}'))">Add to Journal</button>
+      <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">Log Review</button>
     </div>
   </div>`;
 }
@@ -2228,7 +2188,7 @@ function openLogModal(setupJson) {
   _editId = null;
   _pendingSetup = s;
   setSetupReviewBox(s);
-  document.getElementById('modal-title').textContent   = '📊 Log Trade';
+  document.getElementById('modal-title').textContent   = 'Log Review';
   document.getElementById('modalSaveBtn').textContent  = 'Save Trade';
   setValue('f_ticker', s.ticker || '');
   setValue('f_direction', s.direction || 'LONG');
