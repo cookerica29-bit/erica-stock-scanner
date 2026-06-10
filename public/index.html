@@ -102,7 +102,7 @@
   select option { background: var(--surface2); }
 
   #tickerInput { width: 320px; }
-  #gradeFilter, #sortMode { min-width: 150px; }
+  #entryStatusFilter, #setupStatusFilter, #phaseFilter { min-width: 160px; }
   #locationFilter { min-width: 130px; }
 
   button {
@@ -613,26 +613,33 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
-    <select id="gradeFilter" onchange="renderScannerResults()">
-      <option value="all">All</option>
-      <option value="stage-bplus" selected>B+ TRADEABLE and up</option>
-      <option value="stage-aplus">A+ READY only</option>
-      <option value="bplus">Quality B+ and up</option>
-      <option value="a">Quality A range only</option>
-      <option value="learning">Best learning setups</option>
+    <select id="entryStatusFilter" onchange="renderScannerResults()">
+      <option value="all">All Entry Statuses</option>
+      <option value="Tradeable">Tradeable</option>
+      <option value="Near Entry">Near Entry</option>
+      <option value="Waiting">Waiting</option>
+      <option value="Too Far">Too Far</option>
     </select>
-    <select id="sortMode" onchange="renderScannerResults()">
-      <option value="quality">Sort by quality</option>
-      <option value="ticker">Sort by ticker</option>
-      <option value="direction">Sort by direction</option>
-      <option value="price">Sort by price</option>
+    <select id="setupStatusFilter" onchange="renderScannerResults()">
+      <option value="all">All Setup Statuses</option>
+      <option value="Pullback Active">Pullback Active</option>
+      <option value="Pullback Complete">Pullback Complete</option>
+      <option value="Early Confirmation">Early Confirmation</option>
+      <option value="Strong Confirmation">Strong Confirmation</option>
+      <option value="Trend Resumption Confirmed">Trend Resumption Confirmed</option>
     </select>
     <select id="locationFilter" onchange="renderScannerResults()">
-      <option value="no-mid" selected>Hide MID</option>
-      <option value="all">All locations</option>
-      <option value="premium">Premium only</option>
-      <option value="discount">Discount only</option>
-      <option value="mid">MID only</option>
+      <option value="all">All Locations</option>
+      <option value="discount">Discount</option>
+      <option value="premium">Premium</option>
+      <option value="mid">Mid</option>
+    </select>
+    <select id="phaseFilter" onchange="renderScannerResults()">
+      <option value="all">All Phases</option>
+      <option value="Trend Move">Trend Move</option>
+      <option value="Pullback">Pullback</option>
+      <option value="Recovery">Recovery</option>
+      <option value="Transition">Transition</option>
     </select>
     <button id="scanBtn" onclick="runScan()">Scan</button>
     <button id="autoScanBtn" onclick="toggleAutoScan()" class="btn-secondary">Auto Scan: OFF</button>
@@ -646,7 +653,7 @@
     <div id="results"></div>
     <div id="near-miss-section" style="display:none; margin-top:28px;">
       <div id="near-miss-header" style="color:#6b7280; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid #2a3040;">
-        Scout Cards — Developing / No Trade
+        Scout Cards — Other Setups
       </div>
       <div id="near-miss-results" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px;"></div>
     </div>
@@ -699,34 +706,33 @@
   <div class="journal-stats" id="journalStats"></div>
   <div class="journal-controls">
     <input type="text" id="filterTicker" placeholder="Filter ticker..." style="width:130px" oninput="renderJournal()" />
-    <select id="filterGrade" onchange="renderJournal()">
-      <option value="">All grades</option>
-      <option value="A+">A+</option>
-      <option value="A">A</option>
-      <option value="B+">B+</option>
-      <option value="B">B</option>
-      <option value="C+">C+</option>
-      <option value="C">C</option>
-      <option value="D">D</option>
-      <option value="Untracked">Untracked</option>
+    <select id="journalEntryStatusFilter" onchange="renderJournal()">
+      <option value="">All Entry Statuses</option>
+      <option value="Tradeable">Tradeable</option>
+      <option value="Near Entry">Near Entry</option>
+      <option value="Waiting">Waiting</option>
+      <option value="Too Far">Too Far</option>
     </select>
-    <select id="filterDirection" onchange="renderJournal()">
-      <option value="">All directions</option>
-      <option value="LONG">LONG</option>
-      <option value="SHORT">SHORT</option>
+    <select id="journalSetupStatusFilter" onchange="renderJournal()">
+      <option value="">All Setup Statuses</option>
+      <option value="Pullback Active">Pullback Active</option>
+      <option value="Pullback Complete">Pullback Complete</option>
+      <option value="Early Confirmation">Early Confirmation</option>
+      <option value="Strong Confirmation">Strong Confirmation</option>
+      <option value="Trend Resumption Confirmed">Trend Resumption Confirmed</option>
     </select>
-    <select id="filterResult" onchange="renderJournal()">
-      <option value="">All results</option>
-      <option value="Win">Win</option>
-      <option value="Loss">Loss</option>
-      <option value="Open">Open</option>
+    <select id="journalLocationFilter" onchange="renderJournal()">
+      <option value="">All Locations</option>
+      <option value="Discount">Discount</option>
+      <option value="Premium">Premium</option>
+      <option value="Mid">Mid</option>
     </select>
-    <select id="filterQuality" onchange="renderJournal()">
-      <option value="">All quality</option>
-      <option value="Good Trade">Good Trade</option>
-      <option value="Bad Trade">Bad Trade</option>
-      <option value="Good Idea, Bad Execution">Good Idea, Bad Execution</option>
-      <option value="Unreviewed">Unreviewed</option>
+    <select id="journalPhaseFilter" onchange="renderJournal()">
+      <option value="">All Phases</option>
+      <option value="Trend Move">Trend Move</option>
+      <option value="Pullback">Pullback</option>
+      <option value="Recovery">Recovery</option>
+      <option value="Transition">Transition</option>
     </select>
     <button class="btn-secondary btn-sm" onclick="exportCSV()">Export CSV</button>
     <button class="btn-secondary btn-sm" style="color:var(--short)" onclick="clearJournal()">Clear All</button>
@@ -741,8 +747,8 @@
   <div class="journal-stats" id="analyticsStats"></div>
   <div class="analytics-grid">
     <div class="analytics-card">
-      <h3>By Grade</h3>
-      <div id="analyticsByGrade"></div>
+      <h3>By Entry Status</h3>
+      <div id="analyticsByEntryStatus"></div>
     </div>
     <div class="analytics-card">
       <h3>By Direction</h3>
@@ -753,16 +759,16 @@
       <div id="analyticsByTicker"></div>
     </div>
     <div class="analytics-card">
-      <h3>Review Quality</h3>
-      <div id="analyticsByQuality"></div>
+      <h3>By Setup Status</h3>
+      <div id="analyticsBySetupStatus"></div>
     </div>
     <div class="analytics-card">
       <h3>Mistake Types</h3>
       <div id="analyticsByMistake"></div>
     </div>
     <div class="analytics-card">
-      <h3>Open Trades</h3>
-      <div id="analyticsOpenTrades"></div>
+      <h3>By Phase</h3>
+      <div id="analyticsByPhase"></div>
     </div>
   </div>
 </div>
@@ -1464,7 +1470,11 @@ function maybeSendBrowserNotification(ticker, message, isAPlus = true) {
 }
 
 function isAutoJournalStage(setup) {
-  return setup?.entryStatus === 'Tradeable';
+  const grade = String(setup?.quality?.grade || '').toUpperCase();
+  const legacyBlockedGrade = grade.startsWith('B') || grade.startsWith('C') || grade === 'D';
+  return setup?.entryStatus === 'Tradeable' &&
+    Boolean(setup?.stockTrend || setup?.trendDirection) &&
+    !legacyBlockedGrade;
 }
 
 const AUTO_JOURNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000;
@@ -1514,6 +1524,7 @@ function buildAutoJournalEntry(setup) {
     phase: setup?.stockPhase || setup?.phase || '',
     setupStatus: setup?.stockSetupStatus || setup?.setupStatus || '',
     entryStatus: setup?.entryStatus || '',
+    setupLocation: setup?.stockLocation || setup?.quality?.location || '',
     trendScore: setup?.quality?.score ?? null,
     trendState: setup?.structureLabel || setup?.trend || '',
     entryType: inferEntryType(setup),
@@ -1605,35 +1616,32 @@ function getLocationBucket(s) {
   return 'mid';
 }
 
-function passesLocationFilter(s, locFilter) {
-  if (locFilter === 'all') return true;
-  const bucket = getLocationBucket(s);
-  if (locFilter === 'no-mid') return bucket !== 'mid';
-  return bucket === locFilter;
+function normalizedLocation(value) {
+  const raw = String(value || '').toLowerCase();
+  if (raw.includes('discount')) return 'discount';
+  if (raw.includes('premium')) return 'premium';
+  if (raw.includes('mid')) return 'mid';
+  return raw;
 }
 
-function passesGradeFilter(s, filter) {
-  const q = s.quality || {};
-  const rank = setupRank(s);
-  const stage = s.trade_eval?.trade_stage || 'RANGE / NO TRADE';
-  if (filter === 'stage-bplus') return stage === 'B+ TRADEABLE' || stage === 'A+ READY';
-  if (filter === 'stage-aplus') return stage === 'A+ READY';
-  if (filter === 'a') return rank >= gradeRank('A');
-  if (filter === 'bplus') return rank >= gradeRank('B+');
-  if (filter === 'b' || filter === 'hide-c') return rank >= gradeRank('B');
-  if (filter === 'learning') {
-    return rank >= gradeRank('B') && Boolean(q.warning) && q.warning !== 'No major visual warning; still wait for the chart to confirm the plan.';
-  }
+function setupLocation(s) {
+  return normalizedLocation(s.stockLocation || getLocationBucket(s));
+}
+
+function setupPhase(s) {
+  return s.stockPhase || s.phase || 'Transition';
+}
+
+function setupStatusValue(s) {
+  return s.stockSetupStatus || s.setupStatus || 'Pullback Active';
+}
+
+function passesFrameworkFilters(s, filters) {
+  if (filters.entryStatus !== 'all' && s.entryStatus !== filters.entryStatus) return false;
+  if (filters.setupStatus !== 'all' && setupStatusValue(s) !== filters.setupStatus) return false;
+  if (filters.location !== 'all' && setupLocation(s) !== filters.location) return false;
+  if (filters.phase !== 'all' && setupPhase(s) !== filters.phase) return false;
   return true;
-}
-
-function sortSetups(rows, mode) {
-  return rows.slice().sort((a, b) => {
-    if (mode === 'ticker') return a.ticker.localeCompare(b.ticker);
-    if (mode === 'direction') return `${a.direction || ''}-${a.ticker}`.localeCompare(`${b.direction || ''}-${b.ticker}`);
-    if (mode === 'price') return (b.price || 0) - (a.price || 0);
-    return (b.quality?.score || 0) - (a.quality?.score || 0);
-  });
 }
 
 function entryStatusRank(status) {
@@ -1666,40 +1674,45 @@ function entryStatusSummary(rows) {
 function renderScannerResults() {
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
-  const filter = document.getElementById('gradeFilter')?.value || 'all';
-  const sortMode = document.getElementById('sortMode')?.value || 'quality';
-  const locFilter = document.getElementById('locationFilter')?.value || 'no-mid';
+  const filters = {
+    entryStatus: document.getElementById('entryStatusFilter')?.value || 'all',
+    setupStatus: document.getElementById('setupStatusFilter')?.value || 'all',
+    location: document.getElementById('locationFilter')?.value || 'all',
+    phase: document.getElementById('phaseFilter')?.value || 'all',
+  };
 
-  const allRows = sortSetups(scannerRows.filter(s => passesGradeFilter(s, filter)), sortMode);
-  const allNearMiss = sortSetups(scannerNearMiss.filter(s => passesGradeFilter(s, filter)), sortMode);
-  const rows = sortScannerCardsForDisplay(allRows.filter(s => passesLocationFilter(s, locFilter)));
-  const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesLocationFilter(s, locFilter)));
+  const allRows = scannerRows.slice();
+  const allNearMiss = scannerNearMiss.slice();
+  const rows = sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, filters)));
+  const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, filters)));
   const totalVisible = rows.length + nearMiss.length;
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
   const visibleSetups = [...rows, ...nearMiss];
 
   if (rows.length === 0) {
-    results.innerHTML = '<div class="empty">No qualified setups match this filter — check Developing section below.</div>';
+    results.innerHTML = '<div class="empty">No setups match this filter — check other Scout cards below.</div>';
   } else {
     results.innerHTML = rows.map(renderCard).join('');
   }
 
   const longs   = rows.filter(s => s.direction === 'LONG').length;
   const shorts  = rows.filter(s => s.direction === 'SHORT').length;
-  const aPlus   = rows.filter(s => s.trade_eval?.trade_stage === 'A+ READY').length;
-  const bPlus   = rows.filter(s => s.trade_eval?.trade_stage === 'B+ TRADEABLE').length;
-  const filterLabel = document.getElementById('gradeFilter')?.selectedOptions?.[0]?.textContent || 'All grades';
-  const tierLabel = aPlus > 0 || bPlus > 0 ? ` (${aPlus} A+ · ${bPlus} B+)` : '';
-  const showingLabel = (locFilter !== 'all' && totalBeforeLocFilter !== totalVisible)
+  const filterLabel = [
+    document.getElementById('entryStatusFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('setupStatusFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('locationFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('phaseFilter')?.selectedOptions?.[0]?.textContent,
+  ].filter(Boolean).join(' · ');
+  const showingLabel = totalBeforeLocFilter !== totalVisible
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
     : ` · ${totalVisible} total including developing`;
-  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''}${tierLabel} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel} · ${entryStatusSummary(visibleSetups)}`;
+  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel} · ${entryStatusSummary(visibleSetups)}`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
   const nmHeader = document.getElementById('near-miss-header');
   if (nearMiss.length > 0) {
-    nmHeader.textContent = `Scout Cards — Developing / No Trade (${nearMiss.length})`;
+    nmHeader.textContent = `Scout Cards — Other Setups (${nearMiss.length})`;
     nmResults.innerHTML = nearMiss.map(renderNearMissCard).join('');
     nmSection.style.display = 'block';
   } else {
@@ -2372,7 +2385,7 @@ function saveJournalEntry() {
     updated.setupGrade = _pendingSetup.quality.grade || null;
     updated.setupScore = _pendingSetup.quality.score ?? null;
     updated.setupRawScore = _pendingSetup.quality.raw_score ?? null;
-    updated.setupLocation = _pendingSetup.quality.location || '';
+    updated.setupLocation = _pendingSetup.stockLocation || _pendingSetup.quality.location || '';
     updated.setupCleanliness = _pendingSetup.quality.cleanliness || '';
     updated.setupFreshness = _pendingSetup.quality.freshness || '';
     updated.setupRoom = _pendingSetup.quality.room_to_target || '';
@@ -2472,17 +2485,17 @@ function updateEntryLifecycle(id, action) {
 function renderJournal() {
   const all       = loadJournal();
   const fTicker   = (document.getElementById('filterTicker')?.value   || '').toUpperCase().trim();
-  const fGrade    = document.getElementById('filterGrade')?.value || '';
-  const fDir      = document.getElementById('filterDirection')?.value || '';
-  const fResult   = document.getElementById('filterResult')?.value    || '';
-  const fQuality  = document.getElementById('filterQuality')?.value   || '';
+  const fEntryStatus = document.getElementById('journalEntryStatusFilter')?.value || '';
+  const fSetupStatus = document.getElementById('journalSetupStatusFilter')?.value || '';
+  const fLocation = document.getElementById('journalLocationFilter')?.value || '';
+  const fPhase = document.getElementById('journalPhaseFilter')?.value || '';
 
   const filtered = all.filter(e =>
     (!fTicker  || e.ticker.includes(fTicker)) &&
-    (!fGrade   || (fGrade === 'Untracked' ? !e.setupGrade : e.setupGrade === fGrade)) &&
-    (!fDir     || e.direction === fDir) &&
-    (!fResult  || e.result === fResult) &&
-    (!fQuality || (e.tradeQuality || 'Unreviewed') === fQuality)
+    (!fEntryStatus || e.entryStatus === fEntryStatus) &&
+    (!fSetupStatus || e.setupStatus === fSetupStatus) &&
+    (!fLocation || normalizedLocation(e.setupLocation) === normalizedLocation(fLocation)) &&
+    (!fPhase || e.phase === fPhase)
   );
 
   // Stats (from all, not filtered)
@@ -2514,11 +2527,7 @@ function renderJournal() {
   const rows = filtered.slice().reverse().map(e => {
     const resultCls = e.result === 'Win' ? 'win' : e.result === 'Loss' ? 'loss' : 'open';
     const badgeCls  = e.result === 'Win' ? 'result-win' : e.result === 'Loss' ? 'result-loss' : 'result-open';
-    const pnlStr = e.pnl != null
-      ? `<span class="${e.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${e.pnl >= 0 ? '+' : ''}$${e.pnl.toFixed(2)}</span>`
-      : '<span style="color:var(--muted)">—</span>';
     const dirCls = e.direction === 'LONG' ? 'style="color:var(--long)"' : 'style="color:var(--short)"';
-    const shots = `${e.beforeShot ? `<a class="shot-link" href="${e.beforeShot}" target="_blank">Before</a>` : '—'}${e.afterShot ? ` / <a class="shot-link" href="${e.afterShot}" target="_blank">After</a>` : ''}`;
     const actions = e.result === 'Open'
       ? `<div class="action-stack">
           <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'tp1')">TP1</button>
@@ -2532,36 +2541,15 @@ function renderJournal() {
         <td>${e.createdAt ? new Date(e.createdAt).toLocaleString() : e.date}</td>
         <td><strong>${e.ticker}</strong></td>
         <td ${dirCls}>${e.direction}</td>
-        <td>${e.setupGrade ? `<span class="grade-badge ${gradeClass(e.setupGrade)}">${e.setupGrade}</span>` : '—'}</td>
-        <td>${e.scannerStatus || 'WATCH'}</td>
         <td>${e.trend || '—'}</td>
         <td>${e.setupTf || e.timeframe || '—'}</td>
         <td>${e.phase || '—'}</td>
         <td>${e.setupStatus || '—'}</td>
         <td>${e.entryStatus || '—'}</td>
-        <td>${e.trendScore ?? '—'}<br /><span style="color:var(--muted)">${e.trendState || '—'}</span></td>
-        <td>${e.entryType || 'N/A'}</td>
-        <td>${e.relativeVolume ?? '—'}</td>
-        <td>${e.atrExpansion ?? '—'}</td>
-        <td>${e.setupNotes || '—'}</td>
-        <td>${e.option || '—'}</td>
-        <td>${e.strike ?? '—'} ${e.optionType || 'N/A'}<br /><span style="color:var(--muted)">Ask ${e.askAtSelection ?? '—'} · Spr ${e.bidAskSpread ?? '—'}</span></td>
-        <td>${e.openInterest ?? '—'} / ${e.optionVolume ?? '—'}</td>
-        <td>${e.entry != null ? '$'+e.entry.toFixed(2) : '—'}</td>
-        <td>${e.exit  != null ? '$'+e.exit.toFixed(2)  : '—'}</td>
-        <td>${e.rResult != null ? e.rResult.toFixed(2)+'R' : '—'}</td>
-        <td>${shots}</td>
-        <td>${e.contracts}x</td>
-        <td>${e.expiry || '—'}</td>
-        <td>${pnlStr}</td>
-        <td>${e.pnlPct != null ? Number(e.pnlPct).toFixed(2)+'%' : '—'}</td>
-        <td>${e.tradeQuality || 'Unreviewed'}</td>
-        <td>${e.mistakeType || '—'}</td>
+        <td><span class="result-badge ${badgeCls}">${e.reviewResult || e.result || 'Pending'}</span></td>
         <td>${e.directionCorrect || 'Pending'}</td>
         <td>${e.entryQuality || 'Pending'}</td>
-        <td>${e.reviewResult || 'Pending'}</td>
         <td>${e.notes || '—'}</td>
-        <td><span class="result-badge ${badgeCls}">${e.result}</span></td>
         <td>${actions}</td>
         <td style="white-space:nowrap">
           <button class="edit-btn" onclick="openEditModal(${e.id})">✏️</button>
@@ -2574,9 +2562,7 @@ function renderJournal() {
     <table class="journal-table">
       <thead>
         <tr>
-          <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Scanner</th><th>Trend</th><th>Setup TF</th><th>Phase</th><th>Setup Status</th><th>Entry Status</th><th>Legacy Trend</th><th>Entry Type</th><th>Rel Vol</th><th>ATR Exp</th><th>Setup Notes</th><th>Option</th><th>Strike / Type</th><th>OI / Vol</th>
-          <th>Entry</th><th>Exit</th><th>R</th><th>Shots</th><th>Qty</th><th>Expiry</th>
-          <th>P&amp;L</th><th>P&amp;L %</th><th>Quality</th><th>Mistake</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Result</th><th>Review Notes</th><th>Legacy Result</th><th>Manage</th><th></th>
+          <th>Date</th><th>Ticker</th><th>Direction</th><th>Trend</th><th>Setup TF</th><th>Phase</th><th>Setup Status</th><th>Entry Status</th><th>Result</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Notes</th><th>Manage</th><th></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -2654,37 +2640,36 @@ function renderAnalyticsTable(rows, label = 'Group') {
 function renderAnalytics() {
   const all = loadJournal();
   const closed = all.filter(e => e.result !== 'Open');
-  const withGrade = all.filter(e => e.setupGrade);
   const stats = calcStats(all);
-  const gradeRows = groupStats(withGrade, e => e.setupGrade)
-    .sort((a, b) => gradeRank(b.key) - gradeRank(a.key));
+  const entryStatusRows = groupStats(all, e => e.entryStatus || 'Untracked')
+    .sort((a, b) => entryStatusRank(a.key) - entryStatusRank(b.key));
+  const setupStatusRows = groupStats(all, e => e.setupStatus || 'Untracked')
+    .sort((a, b) => b.trades - a.trades);
   const directionRows = groupStats(all, e => e.direction)
     .sort((a, b) => b.trades - a.trades);
   const tickerRows = groupStats(all, e => e.ticker)
     .sort((a, b) => b.trades - a.trades || b.totalPnl - a.totalPnl)
     .slice(0, 8);
-  const qualityRows = groupStats(all, e => e.tradeQuality || 'Unreviewed')
-    .sort((a, b) => b.trades - a.trades);
   const mistakeRows = groupStats(all.filter(e => e.mistakeType), e => e.mistakeType)
     .sort((a, b) => b.trades - a.trades);
-  const openRows = groupStats(all.filter(e => e.result === 'Open'), e => e.setupGrade || 'Untracked')
-    .sort((a, b) => gradeRank(b.key) - gradeRank(a.key));
+  const phaseRows = groupStats(all, e => e.phase || 'Untracked')
+    .sort((a, b) => phaseRank(a.key) - phaseRank(b.key));
 
   document.getElementById('analyticsStats').innerHTML = `
     <div class="stat-card"><div class="stat-label">Logged Trades</div><div class="stat-value">${all.length}</div></div>
     <div class="stat-card"><div class="stat-label">Closed Trades</div><div class="stat-value">${closed.length}</div></div>
-    <div class="stat-card"><div class="stat-label">Graded Trades</div><div class="stat-value">${withGrade.length}</div></div>
+    <div class="stat-card"><div class="stat-label">Tradeable Logged</div><div class="stat-value">${all.filter(e => e.entryStatus === 'Tradeable').length}</div></div>
     <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value ${stats.winRate == null ? 'muted' : stats.winRate >= 50 ? 'green' : 'red'}">${stats.winRate == null ? '—' : stats.winRate + '%'}</div></div>
     <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value ${stats.totalPnl >= 0 ? 'green' : 'red'}">${money(stats.totalPnl)}</div></div>
     <div class="stat-card"><div class="stat-label">Avg Closed P&amp;L</div><div class="stat-value ${stats.avgPnl >= 0 ? 'green' : 'red'}">${money(stats.avgPnl)}</div></div>
   `;
 
-  document.getElementById('analyticsByGrade').innerHTML = renderAnalyticsTable(gradeRows, 'Grade');
+  document.getElementById('analyticsByEntryStatus').innerHTML = renderAnalyticsTable(entryStatusRows, 'Entry Status');
   document.getElementById('analyticsByDirection').innerHTML = renderAnalyticsTable(directionRows, 'Direction');
   document.getElementById('analyticsByTicker').innerHTML = renderAnalyticsTable(tickerRows, 'Ticker');
-  document.getElementById('analyticsByQuality').innerHTML = renderAnalyticsTable(qualityRows, 'Quality');
+  document.getElementById('analyticsBySetupStatus').innerHTML = renderAnalyticsTable(setupStatusRows, 'Setup Status');
   document.getElementById('analyticsByMistake').innerHTML = renderAnalyticsTable(mistakeRows, 'Mistake');
-  document.getElementById('analyticsOpenTrades').innerHTML = renderAnalyticsTable(openRows, 'Grade');
+  document.getElementById('analyticsByPhase').innerHTML = renderAnalyticsTable(phaseRows, 'Phase');
 }
 
 // ── CSV Export ───────────────────────────────────────────────────────────────
