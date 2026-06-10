@@ -1464,7 +1464,7 @@ function maybeSendBrowserNotification(ticker, message, isAPlus = true) {
 }
 
 function isAutoJournalStage(setup) {
-  return ['A+ READY', 'B+ TRADEABLE'].includes(getTradeStage(setup));
+  return setup?.entryStatus === 'Tradeable';
 }
 
 const AUTO_JOURNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000;
@@ -1509,6 +1509,11 @@ function buildAutoJournalEntry(setup) {
     direction: setup?.direction || 'N/A',
     timeframe: setup?.timeframe || 'N/A',
     scannerStatus: scannerStatusFromStage(ev.trade_stage),
+    trend: setup?.stockTrend || setup?.trendDirection || '',
+    setupTf: setup?.setupTimeframeDirection || setup?.timeframe || '',
+    phase: setup?.stockPhase || setup?.phase || '',
+    setupStatus: setup?.stockSetupStatus || setup?.setupStatus || '',
+    entryStatus: setup?.entryStatus || '',
     trendScore: setup?.quality?.score ?? null,
     trendState: setup?.structureLabel || setup?.trend || '',
     entryType: inferEntryType(setup),
@@ -1631,6 +1636,33 @@ function sortSetups(rows, mode) {
   });
 }
 
+function entryStatusRank(status) {
+  return { 'Tradeable': 0, 'Near Entry': 1, 'Waiting': 2, 'Too Far': 3 }[status] ?? 4;
+}
+
+function phaseRank(phase) {
+  return { 'Trend Move': 0, 'Pullback': 1, 'Recovery': 2, 'Transition': 3 }[phase] ?? 4;
+}
+
+function sortScannerCardsForDisplay(rows) {
+  return rows.slice().sort((a, b) => {
+    const entryDiff = entryStatusRank(a.entryStatus) - entryStatusRank(b.entryStatus);
+    if (entryDiff) return entryDiff;
+    const phaseDiff = phaseRank(a.stockPhase || a.phase) - phaseRank(b.stockPhase || b.phase);
+    if (phaseDiff) return phaseDiff;
+    return String(a.ticker || '').localeCompare(String(b.ticker || ''));
+  });
+}
+
+function entryStatusSummary(rows) {
+  const counts = rows.reduce((acc, row) => {
+    const status = ['Tradeable', 'Near Entry', 'Waiting', 'Too Far'].includes(row.entryStatus) ? row.entryStatus : 'Unknown';
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  return `Tradeable: ${counts.Tradeable || 0} | Near Entry: ${counts['Near Entry'] || 0} | Waiting: ${counts.Waiting || 0} | Too Far: ${counts['Too Far'] || 0}`;
+}
+
 function renderScannerResults() {
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
@@ -1640,10 +1672,11 @@ function renderScannerResults() {
 
   const allRows = sortSetups(scannerRows.filter(s => passesGradeFilter(s, filter)), sortMode);
   const allNearMiss = sortSetups(scannerNearMiss.filter(s => passesGradeFilter(s, filter)), sortMode);
-  const rows = allRows.filter(s => passesLocationFilter(s, locFilter));
-  const nearMiss = allNearMiss.filter(s => passesLocationFilter(s, locFilter));
+  const rows = sortScannerCardsForDisplay(allRows.filter(s => passesLocationFilter(s, locFilter)));
+  const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesLocationFilter(s, locFilter)));
   const totalVisible = rows.length + nearMiss.length;
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
+  const visibleSetups = [...rows, ...nearMiss];
 
   if (rows.length === 0) {
     results.innerHTML = '<div class="empty">No qualified setups match this filter — check Developing section below.</div>';
@@ -1660,7 +1693,7 @@ function renderScannerResults() {
   const showingLabel = (locFilter !== 'all' && totalBeforeLocFilter !== totalVisible)
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
     : ` · ${totalVisible} total including developing`;
-  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''}${tierLabel} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel}`;
+  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''}${tierLabel} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel} · ${entryStatusSummary(visibleSetups)}`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
@@ -1876,122 +1909,111 @@ function renderPriorityWatchlist(rows, nearMiss) {
     </div>`;
 }
 
-function renderCard(s) {
-  const isLong  = s.direction === 'LONG';
-  const c       = s.checklist || {};
-  const q       = s.quality || {};
-  const grade   = q.grade || 'C';
-  const gradeCls = gradeClass(grade);
-  const ci      = (pass, label) =>
-    `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
-  const riskPct = s.entry > 0 ? ((s.risk / s.entry) * 100).toFixed(1) : '—';
-  const encoded = encodeURIComponent(JSON.stringify(s));
-  const obLabel = s.in_ob ? 'Inside OB' : s.near_ob ? 'Near OB' : 'At OB';
-  const coachBox = renderCoachBox(q);
-  const stageBox = renderTradeStageBox(s.trade_eval);
+function fmtMoney(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : '—';
+}
 
-  const isAPlusAlert = aPlusReadyAlerts.has(getStageKey(s));
-  const isBPlusCard  = s.trade_eval?.trade_stage === 'B+ TRADEABLE';
+function fmtNumber(value, decimals = 2) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(decimals) : '—';
+}
+
+function renderScoutMetric(label, value) {
+  return `<div class="ind-cell"><div class="ind-label">${label}</div><div class="ind-value">${value || '—'}</div></div>`;
+}
+
+function statusColor(status) {
+  if (status === 'Tradeable') return 'var(--long)';
+  if (status === 'Near Entry') return '#fbbf24';
+  if (status === 'Too Far') return 'var(--short)';
+  return 'var(--muted)';
+}
+
+function renderCard(s) {
+  const q = s.quality || {};
+  const ev = s.trade_eval || {};
+  const trend = s.stockTrend || s.trendDirection || 'Mixed';
+  const setupTf = s.setupTimeframeDirection || (s.trend === 'LONG' ? 'Bullish' : s.trend === 'SHORT' ? 'Bearish' : 'Mixed');
+  const phase = s.stockPhase || s.phase || 'Transition';
+  const setupStatus = s.stockSetupStatus || s.setupStatus || 'Pullback Active';
+  const setupReason = s.stockSetupStatusReason || s.setupStatusReason || q.coach_note || 'waiting for cleaner structure';
+  const location = s.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
+  const entryStatus = s.entryStatus || 'Waiting';
+  const showLevels = Boolean(s.entryVisible && s.entry != null && s.sl != null && s.tp1 != null);
+  const directionLabel = s.direction || 'N/A';
+  const isLong = directionLabel === 'LONG';
+  const encoded = encodeURIComponent(JSON.stringify(s));
+  const distanceText = s.distanceFromEntryAtr != null
+    ? `${fmtNumber(s.distanceFromEntryAtr)} ATR / ${fmtNumber(s.distanceFromEntryPercent)}% from entry`
+    : 'No actionable entry distance yet';
+  const option = s.option || {};
+  const diagnostics = `
+    <details class="coach-box" style="margin-top:12px;">
+      <summary class="coach-title" style="cursor:pointer;">Details / Diagnostics</summary>
+      <div class="coach-grid" style="margin-top:10px;">
+        <div class="coach-metric"><div class="coach-label">Momentum</div><div class="coach-value">${ev.displacement || 'NONE'}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>
+        <div class="coach-metric"><div class="coach-label">Pullback</div><div class="coach-value">${s.in_ob ? 'Inside demand/supply' : s.near_ob ? 'Near demand/supply' : ev.sweep_taken ? 'Sweep seen' : 'Active'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Confirmation</div><div class="coach-value">${ev.trigger_confirmed ? 'Trigger confirmed' : s.bos_confirmed ? 'BOS confirmed' : ev.rejection_confirmed ? 'Rejection confirmed' : 'Waiting'}</div></div>
+        <div class="coach-metric"><div class="coach-label">BOS / CHoCH</div><div class="coach-value">${s.bos_confirmed ? `BOS ${fmtMoney(s.bos_level)}` : 'No BOS'}${s.structureLabel ? ` · ${s.structureLabel}` : ''}</div></div>
+        <div class="coach-metric"><div class="coach-label">RSI / ATR / EMA</div><div class="coach-value">RSI ${s.rsi ?? '—'} · ATR ${fmtMoney(s.atr)} · EMA20 ${fmtMoney(s.ema20)} · EMA50 ${fmtMoney(s.ema50)}</div></div>
+        <div class="coach-metric"><div class="coach-label">Daily Trend</div><div class="coach-value">${s.dailyTrendDirection || trend}</div></div>
+        <div class="coach-metric"><div class="coach-label">4H Trend</div><div class="coach-value">${s.h4TrendDirection || 'Mixed'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Scanner Status</div><div class="coach-value">${ev.trade_stage || '—'}</div></div>
+      </div>
+      ${option.symbol ? `<div class="option-box" style="margin-top:10px;margin-bottom:0;">
+        <div class="option-label">Suggested Option · ${option.dte || '—'} DTE</div>
+        <div class="option-symbol">${option.symbol}</div>
+        <div class="option-meta">Strike ${fmtMoney(option.strike)} · Expiry ${option.expiry || '—'}</div>
+      </div>` : ''}
+    </details>`;
 
   return `
-  <div class="card ${isAPlusAlert ? 'a-plus-alert' : isBPlusCard ? 'b-plus-alert' : ''}">
+  <div class="card">
     <div class="card-header">
       <div class="ticker-wrap">
         <span class="ticker">${s.ticker}</span>
         ${s.timeframe ? `<span class="timeframe-badge">${s.timeframe}</span>` : ''}
       </div>
       <div class="card-header-right">
-        <span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>
-        ${s.structureLabel ? `<span style="font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(99,102,241,0.13);border:1px solid rgba(99,102,241,0.28);color:#c7d2fe;">${s.structureLabel}</span>` : ''}
-        <span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${s.direction}</span>
+        <span class="badge ${isLong ? 'badge-long' : directionLabel === 'SHORT' ? 'badge-short' : ''}">${directionLabel}</span>
       </div>
     </div>
     <div class="card-body">
       <div class="price-row">
-        <span class="price-big">$${s.price.toFixed(2)}</span>
-        <span class="price-meta">ATR $${s.atr.toFixed(2)} · ${obLabel}</span>
+        <span class="price-big">${fmtMoney(s.price)}</span>
+        <span class="price-meta">Current Price · ATR ${fmtMoney(s.atr)}</span>
       </div>
       <div class="ind-grid">
-        <div class="ind-cell"><div class="ind-label">BOS Level</div><div class="ind-value">$${s.bos_level != null ? s.bos_level.toFixed(2) : '—'}</div></div>
-        <div class="ind-cell"><div class="ind-label">OB High</div><div class="ind-value">$${s.ob_high != null ? s.ob_high.toFixed(2) : '—'}</div></div>
-        <div class="ind-cell"><div class="ind-label">OB Low</div><div class="ind-value">$${s.ob_low != null ? s.ob_low.toFixed(2) : '—'}</div></div>
+        ${renderScoutMetric('Trend', trend)}
+        ${renderScoutMetric('Setup TF', setupTf)}
+        ${renderScoutMetric('Phase', phase)}
+        ${renderScoutMetric('Setup Status', setupStatus)}
+        ${renderScoutMetric('Location', location)}
+        ${renderScoutMetric('Entry Status', `<span style="color:${statusColor(entryStatus)}">${entryStatus}</span>`)}
+        ${renderScoutMetric('Nearest Support / Demand', fmtMoney(s.nearestSupportDemand))}
+        ${renderScoutMetric('Nearest Resistance / Supply', fmtMoney(s.nearestResistanceSupply))}
+        ${renderScoutMetric('Distance', distanceText)}
       </div>
-      ${stageBox}
-      <table class="levels-table">
-        <thead><tr><th>Level</th><th>Price</th><th>R:R</th></tr></thead>
-        <tbody>
-          <tr><td class="level-sl">Stop Loss</td><td class="level-sl">$${s.sl.toFixed(2)}</td><td class="rr">—</td></tr>
-          <tr><td class="level-entry">Entry (OB mid)</td><td class="level-entry">$${s.entry.toFixed(2)}</td><td class="rr">1R = $${s.risk.toFixed(2)} (${riskPct}%)</td></tr>
-          <tr><td class="level-tp">TP1</td><td class="level-tp">$${s.tp1.toFixed(2)}</td><td class="rr">2R</td></tr>
-          <tr><td class="level-tp">TP2</td><td class="level-tp">$${s.tp2.toFixed(2)}</td><td class="rr">3R</td></tr>
-          <tr><td class="level-tp">TP3</td><td class="level-tp">$${s.tp3.toFixed(2)}</td><td class="rr">4R</td></tr>
-        </tbody>
-      </table>
-      <div class="option-box">
-        <div class="option-label">Suggested Option · ${s.option.dte} DTE</div>
-        <div class="option-symbol">${s.option.symbol}</div>
-        <div class="option-meta">Strike $${s.option.strike} · Expiry ${s.option.expiry}</div>
-      </div>
-      ${coachBox}
-      ${s.structureNote ? `<div style="font-size:11px;padding:6px 10px;border-radius:5px;margin-bottom:6px;${
-        s.structureNote.startsWith('✅') ? 'background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.22);color:#86efac;' :
-        s.structureNote.startsWith('⚠️') ? 'background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);color:#fcd34d;' :
-        'background:rgba(99,102,241,0.07);border:1px solid rgba(99,102,241,0.2);color:#c7d2fe;'
-      }">${s.structureNote}</div>` : ''}
-      ${s.macroLabel ? `<div style="font-size:11px;padding:5px 10px;border-radius:5px;margin-bottom:10px;${
-        s.macroBias === 'Macro Bearish' ? 'background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);color:#fca5a5;' :
-        s.macroBias === 'Macro Bullish' ? 'background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.2);color:#86efac;' :
-        'background:rgba(107,114,128,0.08);border:1px solid rgba(107,114,128,0.2);color:#9ca3af;'
-      }">${s.macroLabel}</div>` : ''}
-      <div class="checklist">
-        ${ci(c.trendConfirmed,  'Trend confirmed')}
-        ${ci(c.bosConfirmed,    'BOS confirmed')}
-        ${ci(c.obFound,         'OB identified')}
-        ${ci(c.priceAtOb,       'Price at OB zone')}
-        ${ci(c.structureAligned,'Structure aligned')}
-        ${ci(c.chochClear,      'No counter CHoCH')}
-      </div>
+      <div class="coach-note">${setupReason}</div>
+      ${showLevels ? `
+        <table class="levels-table">
+          <thead><tr><th>Level</th><th>Price</th><th>Context</th></tr></thead>
+          <tbody>
+            <tr><td class="level-entry">Entry</td><td class="level-entry">${fmtMoney(s.entry)}</td><td class="rr">${distanceText}</td></tr>
+            <tr><td class="level-sl">Stop Loss</td><td class="level-sl">${fmtMoney(s.sl)}</td><td class="rr">Planned invalidation</td></tr>
+            <tr><td class="level-tp">TP1</td><td class="level-tp">${fmtMoney(s.tp1)}</td><td class="rr">Initial target</td></tr>
+            ${s.tp2 != null ? `<tr><td class="level-tp">TP2</td><td class="level-tp">${fmtMoney(s.tp2)}</td><td class="rr">Extended target</td></tr>` : ''}
+            ${s.tp3 != null ? `<tr><td class="level-tp">TP3</td><td class="level-tp">${fmtMoney(s.tp3)}</td><td class="rr">Runner target</td></tr>` : ''}
+          </tbody>
+        </table>` :
+        `<div class="coach-warning">Suggested Entry / SL / TP hidden until price is within 0.5 ATR.</div>`}
+      ${diagnostics}
     </div>
     <div class="card-footer">
       <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">Log Review</button>
     </div>
   </div>`;
-}
-
-function renderTradeStageBox(ev) {
-  if (!ev) return '';
-  const room = ev.room_to_target || {};
-  const stage = ev.trade_stage || 'RANGE / NO TRADE';
-  const stageCls =
-    stage === 'A+ READY' ? 'ready' :
-    stage === 'B+ TRADEABLE' ? 'b-plus' :
-    stage === 'RANGE / NO TRADE' ? 'no-trade' :
-    stage === 'BUILDING / WATCHLIST' ? 'forming' : 'confirm';
-  const target = room.target != null ? `$${Number(room.target).toFixed(2)}` : '—';
-  const pct = room.percent_to_target != null ? `${room.percent_to_target}%` : '—';
-  const rr = room.estimated_rr != null ? `${Number(room.estimated_rr).toFixed(2)}R` : '—';
-  const roomText = `${pct} to ${target} · RR ${rr}`;
-  const missing = (ev.missing_for_a_plus || []).map(x => `<div>${x}</div>`).join('');
-  const locationText = formatLocationLabel(ev.location, ev.location_percentile);
-  const dispValue = ev.displacement || 'NONE';
-  const dispRow = dispValue !== 'NONE'
-    ? `<div class="stage-metric"><div class="stage-label">Displacement</div><div class="stage-value">${dispValue}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>`
-    : '';
-
-  return `
-    <div class="stage-box">
-      <div class="stage-head">
-        <div class="stage-title">Trade-Stage Scout</div>
-        <div class="stage-pill ${stageCls}">${ev.stage_badge || stage}</div>
-      </div>
-      <div class="stage-grid">
-        <div class="stage-metric"><div class="stage-label">Location</div><div class="stage-value">${locationText}</div></div>
-        ${dispRow}
-        <div class="stage-metric"><div class="stage-label">Setup Type</div><div class="stage-value">${ev.setup_type || 'NONE'}</div></div>
-        <div class="stage-metric" style="grid-column:1 / -1;"><div class="stage-label">Room to Target</div><div class="stage-value ${room.blocked ? 'blocked' : ''}">${roomText}${room.blocked ? ' · BLOCKED' : room.clear ? ' · CLEAR' : ''}</div></div>
-      </div>
-      ${missing ? `<div class="missing-box"><div class="missing-box-title">Missing for A+</div>${missing}</div>` : ''}
-    </div>`;
 }
 
 function formatLocationLabel(location, percentile) {
@@ -2012,87 +2034,8 @@ function formatLocationLabel(location, percentile) {
   return `${dot} ${label}`;
 }
 
-function renderCoachBox(q) {
-  if (!q || !q.grade) return '';
-  return `
-    <div class="coach-box">
-      <div class="coach-head">
-        <div class="coach-title">Chart Coach</div>
-        <div class="coach-score">Quality ${q.score ?? '—'}/100${q.raw_score && q.raw_score !== q.score ? ` · raw ${q.raw_score}` : ''}</div>
-      </div>
-      ${q.grade_note ? `<div class="coach-grade-note">${q.grade_note}</div>` : ''}
-      <div class="coach-grid">
-        <div class="coach-metric"><div class="coach-label">Location</div><div class="coach-value">${q.location || '—'}</div></div>
-        <div class="coach-metric"><div class="coach-label">Cleanliness</div><div class="coach-value">${q.cleanliness || '—'}</div></div>
-        <div class="coach-metric"><div class="coach-label">Freshness</div><div class="coach-value">${q.freshness || '—'}</div></div>
-        <div class="coach-metric"><div class="coach-label">Room</div><div class="coach-value">${q.room_to_target || '—'}</div></div>
-      </div>
-      <div class="coach-note">${q.coach_note || 'Review structure, location, and reaction before entry.'}</div>
-      ${q.warning && q.warning !== 'No major visual warning.' ? `<div class="coach-warning">${q.warning}</div>` : ''}
-    </div>`;
-}
-
 function renderNearMissCard(s) {
-  const isLong    = s.direction === 'LONG';
-  const hasTrend  = s.trend && s.trend !== 'NEUTRAL';
-  const hasBOS    = s.bos_confirmed;
-  const hasOB     = s.ob_high != null && s.ob_low != null;
-  const atOB      = s.in_ob || s.near_ob;
-  const q          = s.quality || {};
-  const grade      = q.grade || 'D';
-  const gradeCls   = gradeClass(grade);
-  const stageBox   = renderTradeStageBox(s.trade_eval);
-  const ci        = (pass, label) =>
-    `<div class="check-item ${pass ? 'pass' : 'fail'}"><span class="icon">${pass ? '✓' : '✗'}</span>${label}</div>`;
-
-  let missing = '';
-  if (!hasBOS)      missing = 'Waiting for BOS — no confirmed break of structure yet.';
-  else if (!hasOB)  missing = 'BOS confirmed but no OB identified in recent structure.';
-  else if (!atOB)   missing = `Waiting for pullback into OB zone ($${s.ob_low?.toFixed(2)} – $${s.ob_high?.toFixed(2)}).`;
-
-  const dirColor = isLong ? 'var(--long)' : 'var(--short)';
-  const dirBg    = isLong ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)';
-
-  const isAPlusAlert = aPlusReadyAlerts.has(getStageKey(s));
-  const encoded = encodeURIComponent(JSON.stringify(s));
-
-  return `
-  <div class="card ${isAPlusAlert ? 'a-plus-alert' : ''}" style="opacity:0.88; border-color: ${isAPlusAlert ? 'rgba(34,197,94,0.85)' : 'rgba(251,191,36,0.25)'};">
-    <div class="card-header" style="border-color: rgba(251,191,36,0.15);">
-      <div class="ticker-wrap">
-        <span class="ticker">${s.ticker}</span>
-        ${s.timeframe ? `<span class="timeframe-badge">${s.timeframe}</span>` : ''}
-      </div>
-      <div class="card-header-right">
-        ${q.grade ? `<span class="grade-badge ${gradeCls}" title="Chart quality grade">${grade}</span>` : ''}
-        ${s.structureLabel ? `<span style="font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(99,102,241,0.13);border:1px solid rgba(99,102,241,0.28);color:#c7d2fe;">${s.structureLabel}</span>` : ''}
-        ${hasTrend ? `<span class="badge" style="background:${dirBg}; color:${dirColor};">${s.direction}</span>` : ''}
-        <span class="badge" style="background:rgba(251,191,36,0.12); color:#fbbf24;">${s.trade_eval?.stage_badge || s.trade_eval?.trade_stage || 'DEVELOPING'}</span>
-      </div>
-    </div>
-    <div class="card-body">
-      <div class="price-row">
-        <span class="price-big">$${s.price.toFixed(2)}</span>
-        <span class="price-meta">ATR $${s.atr.toFixed(2)}</span>
-      </div>
-      <div class="checklist" style="border-top:none; padding-top:0; margin-bottom:10px;">
-        ${ci(hasTrend, `Trend confirmed (${s.trend || 'NEUTRAL'})`)}
-        ${ci(hasBOS,   'BOS confirmed')}
-        ${ci(hasOB,    'OB identified')}
-        ${ci(atOB,     s.in_ob ? 'Price inside OB' : s.near_ob ? 'Price near OB' : 'Price at OB zone')}
-      </div>
-      ${stageBox}
-      ${missing ? `<div style="font-size:11px; color:#fca5a5; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); border-radius:5px; padding:6px 10px; margin-bottom:8px;">${missing}</div>` : ''}
-      ${renderCoachBox(q)}
-      <div style="display:flex; gap:14px; font-size:11px; color:var(--muted); flex-wrap:wrap;">
-        ${hasBOS && s.bos_level ? `<span>BOS @ $${s.bos_level.toFixed(2)}</span>` : ''}
-        ${hasOB ? `<span>OB $${s.ob_low?.toFixed(2)}–$${s.ob_high?.toFixed(2)}</span>` : ''}
-      </div>
-    </div>
-    <div class="card-footer">
-      <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">Log Review</button>
-    </div>
-  </div>`;
+  return renderCard(s);
 }
 
 // ── Modal ────────────────────────────────────────────────────────────────────
@@ -2195,7 +2138,7 @@ function openLogModal(setupJson) {
   setValue('f_option', s.option?.symbol || '');
   setValue('f_scannerStatus', scannerStatusFromStage(ev.trade_stage));
   setValue('f_trendScore', trendReview.trend_score ?? s.quality?.score ?? '');
-  setValue('f_trendState', trendReview.status || s.structureLabel || s.trend || '');
+  setValue('f_trendState', trendReview.status || [s.stockTrend || s.trendDirection, s.stockPhase || s.phase, s.stockSetupStatus || s.setupStatus].filter(Boolean).join(' · ') || s.structureLabel || s.trend || '');
   setValue('f_entryType', trendReview.clean_pullback === 'Yes' ? 'Pullback' : 'N/A');
   setValue('f_relativeVolume', trendReview.relative_volume ?? '');
   setValue('f_atrExpansion', trendReview.atr_expansion ?? '');
@@ -2421,6 +2364,11 @@ function saveJournalEntry() {
   if (updated.accountSize) localStorage.setItem('stock_scanner_account_size', updated.accountSize);
   if (updated.riskPct) localStorage.setItem('stock_scanner_risk_pct', updated.riskPct);
   if (_pendingSetup?.quality) {
+    updated.trend = _pendingSetup.stockTrend || _pendingSetup.trendDirection || '';
+    updated.setupTf = _pendingSetup.setupTimeframeDirection || _pendingSetup.timeframe || '';
+    updated.phase = _pendingSetup.stockPhase || _pendingSetup.phase || '';
+    updated.setupStatus = _pendingSetup.stockSetupStatus || _pendingSetup.setupStatus || '';
+    updated.entryStatus = _pendingSetup.entryStatus || '';
     updated.setupGrade = _pendingSetup.quality.grade || null;
     updated.setupScore = _pendingSetup.quality.score ?? null;
     updated.setupRawScore = _pendingSetup.quality.raw_score ?? null;
@@ -2586,6 +2534,11 @@ function renderJournal() {
         <td ${dirCls}>${e.direction}</td>
         <td>${e.setupGrade ? `<span class="grade-badge ${gradeClass(e.setupGrade)}">${e.setupGrade}</span>` : '—'}</td>
         <td>${e.scannerStatus || 'WATCH'}</td>
+        <td>${e.trend || '—'}</td>
+        <td>${e.setupTf || e.timeframe || '—'}</td>
+        <td>${e.phase || '—'}</td>
+        <td>${e.setupStatus || '—'}</td>
+        <td>${e.entryStatus || '—'}</td>
         <td>${e.trendScore ?? '—'}<br /><span style="color:var(--muted)">${e.trendState || '—'}</span></td>
         <td>${e.entryType || 'N/A'}</td>
         <td>${e.relativeVolume ?? '—'}</td>
@@ -2621,7 +2574,7 @@ function renderJournal() {
     <table class="journal-table">
       <thead>
         <tr>
-          <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Scanner</th><th>Trend</th><th>Entry Type</th><th>Rel Vol</th><th>ATR Exp</th><th>Setup Notes</th><th>Option</th><th>Strike / Type</th><th>OI / Vol</th>
+          <th>Date</th><th>Ticker</th><th>Dir</th><th>Grade</th><th>Scanner</th><th>Trend</th><th>Setup TF</th><th>Phase</th><th>Setup Status</th><th>Entry Status</th><th>Legacy Trend</th><th>Entry Type</th><th>Rel Vol</th><th>ATR Exp</th><th>Setup Notes</th><th>Option</th><th>Strike / Type</th><th>OI / Vol</th>
           <th>Entry</th><th>Exit</th><th>R</th><th>Shots</th><th>Qty</th><th>Expiry</th>
           <th>P&amp;L</th><th>P&amp;L %</th><th>Quality</th><th>Mistake</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Result</th><th>Review Notes</th><th>Legacy Result</th><th>Manage</th><th></th>
         </tr>
@@ -2739,9 +2692,9 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','SetupTF','Phase','SetupStatus','EntryStatus','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
   const rows = entries.map(e => [
-    e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
+    e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', `"${e.trend || ''}"`, `"${e.setupTf || ''}"`, `"${e.phase || ''}"`, `"${e.setupStatus || ''}"`, `"${e.entryStatus || ''}"`, e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
     `"${e.option||''}"`, e.expiry, e.strike ?? '', e.optionType || 'N/A', e.askAtSelection ?? '', e.bidAskSpread ?? '', e.openInterest ?? '', e.optionVolume ?? '',
     e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.pnl ?? '', e.pnlPct ?? '', e.rResult ?? '', e.contracts,

@@ -1398,6 +1398,8 @@ def analyze_ticker(
 
         atr = _compute_atr(df)
         rsi = round(_compute_rsi(close), 1)
+        ema20 = round(float(close.ewm(span=20, adjust=False).mean().iloc[-1]), 2)
+        ema50 = round(float(close.ewm(span=50, adjust=False).mean().iloc[-1]), 2)
 
         # Price action
         swings        = _find_swings(df)
@@ -1573,6 +1575,8 @@ def analyze_ticker(
                 "price":         round(price, 2),
                 "atr":           round(atr, 2),
                 "rsi":           rsi,
+                "ema20":         ema20,
+                "ema50":         ema50,
                 "trend":         trend,
                 "bos_confirmed": bos_confirmed,
                 "bos_level":     round(bos_level, 2) if bos_level else None,
@@ -1669,6 +1673,8 @@ def analyze_ticker(
                 "price":         round(price, 2),
                 "atr":           round(atr, 2),
                 "rsi":           rsi,
+                "ema20":         ema20,
+                "ema50":         ema50,
                 "trend":         trend,
                 "bos_confirmed": bos_confirmed,
                 "bos_level":     round(bos_level, 2),
@@ -1696,6 +1702,8 @@ def analyze_ticker(
             "price":         round(price, 2),
             "atr":           round(atr, 2),
             "rsi":           rsi,
+            "ema20":         ema20,
+            "ema50":         ema50,
             "trend":         trend,
             "bos_confirmed": bos_confirmed,
             "bos_level":     round(bos_level, 2),
@@ -1888,6 +1896,138 @@ def _best_timeframe_result(daily_result: Optional[dict], h4_result: Optional[dic
     return max([daily_result, h4_result], key=_setup_rank)
 
 
+def _stock_direction_label(raw: Optional[str]) -> str:
+    if raw == "LONG":
+        return "Bullish"
+    if raw == "SHORT":
+        return "Bearish"
+    return "Mixed"
+
+
+def _trend_from_ohlc(df: Optional[pd.DataFrame]) -> str:
+    if df is None or len(df) < 20:
+        return "Mixed"
+    try:
+        clean = _flatten_columns(df.copy()).dropna().astype(float)
+        swings = _find_swings(clean)
+        return _stock_direction_label(_get_trend(swings))
+    except Exception:
+        return "Mixed"
+
+
+def _result_direction(result: Optional[dict], fallback_df: Optional[pd.DataFrame] = None) -> str:
+    if result and result.get("trend"):
+        return _stock_direction_label(result.get("trend"))
+    return _trend_from_ohlc(fallback_df)
+
+
+def _stock_phase(daily_direction: str, h4_direction: str) -> str:
+    if daily_direction == "Bullish" and h4_direction == "Bullish":
+        return "Trend Move"
+    if daily_direction == "Bullish" and h4_direction == "Bearish":
+        return "Pullback"
+    if daily_direction == "Bearish" and h4_direction == "Bearish":
+        return "Trend Move"
+    if daily_direction == "Bearish" and h4_direction == "Bullish":
+        return "Pullback"
+    return "Transition"
+
+
+def _stock_setup_status(result: dict) -> tuple:
+    ev = result.get("trade_eval") or {}
+    if ev.get("trigger_confirmed") or ev.get("a_plus_ready"):
+        return "Trend Resumption Confirmed", "trigger confirmed after pullback"
+    if ev.get("displacement") == "STRONG" and result.get("bos_confirmed"):
+        return "Strong Confirmation", "strong displacement with confirmed BOS"
+    if result.get("bos_confirmed") or ev.get("rejection_confirmed"):
+        return "Early Confirmation", "structure confirmation is forming"
+    if result.get("in_ob") or result.get("near_ob") or ev.get("sweep_taken"):
+        return "Pullback Complete", "price reacted at the active pullback zone"
+    return "Pullback Active", "waiting for pullback completion and confirmation"
+
+
+def _stock_location_label(ev: dict) -> str:
+    pct = ev.get("location_percentile")
+    if pct is not None:
+        if pct <= 30:
+            return "Discount"
+        if pct >= 70:
+            return "Premium"
+        return "Mid"
+    raw = str(ev.get("location") or "").upper()
+    if "DISCOUNT" in raw:
+        return "Discount"
+    if "PREMIUM" in raw:
+        return "Premium"
+    return "Mid"
+
+
+def _stock_entry_status(result: dict) -> tuple:
+    entry = result.get("entry")
+    price = result.get("price")
+    atr = result.get("atr")
+    if entry is None or price is None or not atr:
+        return "Waiting", None, None
+    distance = abs(float(price) - float(entry))
+    distance_atr = distance / float(atr) if float(atr) > 0 else None
+    distance_pct = (distance / float(price)) * 100 if float(price) > 0 else None
+    if distance_atr is None:
+        status = "Waiting"
+    elif distance_atr <= 0.25:
+        status = "Tradeable"
+    elif distance_atr <= 0.50:
+        status = "Near Entry"
+    elif distance_atr <= 1.00:
+        status = "Waiting"
+    else:
+        status = "Too Far"
+    return (
+        status,
+        round(distance_atr, 2) if distance_atr is not None else None,
+        round(distance_pct, 2) if distance_pct is not None else None,
+    )
+
+
+def _enrich_stock_scout_fields(
+    result: Optional[dict],
+    daily_result: Optional[dict],
+    h4_result: Optional[dict],
+    daily_df: Optional[pd.DataFrame],
+    h4_df: Optional[pd.DataFrame],
+) -> Optional[dict]:
+    if not result:
+        return None
+
+    daily_direction = _result_direction(daily_result, daily_df)
+    h4_direction = _result_direction(h4_result, h4_df)
+    setup_direction = _result_direction(result)
+    setup_status, setup_reason = _stock_setup_status(result)
+    entry_status, distance_atr, distance_pct = _stock_entry_status(result)
+    ev = result.get("trade_eval") or {}
+
+    result.update({
+        "stockTrend": daily_direction,
+        "trendDirection": daily_direction,
+        "dailyTrendDirection": daily_direction,
+        "h4TrendDirection": h4_direction,
+        "setupTimeframeDirection": setup_direction,
+        "stockPhase": _stock_phase(daily_direction, h4_direction),
+        "phase": _stock_phase(daily_direction, h4_direction),
+        "stockSetupStatus": setup_status,
+        "setupStatus": setup_status,
+        "stockSetupStatusReason": setup_reason,
+        "setupStatusReason": setup_reason,
+        "stockLocation": _stock_location_label(ev),
+        "nearestSupportDemand": result.get("ob_low") if result.get("ob_low") is not None else result.get("sl"),
+        "nearestResistanceSupply": result.get("ob_high") if result.get("ob_high") is not None else result.get("bos_level"),
+        "entryStatus": entry_status,
+        "distanceFromEntryAtr": distance_atr,
+        "distanceFromEntryPercent": distance_pct,
+        "entryVisible": distance_atr is not None and distance_atr <= 0.5,
+    })
+    return result
+
+
 def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
     if watchlist is None:
         watchlist = get_finviz_watchlist()
@@ -1952,4 +2092,5 @@ def scan_ticker(
         timeframe="4H",
     )
 
-    return _best_timeframe_result(daily_result, h4_result)
+    best = _best_timeframe_result(daily_result, h4_result)
+    return _enrich_stock_scout_fields(best, daily_result, h4_result, _daily_df, h4_source)
