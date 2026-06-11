@@ -232,6 +232,28 @@
   .priority-yellow { color: #fbbf24; }
   .priority-red { color: var(--short); }
   .priority-muted { color: var(--muted); }
+  .index-watchlist .priority-list { gap: 8px; }
+  .index-row {
+    align-items: center;
+    background: rgba(148,163,184,0.035);
+    border-radius: 8px;
+    cursor: pointer;
+    display: grid;
+    font-size: 11px;
+    gap: 8px;
+    grid-template-columns: 70px 80px 80px 95px 150px 95px 80px 120px 70px;
+    padding: 9px 10px;
+  }
+  .index-row:hover { background: rgba(148,163,184,0.075); }
+  .index-cell-label { color: var(--muted); display: none; font-size: 9px; margin-bottom: 2px; }
+  .index-cell-value { color: var(--text); font-weight: 650; overflow-wrap: anywhere; }
+  .index-distance { color: var(--muted); }
+  @media (max-width: 980px) {
+    .index-row {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .index-cell-label { display: block; }
+  }
   .card.priority-card-focus {
     border-color: rgba(251,191,36,0.8);
     box-shadow: 0 0 0 1px rgba(251,191,36,0.45), 0 0 24px rgba(251,191,36,0.18);
@@ -1857,152 +1879,6 @@ function renderScannerResults() {
   renderPriorityWatchlist(scannerRows, scannerNearMiss);
 }
 
-function buildPriorityList(rows, nearMiss) {
-  const pool = [...(rows || []), ...(nearMiss || [])].filter(s => s && s.trade_eval);
-  const scoreSetup = (setup) => {
-    const ev = setup.trade_eval || {};
-    const missingCount = ev.missing_for_a_plus?.length ?? 99;
-    const pct = Number(ev.location_percentile);
-    let locationScore = 50;
-    if (Number.isFinite(pct)) {
-      if ((setup.direction === 'LONG' && pct <= 30) || (setup.direction === 'SHORT' && pct >= 70)) {
-        locationScore = 0;
-      } else if (pct > 30 && pct < 70) {
-        locationScore = 50;
-      } else {
-        locationScore = 100;
-      }
-    }
-    const blockedScore = ev.room_to_target?.blocked ? 75 : 0;
-    const rr = Number(ev.room_to_target?.estimated_rr);
-    const rrBonus = Number.isFinite(rr) ? Math.min(30, Math.round((rr - 1) * 15)) : 0;
-    const grade = setup.quality?.grade;
-    const gradeBonus = grade === 'A+' ? 50 : 0;
-    return (missingCount * 100) + locationScore + blockedScore - rrBonus - gradeBonus;
-  };
-
-  return pool
-    .map(setup => ({ setup, priorityScore: scoreSetup(setup) }))
-    .sort((a, b) => a.priorityScore - b.priorityScore)
-    .slice(0, 5);
-}
-
-function priorityLocationInfo(setup) {
-  const pct = Number(setup.trade_eval?.location_percentile);
-  if (!Number.isFinite(pct)) return { label: 'MID', cls: 'priority-yellow' };
-  const ideal = (setup.direction === 'LONG' && pct <= 30) || (setup.direction === 'SHORT' && pct >= 70);
-  const mid = pct > 30 && pct < 70;
-  const label = pct >= 70 ? 'PREMIUM' : pct <= 30 ? 'DISCOUNT' : 'MID';
-  return {
-    label,
-    cls: ideal ? 'priority-green' : mid ? 'priority-yellow' : 'priority-red',
-  };
-}
-
-function priorityRoomInfo(setup) {
-  const blocked = Boolean(setup.trade_eval?.room_to_target?.blocked);
-  return {
-    label: blocked ? 'BLOCKED' : 'CLEAR',
-    cls: blocked ? 'priority-red' : 'priority-green',
-  };
-}
-
-function priorityRrInfo(setup) {
-  const rr = Number(setup.trade_eval?.room_to_target?.estimated_rr);
-  if (!Number.isFinite(rr)) return { label: '—', cls: 'priority-muted' };
-  return {
-    label: `${rr.toFixed(2)}R`,
-    cls: rr >= 2 ? 'priority-green' : rr >= 1.5 ? 'priority-yellow' : 'priority-red',
-  };
-}
-
-function priorityReadinessLabel(missingCount) {
-  if (missingCount === 0) return '🔥 READY';
-  if (missingCount === 1) return '👀 WATCH';
-  return '🚫 WAIT';
-}
-
-function priorityAlertRecentlySent(key) {
-  try {
-    const last = Number(localStorage.getItem(key));
-    return Number.isFinite(last) && Date.now() - last < 4 * 60 * 60 * 1000;
-  } catch {
-    return false;
-  }
-}
-
-function markPriorityAlertSent(key) {
-  try { localStorage.setItem(key, Date.now()); } catch {}
-}
-
-function priorityAlertObject(setup, type, customMessage) {
-  return {
-    ticker: setup.ticker,
-    setup,
-    previousStage: setup.trade_eval?.trade_stage,
-    currentStage: setup.trade_eval?.trade_stage,
-    type,
-    customMessage,
-  };
-}
-
-function firePriorityWatchlistAlerts(priority) {
-  const nextRanks = new Map();
-  priority.forEach(({ setup }, index) => {
-    const ticker = String(setup?.ticker || '').trim().toUpperCase();
-    if (!ticker || !setup?.trade_eval) return;
-
-    const rank = index + 1;
-    nextRanks.set(ticker, rank);
-    const missing = setup.trade_eval.missing_for_a_plus || [];
-    const missingCount = missing.length;
-    const clearRoom = setup.trade_eval.room_to_target?.blocked === false;
-    const stage = setup.trade_eval.trade_stage || '';
-    const tf = setup.timeframe ? `${setup.timeframe} ` : '';
-    const direction = setup.direction || '';
-
-    if (missingCount === 0 && stage === 'A+ READY') {
-      const key = `priority_alerted_${ticker}_aplus`;
-      if (!priorityAlertRecentlySent(key)) {
-        handleAPlusReadyAlert(priorityAlertObject(
-          setup,
-          'aplus',
-          `🔥 ${ticker} · ${tf}${direction} — A+ READY`
-        ));
-        markPriorityAlertSent(key);
-      }
-    } else if (missingCount === 1 && clearRoom) {
-      const key = `priority_alerted_${ticker}`;
-      if (!priorityAlertRecentlySent(key)) {
-        handleAPlusReadyAlert(priorityAlertObject(
-          setup,
-          'bplus',
-          `👀 ${ticker} · ${tf}${direction} — 1 away from A+: ${missing[0]}`
-        ));
-        markPriorityAlertSent(key);
-      }
-    }
-
-    let previousRank = NaN;
-    try { previousRank = Number(localStorage.getItem(`priority_rank_${ticker}`)); } catch {}
-    if (rank <= 2 && Number.isFinite(previousRank) && previousRank > rank) {
-      const key = `priority_rank_alerted_${ticker}`;
-      if (!priorityAlertRecentlySent(key)) {
-        handleAPlusReadyAlert(priorityAlertObject(
-          setup,
-          stage === 'A+ READY' ? 'aplus' : 'bplus',
-          `📈 ${ticker} · ${tf}${direction} moved to #${rank} Priority Watchlist`
-        ));
-        markPriorityAlertSent(key);
-      }
-    }
-  });
-
-  nextRanks.forEach((rank, ticker) => {
-    try { localStorage.setItem(`priority_rank_${ticker}`, rank); } catch {}
-  });
-}
-
 function scrollToPriorityCard(ticker) {
   const targetTicker = String(ticker || '').toUpperCase();
   const tickerEls = Array.from(document.querySelectorAll('.card .ticker'));
@@ -2017,41 +1893,58 @@ function scrollToPriorityCard(ticker) {
 function renderPriorityWatchlist(rows, nearMiss) {
   const box = document.getElementById('priority-watchlist');
   if (!box) return;
-  const priority = buildPriorityList(rows, nearMiss);
-  if (!priority.length) {
+  const indexTickers = new Set(['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLF', 'XLK', 'SMH']);
+  const pool = [...(rows || []), ...(nearMiss || [])]
+    .filter(setup => indexTickers.has(String(setup?.ticker || '').toUpperCase()));
+  const seen = new Set();
+  const indexRows = sortScannerCardsForDisplay(pool)
+    .filter(setup => {
+      const ticker = String(setup?.ticker || '').toUpperCase();
+      if (!ticker || seen.has(ticker)) return false;
+      seen.add(ticker);
+      return true;
+    });
+
+  if (!indexRows.length) {
     box.innerHTML = '';
     box.style.display = 'none';
     return;
   }
-  firePriorityWatchlistAlerts(priority);
 
   box.style.display = 'block';
   box.innerHTML = `
-    <div class="priority-watchlist">
+    <div class="priority-watchlist index-watchlist">
       <div class="priority-head">
-        <div class="priority-title">⭐ Priority Watchlist</div>
-        <div class="priority-subtitle">Top setups closest to A+ — ranked by readiness</div>
+        <div class="priority-title">Index Watchlist</div>
+        <div class="priority-subtitle">Major index ETFs ranked by entry status</div>
       </div>
       <div class="priority-list">
-        ${priority.map(({ setup }) => {
-          const loc = priorityLocationInfo(setup);
-          const room = priorityRoomInfo(setup);
-          const rr = priorityRrInfo(setup);
-          const missingCount = setup.trade_eval?.missing_for_a_plus?.length ?? 99;
-          const isLong = setup.direction === 'LONG';
-          const isAPlus = setup.trade_eval?.trade_stage === 'A+ READY';
-          const prioritySignal = isAPlus ? '🔥' : (missingCount === 1 && room.label === 'CLEAR') ? '🔔' : '';
+        ${indexRows.map(setup => {
+          const ticker = setup.ticker || '—';
+          const trend = setup.stockTrend || setup.trendDirection || 'Mixed';
+          const setupTf = setup.setupTimeframeDirection || (setup.trend === 'LONG' ? 'Bullish' : setup.trend === 'SHORT' ? 'Bearish' : 'Mixed');
+          const phase = setupPhase(setup);
+          const setupStatus = setupStatusValue(setup);
+          const entryStatus = setup.entryStatus || 'Waiting';
+          const entryClass = entryStatusClass(entryStatus);
+          const location = setup.stockLocation || formatLocationLabel(setup.trade_eval?.location, setup.trade_eval?.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
+          const distanceText = setup.distanceFromEntryAtr != null
+            ? `${fmtNumber(setup.distanceFromEntryAtr)} ATR / ${fmtNumber(setup.distanceFromEntryPercent)}%`
+            : '—';
+          const direction = setup.direction || 'N/A';
+          const directionDisplay = direction === 'LONG' || direction === 'SHORT' ? formatDisplayLabel(direction) : direction;
+          const isLong = direction === 'LONG';
           return `
-            <div class="priority-row" onclick="scrollToPriorityCard('${String(setup.ticker || '').replace(/'/g, "\\'")}')">
-              <span class="priority-ticker">${isAPlus ? '⭐ ' : ''}${setup.ticker || '—'}</span>
-              <span class="priority-readiness">${priorityReadinessLabel(missingCount)}</span>
-              ${setup.timeframe ? `<span class="timeframe-badge">${setup.timeframe}</span>` : ''}
-              ${setup.direction ? `<span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${setup.direction}</span>` : ''}
-              <span class="${loc.cls}">● ${loc.label}</span>
-              <span class="priority-chip">${missingCount} missing</span>
-              <span class="${room.cls}">${room.label}</span>
-              <span class="${rr.cls}">RR: ${rr.label}</span>
-              ${prioritySignal ? `<span class="priority-alert-indicator">${prioritySignal}</span>` : ''}
+            <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
+              <div><div class="index-cell-label">Ticker</div><div class="priority-ticker">${ticker}</div></div>
+              <div><div class="index-cell-label">Trend</div><div class="index-cell-value">${trend}</div></div>
+              <div><div class="index-cell-label">Setup TF</div><div class="index-cell-value">${setupTf}</div></div>
+              <div><div class="index-cell-label">Phase</div><div class="index-cell-value">${phase}</div></div>
+              <div><div class="index-cell-label">Setup Status</div><div class="index-cell-value">${setupStatus}</div></div>
+              <div><div class="index-cell-label">Entry Status</div><div><span class="entry-pill ${entryClass}">${entryStatus}</span></div></div>
+              <div><div class="index-cell-label">Location</div><div class="index-cell-value">${formatDisplayLabel(location)}</div></div>
+              <div><div class="index-cell-label">Distance</div><div class="index-cell-value index-distance">${distanceText}</div></div>
+              <div><div class="index-cell-label">Direction</div><div><span class="badge ${isLong ? 'badge-long' : direction === 'SHORT' ? 'badge-short' : ''}">${directionDisplay}</span></div></div>
             </div>`;
         }).join('')}
       </div>
