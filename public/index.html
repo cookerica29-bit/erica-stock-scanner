@@ -135,14 +135,20 @@
 
   #results {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(390px, 1fr));
+    gap: 18px;
   }
 
   .empty { grid-column: 1 / -1; text-align: center; padding: 60px 0; color: var(--muted); }
 
   /* ── Setup card ────────────────────────────────────────────────────────── */
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .card {
+    background: linear-gradient(180deg, rgba(24,31,43,0.96), rgba(18,24,34,0.96));
+    border: 1px solid rgba(148,163,184,0.12);
+    border-radius: 12px;
+    box-shadow: 0 14px 34px rgba(0,0,0,0.18);
+    overflow: hidden;
+  }
   .card.a-plus-alert {
     border-color: rgba(34,197,94,0.85);
     box-shadow: 0 0 0 1px rgba(34,197,94,0.45), 0 0 24px rgba(34,197,94,0.22);
@@ -157,15 +163,16 @@
   }
   .card-header {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    gap: 14px;
+    padding: 16px 18px 10px;
   }
-  .ticker { font-size: 20px; font-weight: 700; letter-spacing: 0.05em; }
-  .ticker-wrap { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .card-header-right { display: flex; align-items: center; gap: 8px; }
+  .ticker { font-size: 24px; font-weight: 800; letter-spacing: 0.02em; line-height: 1; }
+  .ticker-wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+  .card-header-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
-  .badge { border-radius: 5px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 10px; text-transform: uppercase; }
-  .badge-long  { background: var(--long-dim);  color: var(--long); }
-  .badge-short { background: var(--short-dim); color: var(--short); }
+  .badge { border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; padding: 5px 10px; }
+  .badge-long  { background: rgba(34,197,94,0.12);  color: #86efac; }
+  .badge-short { background: rgba(239,68,68,0.12); color: #fca5a5; }
   .grade-badge {
     border: 1px solid var(--border);
     border-radius: 5px;
@@ -178,15 +185,15 @@
     text-align: center;
   }
   .timeframe-badge {
-    border: 1px solid rgba(148,163,184,0.28);
-    border-radius: 5px;
-    color: #94a3b8;
-    background: rgba(148,163,184,0.08);
+    border: 1px solid rgba(148,163,184,0.16);
+    border-radius: 999px;
+    color: #a8b3c5;
+    background: rgba(148,163,184,0.06);
     font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
+    font-weight: 700;
+    letter-spacing: 0.02em;
     line-height: 1;
-    padding: 3px 7px;
+    padding: 5px 8px;
   }
   .priority-watchlist {
     background: var(--surface);
@@ -234,20 +241,104 @@
   .grade-c { background: rgba(245,158,11,0.13); border-color: rgba(245,158,11,0.34); color: #fcd34d; }
   .grade-d { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.34); color: #fca5a5; }
 
-  .card-body { padding: 14px 16px; }
+  .card-body { padding: 0 18px 14px; }
 
-  .price-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
-  .price-big { font-size: 22px; font-weight: 700; }
+  .entry-pill {
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 800;
+    padding: 6px 12px;
+    white-space: nowrap;
+  }
+  .entry-pill.tradeable { background: rgba(34,197,94,0.14); color: #86efac; }
+  .entry-pill.near-entry { background: rgba(59,130,246,0.15); color: #93c5fd; }
+  .entry-pill.waiting { background: rgba(245,158,11,0.14); color: #fcd34d; }
+  .entry-pill.too-far,
+  .entry-pill.unknown { background: rgba(148,163,184,0.09); color: #94a3b8; }
+
+  .price-row {
+    align-items: baseline;
+    display: flex;
+    gap: 10px;
+    margin: 2px 0 16px;
+  }
+  .price-big { font-size: 22px; font-weight: 800; }
   .price-meta { color: var(--muted); font-size: 11px; }
 
-  .ind-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
-  .ind-cell { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
-  .ind-label { color: var(--muted); font-size: 10px; margin-bottom: 2px; }
-  .ind-value { font-size: 13px; font-weight: 600; }
-
-  .levels-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 12px; }
-  .levels-table th { color: var(--muted); font-weight: 500; padding: 4px 6px; text-align: left; border-bottom: 1px solid var(--border); }
-  .levels-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); }
+  .card-section {
+    background: rgba(2,6,23,0.18);
+    border: 1px solid rgba(148,163,184,0.08);
+    border-radius: 10px;
+    margin-bottom: 10px;
+    padding: 12px;
+  }
+  .section-title {
+    color: #cbd5e1;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    margin-bottom: 10px;
+  }
+  .context-grid,
+  .readiness-grid {
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .context-item,
+  .readiness-item {
+    min-width: 0;
+  }
+  .context-label,
+  .readiness-label,
+  .level-label {
+    color: var(--muted);
+    font-size: 10px;
+    margin-bottom: 3px;
+  }
+  .context-value,
+  .readiness-value,
+  .level-value {
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+  .readiness-item.primary {
+    background: rgba(15,23,42,0.35);
+    border-radius: 8px;
+    padding: 8px 9px;
+  }
+  .readiness-reason {
+    color: #b6c2d2;
+    font-size: 11px;
+    line-height: 1.45;
+    margin-top: 10px;
+  }
+  .levels-strip {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: 10px;
+  }
+  .level-tile {
+    background: rgba(148,163,184,0.045);
+    border-radius: 9px;
+    padding: 10px 11px;
+  }
+  .levels-table {
+    background: rgba(2,6,23,0.16);
+    border-radius: 10px;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin-bottom: 10px;
+    overflow: hidden;
+    width: 100%;
+    font-size: 12px;
+  }
+  .levels-table th { color: var(--muted); font-weight: 600; padding: 7px 10px; text-align: left; border-bottom: 1px solid rgba(148,163,184,0.08); }
+  .levels-table td { padding: 7px 10px; border-bottom: 1px solid rgba(148,163,184,0.06); }
   .levels-table tr:last-child td { border-bottom: none; }
   .level-sl    { color: var(--short); }
   .level-tp    { color: var(--long); }
@@ -259,17 +350,17 @@
   .option-symbol { font-size: 14px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 4px; }
   .option-meta { color: var(--muted); font-size: 11px; }
 
-  .coach-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+  .coach-box { background: rgba(2,6,23,0.16); border: 1px solid rgba(148,163,184,0.08); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
   .coach-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
-  .coach-title { color: var(--text); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+  .coach-title { color: #cbd5e1; font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
   .coach-score { color: var(--muted); font-size: 10px; white-space: nowrap; }
   .coach-grade-note { color: var(--muted); font-size: 10px; line-height: 1.35; margin: -2px 0 8px; }
   .coach-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:7px; margin-bottom:8px; }
-  .coach-metric { border: 1px solid rgba(42,48,64,0.75); border-radius:5px; padding:6px 8px; min-width:0; }
-  .coach-label { color: var(--muted); font-size:9px; letter-spacing:0.06em; text-transform:uppercase; margin-bottom:2px; }
+  .coach-metric { background: rgba(148,163,184,0.04); border-radius:7px; padding:7px 8px; min-width:0; }
+  .coach-label { color: var(--muted); font-size:9px; letter-spacing:0.02em; margin-bottom:2px; }
   .coach-value { color: var(--text); font-size:11px; overflow-wrap:anywhere; }
-  .coach-note { color:#bfdbfe; background:rgba(37,99,235,0.08); border:1px solid rgba(37,99,235,0.18); border-radius:5px; padding:7px 9px; font-size:11px; line-height:1.45; margin-bottom:7px; }
-  .coach-warning { color:#fca5a5; background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.18); border-radius:5px; padding:7px 9px; font-size:11px; line-height:1.45; margin-bottom:7px; }
+  .coach-note { color:#bfdbfe; background:rgba(37,99,235,0.08); border-radius:8px; padding:8px 10px; font-size:11px; line-height:1.45; margin-bottom:7px; }
+  .coach-warning { color:#cbd5e1; background:rgba(148,163,184,0.07); border-radius:8px; padding:8px 10px; font-size:11px; line-height:1.45; margin-bottom:10px; }
   .coach-prompt { color:#fcd34d; font-size:11px; line-height:1.45; }
   .stage-box { background: var(--bg); border: 1px solid rgba(99,102,241,0.2); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
   .stage-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:9px; }
@@ -306,8 +397,19 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    padding: 10px 16px;
-    border-top: 1px solid var(--border);
+    padding: 0 18px 16px;
+  }
+  @media (max-width: 640px) {
+    main { padding: 14px 12px; }
+    #results { grid-template-columns: 1fr; gap: 14px; }
+    .card-header { align-items: flex-start; padding: 14px 14px 8px; }
+    .ticker { font-size: 22px; }
+    .card-body { padding: 0 14px 12px; }
+    .card-header-right { align-self: flex-start; }
+    .context-grid,
+    .readiness-grid,
+    .levels-strip { grid-template-columns: 1fr; }
+    .card-footer { padding: 0 14px 14px; }
   }
   .toast {
     background: rgba(15,23,42,0.96);
@@ -457,33 +559,67 @@
   .stat-value.red   { color: var(--short); }
   .stat-value.muted { color: var(--muted); }
 
-  .journal-table-wrap { overflow-x: auto; }
+  .journal-table-wrap {
+    background: rgba(15,23,42,0.42);
+    border: 1px solid rgba(26,34,48,0.9);
+    border-radius: 10px;
+    overflow-x: auto;
+  }
   .journal-table {
     width: 100%;
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 12px;
     white-space: nowrap;
   }
   .journal-table th {
-    color: var(--muted); font-weight: 500; font-size: 11px;
-    padding: 8px 12px; text-align: left;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
+    color: #94a3b8; font-weight: 600; font-size: 11px;
+    padding: 10px 12px; text-align: left;
+    border-bottom: 1px solid rgba(26,34,48,0.95);
+    border-left: none !important;
+    border-right: none !important;
+    box-shadow: none !important;
+    background: rgba(15,23,42,0.9);
     position: sticky; top: 0;
   }
-  .journal-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  .journal-table tr:hover td { background: var(--surface2); }
-  .journal-table tr.win  td { border-left: 3px solid var(--long); }
-  .journal-table tr.loss td { border-left: 3px solid var(--short); }
-  .journal-table tr.open td { border-left: 3px solid var(--warn); }
+  .journal-table td {
+    border-bottom: 1px solid rgba(26,34,48,0.82);
+    border-left: none !important;
+    border-right: none !important;
+    box-shadow: none !important;
+    padding: 10px 12px;
+  }
+  .journal-table tr.win td,
+  .journal-table tr.loss td,
+  .journal-table tr.open td {
+    border-left: none !important;
+    border-right: none !important;
+    box-shadow: none !important;
+  }
+  .journal-table tbody tr:nth-child(even) td { background: rgba(148,163,184,0.018); }
+  .journal-table tbody tr:hover td { background: rgba(59,130,246,0.06); }
+  .journal-table tbody tr:last-child td { border-bottom: none; }
 
   .result-badge {
-    border-radius: 4px; font-size: 10px; font-weight: 700;
-    padding: 2px 8px; text-transform: uppercase;
+    border-radius: 999px; font-size: 10px; font-weight: 800;
+    padding: 3px 8px;
   }
-  .result-win  { background: var(--long-dim);  color: var(--long); }
-  .result-loss { background: var(--short-dim); color: var(--short); }
-  .result-open { background: #1c1a08; color: var(--warn); }
+  .result-win  { background: rgba(34,197,94,0.12);  color: #86efac; }
+  .result-loss { background: rgba(239,68,68,0.12); color: #fca5a5; }
+  .result-open { background: rgba(148,163,184,0.1); color: #cbd5e1; }
+  .result-pending { background: rgba(245,158,11,0.11); color: #fcd34d; }
+  .journal-status-pill {
+    border-radius: 999px;
+    display: inline-flex;
+    font-size: 10px;
+    font-weight: 800;
+    padding: 3px 8px;
+  }
+  .journal-status-pill.tradeable { background: rgba(34,197,94,0.12); color: #86efac; }
+  .journal-status-pill.near-entry { background: rgba(59,130,246,0.14); color: #93c5fd; }
+  .journal-status-pill.waiting { background: rgba(245,158,11,0.11); color: #fcd34d; }
+  .journal-status-pill.too-far,
+  .journal-status-pill.unknown { background: rgba(148,163,184,0.09); color: #94a3b8; }
 
   .pnl-pos { color: var(--long); }
   .pnl-neg { color: var(--short); }
@@ -1938,9 +2074,53 @@ function renderScoutMetric(label, value) {
 
 function statusColor(status) {
   if (status === 'Tradeable') return 'var(--long)';
-  if (status === 'Near Entry') return '#fbbf24';
-  if (status === 'Too Far') return 'var(--short)';
+  if (status === 'Near Entry') return '#93c5fd';
+  if (status === 'Waiting') return '#fcd34d';
+  if (status === 'Too Far') return '#94a3b8';
   return 'var(--muted)';
+}
+
+function entryStatusClass(status) {
+  if (status === 'Tradeable') return 'tradeable';
+  if (status === 'Near Entry') return 'near-entry';
+  if (status === 'Waiting') return 'waiting';
+  if (status === 'Too Far') return 'too-far';
+  return 'unknown';
+}
+
+function renderContextItem(label, value) {
+  return `<div class="context-item"><div class="context-label">${label}</div><div class="context-value">${value || '—'}</div></div>`;
+}
+
+function renderReadinessItem(label, value, extraClass = '') {
+  return `<div class="readiness-item ${extraClass}"><div class="readiness-label">${label}</div><div class="readiness-value">${value || '—'}</div></div>`;
+}
+
+function renderLevelTile(label, value) {
+  return `<div class="level-tile"><div class="level-label">${label}</div><div class="level-value">${value || '—'}</div></div>`;
+}
+
+function renderJournalStatusPill(status) {
+  const label = status || '—';
+  return `<span class="journal-status-pill ${entryStatusClass(label)}">${label}</span>`;
+}
+
+function resultBadgeClass(result) {
+  const normalized = String(result || '').toLowerCase();
+  if (['win', 'winner'].includes(normalized)) return 'result-win';
+  if (['loss', 'loser', 'stopped', 'failed'].includes(normalized)) return 'result-loss';
+  if (['pending'].includes(normalized)) return 'result-pending';
+  return 'result-open';
+}
+
+function formatDisplayLabel(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '—') return '—';
+  if (text === 'N/A') return text;
+  return text
+    .split(/\s+/)
+    .map(part => part ? part.charAt(0).toUpperCase() + part.slice(1).toLowerCase() : part)
+    .join(' ');
 }
 
 function renderCard(s) {
@@ -1953,8 +2133,10 @@ function renderCard(s) {
   const setupReason = s.stockSetupStatusReason || s.setupStatusReason || q.coach_note || 'waiting for cleaner structure';
   const location = s.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
   const entryStatus = s.entryStatus || 'Waiting';
+  const entryClass = entryStatusClass(entryStatus);
   const showLevels = Boolean(s.entryVisible && s.entry != null && s.sl != null && s.tp1 != null);
   const directionLabel = s.direction || 'N/A';
+  const directionDisplay = directionLabel === 'LONG' || directionLabel === 'SHORT' ? formatDisplayLabel(directionLabel) : directionLabel;
   const isLong = directionLabel === 'LONG';
   const encoded = encodeURIComponent(JSON.stringify(s));
   const distanceText = s.distanceFromEntryAtr != null
@@ -1987,9 +2169,10 @@ function renderCard(s) {
       <div class="ticker-wrap">
         <span class="ticker">${s.ticker}</span>
         ${s.timeframe ? `<span class="timeframe-badge">${s.timeframe}</span>` : ''}
+        <span class="badge ${isLong ? 'badge-long' : directionLabel === 'SHORT' ? 'badge-short' : ''}">${directionDisplay}</span>
       </div>
       <div class="card-header-right">
-        <span class="badge ${isLong ? 'badge-long' : directionLabel === 'SHORT' ? 'badge-short' : ''}">${directionLabel}</span>
+        <span class="entry-pill ${entryClass}">${entryStatus}</span>
       </div>
     </div>
     <div class="card-body">
@@ -1997,18 +2180,28 @@ function renderCard(s) {
         <span class="price-big">${fmtMoney(s.price)}</span>
         <span class="price-meta">Current Price · ATR ${fmtMoney(s.atr)}</span>
       </div>
-      <div class="ind-grid">
-        ${renderScoutMetric('Trend', trend)}
-        ${renderScoutMetric('Setup TF', setupTf)}
-        ${renderScoutMetric('Phase', phase)}
-        ${renderScoutMetric('Setup Status', setupStatus)}
-        ${renderScoutMetric('Location', location)}
-        ${renderScoutMetric('Entry Status', `<span style="color:${statusColor(entryStatus)}">${entryStatus}</span>`)}
-        ${renderScoutMetric('Nearest Support / Demand', fmtMoney(s.nearestSupportDemand))}
-        ${renderScoutMetric('Nearest Resistance / Supply', fmtMoney(s.nearestResistanceSupply))}
-        ${renderScoutMetric('Distance', distanceText)}
+      <div class="card-section">
+        <div class="section-title">Market Context</div>
+        <div class="context-grid">
+          ${renderContextItem('Trend', trend)}
+          ${renderContextItem('Setup TF', setupTf)}
+          ${renderContextItem('Phase', phase)}
+          ${renderContextItem('Location', formatDisplayLabel(location))}
+        </div>
       </div>
-      <div class="coach-note">${setupReason}</div>
+      <div class="card-section">
+        <div class="section-title">Trade Readiness</div>
+        <div class="readiness-grid">
+          ${renderReadinessItem('Setup Status', setupStatus, 'primary')}
+          ${renderReadinessItem('Entry Status', `<span style="color:${statusColor(entryStatus)}">${entryStatus}</span>`, 'primary')}
+          ${renderReadinessItem('Distance from Entry', distanceText)}
+        </div>
+        <div class="readiness-reason">${setupReason}</div>
+      </div>
+      <div class="levels-strip">
+        ${renderLevelTile('Nearest Support / Demand', fmtMoney(s.nearestSupportDemand))}
+        ${renderLevelTile('Nearest Resistance / Supply', fmtMoney(s.nearestResistanceSupply))}
+      </div>
       ${showLevels ? `
         <table class="levels-table">
           <thead><tr><th>Level</th><th>Price</th><th>Context</th></tr></thead>
@@ -2526,8 +2719,13 @@ function renderJournal() {
 
   const rows = filtered.slice().reverse().map(e => {
     const resultCls = e.result === 'Win' ? 'win' : e.result === 'Loss' ? 'loss' : 'open';
-    const badgeCls  = e.result === 'Win' ? 'result-win' : e.result === 'Loss' ? 'result-loss' : 'result-open';
-    const dirCls = e.direction === 'LONG' ? 'style="color:var(--long)"' : 'style="color:var(--short)"';
+    const displayedResult = e.reviewResult || e.result || 'Pending';
+    const badgeCls  = resultBadgeClass(displayedResult);
+    const dirCls = e.direction === 'LONG'
+      ? 'style="color:#86efac;font-weight:800"'
+      : e.direction === 'SHORT'
+        ? 'style="color:#fca5a5;font-weight:800"'
+        : 'style="color:var(--muted)"';
     const actions = e.result === 'Open'
       ? `<div class="action-stack">
           <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'tp1')">TP1</button>
@@ -2545,8 +2743,8 @@ function renderJournal() {
         <td>${e.setupTf || e.timeframe || '—'}</td>
         <td>${e.phase || '—'}</td>
         <td>${e.setupStatus || '—'}</td>
-        <td>${e.entryStatus || '—'}</td>
-        <td><span class="result-badge ${badgeCls}">${e.reviewResult || e.result || 'Pending'}</span></td>
+        <td>${renderJournalStatusPill(e.entryStatus)}</td>
+        <td><span class="result-badge ${badgeCls}">${displayedResult}</span></td>
         <td>${e.directionCorrect || 'Pending'}</td>
         <td>${e.entryQuality || 'Pending'}</td>
         <td>${e.notes || '—'}</td>
