@@ -200,7 +200,8 @@
     border: 1px solid rgba(251,191,36,0.3);
     border-radius: 12px;
     padding: 14px 16px;
-    margin-bottom: 16px;
+    margin: 16px auto;
+    max-width: 1400px;
   }
   .priority-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
   .priority-title { color: var(--text); font-size: 14px; font-weight: 800; letter-spacing: 0.03em; }
@@ -805,8 +806,8 @@
     <span id="status"></span>
     <span id="autoScanCountdown" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>
   </div>
+  <div id="priority-watchlist"></div>
   <main>
-    <div id="priority-watchlist"></div>
     <div id="summary"></div>
     <div id="results"></div>
     <div id="near-miss-section" style="display:none; margin-top:28px;">
@@ -1223,6 +1224,8 @@ const JOURNAL_KEY = 'stock_scanner_journal';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
 let scannerRows = [];
 let scannerNearMiss = [];
+let indexWatchRows = [];
+const INDEX_WATCH_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLF', 'XLK', 'SMH'];
 let previousTradeStages = (() => {
   try {
     const saved = localStorage.getItem(STAGE_CACHE_KEY);
@@ -1467,6 +1470,7 @@ async function runScan() {
       : `${API}/api/scan`;
     const res  = await fetch(url);
     const data = await res.json();
+    await loadIndexWatchlist();
 
     const nextRows = data.rows || [];
     const nextNearMiss = data.near_miss || [];
@@ -1486,15 +1490,35 @@ async function runScan() {
   }
 }
 
+async function loadIndexWatchlist() {
+  const box = document.getElementById('priority-watchlist');
+  try {
+    const res = await fetch(`${API}/api/scan?tickers=${encodeURIComponent(INDEX_WATCH_TICKERS.join(','))}`);
+    const data = await res.json();
+    indexWatchRows = [...(data.rows || []), ...(data.near_miss || [])];
+  } catch (e) {
+    console.warn('Index Watchlist scan failed:', e);
+    indexWatchRows = [];
+  }
+  renderPriorityWatchlist();
+  if (box && !indexWatchRows.length) {
+    box.innerHTML = '';
+    box.style.display = 'none';
+  }
+}
+
 function clearResults() {
   scannerRows = [];
   scannerNearMiss = [];
+  indexWatchRows = [];
   previousTradeStages = new Map();
   aPlusReadyAlerts = new Set();
   try { localStorage.removeItem(STAGE_CACHE_KEY); } catch {}
   document.getElementById('results').innerHTML = '';
   document.getElementById('near-miss-results').innerHTML = '';
   document.getElementById('near-miss-section').style.display = 'none';
+  document.getElementById('priority-watchlist').innerHTML = '';
+  document.getElementById('priority-watchlist').style.display = 'none';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
 }
@@ -1892,8 +1916,9 @@ function scrollToPriorityCard(ticker) {
 function renderPriorityWatchlist(rows, nearMiss) {
   const box = document.getElementById('priority-watchlist');
   if (!box) return;
-  const indexTickers = new Set(['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLF', 'XLK', 'SMH']);
-  const pool = [...(rows || []), ...(nearMiss || [])]
+  const indexTickers = new Set(INDEX_WATCH_TICKERS);
+  const sourceRows = indexWatchRows.length ? indexWatchRows : [...(rows || []), ...(nearMiss || [])];
+  const pool = sourceRows
     .filter(setup => indexTickers.has(String(setup?.ticker || '').toUpperCase()));
   const seen = new Set();
   const indexRows = sortScannerCardsForDisplay(pool)
