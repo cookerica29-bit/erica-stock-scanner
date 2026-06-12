@@ -1492,19 +1492,27 @@ async function runScan() {
 
 async function loadIndexWatchlist() {
   const box = document.getElementById('priority-watchlist');
+  if (!box) {
+    console.warn('[Index Watchlist] container not found');
+    return;
+  }
+  console.info('[Index Watchlist] scanning', INDEX_WATCH_TICKERS.join(', '));
+  renderIndexWatchlistMessage('Loading index watchlist...');
   try {
     const res = await fetch(`${API}/api/scan?tickers=${encodeURIComponent(INDEX_WATCH_TICKERS.join(','))}`);
+    if (!res.ok) throw new Error(`Index scan failed with HTTP ${res.status}`);
     const data = await res.json();
     indexWatchRows = [...(data.rows || []), ...(data.near_miss || [])];
+    console.info('[Index Watchlist] rows received', indexWatchRows.length, indexWatchRows.map(r => r.ticker));
   } catch (e) {
-    console.warn('Index Watchlist scan failed:', e);
+    console.error('[Index Watchlist] scan failed:', e);
     indexWatchRows = [];
   }
-  renderPriorityWatchlist();
-  if (box && !indexWatchRows.length) {
-    box.innerHTML = '';
-    box.style.display = 'none';
+  if (!indexWatchRows.length) {
+    renderIndexWatchlistMessage('Index Watchlist unavailable — check scanner response');
+    return;
   }
+  renderPriorityWatchlist();
 }
 
 function clearResults() {
@@ -1650,32 +1658,6 @@ function maybeSendBrowserNotification(ticker, message, isAPlus = true) {
   }
 }
 
-function isAutoJournalStage(setup) {
-  const grade = String(setup?.quality?.grade || '').toUpperCase();
-  const legacyBlockedGrade = grade.startsWith('B') || grade.startsWith('C') || grade === 'D';
-  return setup?.entryStatus === 'Tradeable' &&
-    Boolean(setup?.stockTrend || setup?.trendDirection) &&
-    !legacyBlockedGrade;
-}
-
-const AUTO_JOURNAL_COOLDOWN_MS = 4 * 60 * 60 * 1000;
-
-function getAutoJournalKey(setup) {
-  const ticker = String(setup?.ticker || '').trim().toUpperCase();
-  const direction = setup?.direction || 'N/A';
-  const timeframe = setup?.timeframe || 'N/A';
-  const entry = setup?.entry == null ? 'N/A' : Number(setup.entry).toFixed(2);
-  return [ticker, direction, timeframe, entry].join('|');
-}
-
-function isSameJournalSetup(entry, setup) {
-  const tickerMatches = String(entry?.ticker || '').trim().toUpperCase() === String(setup?.ticker || '').trim().toUpperCase();
-  const directionMatches = (entry?.direction || 'N/A') === (setup?.direction || 'N/A');
-  const entryMatches = entry?.entry != null && setup?.entry != null && Math.abs(Number(entry.entry) - Number(setup.entry)) < 0.01;
-  const timeframeMatches = !entry?.timeframe || entry.timeframe === 'N/A' || entry.timeframe === (setup?.timeframe || 'N/A');
-  return tickerMatches && directionMatches && entryMatches && timeframeMatches;
-}
-
 function inferEntryType(setup) {
   const text = `${setup?.trade_eval?.setup_type || ''} ${setup?.quality?.coach_note || ''}`.toLowerCase();
   if (text.includes('pullback')) return 'Pullback';
@@ -1683,84 +1665,6 @@ function inferEntryType(setup) {
   if (text.includes('reversal')) return 'Reversal';
   if (text.includes('continuation')) return 'Continuation';
   return 'N/A';
-}
-
-function buildAutoJournalEntry(setup) {
-  const ev = setup?.trade_eval || {};
-  const option = setup?.option || {};
-  const createdAt = new Date().toISOString();
-  return {
-    id: Date.now() + Math.floor(Math.random() * 1000),
-    date: createdAt.slice(0, 10),
-    createdAt,
-    updatedAt: createdAt,
-    autoJournaled: true,
-    autoJournalKey: getAutoJournalKey(setup),
-    ticker: setup?.ticker || '',
-    direction: setup?.direction || 'N/A',
-    timeframe: setup?.timeframe || 'N/A',
-    scannerStatus: scannerStatusFromStage(ev.trade_stage),
-    trend: setup?.stockTrend || setup?.trendDirection || '',
-    setupTf: setup?.setupTimeframeDirection || setup?.timeframe || '',
-    phase: setup?.stockPhase || setup?.phase || '',
-    setupStatus: setup?.stockSetupStatus || setup?.setupStatus || '',
-    entryStatus: setup?.entryStatus || '',
-    setupLocation: setup?.stockLocation || setup?.quality?.location || '',
-    trendScore: setup?.quality?.score ?? null,
-    trendState: setup?.structureLabel || setup?.trend || '',
-    entryType: inferEntryType(setup),
-    relativeVolume: setup?.relative_volume ?? null,
-    atrExpansion: setup?.atr_expansion ?? null,
-    setupNotes: setup?.quality?.coach_note || `Auto-journaled ${ev.trade_stage || 'stock'} scanner candidate`,
-    option: option.symbol || '',
-    expiry: option.expiry || '',
-    strike: option.strike ?? null,
-    optionType: option.type || (setup?.direction === 'LONG' ? 'CALL' : setup?.direction === 'SHORT' ? 'PUT' : 'N/A'),
-    askAtSelection: option.ask ?? null,
-    bidAskSpread: option.spread ?? option.spread_pct ?? null,
-    openInterest: option.open_interest ?? null,
-    optionVolume: option.volume ?? null,
-    entry: setup?.entry ?? null,
-    plannedStop: setup?.sl ?? null,
-    plannedTp1: setup?.tp1 ?? null,
-    plannedTp2: setup?.tp2 ?? null,
-    plannedTp3: setup?.tp3 ?? null,
-    exit: null,
-    pnl: null,
-    pnlPct: null,
-    rResult: null,
-    contracts: 1,
-    result: 'Open',
-    outcome: 'Open',
-    directionCorrect: 'Pending',
-    entryQuality: 'Pending',
-    reviewResult: 'Pending',
-    notes: '',
-    setupGrade: setup?.quality?.grade || null,
-    setupScore: setup?.quality?.score ?? null,
-  };
-}
-
-function autoJournalHighQualitySetups(setups) {
-  const entries = loadJournal();
-  const now = Date.now();
-  let added = 0;
-  setups.forEach(setup => {
-    if (!isAutoJournalStage(setup)) return;
-    const key = getAutoJournalKey(setup);
-    const duplicate = entries.some(entry => {
-      const entryTime = new Date(entry.createdAt || `${entry.date || ''}T00:00:00`).getTime();
-      const sameLegacyDate = !entry.createdAt && entry.date === new Date().toISOString().slice(0, 10);
-      return ((entry.autoJournalKey || getAutoJournalKey(entry)) === key || isSameJournalSetup(entry, setup)) &&
-        (sameLegacyDate || (Number.isFinite(entryTime) && now - entryTime < AUTO_JOURNAL_COOLDOWN_MS));
-    });
-    if (duplicate) return;
-    entries.push(buildAutoJournalEntry(setup));
-    added++;
-  });
-  if (!added) return;
-  saveJournal(entries);
-  showToast(`Auto-journaled ${added} high-quality setup${added === 1 ? '' : 's'}`);
 }
 
 function showToast(message) {
@@ -1930,8 +1834,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
     });
 
   if (!indexRows.length) {
-    box.innerHTML = '';
-    box.style.display = 'none';
+    renderIndexWatchlistMessage('Index Watchlist unavailable — check scanner response');
     return;
   }
 
@@ -1972,6 +1875,20 @@ function renderPriorityWatchlist(rows, nearMiss) {
             </div>`;
         }).join('')}
       </div>
+    </div>`;
+}
+
+function renderIndexWatchlistMessage(message) {
+  const box = document.getElementById('priority-watchlist');
+  if (!box) return;
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="priority-watchlist index-watchlist">
+      <div class="priority-head">
+        <div class="priority-title">Index Watchlist</div>
+        <div class="priority-subtitle">Major index ETFs ranked by entry status</div>
+      </div>
+      <div class="empty" style="padding:14px 0;">${message}</div>
     </div>`;
 }
 
@@ -2813,6 +2730,7 @@ function exportCSV() {
 setAutoScanButtonState();
 scheduleNextAutoScan();
 autoScanCountdownTimer = setInterval(updateCountdown, 1000);
+loadIndexWatchlist();
 </script>
 </body>
 </html>
