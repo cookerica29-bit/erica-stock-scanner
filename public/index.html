@@ -1476,7 +1476,6 @@ async function runScan() {
 
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
-    autoJournalHighQualitySetups([...nextRows, ...nextNearMiss]);
     renderScannerResults();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
