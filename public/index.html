@@ -263,6 +263,27 @@
   .grade-b { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.38); color: #a5b4fc; }
   .grade-c { background: rgba(245,158,11,0.13); border-color: rgba(245,158,11,0.34); color: #fcd34d; }
   .grade-d { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.34); color: #fca5a5; }
+  .setup-summary {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: -4px 0 14px;
+  }
+  .setup-status-text {
+    color: #d8e0ec;
+    font-size: 13px;
+    font-weight: 800;
+  }
+  .confirmation-pill {
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 5px 9px;
+    white-space: nowrap;
+  }
+  .confirmation-pill.confirmed { background: rgba(34,197,94,0.12); color: #86efac; }
+  .confirmation-pill.waiting { background: rgba(148,163,184,0.09); color: #94a3b8; }
 
   .card-body { padding: 0 18px 14px; }
 
@@ -1017,9 +1038,11 @@
         <div class="modal-section-title">Scanner Snapshot</div>
         <div class="snapshot-grid">
           <div class="snapshot-item"><div class="snapshot-label">Trend</div><div class="snapshot-value" id="snapshotTrend">—</div></div>
-          <div class="snapshot-item"><div class="snapshot-label">Setup TF</div><div class="snapshot-value" id="snapshotSetupTf">—</div></div>
+          <div class="snapshot-item"><div class="snapshot-label">Short-term Flow</div><div class="snapshot-value" id="snapshotSetupTf">—</div></div>
           <div class="snapshot-item"><div class="snapshot-label">Phase</div><div class="snapshot-value" id="snapshotPhase">—</div></div>
           <div class="snapshot-item"><div class="snapshot-label">Location</div><div class="snapshot-value" id="snapshotLocation">—</div></div>
+          <div class="snapshot-item"><div class="snapshot-label">Setup Grade</div><div class="snapshot-value" id="snapshotSetupGrade">—</div></div>
+          <div class="snapshot-item"><div class="snapshot-label">Confirmation</div><div class="snapshot-value" id="snapshotConfirmation">—</div></div>
           <div class="snapshot-item"><div class="snapshot-label">Setup Status</div><div class="snapshot-value" id="snapshotSetupStatus">—</div></div>
           <div class="snapshot-item"><div class="snapshot-label">Entry Status</div><div class="snapshot-value" id="snapshotEntryStatus">—</div></div>
           <div class="snapshot-item"><div class="snapshot-label">Distance From Entry</div><div class="snapshot-value" id="snapshotDistance">—</div></div>
@@ -1880,7 +1903,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
             <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
               <div><div class="index-cell-label">Ticker</div><div class="priority-ticker">${ticker}</div></div>
               <div><div class="index-cell-label">Trend</div><div class="index-cell-value">${trend}</div></div>
-              <div><div class="index-cell-label">Setup TF</div><div class="index-cell-value">${setupTf}</div></div>
+              <div><div class="index-cell-label">Short-term Flow</div><div class="index-cell-value">${setupTf}</div></div>
               <div><div class="index-cell-label">Phase</div><div class="index-cell-value">${phase}</div></div>
               <div><div class="index-cell-label">Setup Status</div><div class="index-cell-value">${setupStatus}</div></div>
               <div><div class="index-cell-label">Entry Status</div><div><span class="entry-pill ${entryClass}">${entryStatus}</span></div></div>
@@ -1972,6 +1995,44 @@ function formatDisplayLabel(value) {
     .join(' ');
 }
 
+function normalizeSetupGrade(value) {
+  const grade = String(value || '').trim().toUpperCase();
+  return ['A', 'B', 'C'].includes(grade) ? grade : 'C';
+}
+
+function renderSetupGradePill(value) {
+  const raw = String(value || '').trim().toUpperCase();
+  if (!['A', 'B', 'C'].includes(raw)) return '—';
+  return `<span class="grade-badge grade-${raw.toLowerCase()}">${raw}</span>`;
+}
+
+function stockSetupLabel(grade) {
+  const normalized = normalizeSetupGrade(grade);
+  if (normalized === 'A') return 'A Setup — Confirmation Started';
+  if (normalized === 'B') return 'B Setup — Wait';
+  return 'C Setup — Caution';
+}
+
+function stockSetupStatusText(grade) {
+  const normalized = normalizeSetupGrade(grade);
+  if (normalized === 'A') return 'Confirmation Started';
+  if (normalized === 'B') return 'Wait';
+  return 'Caution';
+}
+
+function simplifySetupStatus(value) {
+  const text = String(value || '').trim();
+  if (text === 'Pullback Active') return 'Still Pulling Back';
+  if (text === 'Pullback Complete') return 'Pullback Complete';
+  if (text === 'Early Confirmation') return 'Confirmation Started';
+  if (text === 'Reversal / Counter-trend') return 'Counter-trend';
+  return text || '—';
+}
+
+function confirmationDisplay(started) {
+  return started ? 'Confirmed' : 'Not Confirmed';
+}
+
 function renderCard(s) {
   const q = s.quality || {};
   const ev = s.trade_eval || {};
@@ -1980,6 +2041,10 @@ function renderCard(s) {
   const phase = s.stockPhase || s.phase || 'Transition';
   const setupStatus = s.stockSetupStatus || s.setupStatus || 'Pullback Active';
   const setupReason = s.stockSetupStatusReason || s.setupStatusReason || q.coach_note || 'waiting for cleaner structure';
+  const setupGrade = normalizeSetupGrade(s.setupGrade);
+  const setupGradeReason = s.setupGradeReason || setupReason;
+  const confirmationStarted = Boolean(s.confirmationStarted);
+  const confirmationReason = s.confirmationReason || (confirmationStarted ? 'confirmation started' : 'waiting for confirmation');
   const location = s.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
   const entryStatus = s.entryStatus || 'Waiting';
   const entryClass = entryStatusClass(entryStatus);
@@ -2021,10 +2086,15 @@ function renderCard(s) {
         <span class="badge ${isLong ? 'badge-long' : directionLabel === 'SHORT' ? 'badge-short' : ''}">${directionDisplay}</span>
       </div>
       <div class="card-header-right">
+        <span class="grade-badge grade-${setupGrade.toLowerCase()}">${setupGrade}</span>
         <span class="entry-pill ${entryClass}">${entryStatus}</span>
       </div>
     </div>
     <div class="card-body">
+      <div class="setup-summary">
+        <span class="setup-status-text">${stockSetupLabel(setupGrade)}</span>
+        <span class="confirmation-pill ${confirmationStarted ? 'confirmed' : 'waiting'}">Confirmation: ${confirmationDisplay(confirmationStarted)}</span>
+      </div>
       <div class="price-row">
         <span class="price-big">${fmtMoney(s.price)}</span>
         <span class="price-meta">Current Price · ATR ${fmtMoney(s.atr)}</span>
@@ -2033,7 +2103,7 @@ function renderCard(s) {
         <div class="section-title">Market Context</div>
         <div class="context-grid">
           ${renderContextItem('Trend', trend)}
-          ${renderContextItem('Setup TF', setupTf)}
+          ${renderContextItem('Short-term Flow', setupTf)}
           ${renderContextItem('Phase', phase)}
           ${renderContextItem('Location', formatDisplayLabel(location))}
         </div>
@@ -2041,11 +2111,12 @@ function renderCard(s) {
       <div class="card-section">
         <div class="section-title">Trade Readiness</div>
         <div class="readiness-grid">
-          ${renderReadinessItem('Setup Status', setupStatus, 'primary')}
+          ${renderReadinessItem('Status', stockSetupStatusText(setupGrade), 'primary')}
+          ${renderReadinessItem('Setup Status', simplifySetupStatus(setupStatus), 'primary')}
           ${renderReadinessItem('Entry Status', `<span style="color:${statusColor(entryStatus)}">${entryStatus}</span>`, 'primary')}
           ${renderReadinessItem('Distance from Entry', distanceText)}
         </div>
-        <div class="readiness-reason">${setupReason}</div>
+        <div class="readiness-reason">${setupGradeReason}<br>${confirmationReason}</div>
       </div>
       <div class="levels-strip">
         ${renderLevelTile('Nearest Support / Demand', fmtMoney(s.nearestSupportDemand))}
@@ -2107,6 +2178,9 @@ function setSetupReviewBox(entryOrSetup = null) {
   const location = entryOrSetup?.stockLocation || entryOrSetup?.setupLocation || entryOrSetup?.quality?.location || '—';
   const setupStatus = entryOrSetup?.stockSetupStatus || entryOrSetup?.setupStatus || '—';
   const entryStatus = entryOrSetup?.entryStatus || '—';
+  const setupGrade = entryOrSetup?.setupGrade || '—';
+  const confirmationStarted = Boolean(entryOrSetup?.confirmationStarted);
+  const confirmationReason = entryOrSetup?.confirmationReason || '';
   const distance = entryOrSetup?.distanceFromEntryAtr != null
     ? `${fmtNumber(entryOrSetup.distanceFromEntryAtr)} ATR / ${fmtNumber(entryOrSetup.distanceFromEntryPercent)}%`
     : entryOrSetup?.distanceFromEntry || '—';
@@ -2114,7 +2188,9 @@ function setSetupReviewBox(entryOrSetup = null) {
   setText('snapshotSetupTf', setupTf);
   setText('snapshotPhase', phase);
   setText('snapshotLocation', formatDisplayLabel(location));
-  setText('snapshotSetupStatus', setupStatus);
+  setText('snapshotSetupGrade', setupGrade);
+  setText('snapshotConfirmation', entryOrSetup ? `${confirmationDisplay(confirmationStarted)}${confirmationReason ? ` — ${confirmationReason}` : ''}` : '—');
+  setText('snapshotSetupStatus', simplifySetupStatus(setupStatus));
   setText('snapshotEntryStatus', entryStatus);
   setText('snapshotDistance', distance);
   setText('snapshotSupport', fmtMoney(entryOrSetup?.nearestSupportDemand ?? entryOrSetup?.nearestSupport));
@@ -2466,7 +2542,10 @@ function saveJournalEntry() {
     updated.nearestSupportDemand = _pendingSetup.nearestSupportDemand ?? null;
     updated.nearestResistanceSupply = _pendingSetup.nearestResistanceSupply ?? null;
     updated.scannerStatus = scannerStatusFromStage(ev.trade_stage);
-    updated.setupGrade = _pendingSetup.quality?.grade || null;
+    updated.setupGrade = _pendingSetup.setupGrade || _pendingSetup.quality?.grade || null;
+    updated.setupGradeReason = _pendingSetup.setupGradeReason || '';
+    updated.confirmationStarted = Boolean(_pendingSetup.confirmationStarted);
+    updated.confirmationReason = _pendingSetup.confirmationReason || '';
     updated.setupScore = _pendingSetup.quality?.score ?? null;
     updated.setupRawScore = _pendingSetup.quality?.raw_score ?? null;
     updated.setupCleanliness = _pendingSetup.quality?.cleanliness || '';
@@ -2629,11 +2708,13 @@ function renderJournal() {
         <td>${e.createdAt ? new Date(e.createdAt).toLocaleString() : e.date}</td>
         <td><strong>${e.ticker}</strong></td>
         <td ${dirCls}>${e.direction}</td>
+        <td>${renderSetupGradePill(e.setupGrade)}</td>
         <td>${e.trend || '—'}</td>
         <td>${e.setupTf || e.timeframe || '—'}</td>
         <td>${e.phase || '—'}</td>
-        <td>${e.setupStatus || '—'}</td>
+        <td>${simplifySetupStatus(e.setupStatus) || '—'}</td>
         <td>${renderJournalStatusPill(e.entryStatus)}</td>
+        <td>${confirmationDisplay(Boolean(e.confirmationStarted))}</td>
         <td><span class="result-badge ${badgeCls}">${displayedResult}</span></td>
         <td>${e.directionCorrect || 'Pending'}</td>
         <td>${e.entryQuality || 'Pending'}</td>
@@ -2650,7 +2731,7 @@ function renderJournal() {
     <table class="journal-table">
       <thead>
         <tr>
-          <th>Date</th><th>Ticker</th><th>Direction</th><th>Trend</th><th>Setup TF</th><th>Phase</th><th>Setup Status</th><th>Entry Status</th><th>Result</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Notes</th><th>Manage</th><th></th>
+          <th>Date</th><th>Ticker</th><th>Direction</th><th>Grade</th><th>Trend</th><th>Short-term Flow</th><th>Phase</th><th>Setup Status</th><th>Entry Status</th><th>Confirmation</th><th>Result</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Notes</th><th>Manage</th><th></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -2763,9 +2844,9 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','SetupTF','Phase','SetupStatus','EntryStatus','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
   const rows = entries.map(e => [
-    e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', `"${e.trend || ''}"`, `"${e.setupTf || ''}"`, `"${e.phase || ''}"`, `"${e.setupStatus || ''}"`, `"${e.entryStatus || ''}"`, e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
+    e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', `"${e.trend || ''}"`, `"${e.setupTf || ''}"`, `"${e.phase || ''}"`, `"${e.setupStatus || ''}"`, `"${e.entryStatus || ''}"`, e.setupGrade || '', `"${e.setupGradeReason || ''}"`, e.confirmationStarted ? 'Yes' : 'No', `"${e.confirmationReason || ''}"`, e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
     `"${e.option||''}"`, e.expiry, e.strike ?? '', e.optionType || 'N/A', e.askAtSelection ?? '', e.bidAskSpread ?? '', e.openInterest ?? '', e.optionVolume ?? '',
     e.entry ?? '', e.plannedStop ?? '', e.plannedTp1 ?? '', e.exit ?? '', e.pnl ?? '', e.pnlPct ?? '', e.rResult ?? '', e.contracts,

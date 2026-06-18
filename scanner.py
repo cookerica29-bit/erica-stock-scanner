@@ -1988,6 +1988,85 @@ def _stock_entry_status(result: dict) -> tuple:
     )
 
 
+def _stock_trade_direction(result: dict) -> str:
+    raw = str(result.get("direction") or result.get("trend") or "").upper()
+    if raw in {"LONG", "CALL", "BULLISH"}:
+        return "LONG"
+    if raw in {"SHORT", "PUT", "BEARISH"}:
+        return "SHORT"
+    return "NEUTRAL"
+
+
+def _stock_confirmation(result: dict, setup_direction: str, setup_status: str) -> tuple:
+    ev = result.get("trade_eval") or {}
+    trade_direction = _stock_trade_direction(result)
+    structure_label = str(result.get("structureLabel") or result.get("structure") or "").lower()
+    displacement = str(ev.get("displacement") or "").upper()
+
+    bullish_flow = setup_direction == "Bullish" or "bullish" in structure_label
+    bearish_flow = setup_direction == "Bearish" or "bearish" in structure_label
+
+    if ev.get("trigger_confirmed"):
+        return True, "trigger confirmed after pullback"
+
+    if trade_direction == "LONG":
+        if result.get("bos_confirmed") and bullish_flow:
+            return True, "bullish structure shift after pullback"
+        if ev.get("rejection_confirmed") and (result.get("in_ob") or result.get("near_ob")):
+            return True, "strong bullish reaction from demand/support"
+        if displacement == "STRONG" and bullish_flow:
+            return True, "strong bullish reaction candle from support"
+        if result.get("price") and result.get("ema20") and float(result["price"]) > float(result["ema20"]) and bullish_flow:
+            return True, "reclaimed EMA20 with bullish short-term flow"
+        if "Early Confirmation" in setup_status or "Strong Confirmation" in setup_status or "Trend Resumption" in setup_status:
+            return True, "bullish confirmation started"
+        return False, "waiting for bullish structure shift or support reaction"
+
+    if trade_direction == "SHORT":
+        if result.get("bos_confirmed") and bearish_flow:
+            return True, "bearish structure shift after pullback"
+        if ev.get("rejection_confirmed") and (result.get("in_ob") or result.get("near_ob")):
+            return True, "strong bearish reaction from supply/resistance"
+        if displacement == "STRONG" and bearish_flow:
+            return True, "strong bearish reaction candle from resistance"
+        if result.get("price") and result.get("ema20") and float(result["price"]) < float(result["ema20"]) and bearish_flow:
+            return True, "rejected EMA20 with bearish short-term flow"
+        if "Early Confirmation" in setup_status or "Strong Confirmation" in setup_status or "Trend Resumption" in setup_status:
+            return True, "bearish confirmation started"
+        return False, "waiting for bearish structure shift or resistance rejection"
+
+    return False, "direction unclear"
+
+
+def _stock_setup_grade(result: dict, daily_direction: str, setup_direction: str, location: str, setup_status: str) -> tuple:
+    trade_direction = _stock_trade_direction(result)
+    confirmation_started, confirmation_reason = _stock_confirmation(result, setup_direction, setup_status)
+    loc = str(location or "").lower()
+    in_zone = bool(result.get("in_ob") or result.get("near_ob"))
+
+    long_idea = trade_direction == "LONG"
+    short_idea = trade_direction == "SHORT"
+    trend_aligned = (long_idea and daily_direction == "Bullish") or (short_idea and daily_direction == "Bearish")
+    trend_mixed = daily_direction not in {"Bullish", "Bearish"}
+    location_conflict = (long_idea and loc == "premium") or (short_idea and loc == "discount")
+    location_aligned = (
+        (long_idea and (loc == "discount" or (in_zone and loc != "premium"))) or
+        (short_idea and (loc == "premium" or (in_zone and loc != "discount")))
+    )
+
+    if trend_mixed:
+        return "C", "C Setup — Caution: mixed daily trend", confirmation_started, confirmation_reason
+    if not trend_aligned:
+        return "C", "C Setup — Caution: counter-trend idea", confirmation_started, confirmation_reason
+    if location_conflict:
+        return "C", "C Setup — Caution: location conflicts with direction", confirmation_started, confirmation_reason
+    if not location_aligned:
+        return "C", "C Setup — Caution: weak or unclear location context", confirmation_started, confirmation_reason
+    if confirmation_started:
+        return "A", f"A Setup — Confirmation Started: {confirmation_reason}", confirmation_started, confirmation_reason
+    return "B", "B Setup — Wait: trend and location aligned, confirmation not started", confirmation_started, confirmation_reason
+
+
 def _enrich_stock_scout_fields(
     result: Optional[dict],
     daily_result: Optional[dict],
@@ -2004,6 +2083,14 @@ def _enrich_stock_scout_fields(
     setup_status, setup_reason = _stock_setup_status(result)
     entry_status, distance_atr, distance_pct = _stock_entry_status(result)
     ev = result.get("trade_eval") or {}
+    location = _stock_location_label(ev)
+    setup_grade, setup_grade_reason, confirmation_started, confirmation_reason = _stock_setup_grade(
+        result,
+        daily_direction,
+        setup_direction,
+        location,
+        setup_status,
+    )
 
     result.update({
         "stockTrend": daily_direction,
@@ -2017,13 +2104,17 @@ def _enrich_stock_scout_fields(
         "setupStatus": setup_status,
         "stockSetupStatusReason": setup_reason,
         "setupStatusReason": setup_reason,
-        "stockLocation": _stock_location_label(ev),
+        "stockLocation": location,
         "nearestSupportDemand": result.get("ob_low") if result.get("ob_low") is not None else result.get("sl"),
         "nearestResistanceSupply": result.get("ob_high") if result.get("ob_high") is not None else result.get("bos_level"),
         "entryStatus": entry_status,
         "distanceFromEntryAtr": distance_atr,
         "distanceFromEntryPercent": distance_pct,
         "entryVisible": distance_atr is not None and distance_atr <= 0.5,
+        "setupGrade": setup_grade,
+        "setupGradeReason": setup_grade_reason,
+        "confirmationStarted": confirmation_started,
+        "confirmationReason": confirmation_reason,
     })
     return result
 
