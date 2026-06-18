@@ -242,7 +242,7 @@
     display: grid;
     font-size: 11px;
     gap: 8px;
-    grid-template-columns: 70px 80px 80px 95px 150px 95px 80px 120px 70px;
+    grid-template-columns: 70px 54px 80px 80px 95px 150px 95px 80px 120px 70px;
     padding: 9px 10px;
   }
   .index-row:hover { background: rgba(148,163,184,0.075); }
@@ -1886,6 +1886,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
       <div class="priority-list">
         ${indexRows.map(setup => {
           const ticker = setup.ticker || '—';
+          const setupGrade = setup.setupGrade || '';
           const trend = setup.stockTrend || setup.trendDirection || 'Mixed';
           const setupTf = setup.setupTimeframeDirection || (setup.trend === 'LONG' ? 'Bullish' : setup.trend === 'SHORT' ? 'Bearish' : 'Mixed');
           const phase = setupPhase(setup);
@@ -1902,6 +1903,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
           return `
             <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
               <div><div class="index-cell-label">Ticker</div><div class="priority-ticker">${ticker}</div></div>
+              <div><div class="index-cell-label">Grade</div><div>${renderSetupGradePill(setupGrade)}</div></div>
               <div><div class="index-cell-label">Trend</div><div class="index-cell-value">${trend}</div></div>
               <div><div class="index-cell-label">Short-term Flow</div><div class="index-cell-value">${setupTf}</div></div>
               <div><div class="index-cell-label">Phase</div><div class="index-cell-value">${phase}</div></div>
