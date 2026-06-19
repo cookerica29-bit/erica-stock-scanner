@@ -809,6 +809,53 @@
   .trend-status.choppy { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
   .trend-notes { color:#94a3b8; line-height:1.4; white-space:normal; }
 
+  /* ── Video Studio panel ────────────────────────────────────────────────── */
+  #video-panel { padding:20px 24px; max-width:1400px; margin:0 auto; }
+  .studio-layout {
+    display:grid;
+    gap:16px;
+    grid-template-columns:minmax(320px, 420px) minmax(0, 1fr);
+  }
+  .studio-card {
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:14px;
+  }
+  .studio-title { color:var(--text); font-size:15px; font-weight:800; letter-spacing:0.04em; margin-bottom:4px; }
+  .studio-subtitle { color:var(--muted); font-size:11px; line-height:1.45; margin-bottom:14px; }
+  .trade-select-list { display:flex; flex-direction:column; gap:8px; max-height:520px; overflow:auto; padding-right:4px; }
+  .trade-option {
+    align-items:flex-start;
+    background:rgba(148,163,184,0.035);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    cursor:pointer;
+    display:flex;
+    gap:9px;
+    padding:9px 10px;
+  }
+  .trade-option:hover { background:rgba(148,163,184,0.075); }
+  .trade-option input { margin-top:2px; }
+  .trade-option-main { flex:1; min-width:0; }
+  .trade-option-title { color:var(--text); font-size:12px; font-weight:800; }
+  .trade-option-meta { color:var(--muted); font-size:10px; line-height:1.45; margin-top:3px; }
+  .studio-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  .studio-output-grid { display:grid; gap:12px; }
+  .studio-output {
+    background:rgba(2,6,23,0.22);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:10px;
+    padding:12px;
+  }
+  .studio-output-head { align-items:center; display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; }
+  .studio-output h3 { color:#cbd5e1; font-size:12px; font-weight:800; letter-spacing:0.03em; }
+  .studio-output-body { color:#dbe4ef; font-size:12px; line-height:1.55; white-space:pre-wrap; }
+  .studio-empty { color:var(--muted); padding:42px 0; text-align:center; }
+  @media (max-width: 980px) {
+    .studio-layout { grid-template-columns:1fr; }
+  }
+
   /* ── Spinner ───────────────────────────────────────────────────────────── */
   .spinner {
     display: inline-block; width: 14px; height: 14px;
@@ -836,6 +883,7 @@
   <button class="tab-btn" onclick="switchTab('trends')">Trending List</button>
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
+  <button class="tab-btn" onclick="switchTab('video')">Video Studio</button>
 </div>
 
 <!-- ── Scanner Tab ───────────────────────────────────────────────────────── -->
@@ -998,6 +1046,40 @@
     <div class="analytics-card">
       <h3>By Phase</h3>
       <div id="analyticsByPhase"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Video Studio Tab ──────────────────────────────────────────────────── -->
+<div id="video-panel" class="tab-panel">
+  <div class="studio-layout">
+    <div class="studio-card">
+      <div class="studio-title">Video Studio</div>
+      <div class="studio-subtitle">Template-based content outlines from logged trades. Select up to 5 journal rows.</div>
+      <div class="form-row" style="margin-bottom:12px;">
+        <label>Video Type</label>
+        <select id="videoType">
+          <option value="Scanner Intro">Scanner Intro</option>
+          <option value="Weekly Scanner Report">Weekly Scanner Report</option>
+          <option value="Trade Breakdown">Trade Breakdown</option>
+          <option value="Setup Grade Review">Setup Grade Review</option>
+          <option value="Entry Timing Review">Entry Timing Review</option>
+          <option value="Prop Firm Update">Prop Firm Update</option>
+        </select>
+      </div>
+      <div class="studio-subtitle" id="videoTradeCount">0 trades selected</div>
+      <div id="videoTradeList" class="trade-select-list"></div>
+      <div class="studio-actions">
+        <button onclick="generateVideoOutline()">Generate Video Outline</button>
+        <button class="btn-secondary" onclick="renderVideoStudio()">Refresh Trades</button>
+      </div>
+    </div>
+    <div class="studio-card">
+      <div class="studio-title">Generated Outline</div>
+      <div class="studio-subtitle">Client-side template output. No AI API calls are used in v1.</div>
+      <div id="videoOutput" class="studio-output-grid">
+        <div class="studio-empty">Select 1–5 trades and generate an outline.</div>
+      </div>
     </div>
   </div>
 </div>
@@ -1422,7 +1504,7 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
-  const tabs = ['scanner','trends','journal','analytics'];
+  const tabs = ['scanner','trends','journal','analytics','video'];
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
     b.classList.toggle('active', tabs[i] === tab);
   });
@@ -1430,8 +1512,10 @@ function switchTab(tab) {
   document.getElementById('trends-panel').classList.toggle('active', tab === 'trends');
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
   document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
+  document.getElementById('video-panel').classList.toggle('active', tab === 'video');
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics') renderAnalytics();
+  if (tab === 'video') renderVideoStudio();
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
@@ -2588,6 +2672,228 @@ function clearJournal() {
 }
 function deleteEntry(id) {
   saveJournal(loadJournal().filter(e => e.id !== id));
+}
+
+// ── Video Studio ───────────────────────────────────────────────────────────
+
+function videoTradeLabel(e) {
+  const grade = e.setupGrade ? `${e.setupGrade} Setup` : 'Ungraded';
+  const confirmation = e.confirmationStarted ? 'Confirmed' : 'Not Confirmed';
+  return `${e.ticker || '—'} · ${e.direction || 'N/A'} · ${grade} · ${e.entryStatus || 'Untracked'} · ${confirmation}`;
+}
+
+function renderVideoStudio() {
+  const list = document.getElementById('videoTradeList');
+  const count = document.getElementById('videoTradeCount');
+  if (!list || !count) return;
+  const trades = loadJournal()
+    .slice()
+    .sort((a, b) => String(b.createdAt || b.date || '').localeCompare(String(a.createdAt || a.date || '')))
+    .slice(0, 80);
+
+  if (!trades.length) {
+    count.textContent = '0 trades selected';
+    list.innerHTML = '<div class="studio-empty" style="padding:24px 0;">No journal rows yet. Log trades first, then return here.</div>';
+    return;
+  }
+
+  list.innerHTML = trades.map(e => `
+    <label class="trade-option">
+      <input type="checkbox" class="video-trade-check" value="${e.id}" onchange="handleVideoTradeSelection(this)" />
+      <span class="trade-option-main">
+        <span class="trade-option-title">${videoTradeLabel(e)}</span>
+        <span class="trade-option-meta">${e.createdAt ? new Date(e.createdAt).toLocaleString() : e.date || 'No date'} · Trend ${e.trend || '—'} · Flow ${e.setupTf || e.timeframe || '—'} · Phase ${e.phase || '—'}</span>
+      </span>
+    </label>
+  `).join('');
+  updateVideoTradeCount();
+}
+
+function handleVideoTradeSelection(box) {
+  const selected = Array.from(document.querySelectorAll('.video-trade-check:checked'));
+  if (selected.length > 5) {
+    box.checked = false;
+    alert('Select up to 5 trades.');
+  }
+  updateVideoTradeCount();
+}
+
+function updateVideoTradeCount() {
+  const selected = document.querySelectorAll('.video-trade-check:checked').length;
+  const count = document.getElementById('videoTradeCount');
+  if (count) count.textContent = `${selected} trade${selected === 1 ? '' : 's'} selected`;
+}
+
+function selectedVideoTrades() {
+  const ids = new Set(Array.from(document.querySelectorAll('.video-trade-check:checked')).map(el => String(el.value)));
+  return loadJournal().filter(e => ids.has(String(e.id)));
+}
+
+function tradeSummaryLine(e) {
+  return `${e.ticker || '—'} ${e.direction || 'N/A'}: ${e.setupGrade || 'Ungraded'} setup, ${e.trend || '—'} trend, ${e.phase || '—'}, ${e.entryStatus || '—'} entry status, ${e.reviewResult || e.result || 'Pending'} result.`;
+}
+
+function gradeMix(trades) {
+  const counts = trades.reduce((acc, e) => {
+    const grade = e.setupGrade || 'Ungraded';
+    acc[grade] = (acc[grade] || 0) + 1;
+    return acc;
+  }, {});
+  return Object.entries(counts).map(([grade, count]) => `${grade}: ${count}`).join(' · ') || 'No graded trades';
+}
+
+function buildScannerIntroOutline() {
+  return {
+    titles: [
+      'Why I Built My Stock Options Scanner',
+      'Inside My Scanner: Trend, Location, Confirmation',
+      'How I Use A/B/C Setup Grades for Trade Review',
+      'Building a Cleaner Options Watchlist Workflow',
+      'The Scanner I Built to Stop Chasing Random Setups',
+    ],
+    hook: 'I built this scanner because I needed a calmer way to find trade candidates without pretending every alert is a perfect signal.',
+    structure: [
+      'Introduce the problem: too many tickers, too much noise, and inconsistent review.',
+      'Explain the scanner framework: trend, short-term flow, location, entry status, setup grade, and confirmation.',
+      'Show how A/B/C grades separate confirmed pullbacks, wait setups, and caution setups.',
+      'Explain the journal: tracking direction, entry timing, outcome, and review notes.',
+      'Close with honest limitations and the testing plan before trusting the data.',
+    ],
+    scenes: [
+      'Dashboard opening shot with Scanner tab visible.',
+      'Close-up of a setup card showing Trend, Short-term Flow, Location, Grade, and Confirmation.',
+      'Journal tab showing how trades are reviewed after the fact.',
+      'Analytics tab showing how the data will be compared over 50-100 trades.',
+      'Closing screen: this is a review workflow, not an auto-trading system.',
+    ],
+    talkingPoints: [
+      'The scanner was built to narrow attention, not to guarantee wins.',
+      'It checks trend direction, premium/discount or support/resistance location, setup grade, confirmation status, and entry distance.',
+      'A Setup means trend and location line up and confirmation has started.',
+      'B Setup means the area is interesting but patience is needed.',
+      'C Setup means mixed context, counter-trend, or unclear location.',
+      'Journal tracking is the point: find out whether Tradeable status, grades, confirmation, and entry timing actually matter.',
+      'Limitations: data can lag, setups can fail, entries still require discretion, and this version uses simple rule-based classification.',
+      'Future plan: collect 50-100 setups, compare results by grade and entry quality, then decide what deserves automation or filtering.',
+    ],
+    thumbnail: 'I Built My Own Scanner',
+    description: 'A first look at my stock/options scanner workflow. This video explains why I built it, what it checks, how A/B/C setup grades work, how confirmation is tracked, and how I plan to use journal data to test whether the scanner is actually producing better trade candidates.',
+  };
+}
+
+function buildTradeBasedOutline(type, trades) {
+  const tickers = trades.map(e => e.ticker).filter(Boolean).join(', ') || 'selected trades';
+  const primary = trades[0] || {};
+  const summaries = trades.map(tradeSummaryLine);
+  const mix = gradeMix(trades);
+  const titlesByType = {
+    'Weekly Scanner Report': [
+      `Weekly Scanner Report: ${tickers}`,
+      'Best and Worst Setups From This Week',
+      'What the Scanner Found This Week',
+      `A/B/C Setup Review: ${tickers}`,
+      "This Week's Trade Candidates Reviewed",
+    ],
+    'Trade Breakdown': [
+      `${primary.ticker || 'Trade'} Breakdown: What the Scanner Saw`,
+      `Breaking Down a ${primary.setupGrade || ''} Setup on ${primary.ticker || 'This Trade'}`.trim(),
+      'Trade Review: Trend, Location, Confirmation',
+      'Was This Entry Early or On Time?',
+      'Scanner Card to Journal: Full Trade Breakdown',
+    ],
+    'Setup Grade Review': [
+      `A/B/C Setup Grade Review: ${tickers}`,
+      'Do Setup Grades Match Better Trades?',
+      'Ranking Scanner Setups by Quality',
+      'Confirmed vs Wait Setups: What Changed?',
+      'Setup Grade Review From the Journal',
+    ],
+    'Entry Timing Review': [
+      'Entry Timing Review: Early, Late, or Good?',
+      'Was the Scanner Right but the Entry Early?',
+      `Reviewing Entry Quality on ${tickers}`,
+      'Trend Was Right. Was Timing Right?',
+      'What These Trades Say About Pullback Timing',
+    ],
+    'Prop Firm Update': [
+      'Prop Firm Update: Scanner Review',
+      'Trading Discipline Update With Scanner Data',
+      'What I Took, What I Skipped, What I Learned',
+      `Prop Firm Journal Review: ${tickers}`,
+      'Building Consistency With Scanner Rules',
+    ],
+  };
+
+  return {
+    titles: titlesByType[type] || titlesByType['Trade Breakdown'],
+    hook: 'Today I am using logged scanner trades to review whether setup quality, confirmation, and entry timing actually matched the outcome.',
+    structure: [
+      `Set context: ${type} using ${trades.length} selected trade${trades.length === 1 ? '' : 's'}.`,
+      'Review the scanner snapshot: trend, short-term flow, phase, location, setup grade, and entry status.',
+      'Compare confirmation status against the actual entry timing.',
+      'Walk through the outcome and journal notes without hindsight bias.',
+      'Summarize what should be repeated, avoided, or tested next.',
+    ],
+    scenes: [
+      'Opening dashboard shot with selected journal rows.',
+      `Trade list overlay: ${summaries.join(' | ')}`,
+      'Show setup card or journal snapshot for grade, confirmation, and entry status.',
+      'Explain whether the trade was A, B, or C quality and why.',
+      'Close with one testing takeaway for the next scanner session.',
+    ],
+    talkingPoints: [
+      `Selected trades: ${summaries.join(' ')}`,
+      `Grade mix: ${mix}.`,
+      'Trend shows the larger direction; short-term flow shows what price was doing near the entry.',
+      'Location matters because calls into support/discount and puts into resistance/premium should behave differently.',
+      'Confirmation is tracked separately so a good area is not confused with an entry trigger.',
+      'Entry quality labels help separate scanner direction from timing mistakes.',
+      'The goal is not to prove the scanner is perfect. The goal is to collect evidence and improve the workflow.',
+    ],
+    thumbnail: `${type}: ${tickers}`,
+    description: `A ${type.toLowerCase()} using logged stock scanner trades: ${tickers}. I review trend, short-term flow, location, setup grade, confirmation status, entry timing, and journal results to understand what the scanner is doing well and what still needs testing.`,
+  };
+}
+
+function generateVideoOutline() {
+  const type = document.getElementById('videoType')?.value || 'Scanner Intro';
+  const trades = selectedVideoTrades();
+  if (type !== 'Scanner Intro' && trades.length < 1) {
+    alert('Select at least 1 trade for this video type.');
+    return;
+  }
+  const outline = type === 'Scanner Intro' ? buildScannerIntroOutline() : buildTradeBasedOutline(type, trades.slice(0, 5));
+  renderVideoOutput(outline);
+}
+
+function renderVideoOutput(outline) {
+  const output = document.getElementById('videoOutput');
+  if (!output) return;
+  const sections = [
+    ['Title Ideas', outline.titles.map((t, i) => `${i + 1}. ${t}`).join('\n')],
+    ['Hook', outline.hook],
+    ['Video Structure', outline.structure.map((x, i) => `${i + 1}. ${x}`).join('\n')],
+    ['Scene List', outline.scenes.map((x, i) => `${i + 1}. ${x}`).join('\n')],
+    ['Talking Points', outline.talkingPoints.map(x => `- ${x}`).join('\n')],
+    ['Thumbnail Text', outline.thumbnail],
+    ['YouTube Description', outline.description],
+  ];
+  output.innerHTML = sections.map(([title, body], idx) => `
+    <div class="studio-output">
+      <div class="studio-output-head">
+        <h3>${title}</h3>
+        <button class="btn-secondary btn-sm" onclick="copyVideoSection(${idx})">Copy</button>
+      </div>
+      <div class="studio-output-body" id="videoSection${idx}">${body}</div>
+    </div>
+  `).join('');
+}
+
+async function copyVideoSection(idx) {
+  const el = document.getElementById(`videoSection${idx}`);
+  if (!el) return;
+  await navigator.clipboard.writeText(el.textContent || '');
+  showToast('Copied section');
 }
 
 function calcPnlFromLevels(entry) {
