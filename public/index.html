@@ -852,6 +852,32 @@
   .studio-output h3 { color:#cbd5e1; font-size:12px; font-weight:800; letter-spacing:0.03em; }
   .studio-output-body { color:#dbe4ef; font-size:12px; line-height:1.55; white-space:pre-wrap; }
   .studio-empty { color:var(--muted); padding:42px 0; text-align:center; }
+  .recording-assistant { margin-top:16px; }
+  .scene-card {
+    background:rgba(15,23,42,0.32);
+    border:1px solid rgba(148,163,184,0.1);
+    border-radius:10px;
+    padding:12px;
+  }
+  .scene-card-head { align-items:center; display:flex; justify-content:space-between; gap:10px; margin-bottom:10px; }
+  .scene-title { color:var(--text); font-size:13px; font-weight:800; }
+  .scene-checks { display:flex; gap:12px; flex-wrap:wrap; }
+  .scene-field { margin-top:8px; }
+  .scene-label { color:var(--muted); font-size:10px; font-weight:800; letter-spacing:0.05em; margin-bottom:3px; text-transform:uppercase; }
+  .scene-text { color:#dbe4ef; font-size:12px; line-height:1.45; }
+  .project-list { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+  .project-row {
+    align-items:center;
+    background:rgba(148,163,184,0.04);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    display:flex;
+    gap:8px;
+    justify-content:space-between;
+    padding:8px 10px;
+  }
+  .project-title { color:var(--text); font-size:12px; font-weight:800; }
+  .project-meta { color:var(--muted); font-size:10px; margin-top:2px; }
   @media (max-width: 980px) {
     .studio-layout { grid-template-columns:1fr; }
   }
@@ -1072,13 +1098,24 @@
       <div class="studio-actions">
         <button onclick="generateVideoOutline()">Generate Video Outline</button>
         <button class="btn-secondary" onclick="renderVideoStudio()">Refresh Trades</button>
+        <button class="btn-secondary" onclick="saveVideoProject()">Save Video Project</button>
+        <button class="btn-secondary" onclick="loadSavedVideoProjects()">Load Saved Projects</button>
+        <button class="btn-secondary" onclick="exportVideoMarkdown()">Export Outline as Markdown</button>
       </div>
+      <div id="savedVideoProjects" class="project-list"></div>
     </div>
     <div class="studio-card">
       <div class="studio-title">Generated Outline</div>
-      <div class="studio-subtitle">Client-side template output. No AI API calls are used in v1.</div>
+      <div class="studio-subtitle">Client-side template output. No AI API calls are used in v2.</div>
       <div id="videoOutput" class="studio-output-grid">
         <div class="studio-empty">Select 1–5 trades and generate an outline.</div>
+      </div>
+      <div class="recording-assistant">
+        <div class="studio-title" style="margin-top:18px;">Recording Assistant</div>
+        <div class="studio-subtitle">Scene cards for planning screenshots, visuals, and recording progress.</div>
+        <div id="recordingAssistant" class="studio-output-grid">
+          <div class="studio-empty">Generate an outline to create scene cards.</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1341,10 +1378,12 @@
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
+const VIDEO_PROJECTS_KEY = 'stock_scanner_video_projects';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
 let scannerRows = [];
 let scannerNearMiss = [];
 let indexWatchRows = [];
+let currentVideoProject = null;
 const INDEX_WATCH_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLF', 'XLK', 'SMH'];
 let previousTradeStages = (() => {
   try {
@@ -2863,7 +2902,24 @@ function generateVideoOutline() {
     return;
   }
   const outline = type === 'Scanner Intro' ? buildScannerIntroOutline() : buildTradeBasedOutline(type, trades.slice(0, 5));
+  currentVideoProject = {
+    id: Date.now(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    type,
+    trades: trades.slice(0, 5).map(e => ({
+      id: e.id,
+      ticker: e.ticker,
+      direction: e.direction,
+      setupGrade: e.setupGrade,
+      entryStatus: e.entryStatus,
+      reviewResult: e.reviewResult || e.result || 'Pending',
+    })),
+    outline,
+    scenes: buildRecordingScenes(outline, type, trades.slice(0, 5)),
+  };
   renderVideoOutput(outline);
+  renderRecordingAssistant(currentVideoProject.scenes);
 }
 
 function renderVideoOutput(outline) {
@@ -2889,11 +2945,185 @@ function renderVideoOutput(outline) {
   `).join('');
 }
 
+function buildRecordingScenes(outline, type, trades) {
+  return outline.scenes.map((scene, idx) => {
+    const trade = trades[idx % Math.max(trades.length, 1)] || {};
+    const talkingPoint = outline.talkingPoints[idx] || outline.hook;
+    const visual = idx === 0
+      ? 'Dashboard wide shot'
+      : scene.toLowerCase().includes('journal')
+        ? 'Journal table or selected trade row'
+        : scene.toLowerCase().includes('analytics')
+          ? 'Analytics panel or summary stats'
+          : 'Scanner card close-up with grade, confirmation, and entry status';
+    return {
+      title: `Scene ${idx + 1}: ${scene.split(':')[0]}`,
+      show: scene,
+      say: trade.ticker
+        ? `${talkingPoint} Use ${trade.ticker} as the example and explain the ${trade.setupGrade || 'ungraded'} setup context.`
+        : talkingPoint,
+      visual,
+      screenshotNeeded: idx > 0,
+      completed: false,
+    };
+  });
+}
+
+function renderRecordingAssistant(scenes = []) {
+  const box = document.getElementById('recordingAssistant');
+  if (!box) return;
+  if (!scenes.length) {
+    box.innerHTML = '<div class="studio-empty">Generate an outline to create scene cards.</div>';
+    return;
+  }
+  box.innerHTML = scenes.map((scene, idx) => `
+    <div class="scene-card">
+      <div class="scene-card-head">
+        <div class="scene-title">${scene.title}</div>
+        <div class="scene-checks">
+          <label class="check-control"><input type="checkbox" ${scene.screenshotNeeded ? 'checked' : ''} onchange="updateSceneFlag(${idx}, 'screenshotNeeded', this.checked)" /> Screenshot needed</label>
+          <label class="check-control"><input type="checkbox" ${scene.completed ? 'checked' : ''} onchange="updateSceneFlag(${idx}, 'completed', this.checked)" /> Completed</label>
+        </div>
+      </div>
+      <div class="scene-field"><div class="scene-label">What to show on screen</div><div class="scene-text">${scene.show}</div></div>
+      <div class="scene-field"><div class="scene-label">What to say</div><div class="scene-text">${scene.say}</div></div>
+      <div class="scene-field"><div class="scene-label">Suggested visual</div><div class="scene-text">${scene.visual}</div></div>
+    </div>
+  `).join('');
+}
+
+function updateSceneFlag(idx, field, value) {
+  if (!currentVideoProject?.scenes?.[idx]) return;
+  currentVideoProject.scenes[idx][field] = value;
+  currentVideoProject.updatedAt = new Date().toISOString();
+}
+
 async function copyVideoSection(idx) {
   const el = document.getElementById(`videoSection${idx}`);
   if (!el) return;
   await navigator.clipboard.writeText(el.textContent || '');
   showToast('Copied section');
+}
+
+function loadVideoProjects() {
+  try { return JSON.parse(localStorage.getItem(VIDEO_PROJECTS_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function saveVideoProjects(projects) {
+  localStorage.setItem(VIDEO_PROJECTS_KEY, JSON.stringify(projects));
+}
+
+function saveVideoProject() {
+  if (!currentVideoProject) {
+    alert('Generate an outline before saving a video project.');
+    return;
+  }
+  const projects = loadVideoProjects();
+  const title = currentVideoProject.outline?.titles?.[0] || currentVideoProject.type || 'Video Project';
+  const project = {
+    ...currentVideoProject,
+    title,
+    updatedAt: new Date().toISOString(),
+  };
+  const idx = projects.findIndex(p => p.id === project.id);
+  if (idx >= 0) projects[idx] = project;
+  else projects.unshift(project);
+  saveVideoProjects(projects.slice(0, 20));
+  currentVideoProject = project;
+  showToast('Video project saved');
+  loadSavedVideoProjects();
+}
+
+function loadSavedVideoProjects() {
+  const box = document.getElementById('savedVideoProjects');
+  if (!box) return;
+  const projects = loadVideoProjects();
+  if (!projects.length) {
+    box.innerHTML = '<div class="studio-subtitle" style="margin:8px 0 0;">No saved video projects yet.</div>';
+    return;
+  }
+  box.innerHTML = projects.map(project => `
+    <div class="project-row">
+      <div>
+        <div class="project-title">${project.title || project.type || 'Video Project'}</div>
+        <div class="project-meta">${project.type || 'Outline'} · ${project.trades?.length || 0} trade${project.trades?.length === 1 ? '' : 's'} · ${project.updatedAt ? new Date(project.updatedAt).toLocaleString() : ''}</div>
+      </div>
+      <button class="btn-secondary btn-sm" onclick="restoreVideoProject(${project.id})">Load</button>
+    </div>
+  `).join('');
+}
+
+function restoreVideoProject(id) {
+  const project = loadVideoProjects().find(p => p.id === id);
+  if (!project) return;
+  currentVideoProject = project;
+  if (document.getElementById('videoType')) document.getElementById('videoType').value = project.type || 'Scanner Intro';
+  renderVideoOutput(project.outline);
+  renderRecordingAssistant(project.scenes || buildRecordingScenes(project.outline, project.type, []));
+  showToast('Video project loaded');
+}
+
+function videoProjectMarkdown(project) {
+  const outline = project.outline;
+  const scenes = project.scenes || [];
+  return [
+    `# ${outline.titles?.[0] || project.title || 'Video Outline'}`,
+    '',
+    `Video Type: ${project.type || 'N/A'}`,
+    `Updated: ${project.updatedAt || new Date().toISOString()}`,
+    '',
+    '## Title Ideas',
+    ...(outline.titles || []).map((title, idx) => `${idx + 1}. ${title}`),
+    '',
+    '## Hook',
+    outline.hook || '',
+    '',
+    '## Video Structure',
+    ...(outline.structure || []).map((item, idx) => `${idx + 1}. ${item}`),
+    '',
+    '## Scene List',
+    ...(outline.scenes || []).map((item, idx) => `${idx + 1}. ${item}`),
+    '',
+    '## Talking Points',
+    ...(outline.talkingPoints || []).map(item => `- ${item}`),
+    '',
+    '## Recording Assistant',
+    ...scenes.flatMap((scene, idx) => [
+      `### ${idx + 1}. ${scene.title}`,
+      `- What to show: ${scene.show}`,
+      `- What to say: ${scene.say}`,
+      `- Suggested visual: ${scene.visual}`,
+      `- Screenshot needed: ${scene.screenshotNeeded ? 'Yes' : 'No'}`,
+      `- Completed: ${scene.completed ? 'Yes' : 'No'}`,
+      '',
+    ]),
+    '## Thumbnail Text',
+    outline.thumbnail || '',
+    '',
+    '## YouTube Description',
+    outline.description || '',
+  ].join('\n');
+}
+
+function exportVideoMarkdown() {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before exporting.');
+    return;
+  }
+  currentVideoProject.updatedAt = new Date().toISOString();
+  const markdown = videoProjectMarkdown(currentVideoProject);
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const safeTitle = (currentVideoProject.outline?.titles?.[0] || currentVideoProject.type || 'video-outline')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  a.href = url;
+  a.download = `${safeTitle || 'video-outline'}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function calcPnlFromLevels(entry) {
