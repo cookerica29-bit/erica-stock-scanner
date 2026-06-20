@@ -865,6 +865,34 @@
   .scene-field { margin-top:8px; }
   .scene-label { color:var(--muted); font-size:10px; font-weight:800; letter-spacing:0.05em; margin-bottom:3px; text-transform:uppercase; }
   .scene-text { color:#dbe4ef; font-size:12px; line-height:1.45; }
+  .asset-builder {
+    background:rgba(2,6,23,0.22);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    margin-top:12px;
+    padding:10px;
+  }
+  .asset-grid {
+    display:grid;
+    gap:8px;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+  }
+  .asset-grid .form-row { margin:0; }
+  .asset-notes { margin-top:8px; }
+  .asset-summary {
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+    margin-bottom:12px;
+  }
+  .asset-summary-card {
+    background:rgba(148,163,184,0.045);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    padding:10px;
+  }
+  .asset-summary-label { color:var(--muted); font-size:10px; margin-bottom:3px; }
+  .asset-summary-value { color:var(--text); font-size:18px; font-weight:900; }
   .project-list { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
   .project-row {
     align-items:center;
@@ -880,6 +908,8 @@
   .project-meta { color:var(--muted); font-size:10px; margin-top:2px; }
   @media (max-width: 980px) {
     .studio-layout { grid-template-columns:1fr; }
+    .asset-grid,
+    .asset-summary { grid-template-columns:1fr; }
   }
 
   /* ── Spinner ───────────────────────────────────────────────────────────── */
@@ -1101,6 +1131,7 @@
         <button class="btn-secondary" onclick="saveVideoProject()">Save Video Project</button>
         <button class="btn-secondary" onclick="loadSavedVideoProjects()">Load Saved Projects</button>
         <button class="btn-secondary" onclick="exportVideoMarkdown()">Export Outline as Markdown</button>
+        <button class="btn-secondary" onclick="exportAssetChecklistMarkdown()">Export Asset Checklist as Markdown</button>
       </div>
       <div id="savedVideoProjects" class="project-list"></div>
     </div>
@@ -1113,6 +1144,7 @@
       <div class="recording-assistant">
         <div class="studio-title" style="margin-top:18px;">Recording Assistant</div>
         <div class="studio-subtitle">Scene cards for planning screenshots, visuals, and recording progress.</div>
+        <div id="assetChecklistSummary"></div>
         <div id="recordingAssistant" class="studio-output-grid">
           <div class="studio-empty">Generate an outline to create scene cards.</div>
         </div>
@@ -2963,19 +2995,46 @@ function buildRecordingScenes(outline, type, trades) {
         ? `${talkingPoint} Use ${trade.ticker} as the example and explain the ${trade.setupGrade || 'ungraded'} setup context.`
         : talkingPoint,
       visual,
+      assetType: suggestedAssetType(scene, idx),
+      assetNotes: suggestedAssetNotes(scene, trade),
+      assetFilename: suggestedAssetFilename(type, trade, idx),
+      assetStatus: idx === 0 ? 'Needed' : 'Missing',
       screenshotNeeded: idx > 0,
       completed: false,
     };
   });
 }
 
+function suggestedAssetType(scene, idx) {
+  const text = scene.toLowerCase();
+  if (idx === 0 || text.includes('dashboard') || text.includes('scanner')) return 'Scanner Screenshot';
+  if (text.includes('journal')) return 'Journal Screenshot';
+  if (text.includes('alert')) return 'Telegram Alert';
+  if (text.includes('chart')) return 'TradingView Chart';
+  if (text.includes('closing')) return 'No Asset Needed';
+  return 'Scanner Screenshot';
+}
+
+function suggestedAssetNotes(scene, trade) {
+  if (trade?.ticker) return `Capture ${trade.ticker} context for: ${scene}`;
+  return `Capture visual for: ${scene}`;
+}
+
+function suggestedAssetFilename(type, trade, idx) {
+  const prefix = String(type || 'video').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const ticker = String(trade?.ticker || `scene-${idx + 1}`).toLowerCase();
+  return `${prefix}-${String(idx + 1).padStart(2, '0')}-${ticker}.png`;
+}
+
 function renderRecordingAssistant(scenes = []) {
   const box = document.getElementById('recordingAssistant');
   if (!box) return;
   if (!scenes.length) {
+    renderAssetChecklistSummary([]);
     box.innerHTML = '<div class="studio-empty">Generate an outline to create scene cards.</div>';
     return;
   }
+  renderAssetChecklistSummary(scenes);
   box.innerHTML = scenes.map((scene, idx) => `
     <div class="scene-card">
       <div class="scene-card-head">
@@ -2988,6 +3047,31 @@ function renderRecordingAssistant(scenes = []) {
       <div class="scene-field"><div class="scene-label">What to show on screen</div><div class="scene-text">${scene.show}</div></div>
       <div class="scene-field"><div class="scene-label">What to say</div><div class="scene-text">${scene.say}</div></div>
       <div class="scene-field"><div class="scene-label">Suggested visual</div><div class="scene-text">${scene.visual}</div></div>
+      <div class="asset-builder">
+        <div class="scene-label">Asset Builder</div>
+        <div class="asset-grid">
+          <div class="form-row">
+            <label>Asset Type</label>
+            <select onchange="updateSceneFlag(${idx}, 'assetType', this.value)">
+              ${['Scanner Screenshot','Journal Screenshot','TradingView Chart','Telegram Alert','Manual Upload','No Asset Needed'].map(type => `<option value="${type}" ${scene.assetType === type ? 'selected' : ''}>${type}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Filename Suggestion</label>
+            <input type="text" value="${scene.assetFilename || ''}" oninput="updateSceneFlag(${idx}, 'assetFilename', this.value)" />
+          </div>
+          <div class="form-row">
+            <label>Asset Status</label>
+            <select onchange="updateSceneFlag(${idx}, 'assetStatus', this.value)">
+              ${['Needed','Captured','Missing'].map(status => `<option value="${status}" ${scene.assetStatus === status ? 'selected' : ''}>${status}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="form-row asset-notes">
+          <label>Asset Notes</label>
+          <textarea oninput="updateSceneFlag(${idx}, 'assetNotes', this.value)">${scene.assetNotes || ''}</textarea>
+        </div>
+      </div>
     </div>
   `).join('');
 }
@@ -2996,6 +3080,33 @@ function updateSceneFlag(idx, field, value) {
   if (!currentVideoProject?.scenes?.[idx]) return;
   currentVideoProject.scenes[idx][field] = value;
   currentVideoProject.updatedAt = new Date().toISOString();
+  if (field === 'assetStatus' || field === 'assetType') renderAssetChecklistSummary(currentVideoProject.scenes);
+}
+
+function assetChecklistCounts(scenes = []) {
+  return scenes.reduce((acc, scene) => {
+    const needed = scene.assetType !== 'No Asset Needed';
+    if (needed) acc.total += 1;
+    if (needed && scene.assetStatus === 'Captured') acc.captured += 1;
+    if (needed && scene.assetStatus === 'Missing') acc.missing += 1;
+    return acc;
+  }, { total: 0, captured: 0, missing: 0 });
+}
+
+function renderAssetChecklistSummary(scenes = []) {
+  const box = document.getElementById('assetChecklistSummary');
+  if (!box) return;
+  if (!scenes.length) {
+    box.innerHTML = '';
+    return;
+  }
+  const counts = assetChecklistCounts(scenes);
+  box.innerHTML = `
+    <div class="asset-summary">
+      <div class="asset-summary-card"><div class="asset-summary-label">Total assets needed</div><div class="asset-summary-value">${counts.total}</div></div>
+      <div class="asset-summary-card"><div class="asset-summary-label">Captured assets</div><div class="asset-summary-value">${counts.captured}</div></div>
+      <div class="asset-summary-card"><div class="asset-summary-label">Missing assets</div><div class="asset-summary-value">${counts.missing}</div></div>
+    </div>`;
 }
 
 async function copyVideoSection(idx) {
@@ -3094,6 +3205,10 @@ function videoProjectMarkdown(project) {
       `- What to show: ${scene.show}`,
       `- What to say: ${scene.say}`,
       `- Suggested visual: ${scene.visual}`,
+      `- Asset type: ${scene.assetType || 'No Asset Needed'}`,
+      `- Asset notes: ${scene.assetNotes || ''}`,
+      `- Filename suggestion: ${scene.assetFilename || ''}`,
+      `- Asset status: ${scene.assetStatus || 'Needed'}`,
       `- Screenshot needed: ${scene.screenshotNeeded ? 'Yes' : 'No'}`,
       `- Completed: ${scene.completed ? 'Yes' : 'No'}`,
       '',
@@ -3122,6 +3237,51 @@ function exportVideoMarkdown() {
     .replace(/^-|-$/g, '');
   a.href = url;
   a.download = `${safeTitle || 'video-outline'}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function assetChecklistMarkdown(project) {
+  const scenes = project.scenes || [];
+  const counts = assetChecklistCounts(scenes);
+  return [
+    `# Asset Checklist: ${project.outline?.titles?.[0] || project.title || 'Video Project'}`,
+    '',
+    `Video Type: ${project.type || 'N/A'}`,
+    `Total assets needed: ${counts.total}`,
+    `Captured assets: ${counts.captured}`,
+    `Missing assets: ${counts.missing}`,
+    '',
+    '## Assets',
+    ...scenes.flatMap((scene, idx) => [
+      `### ${idx + 1}. ${scene.title}`,
+      `- Asset type: ${scene.assetType || 'No Asset Needed'}`,
+      `- Asset status: ${scene.assetStatus || 'Needed'}`,
+      `- Filename suggestion: ${scene.assetFilename || ''}`,
+      `- Asset notes: ${scene.assetNotes || ''}`,
+      `- Screenshot needed: ${scene.screenshotNeeded ? 'Yes' : 'No'}`,
+      `- Scene visual: ${scene.visual || ''}`,
+      '',
+    ]),
+  ].join('\n');
+}
+
+function exportAssetChecklistMarkdown() {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before exporting an asset checklist.');
+    return;
+  }
+  currentVideoProject.updatedAt = new Date().toISOString();
+  const markdown = assetChecklistMarkdown(currentVideoProject);
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const safeTitle = (currentVideoProject.outline?.titles?.[0] || currentVideoProject.type || 'asset-checklist')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  a.href = url;
+  a.download = `${safeTitle || 'video'}-asset-checklist.md`;
   a.click();
   URL.revokeObjectURL(url);
 }
