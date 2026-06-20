@@ -862,6 +862,7 @@
   }
   .creator-label { color:var(--muted); font-size:10px; margin-bottom:4px; }
   .creator-value { color:var(--text); font-size:14px; font-weight:850; line-height:1.3; overflow-wrap:anywhere; }
+  .creator-unsaved { color:#fcd34d; font-size:11px; font-weight:800; margin-top:6px; }
   .project-status-row { align-items:center; display:flex; gap:8px; flex-wrap:wrap; }
   .project-status-badge {
     border-radius:999px;
@@ -981,6 +982,8 @@
   }
   .project-title { color:var(--text); font-size:12px; font-weight:800; }
   .project-meta { color:var(--muted); font-size:10px; margin-top:2px; }
+  .project-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+  .project-danger { color:#fca5a5 !important; border-color:rgba(239,68,68,0.35) !important; }
   @media (max-width: 980px) {
     .studio-layout { grid-template-columns:1fr; }
     .creator-dashboard-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); }
@@ -1195,6 +1198,7 @@
       <div>
         <div class="studio-title">Creator Dashboard</div>
         <div class="studio-subtitle" style="margin-bottom:0;">Project readiness, recording progress, scripts, shorts, and assets.</div>
+        <div id="creatorUnsavedWarning" class="creator-unsaved" style="display:none;">Unsaved changes</div>
       </div>
       <div class="project-status-row">
         <span id="projectStatusBadge" class="project-status-badge draft">Draft</span>
@@ -1216,6 +1220,7 @@
       <div class="creator-metric"><div class="creator-label">Script status</div><div class="creator-value" id="creatorScriptStatus">Not generated</div></div>
       <div class="creator-metric"><div class="creator-label">Shorts pack</div><div class="creator-value" id="creatorShortsStatus">Not generated</div></div>
       <div class="creator-metric"><div class="creator-label">Project status</div><div class="creator-value" id="creatorProjectStatus">Draft</div></div>
+      <div class="creator-metric"><div class="creator-label">Last saved</div><div class="creator-value" id="creatorLastSaved">Never</div></div>
     </div>
   </div>
   <div class="studio-layout">
@@ -1256,6 +1261,10 @@
         <button class="btn-secondary" onclick="generateShortsPack()">Generate Shorts/Reels Pack</button>
         <button class="btn-secondary" onclick="copyShortScript()">Copy Short Script</button>
         <button class="btn-secondary" onclick="exportShortsMarkdown()">Export Shorts Pack as Markdown</button>
+        <button class="btn-secondary" onclick="startScannerIntroProject()">Start Scanner Intro Project</button>
+        <button class="btn-secondary" onclick="renameCurrentProject()">Rename Current Project</button>
+        <button class="btn-secondary" onclick="duplicateCurrentProject()">Duplicate Current Project</button>
+        <button class="btn-secondary project-danger" onclick="clearCurrentProject()">Clear Current Project</button>
       </div>
       <div id="savedVideoProjects" class="project-list"></div>
     </div>
@@ -1547,6 +1556,7 @@ let scannerRows = [];
 let scannerNearMiss = [];
 let indexWatchRows = [];
 let currentVideoProject = null;
+let videoProjectDirty = false;
 const INDEX_WATCH_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLF', 'XLK', 'SMH'];
 let previousTradeStages = (() => {
   try {
@@ -2896,7 +2906,7 @@ function renderVideoStudio() {
 
   if (!trades.length) {
     count.textContent = '0 trades selected';
-    list.innerHTML = '<div class="studio-empty" style="padding:24px 0;">No journal rows yet. Log trades first, then return here.</div>';
+    list.innerHTML = '<div class="studio-empty" style="padding:24px 0;">No journal trades yet. Log trades from scanner cards to build trade-based videos, or use Start Scanner Intro Project to create an intro without journal rows.</div>';
     renderCreatorDashboard();
     return;
   }
@@ -2932,6 +2942,31 @@ function updateVideoTradeCount() {
 function selectedVideoTrades() {
   const ids = new Set(Array.from(document.querySelectorAll('.video-trade-check:checked')).map(el => String(el.value)));
   return loadJournal().filter(e => ids.has(String(e.id)));
+}
+
+window.addEventListener('beforeunload', e => {
+  if (!videoProjectDirty) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+function markVideoProjectDirty() {
+  if (!currentVideoProject) return;
+  videoProjectDirty = true;
+  renderCreatorDashboard();
+}
+
+function markVideoProjectSaved() {
+  videoProjectDirty = false;
+  renderCreatorDashboard();
+}
+
+function confirmDiscardUnsaved() {
+  return !videoProjectDirty || confirm('You have unsaved Video Studio changes. Continue and discard them?');
+}
+
+function formatProjectDate(value) {
+  return value ? new Date(value).toLocaleString() : 'Never';
 }
 
 function projectStatusClass(status) {
@@ -2976,6 +3011,9 @@ function renderCreatorDashboard() {
   setText('creatorScriptStatus', scriptStatus());
   setText('creatorShortsStatus', shortsStatus());
   setText('creatorProjectStatus', status);
+  setText('creatorLastSaved', formatProjectDate(currentVideoProject?.lastSavedAt));
+  const dirty = document.getElementById('creatorUnsavedWarning');
+  if (dirty) dirty.style.display = videoProjectDirty ? 'block' : 'none';
   const badge = document.getElementById('projectStatusBadge');
   if (badge) {
     badge.textContent = status;
@@ -2989,10 +3027,28 @@ function persistCurrentVideoProject() {
   if (!currentVideoProject?.id) return;
   const projects = loadVideoProjects();
   const idx = projects.findIndex(p => p.id === currentVideoProject.id);
+  const savedAt = new Date().toISOString();
+  currentVideoProject.lastSavedAt = savedAt;
+  currentVideoProject.title = projectTitle(currentVideoProject);
   if (idx >= 0) {
-    projects[idx] = { ...projects[idx], ...currentVideoProject, updatedAt: new Date().toISOString() };
-    saveVideoProjects(projects);
+    projects[idx] = { ...projects[idx], ...currentVideoProject, updatedAt: savedAt, lastSavedAt: savedAt };
+  } else {
+    projects.unshift({ ...currentVideoProject, updatedAt: savedAt, lastSavedAt: savedAt });
   }
+  saveVideoProjects(projects.slice(0, 20));
+}
+
+function duplicateVideoProject(project, titleSuffix = 'Copy') {
+  const now = new Date().toISOString();
+  return {
+    ...JSON.parse(JSON.stringify(project)),
+    id: Date.now(),
+    title: `${project.title || project.outline?.titles?.[0] || project.type || 'Video Project'} ${titleSuffix}`,
+    status: 'Draft',
+    createdAt: now,
+    updatedAt: now,
+    lastSavedAt: now,
+  };
 }
 
 function updateProjectStatus(status) {
@@ -3004,6 +3060,59 @@ function updateProjectStatus(status) {
   currentVideoProject.status = status;
   currentVideoProject.updatedAt = new Date().toISOString();
   persistCurrentVideoProject();
+  markVideoProjectSaved();
+  renderCreatorDashboard();
+}
+
+function renameCurrentProject() {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before renaming it.');
+    return;
+  }
+  const nextTitle = prompt('Project name', projectTitle());
+  if (!nextTitle || !nextTitle.trim()) return;
+  currentVideoProject.title = nextTitle.trim();
+  currentVideoProject.updatedAt = new Date().toISOString();
+  markVideoProjectDirty();
+  renderCreatorDashboard();
+  loadSavedVideoProjects();
+}
+
+function duplicateCurrentProject() {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before duplicating it.');
+    return;
+  }
+  const duplicate = duplicateVideoProject(currentVideoProject);
+  const projects = loadVideoProjects();
+  projects.unshift(duplicate);
+  saveVideoProjects(projects.slice(0, 20));
+  currentVideoProject = duplicate;
+  markVideoProjectSaved();
+  restoreVideoProject(duplicate.id);
+  loadSavedVideoProjects();
+  showToast('Video project duplicated');
+}
+
+function clearCurrentProject() {
+  if (!currentVideoProject && !videoProjectDirty) return;
+  if (!confirmDiscardUnsaved()) return;
+  currentVideoProject = null;
+  videoProjectDirty = false;
+  renderVideoOutput({ titles: [], hook: '', structure: [], scenes: [], talkingPoints: [], thumbnail: '', description: '' });
+  document.getElementById('videoOutput').innerHTML = '<div class="studio-empty">Select 1–5 trades and generate an outline.</div>';
+  renderRecordingAssistant([]);
+  renderShortsPack(null);
+  renderCreatorDashboard();
+  showToast('Current video project cleared');
+}
+
+function startScannerIntroProject() {
+  if (!confirmDiscardUnsaved()) return;
+  const typeEl = document.getElementById('videoType');
+  if (typeEl) typeEl.value = 'Scanner Intro';
+  generateVideoOutline();
+  currentVideoProject.title = 'Scanner Intro Project';
   renderCreatorDashboard();
 }
 
@@ -3162,6 +3271,7 @@ function generateVideoOutline() {
   };
   renderVideoOutput(outline);
   renderRecordingAssistant(currentVideoProject.scenes);
+  markVideoProjectDirty();
   renderCreatorDashboard();
 }
 
@@ -3358,6 +3468,7 @@ function updateSceneFlag(idx, field, value) {
   currentVideoProject.scenes[idx][field] = value;
   currentVideoProject.updatedAt = new Date().toISOString();
   if (field === 'assetStatus' || field === 'assetType') renderAssetChecklistSummary(currentVideoProject.scenes);
+  markVideoProjectDirty();
   renderCreatorDashboard();
 }
 
@@ -3376,6 +3487,7 @@ function changeScriptStyle(style) {
       idx
     ),
   }));
+  markVideoProjectDirty();
   renderRecordingAssistant(currentVideoProject.scenes);
   renderCreatorDashboard();
 }
@@ -3457,18 +3569,21 @@ function saveVideoProject() {
     return;
   }
   const projects = loadVideoProjects();
-  const title = currentVideoProject.outline?.titles?.[0] || currentVideoProject.type || 'Video Project';
+  const title = currentVideoProject.title || currentVideoProject.outline?.titles?.[0] || currentVideoProject.type || 'Video Project';
+  const savedAt = new Date().toISOString();
   const project = {
     ...currentVideoProject,
     title,
     status: currentVideoProject.status || 'Draft',
-    updatedAt: new Date().toISOString(),
+    updatedAt: savedAt,
+    lastSavedAt: savedAt,
   };
   const idx = projects.findIndex(p => p.id === project.id);
   if (idx >= 0) projects[idx] = project;
   else projects.unshift(project);
   saveVideoProjects(projects.slice(0, 20));
   currentVideoProject = project;
+  markVideoProjectSaved();
   showToast('Video project saved');
   loadSavedVideoProjects();
   renderCreatorDashboard();
@@ -3480,24 +3595,35 @@ function loadSavedVideoProjects() {
   const projects = loadVideoProjects();
   if (!projects.length) {
     box.innerHTML = '<div class="studio-subtitle" style="margin:8px 0 0;">No saved video projects yet.</div>';
+    renderCreatorDashboard();
     return;
   }
   box.innerHTML = projects.map(project => `
     <div class="project-row">
       <div>
         <div class="project-title">${project.title || project.type || 'Video Project'}</div>
-        <div class="project-meta">${project.type || 'Outline'} · ${project.status || 'Draft'} · ${project.trades?.length || 0} trade${project.trades?.length === 1 ? '' : 's'} · ${project.updatedAt ? new Date(project.updatedAt).toLocaleString() : ''}</div>
+        <div class="project-meta">
+          Type: ${project.type || 'Outline'} · Status: ${project.status || 'Draft'} · Trades: ${project.trades?.length || 0}<br>
+          Created: ${formatProjectDate(project.createdAt)} · Updated: ${formatProjectDate(project.updatedAt || project.lastSavedAt)}
+        </div>
       </div>
-      <button class="btn-secondary btn-sm" onclick="restoreVideoProject(${project.id})">Load</button>
+      <div class="project-actions">
+        <button class="btn-secondary btn-sm" onclick="restoreVideoProject(${project.id})">Load</button>
+        <button class="btn-secondary btn-sm" onclick="duplicateSavedVideoProject(${project.id})">Duplicate</button>
+        <button class="btn-secondary btn-sm project-danger" onclick="deleteSavedVideoProject(${project.id})">Delete</button>
+      </div>
     </div>
   `).join('');
+  renderCreatorDashboard();
 }
 
 function restoreVideoProject(id) {
+  if (!confirmDiscardUnsaved()) return;
   const project = loadVideoProjects().find(p => p.id === id);
   if (!project) return;
   project.status = project.status || 'Draft';
   currentVideoProject = project;
+  videoProjectDirty = false;
   if (document.getElementById('videoType')) document.getElementById('videoType').value = project.type || 'Scanner Intro';
   if (document.getElementById('scriptStyle')) document.getElementById('scriptStyle').value = project.scriptStyle || 'Casual';
   ensureSceneScripts(currentVideoProject);
@@ -3506,6 +3632,35 @@ function restoreVideoProject(id) {
   renderShortsPack(project.shortsPack || null);
   renderCreatorDashboard();
   showToast('Video project loaded');
+}
+
+function duplicateSavedVideoProject(id) {
+  const project = loadVideoProjects().find(p => p.id === id);
+  if (!project) return;
+  const projects = loadVideoProjects();
+  projects.unshift(duplicateVideoProject(project));
+  saveVideoProjects(projects.slice(0, 20));
+  loadSavedVideoProjects();
+  renderCreatorDashboard();
+  showToast('Saved project duplicated');
+}
+
+function deleteSavedVideoProject(id) {
+  const projects = loadVideoProjects();
+  const project = projects.find(p => p.id === id);
+  if (!project) return;
+  if (!confirm(`Delete saved project "${project.title || project.type || 'Video Project'}"? This cannot be undone.`)) return;
+  saveVideoProjects(projects.filter(p => p.id !== id));
+  if (currentVideoProject?.id === id) {
+    currentVideoProject = null;
+    videoProjectDirty = false;
+    document.getElementById('videoOutput').innerHTML = '<div class="studio-empty">Select 1–5 trades and generate an outline.</div>';
+    renderRecordingAssistant([]);
+    renderShortsPack(null);
+  }
+  loadSavedVideoProjects();
+  renderCreatorDashboard();
+  showToast('Saved project deleted');
 }
 
 function videoProjectMarkdown(project) {
@@ -3663,6 +3818,7 @@ function generateShortsPack() {
   }
   currentVideoProject.shortsPack = buildShortsPack(currentVideoProject);
   currentVideoProject.updatedAt = new Date().toISOString();
+  markVideoProjectDirty();
   renderShortsPack(currentVideoProject.shortsPack);
   renderCreatorDashboard();
 }
@@ -3728,6 +3884,8 @@ async function copyShortScript() {
   }
   const pack = currentVideoProject.shortsPack || buildShortsPack(currentVideoProject);
   currentVideoProject.shortsPack = pack;
+  currentVideoProject.updatedAt = new Date().toISOString();
+  markVideoProjectDirty();
   renderShortsPack(pack);
   renderCreatorDashboard();
   await navigator.clipboard.writeText([pack.hook15, '', pack.script30, '', pack.script60, '', pack.cta].join('\n'));
