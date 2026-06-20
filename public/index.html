@@ -841,6 +841,43 @@
   .trade-option-title { color:var(--text); font-size:12px; font-weight:800; }
   .trade-option-meta { color:var(--muted); font-size:10px; line-height:1.45; margin-top:3px; }
   .studio-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  .creator-dashboard {
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:10px;
+    margin-bottom:16px;
+    padding:14px;
+  }
+  .creator-dashboard-head { align-items:flex-start; display:flex; justify-content:space-between; gap:12px; margin-bottom:12px; }
+  .creator-dashboard-grid {
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(4, minmax(0, 1fr));
+  }
+  .creator-metric {
+    background:rgba(148,163,184,0.04);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    padding:10px;
+  }
+  .creator-label { color:var(--muted); font-size:10px; margin-bottom:4px; }
+  .creator-value { color:var(--text); font-size:14px; font-weight:850; line-height:1.3; overflow-wrap:anywhere; }
+  .project-status-row { align-items:center; display:flex; gap:8px; flex-wrap:wrap; }
+  .project-status-badge {
+    border-radius:999px;
+    display:inline-flex;
+    font-size:10px;
+    font-weight:900;
+    letter-spacing:0.04em;
+    padding:5px 9px;
+    text-transform:uppercase;
+    white-space:nowrap;
+  }
+  .project-status-badge.draft { background:rgba(148,163,184,0.12); color:#cbd5e1; }
+  .project-status-badge.ready-to-record { background:rgba(59,130,246,0.14); color:#93c5fd; }
+  .project-status-badge.recording-complete { background:rgba(34,197,94,0.13); color:#86efac; }
+  .project-status-badge.ready-to-edit { background:rgba(245,158,11,0.14); color:#fcd34d; }
+  .project-status-badge.published { background:rgba(99,102,241,0.16); color:#c4b5fd; }
   .studio-output-grid { display:grid; gap:12px; }
   .studio-output {
     background:rgba(2,6,23,0.22);
@@ -946,11 +983,15 @@
   .project-meta { color:var(--muted); font-size:10px; margin-top:2px; }
   @media (max-width: 980px) {
     .studio-layout { grid-template-columns:1fr; }
+    .creator-dashboard-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); }
     .asset-grid,
     .asset-summary,
     .script-grid,
     .shorts-grid { grid-template-columns:1fr; }
     .shorts-block.full { grid-column:auto; }
+  }
+  @media (max-width: 560px) {
+    .creator-dashboard-grid { grid-template-columns:1fr; }
   }
 
   /* ── Spinner ───────────────────────────────────────────────────────────── */
@@ -1149,6 +1190,34 @@
 
 <!-- ── Video Studio Tab ──────────────────────────────────────────────────── -->
 <div id="video-panel" class="tab-panel">
+  <div class="creator-dashboard">
+    <div class="creator-dashboard-head">
+      <div>
+        <div class="studio-title">Creator Dashboard</div>
+        <div class="studio-subtitle" style="margin-bottom:0;">Project readiness, recording progress, scripts, shorts, and assets.</div>
+      </div>
+      <div class="project-status-row">
+        <span id="projectStatusBadge" class="project-status-badge draft">Draft</span>
+        <select id="projectStatusSelect" onchange="updateProjectStatus(this.value)">
+          <option value="Draft">Draft</option>
+          <option value="Ready to Record">Ready to Record</option>
+          <option value="Recording Complete">Recording Complete</option>
+          <option value="Ready to Edit">Ready to Edit</option>
+          <option value="Published">Published</option>
+        </select>
+      </div>
+    </div>
+    <div class="creator-dashboard-grid">
+      <div class="creator-metric"><div class="creator-label">Saved video projects</div><div class="creator-value" id="creatorSavedCount">0</div></div>
+      <div class="creator-metric"><div class="creator-label">Current project</div><div class="creator-value" id="creatorCurrentTitle">No project loaded</div></div>
+      <div class="creator-metric"><div class="creator-label">Selected trades</div><div class="creator-value" id="creatorSelectedTrades">0</div></div>
+      <div class="creator-metric"><div class="creator-label">Scene completion</div><div class="creator-value" id="creatorSceneProgress">0 / 0</div></div>
+      <div class="creator-metric"><div class="creator-label">Asset completion</div><div class="creator-value" id="creatorAssetProgress">0 / 0</div></div>
+      <div class="creator-metric"><div class="creator-label">Script status</div><div class="creator-value" id="creatorScriptStatus">Not generated</div></div>
+      <div class="creator-metric"><div class="creator-label">Shorts pack</div><div class="creator-value" id="creatorShortsStatus">Not generated</div></div>
+      <div class="creator-metric"><div class="creator-label">Project status</div><div class="creator-value" id="creatorProjectStatus">Draft</div></div>
+    </div>
+  </div>
   <div class="studio-layout">
     <div class="studio-card">
       <div class="studio-title">Video Studio</div>
@@ -1192,7 +1261,7 @@
     </div>
     <div class="studio-card">
       <div class="studio-title">Generated Outline</div>
-      <div class="studio-subtitle">Client-side template output. No AI API calls are used in v5.</div>
+      <div class="studio-subtitle">Client-side template output. No AI API calls are used in v6.</div>
       <div id="videoOutput" class="studio-output-grid">
         <div class="studio-empty">Select 1–5 trades and generate an outline.</div>
       </div>
@@ -2819,6 +2888,7 @@ function renderVideoStudio() {
   const list = document.getElementById('videoTradeList');
   const count = document.getElementById('videoTradeCount');
   if (!list || !count) return;
+  renderCreatorDashboard();
   const trades = loadJournal()
     .slice()
     .sort((a, b) => String(b.createdAt || b.date || '').localeCompare(String(a.createdAt || a.date || '')))
@@ -2827,6 +2897,7 @@ function renderVideoStudio() {
   if (!trades.length) {
     count.textContent = '0 trades selected';
     list.innerHTML = '<div class="studio-empty" style="padding:24px 0;">No journal rows yet. Log trades first, then return here.</div>';
+    renderCreatorDashboard();
     return;
   }
 
@@ -2855,11 +2926,85 @@ function updateVideoTradeCount() {
   const selected = document.querySelectorAll('.video-trade-check:checked').length;
   const count = document.getElementById('videoTradeCount');
   if (count) count.textContent = `${selected} trade${selected === 1 ? '' : 's'} selected`;
+  renderCreatorDashboard();
 }
 
 function selectedVideoTrades() {
   const ids = new Set(Array.from(document.querySelectorAll('.video-trade-check:checked')).map(el => String(el.value)));
   return loadJournal().filter(e => ids.has(String(e.id)));
+}
+
+function projectStatusClass(status) {
+  return String(status || 'Draft').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'draft';
+}
+
+function projectTitle(project = currentVideoProject) {
+  return project?.title || project?.outline?.titles?.[0] || project?.type || 'No project loaded';
+}
+
+function sceneCompletionCounts(project = currentVideoProject) {
+  const scenes = project?.scenes || [];
+  return {
+    total: scenes.length,
+    completed: scenes.filter(scene => scene.completed).length,
+  };
+}
+
+function scriptStatus(project = currentVideoProject) {
+  if (!project?.scenes?.length) return 'Not generated';
+  ensureSceneScripts(project);
+  return project.scenes.every(scene => scene.script?.naturalTalking && scene.script?.shortVoiceover)
+    ? 'Ready'
+    : 'Incomplete';
+}
+
+function shortsStatus(project = currentVideoProject) {
+  return project?.shortsPack ? 'Generated' : 'Not generated';
+}
+
+function renderCreatorDashboard() {
+  const projects = loadVideoProjects();
+  const status = currentVideoProject?.status || 'Draft';
+  const sceneCounts = sceneCompletionCounts();
+  const assetCounts = assetChecklistCounts(currentVideoProject?.scenes || []);
+  const selected = document.querySelectorAll('.video-trade-check:checked').length;
+  setText('creatorSavedCount', String(projects.length));
+  setText('creatorCurrentTitle', projectTitle());
+  setText('creatorSelectedTrades', String(selected));
+  setText('creatorSceneProgress', `${sceneCounts.completed} / ${sceneCounts.total}`);
+  setText('creatorAssetProgress', `${assetCounts.captured} / ${assetCounts.total}`);
+  setText('creatorScriptStatus', scriptStatus());
+  setText('creatorShortsStatus', shortsStatus());
+  setText('creatorProjectStatus', status);
+  const badge = document.getElementById('projectStatusBadge');
+  if (badge) {
+    badge.textContent = status;
+    badge.className = `project-status-badge ${projectStatusClass(status)}`;
+  }
+  const select = document.getElementById('projectStatusSelect');
+  if (select && select.value !== status) select.value = status;
+}
+
+function persistCurrentVideoProject() {
+  if (!currentVideoProject?.id) return;
+  const projects = loadVideoProjects();
+  const idx = projects.findIndex(p => p.id === currentVideoProject.id);
+  if (idx >= 0) {
+    projects[idx] = { ...projects[idx], ...currentVideoProject, updatedAt: new Date().toISOString() };
+    saveVideoProjects(projects);
+  }
+}
+
+function updateProjectStatus(status) {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before changing project status.');
+    renderCreatorDashboard();
+    return;
+  }
+  currentVideoProject.status = status;
+  currentVideoProject.updatedAt = new Date().toISOString();
+  persistCurrentVideoProject();
+  renderCreatorDashboard();
 }
 
 function tradeSummaryLine(e) {
@@ -3011,11 +3156,13 @@ function generateVideoOutline() {
       reviewResult: e.reviewResult || e.result || 'Pending',
     })),
     outline,
+    status: currentVideoProject?.status || 'Draft',
     scriptStyle,
     scenes: buildRecordingScenes(outline, type, trades.slice(0, 5), scriptStyle),
   };
   renderVideoOutput(outline);
   renderRecordingAssistant(currentVideoProject.scenes);
+  renderCreatorDashboard();
 }
 
 function renderVideoOutput(outline) {
@@ -3143,6 +3290,7 @@ function renderRecordingAssistant(scenes = []) {
   }
   if (currentVideoProject) scenes = ensureSceneScripts(currentVideoProject);
   renderAssetChecklistSummary(scenes);
+  renderCreatorDashboard();
   box.innerHTML = scenes.map((scene, idx) => `
     <div class="scene-card">
       <div class="scene-card-head">
@@ -3210,6 +3358,7 @@ function updateSceneFlag(idx, field, value) {
   currentVideoProject.scenes[idx][field] = value;
   currentVideoProject.updatedAt = new Date().toISOString();
   if (field === 'assetStatus' || field === 'assetType') renderAssetChecklistSummary(currentVideoProject.scenes);
+  renderCreatorDashboard();
 }
 
 function changeScriptStyle(style) {
@@ -3228,6 +3377,7 @@ function changeScriptStyle(style) {
     ),
   }));
   renderRecordingAssistant(currentVideoProject.scenes);
+  renderCreatorDashboard();
 }
 
 async function copySceneScript(idx, field) {
@@ -3311,6 +3461,7 @@ function saveVideoProject() {
   const project = {
     ...currentVideoProject,
     title,
+    status: currentVideoProject.status || 'Draft',
     updatedAt: new Date().toISOString(),
   };
   const idx = projects.findIndex(p => p.id === project.id);
@@ -3320,6 +3471,7 @@ function saveVideoProject() {
   currentVideoProject = project;
   showToast('Video project saved');
   loadSavedVideoProjects();
+  renderCreatorDashboard();
 }
 
 function loadSavedVideoProjects() {
@@ -3334,7 +3486,7 @@ function loadSavedVideoProjects() {
     <div class="project-row">
       <div>
         <div class="project-title">${project.title || project.type || 'Video Project'}</div>
-        <div class="project-meta">${project.type || 'Outline'} · ${project.trades?.length || 0} trade${project.trades?.length === 1 ? '' : 's'} · ${project.updatedAt ? new Date(project.updatedAt).toLocaleString() : ''}</div>
+        <div class="project-meta">${project.type || 'Outline'} · ${project.status || 'Draft'} · ${project.trades?.length || 0} trade${project.trades?.length === 1 ? '' : 's'} · ${project.updatedAt ? new Date(project.updatedAt).toLocaleString() : ''}</div>
       </div>
       <button class="btn-secondary btn-sm" onclick="restoreVideoProject(${project.id})">Load</button>
     </div>
@@ -3344,6 +3496,7 @@ function loadSavedVideoProjects() {
 function restoreVideoProject(id) {
   const project = loadVideoProjects().find(p => p.id === id);
   if (!project) return;
+  project.status = project.status || 'Draft';
   currentVideoProject = project;
   if (document.getElementById('videoType')) document.getElementById('videoType').value = project.type || 'Scanner Intro';
   if (document.getElementById('scriptStyle')) document.getElementById('scriptStyle').value = project.scriptStyle || 'Casual';
@@ -3351,6 +3504,7 @@ function restoreVideoProject(id) {
   renderVideoOutput(project.outline);
   renderRecordingAssistant(project.scenes || buildRecordingScenes(project.outline, project.type, []));
   renderShortsPack(project.shortsPack || null);
+  renderCreatorDashboard();
   showToast('Video project loaded');
 }
 
@@ -3510,6 +3664,7 @@ function generateShortsPack() {
   currentVideoProject.shortsPack = buildShortsPack(currentVideoProject);
   currentVideoProject.updatedAt = new Date().toISOString();
   renderShortsPack(currentVideoProject.shortsPack);
+  renderCreatorDashboard();
 }
 
 function renderShortsPack(pack) {
@@ -3574,6 +3729,7 @@ async function copyShortScript() {
   const pack = currentVideoProject.shortsPack || buildShortsPack(currentVideoProject);
   currentVideoProject.shortsPack = pack;
   renderShortsPack(pack);
+  renderCreatorDashboard();
   await navigator.clipboard.writeText([pack.hook15, '', pack.script30, '', pack.script60, '', pack.cta].join('\n'));
   showToast('Copied short script');
 }
