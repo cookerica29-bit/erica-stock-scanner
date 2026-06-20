@@ -912,6 +912,25 @@
     padding:9px;
   }
   .script-copy-row { align-items:center; display:flex; gap:8px; justify-content:space-between; margin-bottom:6px; }
+  .shorts-pack {
+    background:rgba(34,197,94,0.06);
+    border:1px solid rgba(34,197,94,0.14);
+    border-radius:10px;
+    margin-top:16px;
+    padding:12px;
+  }
+  .shorts-grid {
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+  }
+  .shorts-block {
+    background:rgba(2,6,23,0.18);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    padding:10px;
+  }
+  .shorts-block.full { grid-column:1 / -1; }
   .project-list { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
   .project-row {
     align-items:center;
@@ -929,7 +948,9 @@
     .studio-layout { grid-template-columns:1fr; }
     .asset-grid,
     .asset-summary,
-    .script-grid { grid-template-columns:1fr; }
+    .script-grid,
+    .shorts-grid { grid-template-columns:1fr; }
+    .shorts-block.full { grid-column:auto; }
   }
 
   /* ── Spinner ───────────────────────────────────────────────────────────── */
@@ -1163,12 +1184,15 @@
         <button class="btn-secondary" onclick="exportAssetChecklistMarkdown()">Export Asset Checklist as Markdown</button>
         <button class="btn-secondary" onclick="copyFullScript()">Copy Full Script</button>
         <button class="btn-secondary" onclick="exportScriptMarkdown()">Export Script as Markdown</button>
+        <button class="btn-secondary" onclick="generateShortsPack()">Generate Shorts/Reels Pack</button>
+        <button class="btn-secondary" onclick="copyShortScript()">Copy Short Script</button>
+        <button class="btn-secondary" onclick="exportShortsMarkdown()">Export Shorts Pack as Markdown</button>
       </div>
       <div id="savedVideoProjects" class="project-list"></div>
     </div>
     <div class="studio-card">
       <div class="studio-title">Generated Outline</div>
-      <div class="studio-subtitle">Client-side template output. No AI API calls are used in v4.</div>
+      <div class="studio-subtitle">Client-side template output. No AI API calls are used in v5.</div>
       <div id="videoOutput" class="studio-output-grid">
         <div class="studio-empty">Select 1–5 trades and generate an outline.</div>
       </div>
@@ -1178,6 +1202,13 @@
         <div id="assetChecklistSummary"></div>
         <div id="recordingAssistant" class="studio-output-grid">
           <div class="studio-empty">Generate an outline to create scene cards.</div>
+        </div>
+        <div class="shorts-pack">
+          <div class="studio-title">Shorts/Reels Generator</div>
+          <div class="studio-subtitle">Short-form ideas and scripts from the selected video project.</div>
+          <div id="shortsOutput" class="studio-output-grid">
+            <div class="studio-empty">Generate or load a video project, then create a shorts pack.</div>
+          </div>
         </div>
       </div>
     </div>
@@ -3319,6 +3350,7 @@ function restoreVideoProject(id) {
   ensureSceneScripts(currentVideoProject);
   renderVideoOutput(project.outline);
   renderRecordingAssistant(project.scenes || buildRecordingScenes(project.outline, project.type, []));
+  renderShortsPack(project.shortsPack || null);
   showToast('Video project loaded');
 }
 
@@ -3419,6 +3451,150 @@ function exportScriptMarkdown() {
     .replace(/^-|-$/g, '');
   a.href = url;
   a.download = `${safeTitle || 'video'}-script.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function buildShortsPack(project = currentVideoProject) {
+  if (!project) return null;
+  ensureSceneScripts(project);
+  const title = project.outline?.titles?.[0] || project.title || 'Scanner Review';
+  const trade = project.trades?.[0] || {};
+  const ticker = trade.ticker || 'this setup';
+  const grade = trade.setupGrade ? `${trade.setupGrade} setup` : 'scanner setup';
+  const style = project.scriptStyle || getVideoScriptStyle();
+  const mainPoint = project.outline?.hook || 'The scanner is not here to predict perfectly. It is here to help me review cleaner setups.';
+  const takeaway = project.outline?.talkingPoints?.[0] || 'Trend, location, confirmation, and journal review matter more than random alerts.';
+  const ideas = [
+    `Why ${ticker} was not just another scanner alert`,
+    `A/B/C setup grading explained in under 60 seconds`,
+    `The difference between a good area and a confirmed entry`,
+  ];
+  const hook15 = `I used to treat every clean-looking setup like it was ready. Now I separate the area from the confirmation.`;
+  const script30 = [
+    `Here is the quick version of ${title}.`,
+    `${ticker} came through as a ${grade}, but the real question is not just whether it looked good.`,
+    'I want to know if trend, location, and confirmation were actually lined up.',
+    'That is why I am tracking every setup in the journal instead of trusting the scanner blindly.',
+  ].join(' ');
+  const script60 = [
+    `This is how I am using the scanner in a more honest way. ${mainPoint}`,
+    `For ${ticker}, I am looking at the grade, the entry status, and whether confirmation started before the entry.`,
+    'An A setup means trend, location, and confirmation are working together. A B setup means the area may be good, but I still need to wait. A C setup means caution.',
+    `${takeaway}`,
+    'The goal is not to make the scanner look perfect. The goal is to collect enough trades to see what actually works.',
+  ].join(' ');
+  return {
+    ideas,
+    hook15,
+    script30,
+    script60,
+    caption: `Testing my scanner workflow with ${ticker}. Setup grade, confirmation, and journal review matter more than chasing alerts.`,
+    beats: [
+      'Good area does not always mean good entry',
+      `Setup grade: ${trade.setupGrade || 'Review'}`,
+      'Trend + location + confirmation',
+      'Journal first, automation later',
+    ],
+    hashtags: ['#stockscanner', '#optionstrading', '#tradingjournal', '#daytrading', '#tradereview', '#tradingworkflow'],
+    cta: 'Follow along while I collect the next 50-100 scanner setups and review what actually works.',
+    style,
+  };
+}
+
+function generateShortsPack() {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before creating a shorts pack.');
+    return;
+  }
+  currentVideoProject.shortsPack = buildShortsPack(currentVideoProject);
+  currentVideoProject.updatedAt = new Date().toISOString();
+  renderShortsPack(currentVideoProject.shortsPack);
+}
+
+function renderShortsPack(pack) {
+  const box = document.getElementById('shortsOutput');
+  if (!box) return;
+  if (!pack) {
+    box.innerHTML = '<div class="studio-empty">Generate or load a video project, then create a shorts pack.</div>';
+    return;
+  }
+  box.innerHTML = `
+    <div class="shorts-grid">
+      <div class="shorts-block full"><div class="scene-label">3 Short-form video ideas</div><div class="scene-text">${pack.ideas.map((x, i) => `${i + 1}. ${x}`).join('<br>')}</div></div>
+      <div class="shorts-block"><div class="scene-label">15-second hook</div><div class="scene-text">${pack.hook15}</div></div>
+      <div class="shorts-block"><div class="scene-label">CTA</div><div class="scene-text">${pack.cta}</div></div>
+      <div class="shorts-block full"><div class="scene-label">30-second script</div><div class="scene-text">${pack.script30}</div></div>
+      <div class="shorts-block full"><div class="scene-label">60-second script</div><div class="scene-text">${pack.script60}</div></div>
+      <div class="shorts-block"><div class="scene-label">Caption text</div><div class="scene-text">${pack.caption}</div></div>
+      <div class="shorts-block"><div class="scene-label">Hashtag suggestions</div><div class="scene-text">${pack.hashtags.join(' ')}</div></div>
+      <div class="shorts-block full"><div class="scene-label">On-screen text beats</div><div class="scene-text">${pack.beats.map((x, i) => `${i + 1}. ${x}`).join('<br>')}</div></div>
+    </div>`;
+}
+
+function shortsMarkdown(project = currentVideoProject) {
+  const pack = project?.shortsPack || buildShortsPack(project);
+  if (!pack) return '';
+  return [
+    `# Shorts/Reels Pack: ${project.outline?.titles?.[0] || project.title || 'Video Project'}`,
+    '',
+    `Style: ${pack.style || project.scriptStyle || 'Casual'}`,
+    '',
+    '## 3 Short-form Video Ideas',
+    ...pack.ideas.map((idea, idx) => `${idx + 1}. ${idea}`),
+    '',
+    '## 15-Second Hook',
+    pack.hook15,
+    '',
+    '## 30-Second Script',
+    pack.script30,
+    '',
+    '## 60-Second Script',
+    pack.script60,
+    '',
+    '## Caption Text',
+    pack.caption,
+    '',
+    '## On-Screen Text Beats',
+    ...pack.beats.map((beat, idx) => `${idx + 1}. ${beat}`),
+    '',
+    '## Hashtag Suggestions',
+    pack.hashtags.join(' '),
+    '',
+    '## CTA',
+    pack.cta,
+  ].join('\n');
+}
+
+async function copyShortScript() {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before copying a short script.');
+    return;
+  }
+  const pack = currentVideoProject.shortsPack || buildShortsPack(currentVideoProject);
+  currentVideoProject.shortsPack = pack;
+  renderShortsPack(pack);
+  await navigator.clipboard.writeText([pack.hook15, '', pack.script30, '', pack.script60, '', pack.cta].join('\n'));
+  showToast('Copied short script');
+}
+
+function exportShortsMarkdown() {
+  if (!currentVideoProject) {
+    alert('Generate or load a video project before exporting a shorts pack.');
+    return;
+  }
+  currentVideoProject.shortsPack = currentVideoProject.shortsPack || buildShortsPack(currentVideoProject);
+  currentVideoProject.updatedAt = new Date().toISOString();
+  const markdown = shortsMarkdown(currentVideoProject);
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const safeTitle = (currentVideoProject.outline?.titles?.[0] || currentVideoProject.type || 'shorts-pack')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  a.href = url;
+  a.download = `${safeTitle || 'video'}-shorts-pack.md`;
   a.click();
   URL.revokeObjectURL(url);
 }
