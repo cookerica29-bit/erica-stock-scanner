@@ -131,6 +131,79 @@
   /* ── Scanner panel ─────────────────────────────────────────────────────── */
   main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
 
+  .market-snapshot {
+    max-width: 1400px;
+    margin: 14px auto 0;
+    padding: 0 24px;
+  }
+  .snapshot-card {
+    background: rgba(22,26,34,0.72);
+    border: 1px solid rgba(148,163,184,0.12);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .snapshot-title {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+  .snapshot-groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
+  }
+  .snapshot-group-title {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+  }
+  .snapshot-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .snapshot-badge {
+    align-items: center;
+    background: rgba(15,23,42,0.62);
+    border: 1px solid rgba(148,163,184,0.12);
+    border-radius: 8px;
+    display: inline-flex;
+    gap: 8px;
+    min-height: 32px;
+    padding: 7px 10px;
+  }
+  .snapshot-badge .label {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .snapshot-badge .count {
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 900;
+  }
+  .snapshot-badge.grade-a .count,
+  .snapshot-badge.timing-entry .count,
+  .snapshot-badge.status-ready .count { color: var(--long); }
+  .snapshot-badge.grade-b .count,
+  .snapshot-badge.timing-reaction .count,
+  .snapshot-badge.status-tradeable .count { color: #60a5fa; }
+  .snapshot-badge.grade-c .count,
+  .snapshot-badge.timing-not-ready .count { color: var(--muted); }
+  .snapshot-badge.timing-area .count,
+  .snapshot-badge.status-watch .count { color: var(--warn); }
+  .snapshot-badge.action-review .count { color: var(--long); }
+  .snapshot-badge.action-watch .count { color: var(--warn); }
+  .snapshot-badge.action-monitor .count { color: #60a5fa; }
+  .snapshot-badge.action-low .count { color: var(--muted); }
+
   #summary { margin-bottom: 16px; color: var(--muted); font-size: 11px; }
 
   #results {
@@ -166,6 +239,11 @@
     gap: 14px;
     padding: 16px 18px 10px;
   }
+  .card-action-row {
+    display: flex;
+    justify-content: flex-end;
+    padding: 14px 18px 0;
+  }
   .ticker { font-size: 24px; font-weight: 800; letter-spacing: 0.02em; line-height: 1; }
   .ticker-wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
   .card-header-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
@@ -184,6 +262,20 @@
     padding: 3px 8px;
     text-align: center;
   }
+  .action-badge {
+    border: 1px solid rgba(148,163,184,0.18);
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    padding: 5px 9px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .action-badge.review-now { background:rgba(34,197,94,0.14); border-color:rgba(34,197,94,0.34); color:#86efac; }
+  .action-badge.watch { background:rgba(245,158,11,0.13); border-color:rgba(245,158,11,0.34); color:#fcd34d; }
+  .action-badge.monitor { background:rgba(59,130,246,0.14); border-color:rgba(59,130,246,0.34); color:#93c5fd; }
+  .action-badge.low-priority { background:rgba(148,163,184,0.08); border-color:rgba(148,163,184,0.18); color:#94a3b8; }
   .timeframe-badge {
     border: 1px solid rgba(148,163,184,0.16);
     border-radius: 999px;
@@ -1031,6 +1123,26 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
+    <select id="actionFilter" onchange="renderScannerResults()">
+      <option value="all">All Actions</option>
+      <option value="Review Now">Review Now</option>
+      <option value="Watch">Watch</option>
+      <option value="Monitor">Monitor</option>
+      <option value="Low Priority">Low Priority</option>
+    </select>
+    <select id="gradeFilter" onchange="renderScannerResults()">
+      <option value="all">All Grades</option>
+      <option value="A">A Setups</option>
+      <option value="B">B Setups</option>
+      <option value="C">C Setups</option>
+    </select>
+    <select id="timingFilter" onchange="renderScannerResults()">
+      <option value="all">All Timing</option>
+      <option value="Entry Triggered">Entry Triggered</option>
+      <option value="Reaction Started">Reaction Started</option>
+      <option value="Area Reached">Area Reached</option>
+      <option value="Not Ready">Not Ready</option>
+    </select>
     <select id="entryStatusFilter" onchange="renderScannerResults()">
       <option value="all">All Entry Statuses</option>
       <option value="Tradeable">Tradeable</option>
@@ -1065,6 +1177,7 @@
     <span id="status"></span>
     <span id="autoScanCountdown" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>
   </div>
+  <div id="marketSnapshot" class="market-snapshot"></div>
   <div id="priority-watchlist"></div>
   <main>
     <div id="summary"></div>
@@ -1861,6 +1974,7 @@ function clearResults() {
   document.getElementById('near-miss-section').style.display = 'none';
   document.getElementById('priority-watchlist').innerHTML = '';
   document.getElementById('priority-watchlist').style.display = 'none';
+  document.getElementById('marketSnapshot').innerHTML = '';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
 }
@@ -2055,7 +2169,33 @@ function setupStatusValue(s) {
   return s.stockSetupStatus || s.setupStatus || 'Pullback Active';
 }
 
+function setupGradeValue(s) {
+  return normalizeSetupGrade(s.setupGrade);
+}
+
+function entryTimingValue(s) {
+  return s.entryTimingState || 'Not Ready';
+}
+
+function actionPriorityForSetup(s) {
+  const grade = setupGradeValue(s);
+  const timing = entryTimingValue(s);
+  if (grade === 'A' && timing === 'Entry Triggered') {
+    return { value: 'Review Now', label: '🟢 REVIEW NOW', className: 'review-now' };
+  }
+  if (grade === 'A' && (timing === 'Reaction Started' || timing === 'Area Reached')) {
+    return { value: 'Watch', label: '🟡 WATCH', className: 'watch' };
+  }
+  if (grade === 'B' && (timing === 'Entry Triggered' || timing === 'Reaction Started' || timing === 'Area Reached')) {
+    return { value: 'Monitor', label: '🔵 MONITOR', className: 'monitor' };
+  }
+  return { value: 'Low Priority', label: '⚪ LOW PRIORITY', className: 'low-priority' };
+}
+
 function passesFrameworkFilters(s, filters) {
+  if (filters.action !== 'all' && actionPriorityForSetup(s).value !== filters.action) return false;
+  if (filters.grade !== 'all' && setupGradeValue(s) !== filters.grade) return false;
+  if (filters.timing !== 'all' && entryTimingValue(s) !== filters.timing) return false;
   if (filters.entryStatus !== 'all' && s.entryStatus !== filters.entryStatus) return false;
   if (filters.setupStatus !== 'all' && setupStatusValue(s) !== filters.setupStatus) return false;
   if (filters.location !== 'all' && setupLocation(s) !== filters.location) return false;
@@ -2090,10 +2230,89 @@ function entryStatusSummary(rows) {
   return `Tradeable: ${counts.Tradeable || 0} | Near Entry: ${counts['Near Entry'] || 0} | Waiting: ${counts.Waiting || 0} | Too Far: ${counts['Too Far'] || 0}`;
 }
 
+function countBy(rows, labels, resolver) {
+  const counts = Object.fromEntries(labels.map(label => [label, 0]));
+  rows.forEach(row => {
+    const key = resolver(row);
+    if (Object.prototype.hasOwnProperty.call(counts, key)) counts[key] += 1;
+  });
+  return counts;
+}
+
+function renderSnapshotBadge(label, count, extraClass = '') {
+  return `<div class="snapshot-badge ${extraClass}"><span class="label">${label}</span><span class="count">${count}</span></div>`;
+}
+
+function scannerStatusBucket(row) {
+  const raw = String(row.scannerStatus || row.status || row.trade_stage || row.tradeStage || row.trade_eval?.trade_stage || '').toUpperCase();
+  if (raw.includes('A+')) return 'A+ READY';
+  if (raw.includes('B+') || raw.includes('TRADEABLE')) return 'B+ TRADEABLE';
+  if (raw.includes('WATCH')) return 'WATCH';
+  if (raw.includes('RANGE')) return 'RANGE';
+  return '';
+}
+
+function renderMarketSnapshot(rows) {
+  const el = document.getElementById('marketSnapshot');
+  if (!el) return;
+  const gradeCounts = countBy(rows, ['A', 'B', 'C'], setupGradeValue);
+  const timingLabels = ['Entry Triggered', 'Reaction Started', 'Area Reached', 'Not Ready'];
+  const timingCounts = countBy(rows, timingLabels, entryTimingValue);
+  const actionLabels = ['Review Now', 'Watch', 'Monitor', 'Low Priority'];
+  const actionCounts = countBy(rows, actionLabels, row => actionPriorityForSetup(row).value);
+  const statusLabels = ['A+ READY', 'B+ TRADEABLE', 'WATCH', 'RANGE'];
+  const statusCounts = countBy(rows, statusLabels, scannerStatusBucket);
+
+  el.innerHTML = `
+    <div class="snapshot-card">
+      <div class="snapshot-title">Market Snapshot</div>
+      <div class="snapshot-groups">
+        <div>
+          <div class="snapshot-group-title">Grade Counts</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('A Setups', gradeCounts.A || 0, 'grade-a')}
+            ${renderSnapshotBadge('B Setups', gradeCounts.B || 0, 'grade-b')}
+            ${renderSnapshotBadge('C Setups', gradeCounts.C || 0, 'grade-c')}
+          </div>
+        </div>
+        <div>
+          <div class="snapshot-group-title">Timing Counts</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('Entry Triggered', timingCounts['Entry Triggered'] || 0, 'timing-entry')}
+            ${renderSnapshotBadge('Reaction Started', timingCounts['Reaction Started'] || 0, 'timing-reaction')}
+            ${renderSnapshotBadge('Area Reached', timingCounts['Area Reached'] || 0, 'timing-area')}
+            ${renderSnapshotBadge('Not Ready', timingCounts['Not Ready'] || 0, 'timing-not-ready')}
+          </div>
+        </div>
+        <div>
+          <div class="snapshot-group-title">Action Counts</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('Review Now', actionCounts['Review Now'] || 0, 'action-review')}
+            ${renderSnapshotBadge('Watch', actionCounts.Watch || 0, 'action-watch')}
+            ${renderSnapshotBadge('Monitor', actionCounts.Monitor || 0, 'action-monitor')}
+            ${renderSnapshotBadge('Low Priority', actionCounts['Low Priority'] || 0, 'action-low')}
+          </div>
+        </div>
+        <div>
+          <div class="snapshot-group-title">Legacy Status Counts</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('A+ READY', statusCounts['A+ READY'] || 0, 'status-ready')}
+            ${renderSnapshotBadge('B+ TRADEABLE', statusCounts['B+ TRADEABLE'] || 0, 'status-tradeable')}
+            ${renderSnapshotBadge('WATCH', statusCounts.WATCH || 0, 'status-watch')}
+            ${renderSnapshotBadge('RANGE', statusCounts.RANGE || 0)}
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
 function renderScannerResults() {
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
   const filters = {
+    action: document.getElementById('actionFilter')?.value || 'all',
+    grade: document.getElementById('gradeFilter')?.value || 'all',
+    timing: document.getElementById('timingFilter')?.value || 'all',
     entryStatus: document.getElementById('entryStatusFilter')?.value || 'all',
     setupStatus: document.getElementById('setupStatusFilter')?.value || 'all',
     location: document.getElementById('locationFilter')?.value || 'all',
@@ -2102,6 +2321,7 @@ function renderScannerResults() {
 
   const allRows = scannerRows.slice();
   const allNearMiss = scannerNearMiss.slice();
+  renderMarketSnapshot([...allRows, ...allNearMiss]);
   const rows = sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, filters)));
   const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, filters)));
   const totalVisible = rows.length + nearMiss.length;
@@ -2117,6 +2337,9 @@ function renderScannerResults() {
   const longs   = rows.filter(s => s.direction === 'LONG').length;
   const shorts  = rows.filter(s => s.direction === 'SHORT').length;
   const filterLabel = [
+    document.getElementById('actionFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('gradeFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('timingFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('entryStatusFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('setupStatusFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('locationFilter')?.selectedOptions?.[0]?.textContent,
@@ -2341,6 +2564,7 @@ function renderCard(s) {
   const setupReason = s.stockSetupStatusReason || s.setupStatusReason || q.coach_note || 'waiting for cleaner structure';
   const setupGrade = normalizeSetupGrade(s.setupGrade);
   const setupGradeReason = s.setupGradeReason || setupReason;
+  const actionPriority = actionPriorityForSetup(s);
   const confirmationStarted = Boolean(s.confirmationStarted);
   const confirmationReason = s.confirmationReason || (confirmationStarted ? 'confirmation started' : 'waiting for confirmation');
   const location = s.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
@@ -2377,6 +2601,9 @@ function renderCard(s) {
 
   return `
   <div class="card">
+    <div class="card-action-row">
+      <span class="action-badge ${actionPriority.className}">${actionPriority.label}</span>
+    </div>
     <div class="card-header">
       <div class="ticker-wrap">
         <span class="ticker">${s.ticker}</span>
