@@ -120,8 +120,7 @@
     font-size: 9px;
     margin-top: 2px;
   }
-  #entryStatusFilter, #setupStatusFilter, #phaseFilter { min-width: 160px; }
-  #locationFilter { min-width: 130px; }
+  #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter { min-width: 150px; }
 
   button {
     background: var(--accent);
@@ -1164,53 +1163,28 @@
       <input type="search" id="tickerInput" placeholder="Search AAPL or Apple..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
       <div class="control-hint">Scan refreshes all cards. Type AAPL or Apple here to filter the loaded cards.</div>
     </div>
-    <select id="actionFilter" onchange="renderScannerResults()">
-      <option value="all">All Actions</option>
-      <option value="Review Now">Review Now</option>
-      <option value="Watch">Watch</option>
-      <option value="Monitor">Monitor</option>
-      <option value="Low Priority">Low Priority</option>
+    <select id="statusFilter" onchange="renderScannerResults()">
+      <option value="all">All Statuses</option>
+      <option value="ENTER NOW">ENTER NOW</option>
+      <option value="WAIT">WAIT</option>
+      <option value="SKIP">SKIP</option>
+      <option value="TOO LATE">TOO LATE</option>
     </select>
-    <select id="gradeFilter" onchange="renderScannerResults()">
-      <option value="all">All Grades</option>
-      <option value="A">A Setups</option>
-      <option value="B">B Setups</option>
-      <option value="C">C Setups</option>
+    <select id="directionFilter" onchange="renderScannerResults()">
+      <option value="all">All Directions</option>
+      <option value="LONG">Long</option>
+      <option value="SHORT">Short</option>
     </select>
-    <select id="timingFilter" onchange="renderScannerResults()">
-      <option value="all">All Timing</option>
-      <option value="Entry Triggered">Entry Triggered</option>
-      <option value="Reaction Started">Reaction Started</option>
-      <option value="Area Reached">Area Reached</option>
-      <option value="Not Ready">Not Ready</option>
+    <select id="qualityFilter" onchange="renderScannerResults()">
+      <option value="all">All Setup Quality</option>
+      <option value="A">Top Setup</option>
+      <option value="B">Strong Setup</option>
+      <option value="C">Skip / Low Quality</option>
     </select>
-    <select id="entryStatusFilter" onchange="renderScannerResults()">
-      <option value="all">All Entry Statuses</option>
-      <option value="Tradeable">Tradeable</option>
-      <option value="Near Entry">Near Entry</option>
-      <option value="Waiting">Waiting</option>
-      <option value="Too Far">Too Far</option>
-    </select>
-    <select id="setupStatusFilter" onchange="renderScannerResults()">
-      <option value="all">All Setup Statuses</option>
-      <option value="Pullback Active">Pullback Active</option>
-      <option value="Pullback Complete">Pullback Complete</option>
-      <option value="Early Confirmation">Early Confirmation</option>
-      <option value="Strong Confirmation">Strong Confirmation</option>
-      <option value="Trend Resumption Confirmed">Trend Resumption Confirmed</option>
-    </select>
-    <select id="locationFilter" onchange="renderScannerResults()">
-      <option value="all">All Locations</option>
-      <option value="discount">Discount</option>
-      <option value="premium">Premium</option>
-      <option value="mid">Mid</option>
-    </select>
-    <select id="phaseFilter" onchange="renderScannerResults()">
-      <option value="all">All Phases</option>
-      <option value="Trend Move">Trend Move</option>
-      <option value="Pullback">Pullback</option>
-      <option value="Recovery">Recovery</option>
-      <option value="Transition">Transition</option>
+    <select id="contractTypeFilter" onchange="renderScannerResults()">
+      <option value="all">All Contracts</option>
+      <option value="CALL">Calls</option>
+      <option value="PUT">Puts</option>
     </select>
     <button id="scanBtn" onclick="runScan()">Scan</button>
     <button id="autoScanBtn" onclick="toggleAutoScan()" class="btn-secondary">Auto Scan: OFF</button>
@@ -2272,13 +2246,10 @@ function actionPriorityForSetup(s) {
 function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
   if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
-  if (filters.action !== 'all' && actionPriorityForSetup(s).value !== filters.action) return false;
-  if (filters.grade !== 'all' && setupGradeValue(s) !== filters.grade) return false;
-  if (filters.timing !== 'all' && entryTimingValue(s) !== filters.timing) return false;
-  if (filters.entryStatus !== 'all' && s.entryStatus !== filters.entryStatus) return false;
-  if (filters.setupStatus !== 'all' && setupStatusValue(s) !== filters.setupStatus) return false;
-  if (filters.location !== 'all' && setupLocation(s) !== filters.location) return false;
-  if (filters.phase !== 'all' && setupPhase(s) !== filters.phase) return false;
+  if (filters.status !== 'all' && simpleStatus(s).label !== filters.status) return false;
+  if (filters.direction !== 'all' && String(s?.direction || '').toUpperCase() !== filters.direction) return false;
+  if (filters.quality !== 'all' && setupGradeValue(s) !== filters.quality) return false;
+  if (filters.contractType !== 'all' && contractTypeValue(s) !== filters.contractType) return false;
   return true;
 }
 
@@ -2300,13 +2271,13 @@ function sortScannerCardsForDisplay(rows) {
   });
 }
 
-function entryStatusSummary(rows) {
+function simpleStatusSummary(rows) {
   const counts = rows.reduce((acc, row) => {
-    const status = ['Tradeable', 'Near Entry', 'Waiting', 'Too Far'].includes(row.entryStatus) ? row.entryStatus : 'Unknown';
+    const status = simpleStatus(row).label;
     acc[status] = (acc[status] || 0) + 1;
     return acc;
   }, {});
-  return `Tradeable: ${counts.Tradeable || 0} | Near Entry: ${counts['Near Entry'] || 0} | Waiting: ${counts.Waiting || 0} | Too Far: ${counts['Too Far'] || 0}`;
+  return `ENTER NOW: ${counts['ENTER NOW'] || 0} | WAIT: ${counts.WAIT || 0} | SKIP: ${counts.SKIP || 0} | TOO LATE: ${counts['TOO LATE'] || 0}`;
 }
 
 function countBy(rows, labels, resolver) {
@@ -2322,63 +2293,48 @@ function renderSnapshotBadge(label, count, extraClass = '') {
   return `<div class="snapshot-badge ${extraClass}"><span class="label">${label}</span><span class="count">${count}</span></div>`;
 }
 
-function scannerStatusBucket(row) {
-  const raw = String(row.scannerStatus || row.status || row.trade_stage || row.tradeStage || row.trade_eval?.trade_stage || '').toUpperCase();
-  if (raw.includes('A+')) return 'A+ READY';
-  if (raw.includes('B+') || raw.includes('TRADEABLE')) return 'B+ TRADEABLE';
-  if (raw.includes('WATCH')) return 'WATCH';
-  if (raw.includes('RANGE')) return 'RANGE';
-  return '';
-}
-
 function renderMarketSnapshot(rows) {
   const el = document.getElementById('marketSnapshot');
   if (!el) return;
   const gradeCounts = countBy(rows, ['A', 'B', 'C'], setupGradeValue);
-  const timingLabels = ['Entry Triggered', 'Reaction Started', 'Area Reached', 'Not Ready'];
-  const timingCounts = countBy(rows, timingLabels, entryTimingValue);
-  const actionLabels = ['Review Now', 'Watch', 'Monitor', 'Low Priority'];
-  const actionCounts = countBy(rows, actionLabels, row => actionPriorityForSetup(row).value);
-  const statusLabels = ['A+ READY', 'B+ TRADEABLE', 'WATCH', 'RANGE'];
-  const statusCounts = countBy(rows, statusLabels, scannerStatusBucket);
+  const simpleStatusLabels = ['ENTER NOW', 'WAIT', 'SKIP', 'TOO LATE'];
+  const simpleStatusCounts = countBy(rows, simpleStatusLabels, row => simpleStatus(row).label);
+  const directionCounts = countBy(rows, ['LONG', 'SHORT'], row => String(row.direction || '').toUpperCase());
+  const contractCounts = countBy(rows, ['CALL', 'PUT'], contractTypeValue);
 
   el.innerHTML = `
     <div class="snapshot-card">
       <div class="snapshot-title">Market Snapshot</div>
       <div class="snapshot-groups">
         <div>
-          <div class="snapshot-group-title">Grade Counts</div>
+          <div class="snapshot-group-title">Setup Quality</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('A Setups', gradeCounts.A || 0, 'grade-a')}
-            ${renderSnapshotBadge('B Setups', gradeCounts.B || 0, 'grade-b')}
-            ${renderSnapshotBadge('C Setups', gradeCounts.C || 0, 'grade-c')}
+            ${renderSnapshotBadge('Top Setup', gradeCounts.A || 0, 'grade-a')}
+            ${renderSnapshotBadge('Strong Setup', gradeCounts.B || 0, 'grade-b')}
+            ${renderSnapshotBadge('Skip / Low Quality', gradeCounts.C || 0, 'grade-c')}
           </div>
         </div>
         <div>
-          <div class="snapshot-group-title">Timing Counts</div>
+          <div class="snapshot-group-title">Status</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Entry Triggered', timingCounts['Entry Triggered'] || 0, 'timing-entry')}
-            ${renderSnapshotBadge('Reaction Started', timingCounts['Reaction Started'] || 0, 'timing-reaction')}
-            ${renderSnapshotBadge('Area Reached', timingCounts['Area Reached'] || 0, 'timing-area')}
-            ${renderSnapshotBadge('Not Ready', timingCounts['Not Ready'] || 0, 'timing-not-ready')}
+            ${renderSnapshotBadge('ENTER NOW', simpleStatusCounts['ENTER NOW'] || 0, 'timing-entry')}
+            ${renderSnapshotBadge('WAIT', simpleStatusCounts.WAIT || 0, 'timing-reaction')}
+            ${renderSnapshotBadge('SKIP', simpleStatusCounts.SKIP || 0, 'timing-not-ready')}
+            ${renderSnapshotBadge('TOO LATE', simpleStatusCounts['TOO LATE'] || 0, 'timing-area')}
           </div>
         </div>
         <div>
-          <div class="snapshot-group-title">Action Counts</div>
+          <div class="snapshot-group-title">Direction</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Review Now', actionCounts['Review Now'] || 0, 'action-review')}
-            ${renderSnapshotBadge('Watch', actionCounts.Watch || 0, 'action-watch')}
-            ${renderSnapshotBadge('Monitor', actionCounts.Monitor || 0, 'action-monitor')}
-            ${renderSnapshotBadge('Low Priority', actionCounts['Low Priority'] || 0, 'action-low')}
+            ${renderSnapshotBadge('Long', directionCounts.LONG || 0, 'action-review')}
+            ${renderSnapshotBadge('Short', directionCounts.SHORT || 0, 'action-watch')}
           </div>
         </div>
         <div>
-          <div class="snapshot-group-title">Legacy Status Counts</div>
+          <div class="snapshot-group-title">Contract Type</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('A+ READY', statusCounts['A+ READY'] || 0, 'status-ready')}
-            ${renderSnapshotBadge('B+ TRADEABLE', statusCounts['B+ TRADEABLE'] || 0, 'status-tradeable')}
-            ${renderSnapshotBadge('WATCH', statusCounts.WATCH || 0, 'status-watch')}
-            ${renderSnapshotBadge('RANGE', statusCounts.RANGE || 0)}
+            ${renderSnapshotBadge('Calls', contractCounts.CALL || 0, 'status-ready')}
+            ${renderSnapshotBadge('Puts', contractCounts.PUT || 0, 'status-tradeable')}
           </div>
         </div>
       </div>
@@ -2389,13 +2345,10 @@ function renderScannerResults() {
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
   const filters = {
-    action: document.getElementById('actionFilter')?.value || 'all',
-    grade: document.getElementById('gradeFilter')?.value || 'all',
-    timing: document.getElementById('timingFilter')?.value || 'all',
-    entryStatus: document.getElementById('entryStatusFilter')?.value || 'all',
-    setupStatus: document.getElementById('setupStatusFilter')?.value || 'all',
-    location: document.getElementById('locationFilter')?.value || 'all',
-    phase: document.getElementById('phaseFilter')?.value || 'all',
+    status: document.getElementById('statusFilter')?.value || 'all',
+    direction: document.getElementById('directionFilter')?.value || 'all',
+    quality: document.getElementById('qualityFilter')?.value || 'all',
+    contractType: document.getElementById('contractTypeFilter')?.value || 'all',
     tickerSearch: tickerQueryParts(document.getElementById('tickerInput')?.value || ''),
   };
 
@@ -2418,19 +2371,16 @@ function renderScannerResults() {
   const longs   = rows.filter(s => s.direction === 'LONG').length;
   const shorts  = rows.filter(s => s.direction === 'SHORT').length;
   const filterLabel = [
-    document.getElementById('actionFilter')?.selectedOptions?.[0]?.textContent,
-    document.getElementById('gradeFilter')?.selectedOptions?.[0]?.textContent,
-    document.getElementById('timingFilter')?.selectedOptions?.[0]?.textContent,
-    document.getElementById('entryStatusFilter')?.selectedOptions?.[0]?.textContent,
-    document.getElementById('setupStatusFilter')?.selectedOptions?.[0]?.textContent,
-    document.getElementById('locationFilter')?.selectedOptions?.[0]?.textContent,
-    document.getElementById('phaseFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('statusFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('directionFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('qualityFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('contractTypeFilter')?.selectedOptions?.[0]?.textContent,
     filters.tickerSearch.length ? `Ticker: ${filters.tickerSearch.join(',')}` : '',
   ].filter(Boolean).join(' · ');
   const showingLabel = totalBeforeLocFilter !== totalVisible
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
     : ` · ${totalVisible} total including developing`;
-  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel} · ${entryStatusSummary(visibleSetups)}`;
+  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel} · ${simpleStatusSummary(visibleSetups)}`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
@@ -2503,16 +2453,15 @@ function renderPriorityWatchlist(rows, nearMiss) {
           const entryStatus = setup.entryStatus || 'Waiting';
           const location = setup.stockLocation || formatLocationLabel(setup.trade_eval?.location, setup.trade_eval?.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
           const direction = setup.direction || 'N/A';
-          const simple = simpleIndexStatus(setup);
-          const rr = rewardRiskText(setup);
-          const option = suggestedContractText(setup);
-          const why = simpleIndexWhy(setup, simple.label, trend, setupTf, phase, setupStatus, entryStatus, location);
+          const simple = simpleStatus(setup);
+          const quality = simpleSetupLabel(setupGrade);
+          const why = simpleWhyItems(setup, simple.label, trend, setupTf, phase, setupStatus, entryStatus, location);
           return `
             <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
               <div class="index-simple-head">
                 <div>
                   <div class="priority-ticker">${ticker}</div>
-                  <div class="index-grade-stars">${gradeStars(setupGrade)} / Grade ${setupGrade || '—'}</div>
+                  <div class="index-grade-stars">${starsForGrade(setupGrade)} ${quality}</div>
                 </div>
                 ${renderSetupGradePill(setupGrade)}
               </div>
@@ -2520,33 +2469,18 @@ function renderPriorityWatchlist(rows, nearMiss) {
                 <div class="index-simple-label">Status</div>
                 <div class="index-simple-status ${simple.className}">${simple.label}</div>
                 <div class="index-simple-label" style="margin-top:8px;">Direction</div>
-                <div class="index-simple-direction">${formatDisplayLabel(direction)}</div>
+                <div class="index-simple-direction">${simpleDirection(direction)}</div>
               </div>
-              <div class="index-plan">
-                <div class="index-simple-label">Trade Plan</div>
-                <div class="index-plan-row"><span>Entry</span><span>${fmtMoney(setup.entry)}</span></div>
-                <div class="index-plan-row"><span>Stop</span><span>${fmtMoney(setup.sl)}</span></div>
-                <div class="index-plan-row"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
-                <div class="index-plan-row"><span>R:R</span><span>${rr}</span></div>
-              </div>
-              <div class="index-contract">
-                <div class="index-simple-label">Suggested Contract</div>
-                <div class="index-contract-main">${option.main}</div>
-                <div class="index-contract-sub">${option.sub}</div>
-              </div>
-              <details class="index-why" onclick="event.stopPropagation()">
-                <summary>Why?</summary>
-                <ul class="index-why-list">
-                  ${why.map(item => `<li>${item}</li>`).join('')}
-                </ul>
-              </details>
+              ${renderTradePlanBlock(setup)}
+              ${renderSuggestedContractBlock(setup)}
+              ${renderCollapsedWhyBlock(why)}
             </div>`;
         }).join('')}
       </div>
     </div>`;
 }
 
-function simpleIndexStatus(setup) {
+function simpleStatus(setup) {
   const grade = setupGradeValue(setup);
   const entryStatus = setup.entryStatus || 'Waiting';
   const timing = entryTimingValue(setup);
@@ -2564,9 +2498,29 @@ function simpleIndexStatus(setup) {
   return { label: 'WAIT', className: 'wait' };
 }
 
-function gradeStars(grade) {
-  const count = { A: 4, B: 3, C: 2, D: 1 }[normalizeSetupGrade(grade)] ?? 0;
+function simpleSetupLabel(grade) {
+  return { A: 'Top Setup', B: 'Strong Setup', C: 'Skip / Low Quality' }[normalizeSetupGrade(grade)] || 'Skip / Low Quality';
+}
+
+function starsForGrade(grade) {
+  const count = { A: 5, B: 4, C: 2 }[normalizeSetupGrade(grade)] ?? 2;
   return `${'★'.repeat(count)}${'☆'.repeat(5 - count)}`;
+}
+
+function simpleDirection(direction) {
+  const raw = String(direction || '').toUpperCase();
+  if (raw === 'LONG') return 'Long';
+  if (raw === 'SHORT') return 'Short';
+  return 'No clear direction';
+}
+
+function contractTypeValue(setup) {
+  const raw = String(setup?.option?.type || '').toUpperCase();
+  if (raw === 'CALL' || raw === 'PUT') return raw;
+  const direction = String(setup?.direction || '').toUpperCase();
+  if (direction === 'LONG') return 'CALL';
+  if (direction === 'SHORT') return 'PUT';
+  return '';
 }
 
 function rewardRiskText(setup) {
@@ -2578,6 +2532,17 @@ function rewardRiskText(setup) {
   const reward = Math.abs(target - entry);
   if (!risk) return '—';
   return `${(reward / risk).toFixed(1)}`;
+}
+
+function renderTradePlanBlock(setup) {
+  return `
+    <div class="index-plan">
+      <div class="index-simple-label">Trade Plan</div>
+      <div class="index-plan-row"><span>Entry</span><span>${fmtMoney(setup.entry)}</span></div>
+      <div class="index-plan-row"><span>Stop</span><span>${fmtMoney(setup.sl)}</span></div>
+      <div class="index-plan-row"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
+      <div class="index-plan-row"><span>R:R</span><span>${rewardRiskText(setup)}</span></div>
+    </div>`;
 }
 
 function formatShortDate(value) {
@@ -2599,8 +2564,28 @@ function suggestedContractText(setup) {
   };
 }
 
-function simpleIndexWhy(setup, status, trend, setupTf, phase, setupStatus, entryStatus, location) {
-  const direction = formatDisplayLabel(setup.direction || 'No clear direction');
+function renderSuggestedContractBlock(setup) {
+  const option = suggestedContractText(setup);
+  return `
+    <div class="index-contract">
+      <div class="index-simple-label">Suggested Contract</div>
+      <div class="index-contract-main">${option.main}</div>
+      <div class="index-contract-sub">${option.sub}</div>
+    </div>`;
+}
+
+function renderCollapsedWhyBlock(items) {
+  return `
+    <details class="index-why" onclick="event.stopPropagation()">
+      <summary>Why?</summary>
+      <ul class="index-why-list">
+        ${items.map(item => `<li>${item}</li>`).join('')}
+      </ul>
+    </details>`;
+}
+
+function simpleWhyItems(setup, status, trend, setupTf, phase, setupStatus, entryStatus, location) {
+  const direction = simpleDirection(setup.direction);
   const items = [];
   if (trend && trend !== 'Mixed') items.push(`Trend is ${String(trend).toLowerCase()}.`);
   if (status === 'ENTER NOW') items.push('Entry area is active.');
@@ -2699,7 +2684,7 @@ function normalizeSetupGrade(value) {
 function renderSetupGradePill(value) {
   const raw = String(value || '').trim().toUpperCase();
   if (!['A', 'B', 'C'].includes(raw)) return '—';
-  return `<span class="grade-badge grade-${raw.toLowerCase()}">${raw}</span>`;
+  return `<span class="grade-badge grade-${raw.toLowerCase()}">${simpleSetupLabel(raw)}</span>`;
 }
 
 function stockSetupLabel(grade) {
