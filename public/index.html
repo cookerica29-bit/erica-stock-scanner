@@ -103,6 +103,19 @@
 
   #tickerInput { width: 320px; }
   #tickerSearchInput { width: 180px; }
+  .control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .control-label {
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
   #entryStatusFilter, #setupStatusFilter, #phaseFilter { min-width: 160px; }
   #locationFilter { min-width: 130px; }
 
@@ -1123,8 +1136,14 @@
 <!-- ── Scanner Tab ───────────────────────────────────────────────────────── -->
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
-    <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
-    <input type="search" id="tickerSearchInput" placeholder="Search ticker..." autocomplete="off" oninput="renderScannerResults()" />
+    <div class="control-group">
+      <label class="control-label" for="tickerInput">Scan Specific Tickers</label>
+      <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
+    </div>
+    <div class="control-group">
+      <label class="control-label" for="tickerSearchInput">Search Results</label>
+      <input type="search" id="tickerSearchInput" placeholder="Find ticker in cards..." autocomplete="off" oninput="renderScannerResults()" />
+    </div>
     <select id="actionFilter" onchange="renderScannerResults()">
       <option value="all">All Actions</option>
       <option value="Review Now">Review Now</option>
