@@ -1141,9 +1141,9 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <div class="control-group">
-      <label class="control-label" for="tickerInput">Ticker Search / Scan · UI v4</label>
-      <input type="search" id="tickerInput" placeholder="Type AAPL or Apple, then Scan..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
-      <div class="control-hint">Type AAPL or Apple. Scan uses the matched ticker; typing filters loaded cards.</div>
+      <label class="control-label" for="tickerInput">Ticker Search · UI v5</label>
+      <input type="search" id="tickerInput" placeholder="Search AAPL or Apple..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
+      <div class="control-hint">Scan refreshes all cards. Type AAPL or Apple here to filter the loaded cards.</div>
     </div>
     <select id="actionFilter" onchange="renderScannerResults()">
       <option value="all">All Actions</option>
@@ -1751,10 +1751,6 @@ function tickerQueryParts(value) {
     .filter(Boolean);
 }
 
-function normalizeTickerQuery(value) {
-  return tickerQueryParts(value).join(',');
-}
-
 function getEasternParts(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
@@ -1966,7 +1962,6 @@ async function runTrendScan() {
 async function runScan() {
   const btn     = document.getElementById('scanBtn');
   const status  = document.getElementById('status');
-  const input   = normalizeTickerQuery(document.getElementById('tickerInput')?.value || '');
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
 
@@ -1976,10 +1971,7 @@ async function runScan() {
   summary.textContent = '';
 
   try {
-    const url = input
-      ? `${API}/api/scan?tickers=${encodeURIComponent(input)}`
-      : `${API}/api/scan`;
-    const res  = await fetch(url);
+    const res  = await fetch(`${API}/api/scan`);
     const data = await res.json();
     await loadIndexWatchlist();
 
@@ -2398,7 +2390,8 @@ function renderScannerResults() {
   const visibleSetups = [...rows, ...nearMiss];
 
   if (rows.length === 0) {
-    results.innerHTML = '<div class="empty">No setups match this filter — check other Scout cards below.</div>';
+    const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
+    results.innerHTML = `<div class="empty">No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.</div>`;
   } else {
     results.innerHTML = rows.map(renderCard).join('');
   }
