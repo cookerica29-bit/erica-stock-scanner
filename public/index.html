@@ -115,6 +115,11 @@
     line-height: 1;
     text-transform: uppercase;
   }
+  .control-hint {
+    color: var(--muted);
+    font-size: 9px;
+    margin-top: 2px;
+  }
   #entryStatusFilter, #setupStatusFilter, #phaseFilter { min-width: 160px; }
   #locationFilter { min-width: 130px; }
 
@@ -1136,8 +1141,9 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <div class="control-group">
-      <label class="control-label" for="tickerInput">Search Ticker</label>
-      <input type="search" id="tickerInput" placeholder="Find ticker in cards..." autocomplete="off" oninput="renderScannerResults()" />
+      <label class="control-label" for="tickerInput">Search Ticker · UI v2</label>
+      <input type="search" id="tickerInput" placeholder="Find ticker in loaded cards..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
+      <div class="control-hint">Filters loaded cards. Scan refreshes the full list.</div>
     </div>
     <select id="actionFilter" onchange="renderScannerResults()">
       <option value="all">All Actions</option>
@@ -2379,6 +2385,14 @@ function renderScannerResults() {
     nmSection.style.display = 'none';
   }
   renderPriorityWatchlist(scannerRows, scannerNearMiss);
+}
+
+function bindTickerSearch() {
+  const input = document.getElementById('tickerInput');
+  if (!input) return;
+  input.addEventListener('input', renderScannerResults);
+  input.addEventListener('search', renderScannerResults);
+  input.addEventListener('keyup', renderScannerResults);
 }
 
 function scrollToPriorityCard(ticker) {
@@ -4497,6 +4511,7 @@ function exportCSV() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+bindTickerSearch();
 setAutoScanButtonState();
 scheduleNextAutoScan();
 autoScanCountdownTimer = setInterval(updateCountdown, 1000);
