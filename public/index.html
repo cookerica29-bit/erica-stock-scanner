@@ -2587,6 +2587,36 @@ function renderCollapsedWhyBlock(items) {
     </details>`;
 }
 
+function renderMoreDetailsBlock(setup, details = {}) {
+  const ev = setup.trade_eval || {};
+  const q = setup.quality || {};
+  return `
+    <details class="coach-box" style="margin-top:12px;">
+      <summary class="coach-title" style="cursor:pointer;">More details</summary>
+      <div class="coach-grid" style="margin-top:10px;">
+        <div class="coach-metric"><div class="coach-label">Trend</div><div class="coach-value">${details.trend || 'Mixed'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Now</div><div class="coach-value">${details.setupTf || 'Mixed'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Market Type</div><div class="coach-value">${details.phase || 'Transition'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Location</div><div class="coach-value">${formatDisplayLabel(details.location || 'Mid')}</div></div>
+        <div class="coach-metric"><div class="coach-label">Distance</div><div class="coach-value">${details.distanceText || '—'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Support</div><div class="coach-value">${fmtMoney(setup.nearestSupportDemand)}</div></div>
+        <div class="coach-metric"><div class="coach-label">Resistance</div><div class="coach-value">${fmtMoney(setup.nearestResistanceSupply)}</div></div>
+        <div class="coach-metric"><div class="coach-label">Momentum</div><div class="coach-value">${ev.displacement || 'None'}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>
+        <div class="coach-metric"><div class="coach-label">Confirmation</div><div class="coach-value">${details.confirmationStarted ? 'Started' : 'Waiting'}</div></div>
+        <div class="coach-metric"><div class="coach-label">Scanner Detail</div><div class="coach-value">${ev.trade_stage || details.setupStatus || '—'}</div></div>
+      </div>
+      <div class="coach-warning" style="margin-top:10px;margin-bottom:0;">
+        ${details.setupGradeReason || q.coach_note || 'Review the chart before acting.'}<br>
+        ${details.confirmationReason || 'Wait for confirmation if the setup is not active.'}
+      </div>
+      ${(setup.tp2 != null || setup.tp3 != null) ? `
+        <div class="levels-strip" style="margin-top:10px;">
+          ${setup.tp2 != null ? renderLevelTile('Target 2', fmtMoney(setup.tp2)) : ''}
+          ${setup.tp3 != null ? renderLevelTile('Target 3', fmtMoney(setup.tp3)) : ''}
+        </div>` : ''}
+    </details>`;
+}
+
 function simpleWhyItems(setup, status, trend, setupTf, phase, setupStatus, entryStatus, location) {
   const direction = simpleDirection(setup.direction);
   const items = [];
@@ -2628,28 +2658,12 @@ function renderScoutMetric(label, value) {
   return `<div class="ind-cell"><div class="ind-label">${label}</div><div class="ind-value">${value || '—'}</div></div>`;
 }
 
-function statusColor(status) {
-  if (status === 'Tradeable') return 'var(--long)';
-  if (status === 'Near Entry') return '#93c5fd';
-  if (status === 'Waiting') return '#fcd34d';
-  if (status === 'Too Far') return '#94a3b8';
-  return 'var(--muted)';
-}
-
 function entryStatusClass(status) {
   if (status === 'Tradeable') return 'tradeable';
   if (status === 'Near Entry') return 'near-entry';
   if (status === 'Waiting') return 'waiting';
   if (status === 'Too Far') return 'too-far';
   return 'unknown';
-}
-
-function renderContextItem(label, value) {
-  return `<div class="context-item"><div class="context-label">${label}</div><div class="context-value">${value || '—'}</div></div>`;
-}
-
-function renderReadinessItem(label, value, extraClass = '') {
-  return `<div class="readiness-item ${extraClass}"><div class="readiness-label">${label}</div><div class="readiness-value">${value || '—'}</div></div>`;
 }
 
 function renderLevelTile(label, value) {
@@ -2690,20 +2704,6 @@ function renderSetupGradePill(value) {
   return `<span class="grade-badge grade-${raw.toLowerCase()}">${simpleSetupLabel(raw)}</span>`;
 }
 
-function stockSetupLabel(grade) {
-  const normalized = normalizeSetupGrade(grade);
-  if (normalized === 'A') return 'A Setup — Confirmation Started';
-  if (normalized === 'B') return 'B Setup — Wait';
-  return 'C Setup — Caution';
-}
-
-function stockSetupStatusText(grade) {
-  const normalized = normalizeSetupGrade(grade);
-  if (normalized === 'A') return 'Confirmation Started';
-  if (normalized === 'B') return 'Wait';
-  return 'Caution';
-}
-
 function simplifySetupStatus(value) {
   const text = String(value || '').trim();
   if (text === 'Pullback Active') return 'Still Pulling Back';
@@ -2727,102 +2727,55 @@ function renderCard(s) {
   const setupReason = s.stockSetupStatusReason || s.setupStatusReason || q.coach_note || 'waiting for cleaner structure';
   const setupGrade = normalizeSetupGrade(s.setupGrade);
   const setupGradeReason = s.setupGradeReason || setupReason;
-  const actionPriority = actionPriorityForSetup(s);
   const confirmationStarted = Boolean(s.confirmationStarted);
   const confirmationReason = s.confirmationReason || (confirmationStarted ? 'confirmation started' : 'waiting for confirmation');
   const location = s.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
   const entryStatus = s.entryStatus || 'Waiting';
-  const entryClass = entryStatusClass(entryStatus);
-  const showLevels = Boolean(s.entryVisible && s.entry != null && s.sl != null && s.tp1 != null);
   const directionLabel = s.direction || 'N/A';
-  const directionDisplay = directionLabel === 'LONG' || directionLabel === 'SHORT' ? formatDisplayLabel(directionLabel) : directionLabel;
-  const isLong = directionLabel === 'LONG';
+  const simple = simpleStatus(s);
+  const quality = simpleSetupLabel(setupGrade);
+  const why = simpleWhyItems(s, simple.label, trend, setupTf, phase, setupStatus, entryStatus, location);
   const encoded = encodeURIComponent(JSON.stringify(s));
   const distanceText = s.distanceFromEntryAtr != null
     ? `${fmtNumber(s.distanceFromEntryAtr)} ATR / ${fmtNumber(s.distanceFromEntryPercent)}% from entry`
     : 'No actionable entry distance yet';
-  const option = s.option || {};
-  const diagnostics = `
-    <details class="coach-box" style="margin-top:12px;">
-      <summary class="coach-title" style="cursor:pointer;">Details / Diagnostics</summary>
-      <div class="coach-grid" style="margin-top:10px;">
-        <div class="coach-metric"><div class="coach-label">Momentum</div><div class="coach-value">${ev.displacement || 'NONE'}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>
-        <div class="coach-metric"><div class="coach-label">Pullback</div><div class="coach-value">${s.in_ob ? 'Inside demand/supply' : s.near_ob ? 'Near demand/supply' : ev.sweep_taken ? 'Sweep seen' : 'Active'}</div></div>
-        <div class="coach-metric"><div class="coach-label">Confirmation</div><div class="coach-value">${ev.trigger_confirmed ? 'Trigger confirmed' : s.bos_confirmed ? 'BOS confirmed' : ev.rejection_confirmed ? 'Rejection confirmed' : 'Waiting'}</div></div>
-        <div class="coach-metric"><div class="coach-label">BOS / CHoCH</div><div class="coach-value">${s.bos_confirmed ? `BOS ${fmtMoney(s.bos_level)}` : 'No BOS'}${s.structureLabel ? ` · ${s.structureLabel}` : ''}</div></div>
-        <div class="coach-metric"><div class="coach-label">RSI / ATR / EMA</div><div class="coach-value">RSI ${s.rsi ?? '—'} · ATR ${fmtMoney(s.atr)} · EMA20 ${fmtMoney(s.ema20)} · EMA50 ${fmtMoney(s.ema50)}</div></div>
-        <div class="coach-metric"><div class="coach-label">Daily Trend</div><div class="coach-value">${s.dailyTrendDirection || trend}</div></div>
-        <div class="coach-metric"><div class="coach-label">4H Trend</div><div class="coach-value">${s.h4TrendDirection || 'Mixed'}</div></div>
-        <div class="coach-metric"><div class="coach-label">Scanner Status</div><div class="coach-value">${ev.trade_stage || '—'}</div></div>
-      </div>
-      ${option.symbol ? `<div class="option-box" style="margin-top:10px;margin-bottom:0;">
-        <div class="option-label">Suggested Option · ${option.dte || '—'} DTE</div>
-        <div class="option-symbol">${option.symbol}</div>
-        <div class="option-meta">Strike ${fmtMoney(option.strike)} · Expiry ${option.expiry || '—'}</div>
-      </div>` : ''}
-    </details>`;
 
   return `
   <div class="card">
-    <div class="card-action-row">
-      <span class="action-badge ${actionPriority.className}">${actionPriority.label}</span>
-    </div>
     <div class="card-header">
       <div class="ticker-wrap">
         <span class="ticker">${s.ticker}</span>
         ${s.timeframe ? `<span class="timeframe-badge">${s.timeframe}</span>` : ''}
-        <span class="badge ${isLong ? 'badge-long' : directionLabel === 'SHORT' ? 'badge-short' : ''}">${directionDisplay}</span>
       </div>
       <div class="card-header-right">
-        <span class="grade-badge grade-${setupGrade.toLowerCase()}">${setupGrade}</span>
-        <span class="entry-pill ${entryClass}">${entryStatus}</span>
+        ${renderSetupGradePill(setupGrade)}
       </div>
     </div>
     <div class="card-body">
-      <div class="setup-summary">
-        <span class="setup-status-text">${stockSetupLabel(setupGrade)}</span>
-        <span class="confirmation-pill ${confirmationStarted ? 'confirmed' : 'waiting'}">Confirmation: ${confirmationDisplay(confirmationStarted)}</span>
-      </div>
       <div class="price-row">
         <span class="price-big">${fmtMoney(s.price)}</span>
-        <span class="price-meta">Current Price · ATR ${fmtMoney(s.atr)}</span>
+        <span class="price-meta">${starsForGrade(setupGrade)} ${quality}</span>
       </div>
-      <div class="card-section">
-        <div class="section-title">Market Context</div>
-        <div class="context-grid">
-          ${renderContextItem('Trend', trend)}
-          ${renderContextItem('Short-term Flow', setupTf)}
-          ${renderContextItem('Phase', phase)}
-          ${renderContextItem('Location', formatDisplayLabel(location))}
-        </div>
+      <div class="index-status-block">
+        <div class="index-simple-label">Status</div>
+        <div class="index-simple-status ${simple.className}">${simple.label}</div>
+        <div class="index-simple-label" style="margin-top:8px;">Direction</div>
+        <div class="index-simple-direction">${simpleDirection(directionLabel)}</div>
       </div>
-      <div class="card-section">
-        <div class="section-title">Trade Readiness</div>
-        <div class="readiness-grid">
-          ${renderReadinessItem('Status', stockSetupStatusText(setupGrade), 'primary')}
-          ${renderReadinessItem('Setup Status', simplifySetupStatus(setupStatus), 'primary')}
-          ${renderReadinessItem('Entry Status', `<span style="color:${statusColor(entryStatus)}">${entryStatus}</span>`, 'primary')}
-          ${renderReadinessItem('Distance from Entry', distanceText)}
-        </div>
-        <div class="readiness-reason">${setupGradeReason}<br>${confirmationReason}</div>
-      </div>
-      <div class="levels-strip">
-        ${renderLevelTile('Nearest Support / Demand', fmtMoney(s.nearestSupportDemand))}
-        ${renderLevelTile('Nearest Resistance / Supply', fmtMoney(s.nearestResistanceSupply))}
-      </div>
-      ${showLevels ? `
-        <table class="levels-table">
-          <thead><tr><th>Level</th><th>Price</th><th>Context</th></tr></thead>
-          <tbody>
-            <tr><td class="level-entry">Entry</td><td class="level-entry">${fmtMoney(s.entry)}</td><td class="rr">${distanceText}</td></tr>
-            <tr><td class="level-sl">Stop Loss</td><td class="level-sl">${fmtMoney(s.sl)}</td><td class="rr">Planned invalidation</td></tr>
-            <tr><td class="level-tp">TP1</td><td class="level-tp">${fmtMoney(s.tp1)}</td><td class="rr">Initial target</td></tr>
-            ${s.tp2 != null ? `<tr><td class="level-tp">TP2</td><td class="level-tp">${fmtMoney(s.tp2)}</td><td class="rr">Extended target</td></tr>` : ''}
-            ${s.tp3 != null ? `<tr><td class="level-tp">TP3</td><td class="level-tp">${fmtMoney(s.tp3)}</td><td class="rr">Runner target</td></tr>` : ''}
-          </tbody>
-        </table>` :
-        `<div class="coach-warning">Suggested Entry / SL / TP hidden until price is within 0.5 ATR.</div>`}
-      ${diagnostics}
+      ${renderTradePlanBlock(s)}
+      ${renderSuggestedContractBlock(s)}
+      ${renderCollapsedWhyBlock(why)}
+      ${renderMoreDetailsBlock(s, {
+        trend,
+        setupTf,
+        phase,
+        setupStatus,
+        setupGradeReason,
+        confirmationStarted,
+        confirmationReason,
+        location,
+        distanceText,
+      })}
     </div>
     <div class="card-footer">
       <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">Log Review</button>
