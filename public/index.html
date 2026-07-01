@@ -1957,16 +1957,18 @@ async function runScan() {
   const status  = document.getElementById('status');
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
+  const indexWatchlist = document.getElementById('priority-watchlist');
 
   btn.disabled = true;
   status.innerHTML = '<span class="spinner"></span>Scanning...';
   results.innerHTML = '';
   summary.textContent = '';
+  if (indexWatchlist) indexWatchlist.innerHTML = '';
 
+  const indexPromise = loadIndexWatchlist();
   try {
     const res  = await fetch(`${API}/api/scan`);
     const data = await res.json();
-    await loadIndexWatchlist();
 
     const nextRows = data.rows || [];
     const nextNearMiss = data.near_miss || [];
@@ -1979,8 +1981,9 @@ async function runScan() {
     renderScannerResults();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
-    results.innerHTML = '<div class="empty">Scan failed — is the server running?</div>';
+    results.innerHTML = '<div class="empty">Full scan is still unavailable. Index Watchlist can still load above.</div>';
   } finally {
+    await indexPromise;
     btn.disabled = false;
     status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : 'Done';
   }
