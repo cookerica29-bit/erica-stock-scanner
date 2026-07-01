@@ -1141,9 +1141,9 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <div class="control-group">
-      <label class="control-label" for="tickerInput">Search Ticker · UI v2</label>
-      <input type="search" id="tickerInput" placeholder="Find ticker in loaded cards..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
-      <div class="control-hint">Filters loaded cards. Scan refreshes the full list.</div>
+      <label class="control-label" for="tickerInput">Ticker Search / Scan · UI v3</label>
+      <input type="search" id="tickerInput" placeholder="Type ticker, then Scan or filter loaded cards..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
+      <div class="control-hint">Type AAPL or TSLA. Scan uses this ticker; typing also filters loaded cards.</div>
     </div>
     <select id="actionFilter" onchange="renderScannerResults()">
       <option value="all">All Actions</option>
@@ -1924,6 +1924,7 @@ async function runTrendScan() {
 async function runScan() {
   const btn     = document.getElementById('scanBtn');
   const status  = document.getElementById('status');
+  const input   = document.getElementById('tickerInput')?.value.trim() || '';
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
 
@@ -1933,7 +1934,10 @@ async function runScan() {
   summary.textContent = '';
 
   try {
-    const res  = await fetch(`${API}/api/scan`);
+    const url = input
+      ? `${API}/api/scan?tickers=${encodeURIComponent(input)}`
+      : `${API}/api/scan`;
+    const res  = await fetch(url);
     const data = await res.json();
     await loadIndexWatchlist();
 
