@@ -2490,14 +2490,19 @@ function simpleStatus(setup) {
   const action = actionPriorityForSetup(setup).value;
   const setupStatus = String(setup.setup_status || '').toUpperCase();
   const stockStatus = String(setupStatusValue(setup) || '').toUpperCase();
+  const tradeStage = String(setup.trade_eval?.trade_stage || '').toUpperCase();
+  const triggerConfirmed = Boolean(setup.trade_eval?.trigger_confirmed || setup.confirmationStarted);
+  const tradeableConfirmed = Boolean(setup.trade_eval?.b_plus_tradeable || setup.trade_eval?.a_plus_ready);
+  const legacyNoTrade = tradeStage.includes('RANGE') || tradeStage.includes('NO TRADE');
 
   if (entryStatus === 'Too Far') return { label: 'TOO LATE', className: 'too-late' };
-  if (grade === 'C' || setupStatus === 'SKIPPED' || stockStatus.includes('RANGE') || stockStatus.includes('CHOPPY') || !setup.direction) {
+  if (grade === 'C' || setupStatus === 'SKIPPED' || stockStatus.includes('RANGE') || stockStatus.includes('CHOPPY') || !setup.direction || legacyNoTrade) {
     return { label: 'SKIP', className: 'skip' };
   }
-  if (entryStatus === 'Tradeable' || timing === 'Entry Triggered' || action === 'Review Now') {
+  if (timing === 'Entry Triggered' || triggerConfirmed || tradeableConfirmed || action === 'Review Now') {
     return { label: 'ENTER NOW', className: 'enter-now' };
   }
+  if (entryStatus === 'Tradeable' || entryStatus === 'Near Entry') return { label: 'WAIT', className: 'wait' };
   return { label: 'WAIT', className: 'wait' };
 }
 
@@ -2590,10 +2595,13 @@ function renderCollapsedWhyBlock(items) {
 function renderMoreDetailsBlock(setup, details = {}) {
   const ev = setup.trade_eval || {};
   const q = setup.quality || {};
+  const simple = simpleStatus(setup);
+  const legacyStatus = ev.trade_stage || '';
   return `
     <details class="coach-box" style="margin-top:12px;">
       <summary class="coach-title" style="cursor:pointer;">More details</summary>
       <div class="coach-grid" style="margin-top:10px;">
+        <div class="coach-metric"><div class="coach-label">Status</div><div class="coach-value">${simple.label}</div></div>
         <div class="coach-metric"><div class="coach-label">Trend</div><div class="coach-value">${details.trend || 'Mixed'}</div></div>
         <div class="coach-metric"><div class="coach-label">Now</div><div class="coach-value">${details.setupTf || 'Mixed'}</div></div>
         <div class="coach-metric"><div class="coach-label">Market Type</div><div class="coach-value">${details.phase || 'Transition'}</div></div>
@@ -2603,12 +2611,18 @@ function renderMoreDetailsBlock(setup, details = {}) {
         <div class="coach-metric"><div class="coach-label">Resistance</div><div class="coach-value">${fmtMoney(setup.nearestResistanceSupply)}</div></div>
         <div class="coach-metric"><div class="coach-label">Momentum</div><div class="coach-value">${ev.displacement || 'None'}${ev.displacement_score ? ` · ${ev.displacement_score} ATR` : ''}</div></div>
         <div class="coach-metric"><div class="coach-label">Confirmation</div><div class="coach-value">${details.confirmationStarted ? 'Started' : 'Waiting'}</div></div>
-        <div class="coach-metric"><div class="coach-label">Scanner Detail</div><div class="coach-value">${ev.trade_stage || details.setupStatus || '—'}</div></div>
       </div>
       <div class="coach-warning" style="margin-top:10px;margin-bottom:0;">
         ${details.setupGradeReason || q.coach_note || 'Review the chart before acting.'}<br>
         ${details.confirmationReason || 'Wait for confirmation if the setup is not active.'}
       </div>
+      ${legacyStatus ? `
+        <details class="index-why" style="margin-top:10px;">
+          <summary>Diagnostics</summary>
+          <ul class="index-why-list">
+            <li>Legacy status: ${legacyStatus}</li>
+          </ul>
+        </details>` : ''}
       ${(setup.tp2 != null || setup.tp3 != null) ? `
         <div class="levels-strip" style="margin-top:10px;">
           ${setup.tp2 != null ? renderLevelTile('Target 2', fmtMoney(setup.tp2)) : ''}
