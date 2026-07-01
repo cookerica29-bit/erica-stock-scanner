@@ -102,6 +102,7 @@
   select option { background: var(--surface2); }
 
   #tickerInput { width: 320px; }
+  #tickerSearchInput { width: 180px; }
   #entryStatusFilter, #setupStatusFilter, #phaseFilter { min-width: 160px; }
   #locationFilter { min-width: 130px; }
 
@@ -1123,6 +1124,7 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
+    <input type="search" id="tickerSearchInput" placeholder="Search ticker..." autocomplete="off" oninput="renderScannerResults()" />
     <select id="actionFilter" onchange="renderScannerResults()">
       <option value="all">All Actions</option>
       <option value="Review Now">Review Now</option>
@@ -1977,6 +1979,8 @@ function clearResults() {
   document.getElementById('marketSnapshot').innerHTML = '';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
+  const tickerSearch = document.getElementById('tickerSearchInput');
+  if (tickerSearch) tickerSearch.value = '';
 }
 
 function getTradeStage(setup) {
@@ -2193,6 +2197,8 @@ function actionPriorityForSetup(s) {
 }
 
 function passesFrameworkFilters(s, filters) {
+  const ticker = String(s?.ticker || '').toUpperCase();
+  if (filters.tickerSearch && !ticker.includes(filters.tickerSearch)) return false;
   if (filters.action !== 'all' && actionPriorityForSetup(s).value !== filters.action) return false;
   if (filters.grade !== 'all' && setupGradeValue(s) !== filters.grade) return false;
   if (filters.timing !== 'all' && entryTimingValue(s) !== filters.timing) return false;
@@ -2317,6 +2323,7 @@ function renderScannerResults() {
     setupStatus: document.getElementById('setupStatusFilter')?.value || 'all',
     location: document.getElementById('locationFilter')?.value || 'all',
     phase: document.getElementById('phaseFilter')?.value || 'all',
+    tickerSearch: (document.getElementById('tickerSearchInput')?.value || '').trim().toUpperCase(),
   };
 
   const allRows = scannerRows.slice();
@@ -2344,6 +2351,7 @@ function renderScannerResults() {
     document.getElementById('setupStatusFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('locationFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('phaseFilter')?.selectedOptions?.[0]?.textContent,
+    filters.tickerSearch ? `Ticker: ${filters.tickerSearch}` : '',
   ].filter(Boolean).join(' · ');
   const showingLabel = totalBeforeLocFilter !== totalVisible
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
