@@ -1141,9 +1141,9 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <div class="control-group">
-      <label class="control-label" for="tickerInput">Ticker Search / Scan · UI v3</label>
-      <input type="search" id="tickerInput" placeholder="Type ticker, then Scan or filter loaded cards..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
-      <div class="control-hint">Type AAPL or TSLA. Scan uses this ticker; typing also filters loaded cards.</div>
+      <label class="control-label" for="tickerInput">Ticker Search / Scan · UI v4</label>
+      <input type="search" id="tickerInput" placeholder="Type AAPL or Apple, then Scan..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
+      <div class="control-hint">Type AAPL or Apple. Scan uses the matched ticker; typing filters loaded cards.</div>
     </div>
     <select id="actionFilter" onchange="renderScannerResults()">
       <option value="all">All Actions</option>
@@ -1693,6 +1693,27 @@ let indexWatchRows = [];
 let currentVideoProject = null;
 let videoProjectDirty = false;
 const INDEX_WATCH_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLF', 'XLK', 'SMH'];
+const TICKER_ALIASES = {
+  APPLE: 'AAPL',
+  MICROSOFT: 'MSFT',
+  TESLA: 'TSLA',
+  NVIDIA: 'NVDA',
+  GOOGLE: 'GOOGL',
+  ALPHABET: 'GOOGL',
+  META: 'META',
+  FACEBOOK: 'META',
+  AMAZON: 'AMZN',
+  NETFLIX: 'NFLX',
+  AMD: 'AMD',
+  SPY: 'SPY',
+  SANDP: 'SPY',
+  'S&P': 'SPY',
+  QQQ: 'QQQ',
+  NASDAQ: 'QQQ',
+  DOW: 'DIA',
+  DIA: 'DIA',
+};
+const TICKER_QUERY_STOP_WORDS = new Set(['INC', 'CORP', 'CO', 'COMPANY', 'CLASS', 'THE']);
 let previousTradeStages = (() => {
   try {
     const saved = localStorage.getItem(STAGE_CACHE_KEY);
@@ -1712,6 +1733,27 @@ let autoScanEnabled = true;
 let autoScanTimer = null;
 let autoScanCountdownTimer = null;
 let nextScanAt = null;
+
+function normalizeTickerToken(token) {
+  const original = String(token || '').trim().toUpperCase().replace(/^\$/, '');
+  if (!original) return '';
+  const aliasKey = original.replace(/[^A-Z0-9&]/g, '');
+  if (TICKER_ALIASES[original]) return TICKER_ALIASES[original];
+  if (TICKER_ALIASES[aliasKey]) return TICKER_ALIASES[aliasKey];
+  if (TICKER_QUERY_STOP_WORDS.has(aliasKey)) return '';
+  return original.replace(/[^A-Z0-9.]/g, '');
+}
+
+function tickerQueryParts(value) {
+  return String(value || '')
+    .split(/[,\s]+/)
+    .map(normalizeTickerToken)
+    .filter(Boolean);
+}
+
+function normalizeTickerQuery(value) {
+  return tickerQueryParts(value).join(',');
+}
 
 function getEasternParts(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -1924,7 +1966,7 @@ async function runTrendScan() {
 async function runScan() {
   const btn     = document.getElementById('scanBtn');
   const status  = document.getElementById('status');
-  const input   = document.getElementById('tickerInput')?.value.trim() || '';
+  const input   = normalizeTickerQuery(document.getElementById('tickerInput')?.value || '');
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
 
@@ -2218,7 +2260,7 @@ function actionPriorityForSetup(s) {
 
 function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
-  if (filters.tickerSearch && !ticker.includes(filters.tickerSearch)) return false;
+  if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
   if (filters.action !== 'all' && actionPriorityForSetup(s).value !== filters.action) return false;
   if (filters.grade !== 'all' && setupGradeValue(s) !== filters.grade) return false;
   if (filters.timing !== 'all' && entryTimingValue(s) !== filters.timing) return false;
@@ -2343,7 +2385,7 @@ function renderScannerResults() {
     setupStatus: document.getElementById('setupStatusFilter')?.value || 'all',
     location: document.getElementById('locationFilter')?.value || 'all',
     phase: document.getElementById('phaseFilter')?.value || 'all',
-    tickerSearch: (document.getElementById('tickerInput')?.value || '').trim().toUpperCase(),
+    tickerSearch: tickerQueryParts(document.getElementById('tickerInput')?.value || ''),
   };
 
   const allRows = scannerRows.slice();
@@ -2371,7 +2413,7 @@ function renderScannerResults() {
     document.getElementById('setupStatusFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('locationFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('phaseFilter')?.selectedOptions?.[0]?.textContent,
-    filters.tickerSearch ? `Ticker: ${filters.tickerSearch}` : '',
+    filters.tickerSearch.length ? `Ticker: ${filters.tickerSearch.join(',')}` : '',
   ].filter(Boolean).join(' · ');
   const showingLabel = totalBeforeLocFilter !== totalVisible
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
