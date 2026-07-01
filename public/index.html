@@ -343,28 +343,47 @@
   .priority-yellow { color: #fbbf24; }
   .priority-red { color: var(--short); }
   .priority-muted { color: var(--muted); }
-  .index-watchlist .priority-list { gap: 8px; }
+  .index-watchlist .priority-list {
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  }
   .index-row {
-    align-items: center;
     background: rgba(148,163,184,0.035);
+    border: 1px solid rgba(148,163,184,0.1);
     border-radius: 8px;
     cursor: pointer;
-    display: grid;
-    font-size: 11px;
-    gap: 8px;
-    grid-template-columns: 70px 54px 80px 80px 95px 150px 95px 80px 120px 70px;
-    padding: 9px 10px;
+    font-size: 12px;
+    padding: 12px;
   }
   .index-row:hover { background: rgba(148,163,184,0.075); }
-  .index-cell-label { color: var(--muted); display: none; font-size: 9px; margin-bottom: 2px; }
-  .index-cell-value { color: var(--text); font-weight: 650; overflow-wrap: anywhere; }
-  .index-distance { color: var(--muted); }
-  @media (max-width: 980px) {
-    .index-row {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .index-cell-label { display: block; }
+  .index-simple-head { align-items:flex-start; display:flex; gap:10px; justify-content:space-between; margin-bottom:12px; }
+  .index-grade-stars { color:#fbbf24; font-size:12px; font-weight:900; letter-spacing:0.03em; margin-top:3px; }
+  .index-status-block { border-bottom:1px solid rgba(148,163,184,0.09); border-top:1px solid rgba(148,163,184,0.09); padding:9px 0; }
+  .index-simple-label { color:var(--muted); font-size:9px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
+  .index-simple-status { font-size:20px; font-weight:950; letter-spacing:0.02em; margin-top:2px; }
+  .index-simple-status.enter-now { color:var(--long); }
+  .index-simple-status.wait { color:#fbbf24; }
+  .index-simple-status.skip { color:#94a3b8; }
+  .index-simple-status.too-late { color:#f97316; }
+  .index-simple-direction { color:var(--text); font-size:13px; font-weight:850; margin-top:8px; }
+  .index-plan { display:grid; gap:6px; margin-top:11px; }
+  .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
+  .index-plan-row span:first-child { color:var(--muted); }
+  .index-plan-row span:last-child { color:var(--text); font-weight:800; }
+  .index-contract {
+    background:rgba(2,6,23,0.2);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:7px;
+    margin-top:11px;
+    padding:9px;
   }
+  .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; }
+  .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; }
+  .index-why { margin-top:10px; }
+  .index-why summary { color:#93c5fd; cursor:pointer; font-size:11px; font-weight:850; }
+  .index-why-list { color:var(--muted); line-height:1.45; margin:7px 0 0; padding-left:16px; }
+  .index-why-list li { margin:2px 0; }
   .card.priority-card-focus {
     border-color: rgba(251,191,36,0.8);
     box-shadow: 0 0 0 1px rgba(251,191,36,0.45), 0 0 24px rgba(251,191,36,0.18);
@@ -2482,30 +2501,115 @@ function renderPriorityWatchlist(rows, nearMiss) {
           const phase = setupPhase(setup);
           const setupStatus = setupStatusValue(setup);
           const entryStatus = setup.entryStatus || 'Waiting';
-          const entryClass = entryStatusClass(entryStatus);
           const location = setup.stockLocation || formatLocationLabel(setup.trade_eval?.location, setup.trade_eval?.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
-          const distanceText = setup.distanceFromEntryAtr != null
-            ? `${fmtNumber(setup.distanceFromEntryAtr)} ATR / ${fmtNumber(setup.distanceFromEntryPercent)}%`
-            : '—';
           const direction = setup.direction || 'N/A';
-          const directionDisplay = direction === 'LONG' || direction === 'SHORT' ? formatDisplayLabel(direction) : direction;
-          const isLong = direction === 'LONG';
+          const simple = simpleIndexStatus(setup);
+          const rr = rewardRiskText(setup);
+          const option = suggestedContractText(setup);
+          const why = simpleIndexWhy(setup, simple.label, trend, setupTf, phase, setupStatus, entryStatus, location);
           return `
             <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
-              <div><div class="index-cell-label">Ticker</div><div class="priority-ticker">${ticker}</div></div>
-              <div><div class="index-cell-label">Grade</div><div>${renderSetupGradePill(setupGrade)}</div></div>
-              <div><div class="index-cell-label">Trend</div><div class="index-cell-value">${trend}</div></div>
-              <div><div class="index-cell-label">Short-term Flow</div><div class="index-cell-value">${setupTf}</div></div>
-              <div><div class="index-cell-label">Phase</div><div class="index-cell-value">${phase}</div></div>
-              <div><div class="index-cell-label">Setup Status</div><div class="index-cell-value">${setupStatus}</div></div>
-              <div><div class="index-cell-label">Entry Status</div><div><span class="entry-pill ${entryClass}">${entryStatus}</span></div></div>
-              <div><div class="index-cell-label">Location</div><div class="index-cell-value">${formatDisplayLabel(location)}</div></div>
-              <div><div class="index-cell-label">Distance</div><div class="index-cell-value index-distance">${distanceText}</div></div>
-              <div><div class="index-cell-label">Direction</div><div><span class="badge ${isLong ? 'badge-long' : direction === 'SHORT' ? 'badge-short' : ''}">${directionDisplay}</span></div></div>
+              <div class="index-simple-head">
+                <div>
+                  <div class="priority-ticker">${ticker}</div>
+                  <div class="index-grade-stars">${gradeStars(setupGrade)} / Grade ${setupGrade || '—'}</div>
+                </div>
+                ${renderSetupGradePill(setupGrade)}
+              </div>
+              <div class="index-status-block">
+                <div class="index-simple-label">Status</div>
+                <div class="index-simple-status ${simple.className}">${simple.label}</div>
+                <div class="index-simple-label" style="margin-top:8px;">Direction</div>
+                <div class="index-simple-direction">${formatDisplayLabel(direction)}</div>
+              </div>
+              <div class="index-plan">
+                <div class="index-simple-label">Trade Plan</div>
+                <div class="index-plan-row"><span>Entry</span><span>${fmtMoney(setup.entry)}</span></div>
+                <div class="index-plan-row"><span>Stop</span><span>${fmtMoney(setup.sl)}</span></div>
+                <div class="index-plan-row"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
+                <div class="index-plan-row"><span>R:R</span><span>${rr}</span></div>
+              </div>
+              <div class="index-contract">
+                <div class="index-simple-label">Suggested Contract</div>
+                <div class="index-contract-main">${option.main}</div>
+                <div class="index-contract-sub">${option.sub}</div>
+              </div>
+              <details class="index-why" onclick="event.stopPropagation()">
+                <summary>Why?</summary>
+                <ul class="index-why-list">
+                  ${why.map(item => `<li>${item}</li>`).join('')}
+                </ul>
+              </details>
             </div>`;
         }).join('')}
       </div>
     </div>`;
+}
+
+function simpleIndexStatus(setup) {
+  const grade = setupGradeValue(setup);
+  const entryStatus = setup.entryStatus || 'Waiting';
+  const timing = entryTimingValue(setup);
+  const action = actionPriorityForSetup(setup).value;
+  const setupStatus = String(setup.setup_status || '').toUpperCase();
+  const stockStatus = String(setupStatusValue(setup) || '').toUpperCase();
+
+  if (entryStatus === 'Too Far') return { label: 'TOO LATE', className: 'too-late' };
+  if (grade === 'C' || setupStatus === 'SKIPPED' || stockStatus.includes('RANGE') || stockStatus.includes('CHOPPY') || !setup.direction) {
+    return { label: 'SKIP', className: 'skip' };
+  }
+  if (entryStatus === 'Tradeable' || timing === 'Entry Triggered' || action === 'Review Now') {
+    return { label: 'ENTER NOW', className: 'enter-now' };
+  }
+  return { label: 'WAIT', className: 'wait' };
+}
+
+function gradeStars(grade) {
+  const count = { A: 4, B: 3, C: 2, D: 1 }[normalizeSetupGrade(grade)] ?? 0;
+  return `${'★'.repeat(count)}${'☆'.repeat(5 - count)}`;
+}
+
+function rewardRiskText(setup) {
+  const entry = Number(setup.entry);
+  const stop = Number(setup.sl);
+  const target = Number(setup.tp1);
+  if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return '—';
+  const risk = Math.abs(entry - stop);
+  const reward = Math.abs(target - entry);
+  if (!risk) return '—';
+  return `${(reward / risk).toFixed(1)}`;
+}
+
+function formatShortDate(value) {
+  if (!value) return 'Expiry not loaded';
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function suggestedContractText(setup) {
+  const option = setup.option || {};
+  const type = option.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : '');
+  const strike = Number.isFinite(Number(option.strike)) ? Number(option.strike).toFixed(0) : '—';
+  const price = Number(option.ask ?? option.mid ?? option.mark);
+  const priceText = Number.isFinite(price) ? `≈ ${fmtMoney(price)}` : 'Price not loaded';
+  return {
+    main: `${strike} ${formatDisplayLabel(type)}`.trim(),
+    sub: `${formatShortDate(option.expiry)} · ${priceText}`,
+  };
+}
+
+function simpleIndexWhy(setup, status, trend, setupTf, phase, setupStatus, entryStatus, location) {
+  const direction = formatDisplayLabel(setup.direction || 'No clear direction');
+  const items = [];
+  if (trend && trend !== 'Mixed') items.push(`Trend is ${String(trend).toLowerCase()}.`);
+  if (status === 'ENTER NOW') items.push('Entry area is active.');
+  if (status === 'WAIT') items.push('Waiting for confirmation near the entry area.');
+  if (status === 'TOO LATE') items.push('Price has moved too far from the planned entry.');
+  if (status === 'SKIP') items.push('Quality is not strong enough for a clean trade.');
+  items.push(`Direction is ${direction}.`);
+  items.push(`Details: ${setupTf || 'Mixed'} now, ${phase || 'Transition'}, ${setupStatus || 'Waiting'}, ${entryStatus || 'Waiting'}, ${formatDisplayLabel(location || 'Mid')}.`);
+  return items.slice(0, 4);
 }
 
 function renderIndexWatchlistMessage(message) {
