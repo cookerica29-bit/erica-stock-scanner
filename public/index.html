@@ -102,7 +102,6 @@
   select option { background: var(--surface2); }
 
   #tickerInput { width: 320px; }
-  #tickerSearchInput { width: 180px; }
   .control-group {
     display: flex;
     flex-direction: column;
@@ -1137,12 +1136,8 @@
 <div id="scanner-panel" class="tab-panel active">
   <div class="controls">
     <div class="control-group">
-      <label class="control-label" for="tickerInput">Scan Specific Tickers</label>
-      <input type="text" id="tickerInput" placeholder="Custom tickers (e.g. TSLA,META,GOOG) — leave blank for full watchlist" />
-    </div>
-    <div class="control-group">
-      <label class="control-label" for="tickerSearchInput">Search Results</label>
-      <input type="search" id="tickerSearchInput" placeholder="Find ticker in cards..." autocomplete="off" oninput="renderScannerResults()" />
+      <label class="control-label" for="tickerInput">Search Ticker</label>
+      <input type="search" id="tickerInput" placeholder="Find ticker in cards..." autocomplete="off" oninput="renderScannerResults()" />
     </div>
     <select id="actionFilter" onchange="renderScannerResults()">
       <option value="all">All Actions</option>
@@ -1923,7 +1918,6 @@ async function runTrendScan() {
 async function runScan() {
   const btn     = document.getElementById('scanBtn');
   const status  = document.getElementById('status');
-  const input   = document.getElementById('tickerInput').value.trim();
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
 
@@ -1933,10 +1927,7 @@ async function runScan() {
   summary.textContent = '';
 
   try {
-    const url = input
-      ? `${API}/api/scan?tickers=${encodeURIComponent(input)}`
-      : `${API}/api/scan`;
-    const res  = await fetch(url);
+    const res  = await fetch(`${API}/api/scan`);
     const data = await res.json();
     await loadIndexWatchlist();
 
@@ -1998,7 +1989,7 @@ function clearResults() {
   document.getElementById('marketSnapshot').innerHTML = '';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
-  const tickerSearch = document.getElementById('tickerSearchInput');
+  const tickerSearch = document.getElementById('tickerInput');
   if (tickerSearch) tickerSearch.value = '';
 }
 
@@ -2342,7 +2333,7 @@ function renderScannerResults() {
     setupStatus: document.getElementById('setupStatusFilter')?.value || 'all',
     location: document.getElementById('locationFilter')?.value || 'all',
     phase: document.getElementById('phaseFilter')?.value || 'all',
-    tickerSearch: (document.getElementById('tickerSearchInput')?.value || '').trim().toUpperCase(),
+    tickerSearch: (document.getElementById('tickerInput')?.value || '').trim().toUpperCase(),
   };
 
   const allRows = scannerRows.slice();
