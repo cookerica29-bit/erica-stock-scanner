@@ -279,6 +279,10 @@
     padding: 3px 8px;
     text-align: center;
   }
+  .grade-badge.enter-now { background:rgba(34,197,94,0.14); border-color:rgba(34,197,94,0.35); color:#86efac; }
+  .grade-badge.wait { background:rgba(245,158,11,0.13); border-color:rgba(245,158,11,0.34); color:#fcd34d; }
+  .grade-badge.skip { background:rgba(148,163,184,0.08); border-color:rgba(148,163,184,0.18); color:#94a3b8; }
+  .grade-badge.too-late { background:rgba(249,115,22,0.13); border-color:rgba(249,115,22,0.34); color:#fdba74; }
   .action-badge {
     border: 1px solid rgba(148,163,184,0.18);
     border-radius: 999px;
@@ -2531,21 +2535,20 @@ function renderPriorityWatchlist(rows, nearMiss) {
           const entryStatus = setup.entryStatus || 'Waiting';
           const location = setup.stockLocation || formatLocationLabel(setup.trade_eval?.location, setup.trade_eval?.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
           const direction = setup.direction || 'N/A';
-          const simple = simpleStatus(setup);
-          const quality = simpleSetupLabel(setupGrade);
-          const why = simpleWhyItems(setup, simple.label, trend, setupTf, phase, setupStatus, entryStatus, location);
+          const state = readinessState(setup);
+          const why = simpleWhyItems(setup, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
           return `
             <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
               <div class="index-simple-head">
                 <div>
                   <div class="priority-ticker">${ticker}</div>
-                  <div class="index-grade-stars">${starsForGrade(setupGrade)} ${quality}</div>
+                  <div class="index-grade-stars">${readinessStars(setup)} ${state.label}</div>
                 </div>
-                ${renderSetupGradePill(setupGrade)}
+                ${renderReadinessBadge(setup)}
               </div>
               <div class="index-status-block">
                 <div class="index-simple-label">Status</div>
-                <div class="index-simple-status ${simple.className}">${simple.label}</div>
+                <div class="index-simple-status ${state.className}">${state.label}</div>
                 <div class="index-simple-label" style="margin-top:8px;">Direction</div>
                 <div class="index-simple-direction">${simpleDirection(direction)}</div>
                 ${renderReadinessBar(setup)}
@@ -2594,13 +2597,32 @@ function readinessPercent(setup) {
   return 50;
 }
 
-function renderReadinessBar(setup) {
+function readinessState(setup) {
   const status = simpleStatus(setup);
-  const pct = readinessPercent(setup);
+  return {
+    label: status.label,
+    className: status.className,
+    percent: readinessPercent(setup),
+  };
+}
+
+function readinessStars(setup) {
+  const pct = readinessState(setup).percent;
+  const count = pct === 100 ? 5 : pct >= 75 ? 4 : pct >= 50 ? 3 : 0;
+  return `${'★'.repeat(count)}${'☆'.repeat(5 - count)}`;
+}
+
+function renderReadinessBadge(setup) {
+  const state = readinessState(setup);
+  return `<span class="grade-badge ${state.className}">${state.label}</span>`;
+}
+
+function renderReadinessBar(setup) {
+  const state = readinessState(setup);
   return `
     <div class="readiness-bar-wrap">
-      <div class="readiness-bar-track"><div class="readiness-bar-fill ${status.className}" style="width:${pct}%"></div></div>
-      <div class="readiness-bar-label"><span>Readiness</span><span>${pct}%</span></div>
+      <div class="readiness-bar-track"><div class="readiness-bar-fill ${state.className}" style="width:${state.percent}%"></div></div>
+      <div class="readiness-bar-label"><span>Readiness</span><span>${state.percent}%</span></div>
     </div>`;
 }
 
@@ -2876,9 +2898,8 @@ function renderCard(s) {
   const location = s.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
   const entryStatus = s.entryStatus || 'Waiting';
   const directionLabel = s.direction || 'N/A';
-  const simple = simpleStatus(s);
-  const quality = simpleSetupLabel(setupGrade);
-  const why = simpleWhyItems(s, simple.label, trend, setupTf, phase, setupStatus, entryStatus, location);
+  const state = readinessState(s);
+  const why = simpleWhyItems(s, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
   const encoded = encodeURIComponent(JSON.stringify(s));
   const distanceText = s.distanceFromEntryAtr != null
     ? `${fmtNumber(s.distanceFromEntryAtr)} ATR / ${fmtNumber(s.distanceFromEntryPercent)}% from entry`
@@ -2892,17 +2913,17 @@ function renderCard(s) {
         ${s.timeframe ? `<span class="timeframe-badge">${s.timeframe}</span>` : ''}
       </div>
       <div class="card-header-right">
-        ${renderSetupGradePill(setupGrade)}
+        ${renderReadinessBadge(s)}
       </div>
     </div>
     <div class="card-body">
       <div class="price-row">
         <span class="price-big">${fmtMoney(s.price)}</span>
-        <span class="price-meta">${starsForGrade(setupGrade)} ${quality}</span>
+        <span class="price-meta">${readinessStars(s)} ${state.label}</span>
       </div>
       <div class="index-status-block">
         <div class="index-simple-label">Status</div>
-        <div class="index-simple-status ${simple.className}">${simple.label}</div>
+        <div class="index-simple-status ${state.className}">${state.label}</div>
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
         <div class="index-simple-direction">${simpleDirection(directionLabel)}</div>
         ${renderReadinessBar(s)}
