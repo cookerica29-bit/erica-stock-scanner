@@ -281,6 +281,7 @@
   }
   .grade-badge.enter-now { background:rgba(34,197,94,0.14); border-color:rgba(34,197,94,0.35); color:#86efac; }
   .grade-badge.wait { background:rgba(245,158,11,0.13); border-color:rgba(245,158,11,0.34); color:#fcd34d; }
+  .grade-badge.almost-ready { background:rgba(99,102,241,0.15); border-color:rgba(99,102,241,0.38); color:#c4b5fd; }
   .grade-badge.skip { background:rgba(148,163,184,0.08); border-color:rgba(148,163,184,0.18); color:#94a3b8; }
   .grade-badge.too-late { background:rgba(249,115,22,0.13); border-color:rgba(249,115,22,0.34); color:#fdba74; }
   .action-badge {
@@ -367,6 +368,7 @@
   .index-simple-status { font-size:20px; font-weight:950; letter-spacing:0.02em; margin-top:2px; }
   .index-simple-status.enter-now { color:var(--long); }
   .index-simple-status.wait { color:#fbbf24; }
+  .index-simple-status.almost-ready { color:#c4b5fd; }
   .index-simple-status.skip { color:#94a3b8; }
   .index-simple-status.too-late { color:#f97316; }
   .index-simple-direction { color:var(--text); font-size:13px; font-weight:850; margin-top:8px; }
@@ -384,6 +386,7 @@
     transition:width 0.2s ease;
   }
   .readiness-bar-fill.enter-now { background:var(--long); }
+  .readiness-bar-fill.almost-ready { background:#a78bfa; }
   .readiness-bar-fill.skip,
   .readiness-bar-fill.too-late { background:#64748b; }
   .readiness-bar-label {
@@ -1217,10 +1220,10 @@
     </div>
     <select id="statusFilter" onchange="renderScannerResults()">
       <option value="all">All Statuses</option>
-      <option value="ENTER NOW">ENTER NOW</option>
-      <option value="WAIT">WAIT</option>
-      <option value="SKIP">SKIP</option>
-      <option value="TOO LATE">TOO LATE</option>
+      <option value="SKIP">Skip</option>
+      <option value="WAITING">Waiting</option>
+      <option value="ALMOST_READY">Almost Ready</option>
+      <option value="ENTER_NOW">Enter Now</option>
     </select>
     <select id="directionFilter" onchange="renderScannerResults()">
       <option value="all">All Directions</option>
@@ -2328,7 +2331,7 @@ function actionPriorityForSetup(s) {
 function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
   if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
-  if (filters.status !== 'all' && simpleStatus(s).label !== filters.status) return false;
+  if (filters.status !== 'all' && setupProgressState(s).bucket !== filters.status) return false;
   if (filters.direction !== 'all' && String(s?.direction || '').toUpperCase() !== filters.direction) return false;
   if (filters.quality !== 'all' && setupGradeValue(s) !== filters.quality) return false;
   if (filters.contractType !== 'all' && contractTypeValue(s) !== filters.contractType) return false;
@@ -2355,11 +2358,11 @@ function sortScannerCardsForDisplay(rows) {
 
 function simpleStatusSummary(rows) {
   const counts = rows.reduce((acc, row) => {
-    const status = simpleStatus(row).label;
+    const status = setupProgressState(row).bucket;
     acc[status] = (acc[status] || 0) + 1;
     return acc;
   }, {});
-  return `ENTER NOW: ${counts['ENTER NOW'] || 0} | WAIT: ${counts.WAIT || 0} | SKIP: ${counts.SKIP || 0} | TOO LATE: ${counts['TOO LATE'] || 0}`;
+  return `Skip: ${counts.SKIP || 0} | Waiting: ${counts.WAITING || 0} | Almost Ready: ${counts.ALMOST_READY || 0} | Enter Now: ${counts.ENTER_NOW || 0}`;
 }
 
 function countBy(rows, labels, resolver) {
@@ -2379,8 +2382,8 @@ function renderMarketSnapshot(rows) {
   const el = document.getElementById('marketSnapshot');
   if (!el) return;
   const gradeCounts = countBy(rows, ['A', 'B', 'C'], setupGradeValue);
-  const simpleStatusLabels = ['ENTER NOW', 'WAIT', 'SKIP', 'TOO LATE'];
-  const simpleStatusCounts = countBy(rows, simpleStatusLabels, row => simpleStatus(row).label);
+  const progressLabels = ['SKIP', 'WAITING', 'ALMOST_READY', 'ENTER_NOW'];
+  const progressCounts = countBy(rows, progressLabels, row => setupProgressState(row).bucket);
   const directionCounts = countBy(rows, ['LONG', 'SHORT'], row => String(row.direction || '').toUpperCase());
   const contractCounts = countBy(rows, ['CALL', 'PUT'], contractTypeValue);
 
@@ -2399,10 +2402,10 @@ function renderMarketSnapshot(rows) {
         <div>
           <div class="snapshot-group-title">Status</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('ENTER NOW', simpleStatusCounts['ENTER NOW'] || 0, 'timing-entry')}
-            ${renderSnapshotBadge('WAIT', simpleStatusCounts.WAIT || 0, 'timing-reaction')}
-            ${renderSnapshotBadge('SKIP', simpleStatusCounts.SKIP || 0, 'timing-not-ready')}
-            ${renderSnapshotBadge('TOO LATE', simpleStatusCounts['TOO LATE'] || 0, 'timing-area')}
+            ${renderSnapshotBadge('Skip', progressCounts.SKIP || 0, 'timing-not-ready')}
+            ${renderSnapshotBadge('Waiting', progressCounts.WAITING || 0, 'timing-reaction')}
+            ${renderSnapshotBadge('Almost Ready', progressCounts.ALMOST_READY || 0, 'timing-area')}
+            ${renderSnapshotBadge('Enter Now', progressCounts.ENTER_NOW || 0, 'timing-entry')}
           </div>
         </div>
         <div>
@@ -2535,7 +2538,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
           const entryStatus = setup.entryStatus || 'Waiting';
           const location = setup.stockLocation || formatLocationLabel(setup.trade_eval?.location, setup.trade_eval?.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
           const direction = setup.direction || 'N/A';
-          const state = readinessState(setup);
+          const state = setupProgressState(setup);
           const why = simpleWhyItems(setup, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
           return `
             <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
@@ -2586,43 +2589,53 @@ function simpleStatus(setup) {
   return { label: 'WAIT', className: 'wait' };
 }
 
-function readinessPercent(setup) {
-  const status = simpleStatus(setup).label;
-  if (status === 'ENTER NOW') return 100;
-  if (status === 'SKIP' || status === 'TOO LATE') return 0;
-  const entryStatus = setup.entryStatus || 'Waiting';
-  if (entryStatus === 'Tradeable') return 90;
-  if (entryStatus === 'Near Entry') return 75;
-  if (entryStatus === 'Waiting') return 55;
-  return 50;
-}
-
-function readinessState(setup) {
+function setupProgressState(setup) {
   const status = simpleStatus(setup);
-  return {
-    label: status.label,
-    className: status.className,
-    percent: readinessPercent(setup),
-  };
+  const entryStatus = setup.entryStatus || 'Waiting';
+  const setupStatus = setupStatusValue(setup);
+  const phase = setupPhase(setup);
+  const distanceAtr = Number(setup.distanceFromEntryAtr);
+  const hasDirection = Boolean(setup.direction);
+  const confirmationStarted = Boolean(setup.confirmationStarted || setup.trade_eval?.trigger_confirmed);
+
+  if (status.label === 'ENTER NOW') {
+    return { stage: 5, label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', percent: 100 };
+  }
+  if (status.label === 'SKIP' || status.label === 'TOO LATE') {
+    return { stage: 0, label: 'SKIP', bucket: 'SKIP', className: 'skip', percent: 0 };
+  }
+  if (entryStatus === 'Tradeable' || entryStatus === 'Near Entry' || confirmationStarted) {
+    return { stage: 4, label: 'Almost Ready', bucket: 'ALMOST_READY', className: 'almost-ready', percent: entryStatus === 'Tradeable' ? 95 : 85 };
+  }
+  if (Number.isFinite(distanceAtr) && distanceAtr <= 1) {
+    return { stage: 3, label: 'Setup Building', bucket: 'WAITING', className: 'wait', percent: 60 };
+  }
+  if (['Pullback', 'Recovery', 'Transition'].includes(phase) || String(setupStatus).includes('Pullback')) {
+    return { stage: 2, label: 'Pullback Started', bucket: 'WAITING', className: 'wait', percent: 40 };
+  }
+  if (hasDirection) {
+    return { stage: 1, label: 'Trend Found', bucket: 'WAITING', className: 'wait', percent: 20 };
+  }
+  return { stage: 0, label: 'SKIP', bucket: 'SKIP', className: 'skip', percent: 0 };
 }
 
 function readinessStars(setup) {
-  const pct = readinessState(setup).percent;
+  const pct = setupProgressState(setup).percent;
   const count = pct === 100 ? 5 : pct >= 75 ? 4 : pct >= 50 ? 3 : 0;
   return `${'★'.repeat(count)}${'☆'.repeat(5 - count)}`;
 }
 
 function renderReadinessBadge(setup) {
-  const state = readinessState(setup);
+  const state = setupProgressState(setup);
   return `<span class="grade-badge ${state.className}">${state.label}</span>`;
 }
 
 function renderReadinessBar(setup) {
-  const state = readinessState(setup);
+  const state = setupProgressState(setup);
   return `
     <div class="readiness-bar-wrap">
       <div class="readiness-bar-track"><div class="readiness-bar-fill ${state.className}" style="width:${state.percent}%"></div></div>
-      <div class="readiness-bar-label"><span>Readiness</span><span>${state.percent}%</span></div>
+      <div class="readiness-bar-label"><span>Progress</span><span>${state.percent}%</span></div>
     </div>`;
 }
 
@@ -2788,8 +2801,10 @@ function simpleWhyItems(setup, status, trend, setupTf, phase, setupStatus, entry
   const items = [];
   if (trend && trend !== 'Mixed') items.push(`Trend is ${String(trend).toLowerCase()}.`);
   if (status === 'ENTER NOW') items.push('Entry area is active.');
-  if (status === 'WAIT') items.push('Waiting for confirmation near the entry area.');
-  if (status === 'TOO LATE') items.push('Price has moved too far from the planned entry.');
+  if (status === 'Trend Found') items.push('Direction exists, but the setup is not close yet.');
+  if (status === 'Pullback Started') items.push('The setup is developing.');
+  if (status === 'Setup Building') items.push('Price is moving toward the entry area.');
+  if (status === 'Almost Ready') items.push('Waiting on final confirmation near entry.');
   if (status === 'SKIP') items.push('Quality is not strong enough for a clean trade.');
   items.push(`Direction is ${direction}.`);
   items.push(`Details: ${setupTf || 'Mixed'} now, ${phase || 'Transition'}, ${setupStatus || 'Waiting'}, ${entryStatus || 'Waiting'}, ${formatDisplayLabel(location || 'Mid')}.`);
@@ -2898,7 +2913,7 @@ function renderCard(s) {
   const location = s.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
   const entryStatus = s.entryStatus || 'Waiting';
   const directionLabel = s.direction || 'N/A';
-  const state = readinessState(s);
+  const state = setupProgressState(s);
   const why = simpleWhyItems(s, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
   const encoded = encodeURIComponent(JSON.stringify(s));
   const distanceText = s.distanceFromEntryAtr != null
