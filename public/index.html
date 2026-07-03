@@ -366,6 +366,39 @@
   .index-simple-status.skip { color:#94a3b8; }
   .index-simple-status.too-late { color:#f97316; }
   .index-simple-direction { color:var(--text); font-size:13px; font-weight:850; margin-top:8px; }
+  .readiness-bar-wrap { margin-top:9px; }
+  .readiness-bar-track {
+    background:rgba(148,163,184,0.12);
+    border-radius:999px;
+    height:6px;
+    overflow:hidden;
+  }
+  .readiness-bar-fill {
+    background:#fbbf24;
+    border-radius:999px;
+    height:100%;
+    transition:width 0.2s ease;
+  }
+  .readiness-bar-fill.enter-now { background:var(--long); }
+  .readiness-bar-fill.skip,
+  .readiness-bar-fill.too-late { background:#64748b; }
+  .readiness-bar-label {
+    color:var(--muted);
+    display:flex;
+    font-size:10px;
+    justify-content:space-between;
+    margin-top:4px;
+  }
+  .position-note {
+    background:rgba(59,130,246,0.08);
+    border:1px solid rgba(59,130,246,0.18);
+    border-radius:7px;
+    color:#bfdbfe;
+    font-size:11px;
+    font-weight:800;
+    margin-top:10px;
+    padding:8px 9px;
+  }
   .index-plan { display:grid; gap:6px; margin-top:11px; }
   .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
   .index-plan-row span:first-child { color:var(--muted); }
@@ -383,6 +416,20 @@
   .index-why summary { color:#93c5fd; cursor:pointer; font-size:11px; font-weight:850; }
   .index-why-list { color:var(--muted); line-height:1.45; margin:7px 0 0; padding-left:16px; }
   .index-why-list li { margin:2px 0; }
+  #terms-panel { padding:20px 24px; max-width:1100px; margin:0 auto; }
+  .terms-grid {
+    display:grid;
+    gap:10px;
+    grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));
+  }
+  .term-card {
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:12px;
+  }
+  .term-title { color:var(--text); font-size:13px; font-weight:900; margin-bottom:5px; }
+  .term-copy { color:var(--muted); font-size:12px; line-height:1.45; }
   .card.priority-card-focus {
     border-color: rgba(251,191,36,0.8);
     box-shadow: 0 0 0 1px rgba(251,191,36,0.45), 0 0 24px rgba(251,191,36,0.18);
@@ -1153,6 +1200,7 @@
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
   <button class="tab-btn" onclick="switchTab('video')">Video Studio</button>
+  <button class="tab-btn" onclick="switchTab('terms')">Terms</button>
 </div>
 
 <!-- ── Scanner Tab ───────────────────────────────────────────────────────── -->
@@ -1418,6 +1466,32 @@
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ── Terms Tab ─────────────────────────────────────────────────────────── -->
+<div id="terms-panel" class="tab-panel">
+  <div class="trend-head">
+    <div class="trend-title">Trading Terms</div>
+    <div class="trend-note">Short definitions for reading scanner cards.</div>
+  </div>
+  <div class="terms-grid">
+    <div class="term-card"><div class="term-title">Entry</div><div class="term-copy">The planned price where the trade starts.</div></div>
+    <div class="term-card"><div class="term-title">Stop</div><div class="term-copy">The price where the trade idea is wrong.</div></div>
+    <div class="term-card"><div class="term-title">Target</div><div class="term-copy">The first planned profit area.</div></div>
+    <div class="term-card"><div class="term-title">R:R</div><div class="term-copy">Reward compared with risk. 2.0 means aiming for twice the risk.</div></div>
+    <div class="term-card"><div class="term-title">Call</div><div class="term-copy">An option that can gain when price rises.</div></div>
+    <div class="term-card"><div class="term-title">Put</div><div class="term-copy">An option that can gain when price falls.</div></div>
+    <div class="term-card"><div class="term-title">Contract</div><div class="term-copy">The option being traded.</div></div>
+    <div class="term-card"><div class="term-title">Strike</div><div class="term-copy">The option's selected price level.</div></div>
+    <div class="term-card"><div class="term-title">Expiration</div><div class="term-copy">The date the option expires.</div></div>
+    <div class="term-card"><div class="term-title">Breakeven</div><div class="term-copy">A stop moved to entry so the trade risk is reduced.</div></div>
+    <div class="term-card"><div class="term-title">Watchlist</div><div class="term-copy">A short list of tickers to keep checking.</div></div>
+    <div class="term-card"><div class="term-title">Position</div><div class="term-copy">A trade that is currently open.</div></div>
+    <div class="term-card"><div class="term-title">Ready</div><div class="term-copy">The setup has enough evidence to review for entry.</div></div>
+    <div class="term-card"><div class="term-title">Wait</div><div class="term-copy">The setup is developing, but not ready yet.</div></div>
+    <div class="term-card"><div class="term-title">Skip</div><div class="term-copy">The setup is low quality or not worth attention now.</div></div>
+    <div class="term-card"><div class="term-title">Too Late</div><div class="term-copy">Price has moved too far from the planned entry.</div></div>
   </div>
 </div>
 
@@ -1882,7 +1956,7 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
-  const tabs = ['scanner','trends','journal','analytics','video'];
+  const tabs = ['scanner','trends','journal','analytics','video','terms'];
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
     b.classList.toggle('active', tabs[i] === tab);
   });
@@ -1891,6 +1965,7 @@ function switchTab(tab) {
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
   document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
   document.getElementById('video-panel').classList.toggle('active', tab === 'video');
+  document.getElementById('terms-panel').classList.toggle('active', tab === 'terms');
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics') renderAnalytics();
   if (tab === 'video') renderVideoStudio();
@@ -2473,8 +2548,10 @@ function renderPriorityWatchlist(rows, nearMiss) {
                 <div class="index-simple-status ${simple.className}">${simple.label}</div>
                 <div class="index-simple-label" style="margin-top:8px;">Direction</div>
                 <div class="index-simple-direction">${simpleDirection(direction)}</div>
+                ${renderReadinessBar(setup)}
               </div>
               ${renderTradePlanBlock(setup)}
+              ${renderPositionManagement(setup)}
               ${renderSuggestedContractBlock(setup)}
               ${renderCollapsedWhyBlock(why)}
             </div>`;
@@ -2504,6 +2581,59 @@ function simpleStatus(setup) {
   }
   if (entryStatus === 'Tradeable' || entryStatus === 'Near Entry') return { label: 'WAIT', className: 'wait' };
   return { label: 'WAIT', className: 'wait' };
+}
+
+function readinessPercent(setup) {
+  const status = simpleStatus(setup).label;
+  if (status === 'ENTER NOW') return 100;
+  if (status === 'SKIP' || status === 'TOO LATE') return 0;
+  const entryStatus = setup.entryStatus || 'Waiting';
+  if (entryStatus === 'Tradeable') return 90;
+  if (entryStatus === 'Near Entry') return 75;
+  if (entryStatus === 'Waiting') return 55;
+  return 50;
+}
+
+function renderReadinessBar(setup) {
+  const status = simpleStatus(setup);
+  const pct = readinessPercent(setup);
+  return `
+    <div class="readiness-bar-wrap">
+      <div class="readiness-bar-track"><div class="readiness-bar-fill ${status.className}" style="width:${pct}%"></div></div>
+      <div class="readiness-bar-label"><span>Readiness</span><span>${pct}%</span></div>
+    </div>`;
+}
+
+function openJournalEntryForTicker(ticker) {
+  const target = String(ticker || '').toUpperCase();
+  if (!target) return null;
+  return loadJournal()
+    .filter(e => String(e.ticker || '').toUpperCase() === target && (e.result || 'Open') === 'Open')
+    .sort((a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''))[0] || null;
+}
+
+function managementSuggestion(setup) {
+  const openPosition = openJournalEntryForTicker(setup.ticker);
+  if (!openPosition) return '';
+  const direction = String(openPosition.direction || setup.direction || '').toUpperCase();
+  const entry = Number(openPosition.entry ?? setup.entry);
+  const stop = Number(openPosition.plannedStop ?? setup.sl);
+  const target = Number(openPosition.plannedTp1 ?? setup.tp1);
+  const price = Number(setup.price);
+  if (![entry, stop, target, price].every(Number.isFinite)) return 'Hold / Follow Plan';
+  const risk = Math.abs(entry - stop);
+  if (!risk) return 'Hold / Follow Plan';
+  const bullish = direction === 'LONG' || direction === 'CALL';
+  const reachedTp1 = bullish ? price >= target : price <= target;
+  const rNow = bullish ? (price - entry) / risk : (entry - price) / risk;
+  if (reachedTp1) return 'Consider Taking Partial Profit';
+  if (rNow >= 1) return 'Move Stop to Breakeven';
+  return 'Hold / Follow Plan';
+}
+
+function renderPositionManagement(setup) {
+  const message = managementSuggestion(setup);
+  return message ? `<div class="position-note">${message}</div>` : '';
 }
 
 function simpleSetupLabel(grade) {
@@ -2775,8 +2905,10 @@ function renderCard(s) {
         <div class="index-simple-status ${simple.className}">${simple.label}</div>
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
         <div class="index-simple-direction">${simpleDirection(directionLabel)}</div>
+        ${renderReadinessBar(s)}
       </div>
       ${renderTradePlanBlock(s)}
+      ${renderPositionManagement(s)}
       ${renderSuggestedContractBlock(s)}
       ${renderCollapsedWhyBlock(why)}
       ${renderMoreDetailsBlock(s, {
