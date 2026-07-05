@@ -220,8 +220,8 @@
   .snapshot-badge.action-watch .count { color: var(--warn); }
   .snapshot-badge.action-monitor .count { color: #60a5fa; }
   .snapshot-badge.action-low .count { color: var(--muted); }
-  .snapshot-badge.direction-long .count { color:#86efac; }
-  .snapshot-badge.direction-short .count { color:#fca5a5; }
+  .snapshot-badge.direction-long .count { color:#22c55e; }
+  .snapshot-badge.direction-short .count { color:#ff2d55; }
 
   #summary { margin-bottom: 16px; color: var(--muted); font-size: 11px; }
 
@@ -268,10 +268,11 @@
   .card-header-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
   .badge { border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; padding: 5px 10px; }
-  .badge-long  { background: rgba(34,197,94,0.12);  color: #86efac; }
-  .badge-short { background: rgba(239,68,68,0.12); color: #fca5a5; }
-  .direction-long { color:#86efac !important; }
-  .direction-short { color:#fca5a5 !important; }
+  .badge-long  { background: rgba(34,197,94,0.12);  color: #22c55e; }
+  .badge-short { background: rgba(255,45,85,0.12); color: #ff2d55; }
+  .direction-value { font-weight: 900; }
+  .direction-long { color: #22c55e !important; }
+  .direction-short { color: #ff2d55 !important; }
   .grade-badge {
     border: 1px solid var(--border);
     border-radius: 5px;
@@ -2469,7 +2470,7 @@ function renderScannerResults() {
   const showingLabel = totalBeforeLocFilter !== totalVisible
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
     : ` · ${totalVisible} total including developing`;
-  summary.innerHTML = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — <span class="direction-long">${longs} Long</span>, <span class="direction-short">${shorts} Short</span> · ${escapeHtml(filterLabel)}${escapeHtml(showingLabel)} · ${escapeHtml(simpleStatusSummary(visibleSetups))}`;
+  summary.innerHTML = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — <span class="direction-value direction-long">${longs} Long</span>, <span class="direction-value direction-short">${shorts} Short</span> · ${escapeHtml(filterLabel)}${escapeHtml(showingLabel)} · ${escapeHtml(simpleStatusSummary(visibleSetups))}`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
@@ -2711,7 +2712,13 @@ function directionClass(direction) {
 function renderDirectionText(direction) {
   const label = simpleDirection(direction);
   const className = directionClass(direction);
-  return className ? `<span class="${className}">${label}</span>` : label;
+  return className ? `<span class="direction-value ${className}">${label}</span>` : escapeHtml(label);
+}
+
+function renderContractTypeText(type) {
+  const label = formatDisplayLabel(type);
+  const className = directionClass(type);
+  return className ? `<span class="direction-value ${className}">${label}</span>` : escapeHtml(label);
 }
 
 function contractTypeValue(setup) {
@@ -2759,7 +2766,7 @@ function suggestedContractText(setup) {
   const price = Number(option.ask ?? option.mid ?? option.mark);
   const priceText = Number.isFinite(price) ? `≈ ${fmtMoney(price)}` : 'Price not loaded';
   return {
-    main: `${strike} ${formatDisplayLabel(type)}`.trim(),
+    main: `${escapeHtml(strike)} ${renderContractTypeText(type)}`.trim(),
     sub: `${formatShortDate(option.expiry)} · ${priceText}`,
   };
 }
@@ -2824,7 +2831,6 @@ function renderMoreDetailsBlock(setup, details = {}) {
 }
 
 function simpleWhyItems(setup, status, trend, setupTf, phase, setupStatus, entryStatus, location) {
-  const direction = simpleDirection(setup.direction);
   const items = [];
   if (trend && trend !== 'Mixed') items.push(`Trend is ${String(trend).toLowerCase()}.`);
   if (status === 'ENTER NOW') items.push('Entry area is active.');
@@ -2833,7 +2839,7 @@ function simpleWhyItems(setup, status, trend, setupTf, phase, setupStatus, entry
   if (status === 'Setup Building') items.push('Price is moving toward the entry area.');
   if (status === 'Almost Ready') items.push('Waiting on final confirmation near entry.');
   if (status === 'SKIP') items.push('Quality is not strong enough for a clean trade.');
-  items.push(`Direction is ${direction}.`);
+  items.push(`Direction is ${renderDirectionText(setup.direction)}.`);
   items.push(`Details: ${setupTf || 'Mixed'} now, ${phase || 'Transition'}, ${setupStatus || 'Waiting'}, ${entryStatus || 'Waiting'}, ${formatDisplayLabel(location || 'Mid')}.`);
   return items.slice(0, 4);
 }
@@ -4645,7 +4651,7 @@ function renderJournal() {
       <tr class="${resultCls}">
         <td>${e.createdAt ? new Date(e.createdAt).toLocaleString() : e.date}</td>
         <td><strong>${e.ticker}</strong></td>
-        <td class="${dirCls}" style="font-weight:800">${e.direction}</td>
+        <td class="direction-value ${dirCls}">${e.direction}</td>
         <td>${renderSetupGradePill(e.setupGrade)}</td>
         <td>${e.trend || '—'}</td>
         <td>${e.setupTf || e.timeframe || '—'}</td>
@@ -4724,7 +4730,7 @@ function renderAnalyticsTable(rows, label = 'Group') {
     const pnlCls = r.totalPnl >= 0 ? 'pnl-pos' : 'pnl-neg';
     const avgCls = r.avgPnl >= 0 ? 'pnl-pos' : 'pnl-neg';
     const keyHtml = label === 'Direction'
-      ? `<span class="${directionClass(r.key)}">${escapeHtml(r.key)}</span>`
+      ? `<span class="direction-value ${directionClass(r.key)}">${escapeHtml(r.key)}</span>`
       : escapeHtml(r.key);
     return `
       <tr>
