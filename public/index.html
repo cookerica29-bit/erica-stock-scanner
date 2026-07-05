@@ -379,6 +379,7 @@
   }
   .index-row:hover { background: rgba(148,163,184,0.075); }
   .index-simple-head { align-items:flex-start; display:flex; gap:10px; justify-content:space-between; margin-bottom:12px; }
+  .index-current-price { color:var(--text); font-size:15px; font-weight:850; margin-top:4px; }
   .index-grade-stars { color:#fbbf24; font-size:12px; font-weight:900; letter-spacing:0.03em; margin-top:3px; }
   .index-status-block { border-bottom:1px solid rgba(148,163,184,0.09); border-top:1px solid rgba(148,163,184,0.09); padding:9px 0; }
   .index-simple-label { color:var(--muted); font-size:9px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
@@ -2562,6 +2563,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
               <div class="index-simple-head">
                 <div>
                   <div class="priority-ticker ticker-with-direction">${escapeHtml(ticker)} ${renderDirectionMarker(direction)}</div>
+                  <div class="index-current-price">${fmtMoney(setup.price)}</div>
                   <div class="index-grade-stars">${readinessStars(setup)} ${state.label}</div>
                 </div>
                 ${renderReadinessBadge(setup)}
