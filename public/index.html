@@ -2469,7 +2469,7 @@ function renderScannerResults() {
   const showingLabel = totalBeforeLocFilter !== totalVisible
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
     : ` · ${totalVisible} total including developing`;
-  summary.textContent = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — ${longs} Long, ${shorts} Short · ${filterLabel}${showingLabel} · ${simpleStatusSummary(visibleSetups)}`;
+  summary.innerHTML = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — <span class="direction-long">${longs} Long</span>, <span class="direction-short">${shorts} Short</span> · ${escapeHtml(filterLabel)}${escapeHtml(showingLabel)} · ${escapeHtml(simpleStatusSummary(visibleSetups))}`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
@@ -2557,7 +2557,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
                 <div class="index-simple-label">Status</div>
                 <div class="index-simple-status ${state.className}">${state.label}</div>
                 <div class="index-simple-label" style="margin-top:8px;">Direction</div>
-                <div class="index-simple-direction">${renderDirectionText(direction)}</div>
+                <div class="index-simple-direction ${directionClass(direction)}">${renderDirectionText(direction)}</div>
                 ${renderReadinessBar(setup)}
               </div>
               ${renderTradePlanBlock(setup)}
@@ -2689,6 +2689,16 @@ function simpleDirection(direction) {
   if (raw === 'LONG') return 'Long';
   if (raw === 'SHORT') return 'Short';
   return 'No clear direction';
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
 }
 
 function directionClass(direction) {
@@ -2957,7 +2967,7 @@ function renderCard(s) {
         <div class="index-simple-label">Status</div>
         <div class="index-simple-status ${state.className}">${state.label}</div>
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
-        <div class="index-simple-direction">${renderDirectionText(directionLabel)}</div>
+        <div class="index-simple-direction ${directionClass(directionLabel)}">${renderDirectionText(directionLabel)}</div>
         ${renderReadinessBar(s)}
       </div>
       ${renderTradePlanBlock(s)}
@@ -3433,7 +3443,7 @@ function deleteEntry(id) {
 function videoTradeLabel(e) {
   const grade = e.setupGrade ? `${e.setupGrade} Setup` : 'Ungraded';
   const confirmation = e.confirmationStarted ? 'Confirmed' : 'Not Confirmed';
-  return `${e.ticker || '—'} · ${e.direction || 'N/A'} · ${grade} · ${e.entryStatus || 'Untracked'} · ${confirmation}`;
+  return `${escapeHtml(e.ticker || '—')} · ${renderDirectionText(e.direction || 'N/A')} · ${escapeHtml(grade)} · ${escapeHtml(e.entryStatus || 'Untracked')} · ${escapeHtml(confirmation)}`;
 }
 
 function renderVideoStudio() {
@@ -4713,9 +4723,12 @@ function renderAnalyticsTable(rows, label = 'Group') {
   const body = rows.map(r => {
     const pnlCls = r.totalPnl >= 0 ? 'pnl-pos' : 'pnl-neg';
     const avgCls = r.avgPnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const keyHtml = label === 'Direction'
+      ? `<span class="${directionClass(r.key)}">${escapeHtml(r.key)}</span>`
+      : escapeHtml(r.key);
     return `
       <tr>
-        <td><strong>${r.key}</strong></td>
+        <td><strong>${keyHtml}</strong></td>
         <td>${r.trades}</td>
         <td>${r.closed}</td>
         <td>${r.winRate == null ? '—' : r.winRate + '%'}</td>
