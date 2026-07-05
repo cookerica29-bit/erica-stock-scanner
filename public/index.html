@@ -338,6 +338,18 @@
   }
   .priority-row:hover { background: var(--surface2); }
   .priority-ticker { color: var(--text); font-weight: 800; letter-spacing: 0.05em; }
+  .ticker-with-direction { align-items: center; display: inline-flex; gap: 7px; }
+  .direction-dot {
+    border-radius: 999px;
+    display: inline-block;
+    flex: 0 0 auto;
+    height: 9px;
+    width: 9px;
+  }
+  .direction-dot.direction-long { background: #22c55e; }
+  .direction-dot.direction-short { background: #ff2d55; }
+  .direction-dot.direction-neutral { background: var(--muted); }
+  .direction-neutral { color: var(--muted) !important; }
   .priority-readiness { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: 0.04em; }
   .priority-chip { color: var(--muted); font-size: 11px; }
   .priority-alert-indicator {
@@ -2549,7 +2561,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
             <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
               <div class="index-simple-head">
                 <div>
-                  <div class="priority-ticker">${ticker}</div>
+                  <div class="priority-ticker ticker-with-direction">${escapeHtml(ticker)} ${renderDirectionMarker(direction)}</div>
                   <div class="index-grade-stars">${readinessStars(setup)} ${state.label}</div>
                 </div>
                 ${renderReadinessBadge(setup)}
@@ -2706,19 +2718,24 @@ function directionClass(direction) {
   const raw = String(direction || '').toUpperCase();
   if (raw === 'LONG' || raw === 'CALL') return 'direction-long';
   if (raw === 'SHORT' || raw === 'PUT') return 'direction-short';
-  return '';
+  return 'direction-neutral';
+}
+
+function renderDirectionMarker(direction) {
+  const label = simpleDirection(direction);
+  return `<span class="direction-dot ${directionClass(direction)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
 }
 
 function renderDirectionText(direction) {
   const label = simpleDirection(direction);
   const className = directionClass(direction);
-  return className ? `<span class="direction-value ${className}">${label}</span>` : escapeHtml(label);
+  return `<span class="direction-value ${className}">${escapeHtml(label)}</span>`;
 }
 
 function renderContractTypeText(type) {
   const label = formatDisplayLabel(type);
   const className = directionClass(type);
-  return className ? `<span class="direction-value ${className}">${label}</span>` : escapeHtml(label);
+  return `<span class="direction-value ${className}">${escapeHtml(label)}</span>`;
 }
 
 function contractTypeValue(setup) {
@@ -2957,7 +2974,7 @@ function renderCard(s) {
   <div class="card">
     <div class="card-header">
       <div class="ticker-wrap">
-        <span class="ticker">${s.ticker}</span>
+        <span class="ticker ticker-with-direction">${escapeHtml(s.ticker)} ${renderDirectionMarker(directionLabel)}</span>
         ${s.timeframe ? `<span class="timeframe-badge">${s.timeframe}</span>` : ''}
       </div>
       <div class="card-header-right">
