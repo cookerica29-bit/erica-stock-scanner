@@ -220,6 +220,8 @@
   .snapshot-badge.action-watch .count { color: var(--warn); }
   .snapshot-badge.action-monitor .count { color: #60a5fa; }
   .snapshot-badge.action-low .count { color: var(--muted); }
+  .snapshot-badge.direction-long .count { color:#86efac; }
+  .snapshot-badge.direction-short .count { color:#fca5a5; }
 
   #summary { margin-bottom: 16px; color: var(--muted); font-size: 11px; }
 
@@ -268,6 +270,8 @@
   .badge { border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; padding: 5px 10px; }
   .badge-long  { background: rgba(34,197,94,0.12);  color: #86efac; }
   .badge-short { background: rgba(239,68,68,0.12); color: #fca5a5; }
+  .direction-long { color:#86efac !important; }
+  .direction-short { color:#fca5a5 !important; }
   .grade-badge {
     border: 1px solid var(--border);
     border-radius: 5px;
@@ -2411,8 +2415,8 @@ function renderMarketSnapshot(rows) {
         <div>
           <div class="snapshot-group-title">Direction</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Long', directionCounts.LONG || 0, 'action-review')}
-            ${renderSnapshotBadge('Short', directionCounts.SHORT || 0, 'action-watch')}
+            ${renderSnapshotBadge('Long', directionCounts.LONG || 0, 'direction-long')}
+            ${renderSnapshotBadge('Short', directionCounts.SHORT || 0, 'direction-short')}
           </div>
         </div>
         <div>
@@ -2553,7 +2557,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
                 <div class="index-simple-label">Status</div>
                 <div class="index-simple-status ${state.className}">${state.label}</div>
                 <div class="index-simple-label" style="margin-top:8px;">Direction</div>
-                <div class="index-simple-direction">${simpleDirection(direction)}</div>
+                <div class="index-simple-direction">${renderDirectionText(direction)}</div>
                 ${renderReadinessBar(setup)}
               </div>
               ${renderTradePlanBlock(setup)}
@@ -2685,6 +2689,19 @@ function simpleDirection(direction) {
   if (raw === 'LONG') return 'Long';
   if (raw === 'SHORT') return 'Short';
   return 'No clear direction';
+}
+
+function directionClass(direction) {
+  const raw = String(direction || '').toUpperCase();
+  if (raw === 'LONG' || raw === 'CALL') return 'direction-long';
+  if (raw === 'SHORT' || raw === 'PUT') return 'direction-short';
+  return '';
+}
+
+function renderDirectionText(direction) {
+  const label = simpleDirection(direction);
+  const className = directionClass(direction);
+  return className ? `<span class="${className}">${label}</span>` : label;
 }
 
 function contractTypeValue(setup) {
@@ -2940,7 +2957,7 @@ function renderCard(s) {
         <div class="index-simple-label">Status</div>
         <div class="index-simple-status ${state.className}">${state.label}</div>
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
-        <div class="index-simple-direction">${simpleDirection(directionLabel)}</div>
+        <div class="index-simple-direction">${renderDirectionText(directionLabel)}</div>
         ${renderReadinessBar(s)}
       </div>
       ${renderTradePlanBlock(s)}
@@ -4605,11 +4622,7 @@ function renderJournal() {
     const resultCls = e.result === 'Win' ? 'win' : e.result === 'Loss' ? 'loss' : 'open';
     const displayedResult = e.reviewResult || e.result || 'Pending';
     const badgeCls  = resultBadgeClass(displayedResult);
-    const dirCls = e.direction === 'LONG'
-      ? 'style="color:#86efac;font-weight:800"'
-      : e.direction === 'SHORT'
-        ? 'style="color:#fca5a5;font-weight:800"'
-        : 'style="color:var(--muted)"';
+    const dirCls = directionClass(e.direction);
     const actions = e.result === 'Open'
       ? `<div class="action-stack">
           <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'tp1')">TP1</button>
@@ -4622,7 +4635,7 @@ function renderJournal() {
       <tr class="${resultCls}">
         <td>${e.createdAt ? new Date(e.createdAt).toLocaleString() : e.date}</td>
         <td><strong>${e.ticker}</strong></td>
-        <td ${dirCls}>${e.direction}</td>
+        <td class="${dirCls}" style="font-weight:800">${e.direction}</td>
         <td>${renderSetupGradePill(e.setupGrade)}</td>
         <td>${e.trend || '—'}</td>
         <td>${e.setupTf || e.timeframe || '—'}</td>
