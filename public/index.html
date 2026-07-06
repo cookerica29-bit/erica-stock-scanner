@@ -31,6 +31,7 @@
     font-family: 'SF Mono', 'Fira Code', monospace;
     font-size: 13px;
     min-height: 100vh;
+    overflow-x: hidden;
   }
 
   header {
@@ -52,6 +53,7 @@
     padding: 0 24px;
     display: flex;
     gap: 4px;
+    overflow-x: auto;
   }
   .tab-btn {
     background: none;
@@ -92,6 +94,7 @@
     font-family: inherit;
     font-size: 12px;
     outline: none;
+    max-width: 100%;
   }
   input[type="text"]:focus,
   input[type="number"]:focus,
@@ -146,7 +149,7 @@
   #status { color: var(--muted); font-size: 11px; margin-left: auto; }
 
   /* ── Scanner panel ─────────────────────────────────────────────────────── */
-  main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; width: 100%; }
 
   .market-snapshot {
     max-width: 1400px;
@@ -240,6 +243,7 @@
     border-radius: 12px;
     box-shadow: 0 14px 34px rgba(0,0,0,0.18);
     overflow: hidden;
+    min-width: 0;
   }
   .card.a-plus-alert {
     border-color: rgba(34,197,94,0.85);
@@ -266,6 +270,9 @@
   .ticker { font-size: 24px; font-weight: 800; letter-spacing: 0.02em; line-height: 1; }
   .ticker-wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
   .card-header-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .card-header > div,
+  .ticker-wrap,
+  .card-header-right { min-width: 0; }
 
   .badge { border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; padding: 5px 10px; }
   .badge-long  { background: rgba(34,197,94,0.12);  color: #22c55e; }
@@ -376,6 +383,7 @@
     cursor: pointer;
     font-size: 12px;
     padding: 12px;
+    min-width: 0;
   }
   .index-row:hover { background: rgba(148,163,184,0.075); }
   .index-simple-head { align-items:flex-start; display:flex; gap:10px; justify-content:space-between; margin-bottom:12px; }
@@ -643,6 +651,222 @@
     gap: 8px;
     padding: 0 18px 16px;
   }
+  @media (max-width: 768px) {
+    html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
+    header {
+      gap: 8px;
+      padding: 12px 14px;
+    }
+    header h1 {
+      flex: 1 1 100%;
+      font-size: 15px;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .header-meta {
+      font-size: 10px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .tab-bar {
+      gap: 2px;
+      padding: 0 10px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .tab-btn {
+      flex: 0 0 auto;
+      font-size: 11px;
+      padding: 10px 11px;
+    }
+    .controls {
+      align-items: stretch;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px;
+      padding: 10px 12px;
+    }
+    .control-group,
+    #tickerInput,
+    .controls select,
+    .controls button {
+      min-width: 0;
+      width: 100%;
+    }
+    .control-group {
+      grid-column: 1 / -1;
+    }
+    .control-hint {
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    #status,
+    #autoScanCountdown {
+      grid-column: 1 / -1;
+      margin-left: 0 !important;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .market-snapshot {
+      margin-top: 10px;
+      padding: 0 12px;
+      max-width: 100%;
+    }
+    .snapshot-card,
+    .priority-watchlist {
+      border-radius: 9px;
+      padding: 10px;
+    }
+    .snapshot-groups,
+    .index-watchlist .priority-list,
+    .terms-grid,
+    .analytics-grid,
+    .journal-stats {
+      grid-template-columns: 1fr;
+    }
+    .snapshot-badge {
+      min-width: 0;
+      padding: 6px 8px;
+    }
+    .snapshot-badge .label,
+    .snapshot-badge .count {
+      overflow-wrap: anywhere;
+    }
+    .priority-watchlist {
+      margin: 12px;
+      max-width: calc(100vw - 24px);
+    }
+    .priority-row,
+    .index-row {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .index-simple-head {
+      gap: 8px;
+      min-width: 0;
+    }
+    .index-simple-head > div:first-child,
+    .index-plan-row span,
+    .index-contract-main,
+    .index-contract-sub {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .index-simple-status {
+      font-size: 18px;
+    }
+    main,
+    #journal-panel,
+    #terms-panel,
+    #trends-panel,
+    #analytics-panel,
+    #video-panel {
+      max-width: 100%;
+      padding: 14px 12px;
+      overflow-x: hidden;
+    }
+    #summary {
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    #results,
+    #near-miss-results {
+      grid-template-columns: minmax(0, 1fr) !important;
+      gap: 12px !important;
+      min-width: 0;
+    }
+    #near-miss-section {
+      margin-top: 18px !important;
+      min-width: 0;
+    }
+    .card {
+      border-radius: 10px;
+      max-width: 100%;
+      min-width: 0;
+    }
+    .card-action-row {
+      justify-content: stretch;
+      padding: 10px 12px 0;
+    }
+    .action-stack {
+      width: 100%;
+    }
+    .action-stack button,
+    .card-footer button {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .card-header {
+      gap: 9px;
+    }
+    .card-header-right {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      max-width: 52%;
+    }
+    .ticker {
+      font-size: 21px;
+      overflow-wrap: anywhere;
+    }
+    .ticker-wrap {
+      gap: 6px;
+    }
+    .badge,
+    .action-badge,
+    .grade-badge,
+    .timeframe-badge,
+    .entry-pill,
+    .stage-pill,
+    .confirmation-pill {
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+    .card-section,
+    .option-box,
+    .coach-box,
+    .stage-box {
+      padding: 10px;
+    }
+    .price-row,
+    .coach-head,
+    .stage-head {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .levels-table,
+    .journal-table,
+    .analytics-table,
+    .trend-table {
+      min-width: 680px;
+    }
+    .journal-table-wrap,
+    .trend-table-wrap,
+    .analytics-card {
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .journal-controls {
+      align-items: stretch;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .journal-controls input,
+    .journal-controls select,
+    .journal-controls button {
+      min-width: 0 !important;
+      width: 100% !important;
+    }
+    .modal {
+      width: calc(100vw - 20px);
+      max-width: calc(100vw - 20px);
+    }
+    .modal-body {
+      padding: 14px;
+    }
+  }
   @media (max-width: 640px) {
     main { padding: 14px 12px; }
     #results { grid-template-columns: 1fr; gap: 14px; }
@@ -654,6 +878,88 @@
     .readiness-grid,
     .levels-strip { grid-template-columns: 1fr; }
     .card-footer { padding: 0 14px 14px; }
+  }
+  @media (max-width: 480px) {
+    body { font-size: 12px; }
+    header { padding: 10px 12px; }
+    header h1 { font-size: 14px; }
+    .header-meta { font-size: 9px; }
+    .tab-btn { font-size: 10px; padding: 9px 9px; }
+    .controls,
+    .journal-controls {
+      grid-template-columns: 1fr;
+    }
+    button,
+    .btn-sm {
+      min-height: 36px;
+      padding: 8px 12px;
+      width: 100%;
+    }
+    .market-snapshot,
+    main,
+    #journal-panel,
+    #terms-panel,
+    #trends-panel,
+    #analytics-panel,
+    #video-panel {
+      padding-left: 10px;
+      padding-right: 10px;
+    }
+    .priority-watchlist {
+      margin-left: 10px;
+      margin-right: 10px;
+      max-width: calc(100vw - 20px);
+    }
+    .snapshot-title,
+    .priority-title {
+      font-size: 12px;
+    }
+    .snapshot-badges {
+      gap: 6px;
+    }
+    .snapshot-badge {
+      flex: 1 1 calc(50% - 6px);
+      justify-content: space-between;
+    }
+    .card-header {
+      flex-direction: column;
+    }
+    .card-header-right {
+      justify-content: flex-start;
+      margin-left: 0;
+      max-width: 100%;
+      width: 100%;
+    }
+    .ticker {
+      font-size: 19px;
+    }
+    .index-simple-head {
+      flex-direction: column;
+    }
+    .index-plan-row {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .context-grid,
+    .readiness-grid,
+    .levels-strip,
+    .coach-grid,
+    .stage-grid,
+    .checklist {
+      grid-template-columns: 1fr;
+    }
+    .card-body { padding: 0 12px 10px; }
+    .card-footer {
+      flex-direction: column;
+      padding: 0 12px 12px;
+    }
+    .card-footer button {
+      width: 100%;
+    }
+    .empty {
+      padding: 36px 12px;
+    }
   }
   .toast {
     background: rgba(15,23,42,0.96);
