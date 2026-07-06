@@ -55,6 +55,8 @@ TRENDING_UNIVERSE = [
 
 _finviz_cache = {"tickers": [], "fetched_at": None}
 FINVIZ_CACHE_TTL = timedelta(hours=6)
+_option_chain_cache = {}
+OPTION_CHAIN_CACHE_TTL = timedelta(minutes=30)
 
 
 def get_finviz_watchlist() -> list:
@@ -131,7 +133,7 @@ def _next_friday(days_out: int = 37) -> datetime:
     return target + timedelta(days=days_to_friday)
 
 
-def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
+def _fallback_option(ticker: str, direction: str, entry: float, reason: str = "option chain unavailable") -> dict:
     expiry = _next_friday(37)
     dte = (expiry - datetime.now()).days
     if entry < 20:
@@ -143,12 +145,141 @@ def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
     else:
         increment = 10.0
     atm_strike = round(entry / increment) * increment
+    option_type = "CALL" if direction == "LONG" else "PUT"
     return {
-        "type":   "CALL" if direction == "LONG" else "PUT",
+        "type": option_type,
         "strike": atm_strike,
         "expiry": expiry.strftime("%Y-%m-%d"),
-        "dte":    dte,
-        "symbol": f"{ticker} {expiry.strftime('%b %d').upper()} ${atm_strike:.0f} {'C' if direction == 'LONG' else 'P'}",
+        "dte": dte,
+        "symbol": f"{ticker} {expiry.strftime('%b %d').upper()} ${atm_strike:.0f} {'C' if option_type == 'CALL' else 'P'}",
+        "source": "fallback",
+        "fallback_reason": reason,
+    }
+
+
+def _option_expirations_for_ticker(ticker: str) -> list:
+    now = datetime.utcnow()
+    cached = _option_chain_cache.get(ticker)
+    if cached and now - cached.get("fetched_at", now) < OPTION_CHAIN_CACHE_TTL:
+        return list(cached.get("expirations", []))
+
+    expirations = []
+    try:
+        expirations = list(yf.Ticker(ticker).options or [])
+    except Exception as e:
+        logger.warning(f"[options] expiration fetch failed for {ticker}: {e}")
+
+    _option_chain_cache[ticker] = {"fetched_at": now, "expirations": expirations, "chains": {}}
+    return expirations
+
+
+def _select_expiration(expirations: list, target_days: int = 37) -> Optional[str]:
+    today = datetime.now().date()
+    parsed = []
+    for expiry in expirations:
+        try:
+            expiry_date = datetime.strptime(str(expiry), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        dte = (expiry_date - today).days
+        if dte >= 7:
+            parsed.append((expiry, dte))
+    if not parsed:
+        return None
+    return min(parsed, key=lambda item: (abs(item[1] - target_days), item[1]))[0]
+
+
+def _option_chain_for_ticker(ticker: str, expiry: str):
+    now = datetime.utcnow()
+    cached = _option_chain_cache.get(ticker)
+    if cached and now - cached.get("fetched_at", now) < OPTION_CHAIN_CACHE_TTL:
+        chains = cached.setdefault("chains", {})
+        if expiry in chains:
+            return chains[expiry]
+
+    try:
+        chain = yf.Ticker(ticker).option_chain(expiry)
+    except Exception as e:
+        logger.warning(f"[options] chain fetch failed for {ticker} {expiry}: {e}")
+        return None
+
+    cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
+    cached.setdefault("chains", {})[expiry] = chain
+    return chain
+
+
+def _safe_float(value):
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _safe_int(value):
+    try:
+        if pd.isna(value):
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _option_symbol_from_row(ticker: str, expiry: str, strike: float, option_type: str, row: pd.Series) -> str:
+    contract_symbol = row.get("contractSymbol")
+    if isinstance(contract_symbol, str) and contract_symbol.strip():
+        return contract_symbol
+    expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+    return f"{ticker} {expiry_dt.strftime('%b %d').upper()} ${strike:.0f} {'C' if option_type == 'CALL' else 'P'}"
+
+
+def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
+    option_type = "CALL" if direction == "LONG" else "PUT"
+    expirations = _option_expirations_for_ticker(ticker)
+    expiry = _select_expiration(expirations)
+    if not expiry:
+        return _fallback_option(ticker, direction, entry, "no option expirations returned")
+
+    chain = _option_chain_for_ticker(ticker, expiry)
+    if chain is None:
+        return _fallback_option(ticker, direction, entry, f"option chain unavailable for {expiry}")
+
+    contracts = chain.calls if option_type == "CALL" else chain.puts
+    if contracts is None or contracts.empty or "strike" not in contracts.columns:
+        return _fallback_option(ticker, direction, entry, f"no {option_type.lower()} contracts returned for {expiry}")
+
+    contracts = contracts.copy()
+    contracts["strike_distance"] = (contracts["strike"].astype(float) - float(entry)).abs()
+    row = contracts.sort_values(["strike_distance", "strike"]).iloc[0]
+    strike = _safe_float(row.get("strike"))
+    if strike is None:
+        return _fallback_option(ticker, direction, entry, f"selected {option_type.lower()} contract missing strike")
+
+    expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+    dte = (expiry_date - datetime.now().date()).days
+    bid = _safe_float(row.get("bid"))
+    ask = _safe_float(row.get("ask"))
+    last_price = _safe_float(row.get("lastPrice"))
+    mid = round((bid + ask) / 2, 2) if bid is not None and ask is not None and ask > 0 else None
+    mark = mid if mid is not None else last_price
+    spread = round(ask - bid, 2) if bid is not None and ask is not None and ask >= bid else None
+
+    return {
+        "type": option_type,
+        "strike": strike,
+        "expiry": expiry,
+        "dte": dte,
+        "symbol": _option_symbol_from_row(ticker, expiry, strike, option_type, row),
+        "bid": bid,
+        "ask": ask,
+        "last": last_price,
+        "mid": mid,
+        "mark": mark,
+        "spread": spread,
+        "open_interest": _safe_int(row.get("openInterest")),
+        "volume": _safe_int(row.get("volume")),
+        "source": "option_chain",
     }
 
 
