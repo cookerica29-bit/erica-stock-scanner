@@ -3103,31 +3103,84 @@ function parseExpiryFromOptionSymbol(symbol) {
   return `20${yy}-${mm}-${dd}`;
 }
 
-function selectedOptionExpiry(option = {}) {
-  return option.expiry
-    || option.expiration
-    || option.expiry_date
-    || option.expiration_date
-    || parseExpiryFromOptionSymbol(option.symbol);
+function parseStrikeFromOptionSymbol(symbol) {
+  const raw = String(symbol || '').trim().toUpperCase();
+  const occMatch = raw.match(/^[A-Z.\-]+\d{6}[CP](\d{8})$/);
+  if (occMatch) {
+    const strike = Number(occMatch[1]) / 1000;
+    return Number.isFinite(strike) ? strike : null;
+  }
+  const fallbackMatch = raw.match(/\$(\d+(?:\.\d+)?)/);
+  if (fallbackMatch) {
+    const strike = Number(fallbackMatch[1]);
+    return Number.isFinite(strike) ? strike : null;
+  }
+  return null;
 }
 
-function optionFallbackNote(option = {}) {
-  if (String(option.source || '').toLowerCase() !== 'fallback') return '';
-  const reason = String(option.fallback_reason || '').trim();
+function firstPresent(...values) {
+  return values.find(value => value !== undefined && value !== null && value !== '');
+}
+
+function selectedOptionExpiry(option = {}, suggested = {}, contract = {}) {
+  return firstPresent(
+    option.expiry,
+    option.expiration,
+    option.expiry_date,
+    option.expiration_date,
+    suggested.expiry,
+    suggested.expiration,
+    suggested.expiry_date,
+    suggested.expiration_date,
+    contract.expiry,
+    contract.expiration,
+    contract.expiry_date,
+    contract.expiration_date,
+    parseExpiryFromOptionSymbol(option.symbol),
+    parseExpiryFromOptionSymbol(suggested.symbol),
+    parseExpiryFromOptionSymbol(contract.symbol),
+    parseExpiryFromOptionSymbol(option.contractSymbol),
+    parseExpiryFromOptionSymbol(suggested.contractSymbol),
+    parseExpiryFromOptionSymbol(contract.contractSymbol)
+  );
+}
+
+function selectedOptionStrike(option = {}, suggested = {}, contract = {}) {
+  return firstPresent(
+    option.strike,
+    suggested.strike,
+    contract.strike,
+    parseStrikeFromOptionSymbol(option.symbol),
+    parseStrikeFromOptionSymbol(suggested.symbol),
+    parseStrikeFromOptionSymbol(contract.symbol),
+    parseStrikeFromOptionSymbol(option.contractSymbol),
+    parseStrikeFromOptionSymbol(suggested.contractSymbol),
+    parseStrikeFromOptionSymbol(contract.contractSymbol)
+  );
+}
+
+function optionFallbackNote(option = {}, suggested = {}, contract = {}) {
+  const source = firstPresent(option.source, suggested.source, contract.source);
+  if (String(source || '').toLowerCase() !== 'fallback') return '';
+  const reason = String(firstPresent(option.fallback_reason, suggested.fallback_reason, contract.fallback_reason) || '').trim();
   return reason ? `Fallback estimate · ${reason}` : 'Fallback estimate';
 }
 
 function suggestedContractText(setup) {
   const option = setup.option || {};
-  const type = option.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : '');
-  const strike = Number.isFinite(Number(option.strike)) ? Number(option.strike).toFixed(0) : '—';
-  const price = Number(option.ask ?? option.mid ?? option.mark);
+  const suggested = setup.suggested_contract || {};
+  const contract = setup.contract || {};
+  const type = firstPresent(option.type, suggested.type, contract.type)
+    || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : '');
+  const strikeValue = Number(selectedOptionStrike(option, suggested, contract));
+  const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
+  const price = Number(firstPresent(option.ask, option.mid, option.mark, suggested.ask, suggested.mid, suggested.mark, contract.ask, contract.mid, contract.mark));
   const priceText = Number.isFinite(price) ? `≈ ${fmtMoney(price)}` : 'Price not loaded';
-  const expiry = selectedOptionExpiry(option);
+  const expiry = selectedOptionExpiry(option, suggested, contract);
   return {
     main: `${escapeHtml(strike)} ${renderContractTypeText(type)}`.trim(),
     sub: `${formatShortDate(expiry)} · ${priceText}`,
-    fallbackNote: optionFallbackNote(option),
+    fallbackNote: optionFallbackNote(option, suggested, contract),
   };
 }
 
