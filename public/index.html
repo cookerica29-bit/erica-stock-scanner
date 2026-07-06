@@ -454,6 +454,7 @@
   }
   .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; }
   .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; }
+  .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
   .index-why { margin-top:10px; }
   .index-why summary { color:#93c5fd; cursor:pointer; font-size:11px; font-weight:850; }
   .index-why-list { color:var(--muted); line-height:1.45; margin:7px 0 0; padding-left:16px; }
@@ -755,7 +756,8 @@
     .index-simple-head > div:first-child,
     .index-plan-row span,
     .index-contract-main,
-    .index-contract-sub {
+    .index-contract-sub,
+    .index-contract-note {
       min-width: 0;
       overflow-wrap: anywhere;
     }
@@ -2772,12 +2774,12 @@ function renderScannerResults() {
 
   const allRows = scannerRows.slice();
   const allNearMiss = scannerNearMiss.slice();
-  renderMarketSnapshot([...allRows, ...allNearMiss]);
   const rows = sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, filters)));
   const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, filters)));
   const totalVisible = rows.length + nearMiss.length;
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
   const visibleSetups = [...rows, ...nearMiss];
+  renderMarketSnapshot(visibleSetups);
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
@@ -3093,15 +3095,39 @@ function formatShortDate(value) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+function parseExpiryFromOptionSymbol(symbol) {
+  const raw = String(symbol || '').trim().toUpperCase();
+  const match = raw.match(/^[A-Z.\-]+(\d{2})(\d{2})(\d{2})[CP]\d{8}$/);
+  if (!match) return '';
+  const [, yy, mm, dd] = match;
+  return `20${yy}-${mm}-${dd}`;
+}
+
+function selectedOptionExpiry(option = {}) {
+  return option.expiry
+    || option.expiration
+    || option.expiry_date
+    || option.expiration_date
+    || parseExpiryFromOptionSymbol(option.symbol);
+}
+
+function optionFallbackNote(option = {}) {
+  if (String(option.source || '').toLowerCase() !== 'fallback') return '';
+  const reason = String(option.fallback_reason || '').trim();
+  return reason ? `Fallback estimate · ${reason}` : 'Fallback estimate';
+}
+
 function suggestedContractText(setup) {
   const option = setup.option || {};
   const type = option.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : '');
   const strike = Number.isFinite(Number(option.strike)) ? Number(option.strike).toFixed(0) : '—';
   const price = Number(option.ask ?? option.mid ?? option.mark);
   const priceText = Number.isFinite(price) ? `≈ ${fmtMoney(price)}` : 'Price not loaded';
+  const expiry = selectedOptionExpiry(option);
   return {
     main: `${escapeHtml(strike)} ${renderContractTypeText(type)}`.trim(),
-    sub: `${formatShortDate(option.expiry)} · ${priceText}`,
+    sub: `${formatShortDate(expiry)} · ${priceText}`,
+    fallbackNote: optionFallbackNote(option),
   };
 }
 
@@ -3112,6 +3138,7 @@ function renderSuggestedContractBlock(setup) {
       <div class="index-simple-label">Suggested Contract</div>
       <div class="index-contract-main">${option.main}</div>
       <div class="index-contract-sub">${option.sub}</div>
+      ${option.fallbackNote ? `<div class="index-contract-note">${escapeHtml(option.fallbackNote)}</div>` : ''}
     </div>`;
 }
 
