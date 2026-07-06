@@ -53,8 +53,15 @@
     padding: 0 24px;
     display: flex;
     gap: 4px;
+    flex-wrap: nowrap;
+    max-width: 100%;
     overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
   }
+  .tab-bar::-webkit-scrollbar { display: none; }
+  .tab-bar { scrollbar-width: none; }
   .tab-btn {
     background: none;
     border: none;
@@ -65,7 +72,9 @@
     font-family: inherit;
     font-size: 12px;
     font-weight: 600;
+    flex: 0 0 auto;
     padding: 10px 16px;
+    white-space: nowrap;
     transition: color 0.15s, border-color 0.15s;
   }
   .tab-btn:hover { color: var(--text); opacity: 1; }
@@ -669,14 +678,13 @@
       overflow-wrap: anywhere;
     }
     .tab-bar {
-      gap: 2px;
+      gap: 6px;
       padding: 0 10px;
-      -webkit-overflow-scrolling: touch;
     }
     .tab-btn {
       flex: 0 0 auto;
       font-size: 11px;
-      padding: 10px 11px;
+      padding: 10px 10px;
     }
     .controls {
       align-items: stretch;
@@ -884,7 +892,8 @@
     header { padding: 10px 12px; }
     header h1 { font-size: 14px; }
     .header-meta { font-size: 9px; }
-    .tab-btn { font-size: 10px; padding: 9px 9px; }
+    .tab-bar { gap: 4px; padding: 0 8px; }
+    .tab-btn { font-size: 10px; padding: 9px 8px; }
     .controls,
     .journal-controls {
       grid-template-columns: 1fr;
