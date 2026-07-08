@@ -55,6 +55,12 @@ TRENDING_UNIVERSE = [
     "DAL", "CCL", "AMD", "NVDA", "TSLA", "META", "AMZN", "MSFT", "AAPL",
 ]
 
+NO_EARNINGS_SYMBOLS = {
+    "SPY", "QQQ", "IWM", "DIA",
+    "GLD", "SLV", "USO", "UNG",
+    "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
+}
+
 _finviz_cache = {"tickers": [], "fetched_at": None}
 FINVIZ_CACHE_TTL = timedelta(hours=6)
 _option_chain_cache = {}
@@ -64,6 +70,7 @@ BEST_CONTRACT_CACHE_TTL = timedelta(minutes=12)
 _option_chain_fetch_semaphore = threading.BoundedSemaphore(4)
 _earnings_cache = {}
 EARNINGS_CACHE_TTL = timedelta(hours=6)
+EARNINGS_UNAVAILABLE_CACHE_TTL = timedelta(hours=24)
 
 
 def get_finviz_watchlist() -> list:
@@ -296,10 +303,14 @@ def _next_future_date(values):
 
 
 def _earnings_for_ticker(ticker: str) -> dict:
+    ticker = str(ticker or "").upper()
     now = datetime.utcnow()
     cached = _earnings_cache.get(ticker)
-    if cached and now - cached.get("fetched_at", now) < EARNINGS_CACHE_TTL:
-        return dict(cached.get("data", {}))
+    if cached:
+        cached_data = cached.get("data", {})
+        ttl = EARNINGS_CACHE_TTL if cached_data.get("loaded") else EARNINGS_UNAVAILABLE_CACHE_TTL
+        if now - cached.get("fetched_at", now) < ttl:
+            return dict(cached_data)
 
     data = {
         "loaded": False,
@@ -307,6 +318,10 @@ def _earnings_for_ticker(ticker: str) -> dict:
         "days_until": None,
         "source": "unavailable",
     }
+    if ticker in NO_EARNINGS_SYMBOLS:
+        _earnings_cache[ticker] = {"fetched_at": now, "data": data}
+        return dict(data)
+
     try:
         ticker_obj = yf.Ticker(ticker)
         earnings_date = None
@@ -427,6 +442,75 @@ def _unclean_contract(reason: str, source: str = "not_evaluated") -> dict:
     }
 
 
+def _contract_score(contract: dict) -> Optional[float]:
+    score = contract.get("score", contract.get("best_score"))
+    return _safe_float(score)
+
+
+def _contract_identity(contract: dict) -> tuple:
+    return (
+        contract.get("symbol"),
+        contract.get("expiry"),
+        contract.get("strike"),
+        contract.get("type"),
+    )
+
+
+def _apply_contract_stability(cache_key: tuple, fresh: dict, now: datetime) -> dict:
+    cached = _best_contract_cache.get(cache_key)
+    if not cached:
+        return fresh
+    previous = dict(cached.get("data", {}))
+    if not previous:
+        return fresh
+    previous_score = _contract_score(previous)
+    fresh_score = _contract_score(fresh)
+    previous_execution = previous.get("execution")
+    fresh_execution = fresh.get("execution")
+
+    if previous.get("available") and not fresh.get("available"):
+        previous["cache"] = "stability_hold"
+        previous["stability_reason"] = "kept previous clean contract after transient fresh no-contract result"
+        return previous
+
+    same_contract = _contract_identity(previous) == _contract_identity(fresh)
+    if (
+        same_contract
+        and previous_execution == "Excellent"
+        and fresh_execution == "Fair"
+        and previous_score is not None
+        and fresh_score is not None
+        and previous_score - fresh_score < 8
+    ):
+        stable = dict(fresh)
+        stable["execution"] = "Excellent"
+        stable["cache"] = "stability_hold"
+        stable["stability_reason"] = "held Excellent through minor score drift"
+        return stable
+
+    if (
+        same_contract
+        and previous_execution == "Fair"
+        and fresh_execution == "Excellent"
+        and previous_score is not None
+        and fresh_score is not None
+        and fresh_score - previous_score < 5
+    ):
+        stable = dict(fresh)
+        stable["execution"] = "Fair"
+        stable["cache"] = "stability_hold"
+        stable["stability_reason"] = "held Fair until improvement is meaningful"
+        return stable
+
+    return fresh
+
+
+def _store_best_contract(cache_key: tuple, result: dict, now: datetime) -> dict:
+    stable = _apply_contract_stability(cache_key, result, now)
+    _best_contract_cache[cache_key] = {"fetched_at": now, "data": stable}
+    return dict(stable)
+
+
 def _score_range(value, bands) -> int:
     if value is None:
         return 0
@@ -494,8 +578,7 @@ def _best_contract(ticker: str, direction: str, entry: float) -> dict:
     expirations = _parsed_expirations(_option_expirations_for_ticker(ticker))
     if not expirations:
         result = _unclean_contract("No option expirations available", "unavailable")
-        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
-        return dict(result)
+        return _store_best_contract(cache_key, result, now)
 
     candidates = []
     target_dte = 37
@@ -527,8 +610,7 @@ def _best_contract(ticker: str, direction: str, entry: float) -> dict:
 
     if not candidates:
         result = _unclean_contract("No contracts returned near the ideal strike", "unavailable")
-        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
-        return dict(result)
+        return _store_best_contract(cache_key, result, now)
 
     best = max(candidates, key=lambda item: item["score"])
     diagnostics = best.get("diagnostics", {})
@@ -540,24 +622,21 @@ def _best_contract(ticker: str, direction: str, entry: float) -> dict:
             "best_score": best["score"],
             "diagnostics": diagnostics,
         }
-        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
-        return dict(result)
+        return _store_best_contract(cache_key, result, now)
     if spread_pct is None or spread_pct > 35:
         result = {
             **_unclean_contract("Best contract spread is too wide or unavailable", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
         }
-        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
-        return dict(result)
+        return _store_best_contract(cache_key, result, now)
     if (best.get("open_interest") or 0) < 25 and (best.get("volume") or 0) < 1:
         result = {
             **_unclean_contract("Best contract liquidity is too thin", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
         }
-        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
-        return dict(result)
+        return _store_best_contract(cache_key, result, now)
 
     execution = "Excellent" if best["score"] >= 75 else "Fair" if best["score"] >= 55 else "No Clean Contract"
     if execution == "No Clean Contract":
@@ -567,8 +646,7 @@ def _best_contract(ticker: str, direction: str, entry: float) -> dict:
             "best_score": best["score"],
             "diagnostics": best.get("diagnostics", {}),
         }
-        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
-        return dict(result)
+        return _store_best_contract(cache_key, result, now)
 
     best.update({
         "available": True,
@@ -576,8 +654,7 @@ def _best_contract(ticker: str, direction: str, entry: float) -> dict:
         "source": "option_chain",
         "cache": "miss",
     })
-    _best_contract_cache[cache_key] = {"fetched_at": now, "data": best}
-    return dict(best)
+    return _store_best_contract(cache_key, best, now)
 
 
 def _has_valid_trade_plan(result: dict) -> bool:
