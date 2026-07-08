@@ -385,6 +385,171 @@ def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
     }
 
 
+def _parsed_expirations(expirations: list) -> list:
+    today = datetime.now().date()
+    parsed = []
+    for expiry in expirations:
+        try:
+            expiry_date = datetime.strptime(str(expiry), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        dte = (expiry_date - today).days
+        if dte >= 7:
+            parsed.append((str(expiry), dte))
+    return parsed
+
+
+def _score_range(value, bands) -> int:
+    if value is None:
+        return 0
+    for threshold, score in bands:
+        if value >= threshold:
+            return score
+    return 0
+
+
+def _score_contract_row(row: pd.Series, strike: float, entry: float, dte: int) -> tuple:
+    bid = _safe_float(row.get("bid"))
+    ask = _safe_float(row.get("ask"))
+    last_price = _safe_float(row.get("lastPrice"))
+    open_interest = _safe_int(row.get("openInterest")) or 0
+    volume = _safe_int(row.get("volume")) or 0
+    delta = _safe_float(row.get("delta"))
+    mark = round((bid + ask) / 2, 2) if bid is not None and ask is not None and ask > 0 else last_price
+    spread = round(ask - bid, 2) if bid is not None and ask is not None and ask >= bid else None
+    spread_pct = round((spread / mark) * 100, 1) if spread is not None and mark and mark > 0 else None
+    distance_pct = abs(strike - entry) / entry if entry else 1.0
+
+    spread_score = 25 if spread_pct is not None and spread_pct <= 10 else 18 if spread_pct is not None and spread_pct <= 20 else 10 if spread_pct is not None and spread_pct <= 35 else 0
+    oi_score = _score_range(open_interest, [(500, 20), (100, 14), (25, 8), (1, 4)])
+    volume_score = _score_range(volume, [(100, 15), (20, 10), (1, 5)])
+    dte_score = 15 if 21 <= dte <= 45 else 10 if 14 <= dte <= 60 else 5
+    delta_score = 10 if delta is not None and 0.25 <= abs(delta) <= 0.65 else 5 if delta is None else 3
+    distance_score = 15 if distance_pct <= 0.03 else 10 if distance_pct <= 0.06 else 5 if distance_pct <= 0.10 else 0
+    score = spread_score + oi_score + volume_score + dte_score + delta_score + distance_score
+
+    diagnostics = {
+        "spread_score": spread_score,
+        "open_interest_score": oi_score,
+        "volume_score": volume_score,
+        "dte_score": dte_score,
+        "delta_score": delta_score,
+        "distance_score": distance_score,
+        "spread_pct": spread_pct,
+        "distance_pct": round(distance_pct * 100, 2),
+    }
+    metrics = {
+        "bid": bid,
+        "ask": ask,
+        "last": last_price,
+        "mid": mark,
+        "mark": mark,
+        "spread": spread,
+        "spread_pct": spread_pct,
+        "open_interest": open_interest,
+        "volume": volume,
+        "delta": delta,
+    }
+    return score, metrics, diagnostics
+
+
+def _best_contract(ticker: str, direction: str, entry: float) -> dict:
+    option_type = "CALL" if direction == "LONG" else "PUT"
+    expirations = _parsed_expirations(_option_expirations_for_ticker(ticker))
+    if not expirations:
+        return {
+            "available": False,
+            "execution": "No Clean Contract",
+            "reason": "No option expirations available",
+            "source": "unavailable",
+        }
+
+    candidates = []
+    target_dte = 37
+    for expiry, dte in sorted(expirations, key=lambda item: (abs(item[1] - target_dte), item[1]))[:5]:
+        chain = _option_chain_for_ticker(ticker, expiry)
+        if chain is None:
+            continue
+        contracts = chain.calls if option_type == "CALL" else chain.puts
+        if contracts is None or contracts.empty or "strike" not in contracts.columns:
+            continue
+        contracts = contracts.copy()
+        contracts["strike_distance"] = (contracts["strike"].astype(float) - float(entry)).abs()
+        for _, row in contracts.sort_values(["strike_distance", "strike"]).head(8).iterrows():
+            strike = _safe_float(row.get("strike"))
+            if strike is None:
+                continue
+            score, metrics, diagnostics = _score_contract_row(row, strike, entry, dte)
+            candidates.append({
+                "score": score,
+                "expiry": expiry,
+                "dte": dte,
+                "type": option_type,
+                "strike": strike,
+                "symbol": _option_symbol_from_row(ticker, expiry, strike, option_type, row),
+                **metrics,
+                "diagnostics": diagnostics,
+            })
+
+    if not candidates:
+        return {
+            "available": False,
+            "execution": "No Clean Contract",
+            "reason": "No contracts returned near the ideal strike",
+            "source": "unavailable",
+        }
+
+    best = max(candidates, key=lambda item: item["score"])
+    diagnostics = best.get("diagnostics", {})
+    spread_pct = diagnostics.get("spread_pct")
+    distance_pct = diagnostics.get("distance_pct")
+    if distance_pct is not None and distance_pct > 10:
+        return {
+            "available": False,
+            "execution": "No Clean Contract",
+            "reason": "Closest contract strike is too far from the ideal strike",
+            "source": "option_chain",
+            "best_score": best["score"],
+            "diagnostics": diagnostics,
+        }
+    if spread_pct is None or spread_pct > 35:
+        return {
+            "available": False,
+            "execution": "No Clean Contract",
+            "reason": "Best contract spread is too wide or unavailable",
+            "source": "option_chain",
+            "best_score": best["score"],
+            "diagnostics": diagnostics,
+        }
+    if (best.get("open_interest") or 0) < 25 and (best.get("volume") or 0) < 1:
+        return {
+            "available": False,
+            "execution": "No Clean Contract",
+            "reason": "Best contract liquidity is too thin",
+            "source": "option_chain",
+            "best_score": best["score"],
+            "diagnostics": diagnostics,
+        }
+
+    execution = "Excellent" if best["score"] >= 75 else "Fair" if best["score"] >= 55 else "No Clean Contract"
+    if execution == "No Clean Contract":
+        return {
+            "available": False,
+            "execution": execution,
+            "reason": "Spread, liquidity, DTE, or strike distance did not meet minimum quality",
+            "source": "option_chain",
+            "best_score": best["score"],
+            "diagnostics": best.get("diagnostics", {}),
+        }
+
+    best.update({
+        "available": True,
+        "execution": execution,
+        "source": "option_chain",
+    })
+    return best
+
+
 # ── Price Action Functions ────────────────────────────────────────────────────
 
 def _find_swings(df: pd.DataFrame, margin: int = 4) -> list:
@@ -2349,6 +2514,7 @@ def _enrich_stock_scout_fields(
         "confirmationStarted": confirmation_started,
         "confirmationReason": confirmation_reason,
         "earnings": _earnings_for_ticker(result.get("ticker") or ""),
+        "best_contract": _best_contract(result.get("ticker") or "", result.get("direction") or "", result.get("entry") or 0),
     })
     return result
 

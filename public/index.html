@@ -455,6 +455,14 @@
   .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; }
   .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; }
   .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
+  .best-contract.excellent { border-color:rgba(34,197,94,0.35); background:rgba(34,197,94,0.07); }
+  .best-contract.fair { border-color:rgba(251,191,36,0.4); background:rgba(251,191,36,0.07); }
+  .best-contract.none { border-color:rgba(251,191,36,0.24); background:rgba(251,191,36,0.05); }
+  .best-contract .index-contract-main { font-size:13px; }
+  .best-execution { color:var(--muted); font-size:11px; font-weight:800; margin-top:4px; }
+  .best-contract.excellent .best-execution { color:#22c55e; }
+  .best-contract.fair .best-execution,
+  .best-contract.none .best-execution { color:#fbbf24; }
   .earnings-block {
     background:rgba(2,6,23,0.2);
     border:1px solid rgba(148,163,184,0.08);
@@ -772,6 +780,7 @@
     .index-contract-main,
     .index-contract-sub,
     .index-contract-note,
+    .best-execution,
     .earnings-main,
     .earnings-sub {
       min-width: 0;
@@ -2910,7 +2919,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
               </div>
               ${renderTradePlanBlock(setup)}
               ${renderPositionManagement(setup)}
-              ${renderSuggestedContractBlock(setup)}
+              ${renderBestContractBlock(setup)}
               ${renderEarningsBlock(setup)}
               ${renderCollapsedWhyBlock(why)}
             </div>`;
@@ -3212,6 +3221,39 @@ function renderSuggestedContractBlock(setup) {
     </div>`;
 }
 
+function bestContractDisplay(setup) {
+  const contract = setup.best_contract || {};
+  if (!contract.available) {
+    return {
+      className: 'none',
+      label: 'Options',
+      main: '⚠️ No clean contract available',
+      execution: '⚠️ Review liquidity manually',
+    };
+  }
+  const strikeValue = Number(contract.strike);
+  const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
+  const type = renderContractTypeText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
+  const expiry = formatShortDate(contract.expiry);
+  const execution = String(contract.execution || '').toLowerCase() === 'excellent' ? '✅ Excellent' : '⚠️ Fair';
+  return {
+    className: String(contract.execution || '').toLowerCase() === 'excellent' ? 'excellent' : 'fair',
+    label: 'Best Contract',
+    main: `${expiry} · ${strike} ${type}`.trim(),
+    execution: `Execution: ${execution}`,
+  };
+}
+
+function renderBestContractBlock(setup) {
+  const contract = bestContractDisplay(setup);
+  return `
+    <div class="index-contract best-contract ${contract.className}">
+      <div class="index-simple-label">${contract.label}</div>
+      <div class="index-contract-main">${escapeHtml(contract.main)}</div>
+      <div class="best-execution">${escapeHtml(contract.execution)}</div>
+    </div>`;
+}
+
 function earningsDisplay(setup) {
   const earnings = setup.earnings || {};
   if (!earnings.loaded || !earnings.date) {
@@ -3447,7 +3489,7 @@ function renderCard(s) {
       </div>
       ${renderTradePlanBlock(s)}
       ${renderPositionManagement(s)}
-      ${renderSuggestedContractBlock(s)}
+      ${renderBestContractBlock(s)}
       ${renderEarningsBlock(s)}
       ${renderCollapsedWhyBlock(why)}
       ${renderMoreDetailsBlock(s, {
