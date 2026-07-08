@@ -3,7 +3,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from scanner import scan_all, scan_ticker, debug_ticker, scan_trends, WATCHLIST
+from scanner import scan_all, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -15,6 +15,11 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="public"), name="static")
+
+
+@app.on_event("startup")
+def startup_market_cache_refresh():
+    start_market_cache_refresh()
 
 
 @app.get("/")

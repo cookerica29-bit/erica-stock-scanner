@@ -2456,7 +2456,6 @@ async function runScan() {
   summary.textContent = '';
   if (indexWatchlist) indexWatchlist.innerHTML = '';
 
-  const indexPromise = loadIndexWatchlist();
   try {
     const res  = await fetch(`${API}/api/scan`);
     const data = await res.json();
@@ -2471,11 +2470,12 @@ async function runScan() {
     scannerNearMiss = nextNearMiss;
     renderScannerResults();
     renderExecutionTab();
+    await loadIndexWatchlist();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
     results.innerHTML = '<div class="empty">Full scan is still unavailable. Index Watchlist can still load above.</div>';
+    await loadIndexWatchlist();
   } finally {
-    await indexPromise;
     btn.disabled = false;
     status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : 'Done';
   }
@@ -3306,6 +3306,14 @@ function renderSuggestedContractBlock(setup) {
 
 function bestContractDisplay(setup) {
   const contract = setup.best_contract || {};
+  if (contract.loading || String(contract.source || '').toLowerCase() === 'loading') {
+    return {
+      className: 'none',
+      label: 'Options',
+      main: 'Loading...',
+      execution: '',
+    };
+  }
   if (!contract.available) {
     return {
       className: 'none',
@@ -3388,18 +3396,18 @@ function executionContractInfo(setup) {
   };
 }
 
-function executionRiskText(setup, qty = 1) {
+function executionContractCostText(setup, qty = 1) {
   const cost = executionContractInfo(setup).cost;
   const quantity = Math.max(1, Number.parseInt(qty, 10) || 1);
-  if (!Number.isFinite(cost)) return 'Risk unavailable';
-  return `Estimated risk: ${fmtMoney(cost * 100 * quantity)}`;
+  if (!Number.isFinite(cost)) return 'Estimated Contract Cost: Unavailable';
+  return `Estimated Contract Cost: ${fmtMoney(cost * 100 * quantity)}`;
 }
 
 function updateExecutionRisk(idx) {
   const setup = actionableExecutionRows()[idx];
   const qty = document.getElementById(`executionQty-${idx}`)?.value || 1;
   const el = document.getElementById(`executionRisk-${idx}`);
-  if (setup && el) el.textContent = executionRiskText(setup, qty);
+  if (setup && el) el.textContent = executionContractCostText(setup, qty);
 }
 
 function executionTradePlanText(setup, qty = 1) {
@@ -3407,7 +3415,7 @@ function executionTradePlanText(setup, qty = 1) {
   const quantity = Math.max(1, Number.parseInt(qty, 10) || 1);
   return [
     `Ticker: ${setup.ticker || '—'}`,
-    `Direction: ${renderDirectionText(setup.direction)}`,
+    `Direction: ${simpleDirection(setup.direction)}`,
     `Expiration: ${contract.expiry || 'Unavailable'}`,
     `Strike: ${contract.strike}`,
     `Type: ${contract.type || 'Unavailable'}`,
@@ -3417,7 +3425,7 @@ function executionTradePlanText(setup, qty = 1) {
     `Target: ${fmtMoney(setup.tp1)}`,
     `Contract Quality: ${contract.quality.replace(/[✅⚠️]/g, '').trim() || 'Unavailable'}`,
     `Quantity: ${quantity}`,
-    `Estimated Risk: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Risk unavailable'}`,
+    `Estimated Contract Cost: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Unavailable'}`,
   ].join('\n');
 }
 
@@ -3452,19 +3460,17 @@ function renderExecutionTab() {
   }
   list.innerHTML = rows.map((setup, idx) => {
     const contract = executionContractInfo(setup);
-    const direction = renderDirectionText(setup.direction);
     return `
       <div class="execution-card">
         <div class="execution-card-head">
           <div>
             <div class="execution-ticker ticker-with-direction">${escapeHtml(setup.ticker || '—')} ${renderDirectionMarker(setup.direction)}</div>
-            <div class="execution-grade">${readinessStars(setup)} ${simpleSetupLabel(setupGradeValue(setup))}</div>
           </div>
           <div class="execution-status">ENTER NOW</div>
         </div>
         <div class="execution-section">
           <div class="execution-section-title">Trade Plan</div>
-          <div class="execution-line"><span>Direction</span><span class="${directionClass(setup.direction)}">${escapeHtml(direction)}</span></div>
+          <div class="execution-line"><span>Direction</span>${renderDirectionText(setup.direction)}</div>
           <div class="execution-line"><span>Entry</span><span>${fmtMoney(setup.entry)}</span></div>
           <div class="execution-line"><span>Stop</span><span>${fmtMoney(setup.sl)}</span></div>
           <div class="execution-line"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
@@ -3472,17 +3478,16 @@ function renderExecutionTab() {
         <div class="execution-section">
           <div class="execution-section-title">Best Contract</div>
           <div class="execution-contract-main">${escapeHtml(contract.label)}</div>
-          <div class="execution-contract-sub">Estimated cost: ${escapeHtml(contract.costText)}</div>
           <div class="execution-quality ${contract.qualityClass}">Contract Quality: ${escapeHtml(contract.quality)}</div>
           <div class="execution-risk-row">
             <label class="execution-section-title" for="executionQty-${idx}">Quantity</label>
             <input id="executionQty-${idx}" type="number" min="1" step="1" value="1" oninput="updateExecutionRisk(${idx})" />
           </div>
-          <div id="executionRisk-${idx}" class="execution-risk">${executionRiskText(setup, 1)}</div>
+          <div id="executionRisk-${idx}" class="execution-risk">${executionContractCostText(setup, 1)}</div>
         </div>
         <div class="execution-actions">
           <button onclick="copyExecutionTradePlan(${idx})">Copy Trade Plan</button>
-          <button class="btn-secondary" onclick="openRobinhood()">Open Robinhood</button>
+          <button class="btn-secondary" onclick="openRobinhood()">Execute Trade</button>
         </div>
       </div>`;
   }).join('');

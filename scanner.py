@@ -101,6 +101,7 @@ _background_jobs = set()
 _background_jobs_lock = threading.Lock()
 _background_refresh_started = False
 _background_last_refresh = {}
+_active_scan_count = 0
 
 
 def _cache_record(name: str, outcome: str) -> None:
@@ -125,6 +126,8 @@ def _submit_background_job(key: tuple, fn, *args, **kwargs) -> None:
 
     def _run():
         try:
+            while _scan_is_active():
+                time.sleep(0.25)
             fn(*args, **kwargs)
         except Exception as exc:
             logger.warning("[background] refresh failed for %s: %s", key, exc)
@@ -143,6 +146,23 @@ def _periodic_refresh_due(key: str, ttl_seconds: int) -> bool:
             return False
         _background_last_refresh[key] = now
         return True
+
+
+def _scan_activity_started() -> None:
+    global _active_scan_count
+    with _background_jobs_lock:
+        _active_scan_count += 1
+
+
+def _scan_activity_finished() -> None:
+    global _active_scan_count
+    with _background_jobs_lock:
+        _active_scan_count = max(0, _active_scan_count - 1)
+
+
+def _scan_is_active() -> bool:
+    with _background_jobs_lock:
+        return _active_scan_count > 0
 
 
 def get_finviz_watchlist() -> list:
@@ -263,6 +283,15 @@ def _option_expirations_for_ticker(ticker: str) -> list:
     return _fetch_option_expirations(ticker)
 
 
+def _cached_option_expirations_for_ticker(ticker: str) -> tuple[bool, list]:
+    ticker = str(ticker or "").upper()
+    with _cache_lock:
+        cached = _option_chain_cache.get(ticker)
+        if not cached:
+            return False, []
+        return True, list(cached.get("expirations", []))
+
+
 def _fetch_option_expirations(ticker: str) -> list:
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
@@ -321,6 +350,16 @@ def _option_chain_for_ticker(ticker: str, expiry: str):
         _cache_record("option_chains", "miss")
 
     return _fetch_option_chain(ticker, expiry)
+
+
+def _cached_option_chain_for_ticker(ticker: str, expiry: str):
+    ticker = str(ticker or "").upper()
+    with _cache_lock:
+        cached = _option_chain_cache.get(ticker)
+        if not cached:
+            return False, None
+        chain = cached.setdefault("chains", {}).get(expiry)
+        return chain is not None, chain
 
 
 def _fetch_option_chain(ticker: str, expiry: str):
@@ -396,11 +435,14 @@ def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -
 
     min_expirations = int(config.get("min_option_expirations") or 0)
     if min_expirations > 0:
-        expirations = _option_expirations_for_ticker(ticker)
-        if not expirations:
-            return "no options"
-        if len(expirations) < min_expirations:
-            return "thin options chain"
+        known, expirations = _cached_option_expirations_for_ticker(ticker)
+        if known:
+            if not expirations:
+                return "no options"
+            if len(expirations) < min_expirations:
+                return "thin options chain"
+        else:
+            _submit_background_job(("option_expirations_prefilter", ticker), _refresh_option_expirations, ticker)
 
     return None
 
@@ -499,7 +541,18 @@ def _next_future_date(values):
     return min(dates) if dates else None
 
 
-def _earnings_for_ticker(ticker: str) -> dict:
+def _earnings_loading_result() -> dict:
+    return {
+        "loaded": False,
+        "loading": True,
+        "status": "loading",
+        "date": None,
+        "days_until": None,
+        "source": "background_refresh",
+    }
+
+
+def _earnings_for_ticker(ticker: str, *, allow_fetch: bool = True) -> dict:
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
     with _cache_lock:
@@ -515,6 +568,10 @@ def _earnings_for_ticker(ticker: str) -> dict:
                 _submit_background_job(("earnings", ticker), _refresh_earnings, ticker)
                 return dict(cached_data)
         _cache_record("earnings", "miss")
+
+    if not allow_fetch:
+        _submit_background_job(("earnings", ticker), _refresh_earnings, ticker)
+        return _earnings_loading_result()
 
     return _fetch_earnings_for_ticker(ticker)
 
@@ -577,12 +634,18 @@ def _option_symbol_from_row(ticker: str, expiry: str, strike: float, option_type
 
 def _suggest_option(ticker: str, direction: str, entry: float) -> dict:
     option_type = "CALL" if direction == "LONG" else "PUT"
-    expirations = _option_expirations_for_ticker(ticker)
+    known_expirations, expirations = _cached_option_expirations_for_ticker(ticker)
+    if not known_expirations:
+        _submit_background_job(("option_expirations_suggested", str(ticker or "").upper()), _refresh_option_expirations, str(ticker or "").upper())
+        return _fallback_option(ticker, direction, entry, "option data loading")
     expiry = _select_expiration(expirations)
     if not expiry:
         return _fallback_option(ticker, direction, entry, "no option expirations returned")
 
-    chain = _option_chain_for_ticker(ticker, expiry)
+    known_chain, chain = _cached_option_chain_for_ticker(ticker, expiry)
+    if not known_chain:
+        _submit_background_job(("option_chain_suggested", str(ticker or "").upper(), expiry), _refresh_option_chain, str(ticker or "").upper(), expiry)
+        return _fallback_option(ticker, direction, entry, f"option chain loading for {expiry}")
     if chain is None:
         return _fallback_option(ticker, direction, entry, f"option chain unavailable for {expiry}")
 
@@ -657,6 +720,16 @@ def _unclean_contract(reason: str, source: str = "not_evaluated") -> dict:
         "execution": "No Clean Contract",
         "reason": reason,
         "source": source,
+    }
+
+
+def _loading_contract(reason: str = "Options data is refreshing") -> dict:
+    return {
+        "available": False,
+        "execution": "Loading",
+        "reason": reason,
+        "source": "loading",
+        "loading": True,
     }
 
 
@@ -789,7 +862,15 @@ def _refresh_best_contract(ticker: str, direction: str, entry: float) -> None:
     _best_contract(ticker, direction, entry, allow_stale=False, force_refresh=True)
 
 
-def _best_contract(ticker: str, direction: str, entry: float, *, allow_stale: bool = True, force_refresh: bool = False) -> dict:
+def _best_contract(
+    ticker: str,
+    direction: str,
+    entry: float,
+    *,
+    allow_stale: bool = True,
+    force_refresh: bool = False,
+    block_on_miss: bool = True,
+) -> dict:
     option_type = "CALL" if direction == "LONG" else "PUT"
     cache_key = _best_contract_cache_key(ticker, direction, entry)
     now = datetime.utcnow()
@@ -808,6 +889,10 @@ def _best_contract(ticker: str, direction: str, entry: float, *, allow_stale: bo
                 _submit_background_job(("best_contract", ticker, direction, cache_key[2]), _refresh_best_contract, ticker, direction, entry)
                 return cached_data
         _cache_record("best_contract", "miss")
+
+    if not block_on_miss and not force_refresh:
+        _submit_background_job(("best_contract", ticker, direction, cache_key[2]), _refresh_best_contract, ticker, direction, entry)
+        return _loading_contract("Options data is loading in the background")
 
     expirations = _parsed_expirations(_option_expirations_for_ticker(ticker))
     if not expirations:
@@ -1987,9 +2072,12 @@ def _refresh_cached_best_contracts(limit: int = 40) -> None:
 
 
 def _background_refresh_loop() -> None:
-    time.sleep(30)
+    time.sleep(2)
     while True:
         try:
+            if _scan_is_active():
+                time.sleep(5)
+                continue
             symbols = list(dict.fromkeys(WATCHLIST))
             if _periodic_refresh_due("prices_1d", 180):
                 _submit_background_job(("prices_periodic", "1y", "1d"), _refresh_price_cache, symbols, "1y", "1d")
@@ -2019,6 +2107,10 @@ def _ensure_background_refresh_started() -> None:
         _background_refresh_started = True
     thread = threading.Thread(target=_background_refresh_loop, daemon=True, name="kairos-market-cache-refresh")
     thread.start()
+
+
+def start_market_cache_refresh() -> None:
+    _ensure_background_refresh_started()
 
 
 # ── Trending list analysis ───────────────────────────────────────────────────
@@ -2964,12 +3056,17 @@ def _enrich_stock_scout_fields(
     )
 
     earnings_start = time.perf_counter()
-    earnings = _earnings_for_ticker(result.get("ticker") or "")
+    earnings = _earnings_for_ticker(result.get("ticker") or "", allow_fetch=False)
     earnings_ms = round((time.perf_counter() - earnings_start) * 1000, 1)
 
     best_contract_start = time.perf_counter()
     if _should_enrich_best_contract(result, setup_grade, entry_status):
-        best_contract = _best_contract(result.get("ticker") or "", result.get("direction") or "", result.get("entry") or 0)
+        best_contract = _best_contract(
+            result.get("ticker") or "",
+            result.get("direction") or "",
+            result.get("entry") or 0,
+            block_on_miss=False,
+        )
     else:
         best_contract = _unclean_contract("Best contract not evaluated for non-actionable setup", "not_evaluated")
     best_contract_ms = round((time.perf_counter() - best_contract_start) * 1000, 1)
@@ -3011,6 +3108,7 @@ def _enrich_stock_scout_fields(
 
 def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
     scan_start = time.perf_counter()
+    _scan_activity_started()
     _ensure_background_refresh_started()
     if watchlist is None:
         watchlist = get_finviz_watchlist()
@@ -3098,6 +3196,7 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
         cache_stats,
         ", ".join(slow_contracts) if slow_contracts else "none",
     )
+    _scan_activity_finished()
     return rows, near_miss
 
 
