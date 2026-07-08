@@ -463,6 +463,63 @@
   .best-contract.excellent .best-execution { color:#22c55e; }
   .best-contract.fair .best-execution,
   .best-contract.none .best-execution { color:#fbbf24; }
+  .execution-panel { padding:20px 24px; max-width:1200px; margin:0 auto; }
+  .execution-head {
+    align-items:flex-start;
+    display:flex;
+    gap:12px;
+    justify-content:space-between;
+    margin-bottom:14px;
+  }
+  .execution-title { color:var(--text); font-size:16px; font-weight:900; letter-spacing:0.02em; }
+  .execution-subtitle { color:var(--muted); font-size:12px; line-height:1.45; margin-top:4px; }
+  .execution-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); }
+  .execution-card {
+    background:linear-gradient(180deg, rgba(15,23,42,0.98), rgba(15,23,42,0.9));
+    border:1px solid rgba(34,197,94,0.22);
+    border-radius:10px;
+    padding:14px;
+  }
+  .execution-card-head { align-items:flex-start; display:flex; gap:10px; justify-content:space-between; }
+  .execution-ticker { color:var(--text); font-size:18px; font-weight:950; }
+  .execution-grade { color:#93c5fd; font-size:11px; font-weight:850; margin-top:3px; }
+  .execution-status {
+    border:1px solid rgba(34,197,94,0.35);
+    border-radius:999px;
+    color:var(--long);
+    font-size:10px;
+    font-weight:950;
+    padding:5px 8px;
+    white-space:nowrap;
+  }
+  .execution-section {
+    background:rgba(2,6,23,0.22);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    margin-top:11px;
+    padding:10px;
+  }
+  .execution-section-title { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:0.08em; text-transform:uppercase; }
+  .execution-line { align-items:baseline; display:flex; gap:10px; justify-content:space-between; margin-top:7px; }
+  .execution-line span:first-child { color:var(--muted); }
+  .execution-line span:last-child { color:var(--text); font-weight:850; text-align:right; }
+  .execution-contract-main { color:var(--text); font-size:14px; font-weight:950; margin-top:7px; }
+  .execution-contract-sub { color:var(--muted); font-size:11px; margin-top:4px; }
+  .execution-quality { color:#22c55e; font-size:11px; font-weight:900; margin-top:5px; }
+  .execution-quality.fair { color:#fbbf24; }
+  .execution-risk-row { align-items:center; display:flex; gap:10px; justify-content:space-between; margin-top:10px; }
+  .execution-risk-row input { width:86px; }
+  .execution-risk { color:#fbbf24; font-size:13px; font-weight:950; margin-top:7px; }
+  .execution-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .execution-actions button { flex:1 1 130px; }
+  .execution-empty {
+    background:rgba(15,23,42,0.75);
+    border:1px dashed rgba(148,163,184,0.2);
+    border-radius:10px;
+    color:var(--muted);
+    padding:26px;
+    text-align:center;
+  }
   .earnings-block {
     background:rgba(2,6,23,0.2);
     border:1px solid rgba(148,163,184,0.08);
@@ -1563,6 +1620,7 @@
 
 <div class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
+  <button class="tab-btn" onclick="switchTab('execution')">Execution</button>
   <button class="tab-btn" onclick="switchTab('trends')">Trending List</button>
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
@@ -1580,10 +1638,11 @@
     </div>
     <select id="statusFilter" onchange="renderScannerResults()">
       <option value="all">All Statuses</option>
-      <option value="SKIP">Skip</option>
-      <option value="WAITING">Waiting</option>
+      <option value="ENTER_NOW" selected>Enter Now</option>
+      <option value="DEVELOPING">Developing Setups</option>
       <option value="ALMOST_READY">Almost Ready</option>
-      <option value="ENTER_NOW">Enter Now</option>
+      <option value="WAITING">Waiting</option>
+      <option value="SKIP">Skip</option>
     </select>
     <select id="directionFilter" onchange="renderScannerResults()">
       <option value="all">All Directions</option>
@@ -1619,6 +1678,21 @@
       <div id="near-miss-results" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px;"></div>
     </div>
   </main>
+</div>
+
+<!-- ── Execution Tab ─────────────────────────────────────────────────────── -->
+<div id="execution-panel" class="tab-panel">
+  <div class="execution-panel">
+    <div class="execution-head">
+      <div>
+        <div class="execution-title">Execution</div>
+        <div class="execution-subtitle">Actionable scanner trades only. Use this as a handoff checklist before opening your broker.</div>
+      </div>
+      <button class="btn-secondary" onclick="renderExecutionTab()">Refresh</button>
+    </div>
+    <div id="executionSummary" class="execution-subtitle"></div>
+    <div id="executionList" class="execution-grid"></div>
+  </div>
 </div>
 
 <!-- ── Trending List Tab ─────────────────────────────────────────────────── -->
@@ -2323,16 +2397,18 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
-  const tabs = ['scanner','trends','journal','analytics','video','terms'];
+  const tabs = ['scanner','execution','trends','journal','analytics','video','terms'];
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
     b.classList.toggle('active', tabs[i] === tab);
   });
   document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
+  document.getElementById('execution-panel').classList.toggle('active', tab === 'execution');
   document.getElementById('trends-panel').classList.toggle('active', tab === 'trends');
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
   document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
   document.getElementById('video-panel').classList.toggle('active', tab === 'video');
   document.getElementById('terms-panel').classList.toggle('active', tab === 'terms');
+  if (tab === 'execution') renderExecutionTab();
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics') renderAnalytics();
   if (tab === 'video') renderVideoStudio();
@@ -2421,6 +2497,7 @@ async function runScan() {
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
     renderScannerResults();
+    renderExecutionTab();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
     results.innerHTML = '<div class="empty">Full scan is still unavailable. Index Watchlist can still load above.</div>';
@@ -2471,6 +2548,7 @@ function clearResults() {
   document.getElementById('marketSnapshot').innerHTML = '';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
+  renderExecutionTab();
   const tickerSearch = document.getElementById('tickerInput');
   if (tickerSearch) tickerSearch.value = '';
 }
@@ -2691,7 +2769,9 @@ function actionPriorityForSetup(s) {
 function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
   if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
-  if (filters.status !== 'all' && setupProgressState(s).bucket !== filters.status) return false;
+  const statusBucket = setupProgressState(s).bucket;
+  if (filters.status === 'DEVELOPING' && !['ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
+  if (filters.status !== 'all' && filters.status !== 'DEVELOPING' && statusBucket !== filters.status) return false;
   if (filters.direction !== 'all' && String(s?.direction || '').toUpperCase() !== filters.direction) return false;
   if (filters.quality !== 'all' && setupGradeValue(s) !== filters.quality) return false;
   if (filters.contractType !== 'all' && contractTypeValue(s) !== filters.contractType) return false;
@@ -2915,7 +2995,6 @@ function renderPriorityWatchlist(rows, nearMiss) {
                 <div class="index-simple-status ${state.className}">${state.label}</div>
                 <div class="index-simple-label" style="margin-top:8px;">Direction</div>
                 <div class="index-simple-direction ${directionClass(direction)}">${renderDirectionText(direction)}</div>
-                ${renderReadinessBar(setup)}
               </div>
               ${renderTradePlanBlock(setup)}
               ${renderPositionManagement(setup)}
@@ -2931,24 +3010,33 @@ function renderPriorityWatchlist(rows, nearMiss) {
 function simpleStatus(setup) {
   const grade = setupGradeValue(setup);
   const entryStatus = setup.entryStatus || 'Waiting';
-  const timing = entryTimingValue(setup);
-  const action = actionPriorityForSetup(setup).value;
   const setupStatus = String(setup.setup_status || '').toUpperCase();
   const stockStatus = String(setupStatusValue(setup) || '').toUpperCase();
   const tradeStage = String(setup.trade_eval?.trade_stage || '').toUpperCase();
-  const triggerConfirmed = Boolean(setup.trade_eval?.trigger_confirmed || setup.confirmationStarted);
-  const tradeableConfirmed = Boolean(setup.trade_eval?.b_plus_tradeable || setup.trade_eval?.a_plus_ready);
+  const triggerConfirmed = Boolean(setup.trade_eval?.trigger_confirmed || setup.trade_eval?.a_plus_ready);
+  const bPlusTradeable = Boolean(setup.trade_eval?.b_plus_tradeable);
   const legacyNoTrade = tradeStage.includes('RANGE') || tradeStage.includes('NO TRADE');
+  const building = tradeStage.includes('BUILDING') || tradeStage.includes('WATCHLIST');
+  const hasPlan = hasValidTradePlan(setup);
+  const hasDirection = Boolean(setup.direction);
 
-  if (entryStatus === 'Too Far') return { label: 'TOO LATE', className: 'too-late' };
-  if (grade === 'C' || setupStatus === 'SKIPPED' || stockStatus.includes('RANGE') || stockStatus.includes('CHOPPY') || !setup.direction || legacyNoTrade) {
+  if (!hasDirection || grade === 'C' || setupStatus === 'SKIPPED' || stockStatus.includes('RANGE') || stockStatus.includes('CHOPPY') || legacyNoTrade) {
     return { label: 'SKIP', className: 'skip' };
   }
-  if (timing === 'Entry Triggered' || triggerConfirmed || tradeableConfirmed || action === 'Review Now') {
+  if (entryStatus === 'Too Far') return { label: 'TOO LATE', className: 'too-late' };
+  if (hasPlan && (triggerConfirmed || (bPlusTradeable && entryStatus === 'Tradeable'))) {
     return { label: 'ENTER NOW', className: 'enter-now' };
   }
-  if (entryStatus === 'Tradeable' || entryStatus === 'Near Entry') return { label: 'WAIT', className: 'wait' };
+  if (hasPlan && (entryStatus === 'Tradeable' || entryStatus === 'Near Entry')) return { label: 'ALMOST READY', className: 'almost-ready' };
+  if (building || entryStatus === 'Waiting' || hasDirection) return { label: 'WAIT', className: 'wait' };
   return { label: 'WAIT', className: 'wait' };
+}
+
+function hasValidTradePlan(setup) {
+  return ['entry', 'sl', 'tp1'].every(key => {
+    const value = Number(setup?.[key]);
+    return Number.isFinite(value);
+  });
 }
 
 function setupProgressState(setup) {
@@ -2958,7 +3046,9 @@ function setupProgressState(setup) {
   const phase = setupPhase(setup);
   const distanceAtr = Number(setup.distanceFromEntryAtr);
   const hasDirection = Boolean(setup.direction);
-  const confirmationStarted = Boolean(setup.confirmationStarted || setup.trade_eval?.trigger_confirmed);
+  const tradeStage = String(setup.trade_eval?.trade_stage || '').toUpperCase();
+  const building = tradeStage.includes('BUILDING') || tradeStage.includes('WATCHLIST');
+  const confirmationStarted = Boolean(setup.confirmationStarted || setup.trade_eval?.trigger_confirmed || setup.trade_eval?.rejection_confirmed);
 
   if (status.label === 'ENTER NOW') {
     return { stage: 5, label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', percent: 100 };
@@ -2966,8 +3056,11 @@ function setupProgressState(setup) {
   if (status.label === 'SKIP' || status.label === 'TOO LATE') {
     return { stage: 0, label: 'SKIP', bucket: 'SKIP', className: 'skip', percent: 0 };
   }
-  if (entryStatus === 'Tradeable' || entryStatus === 'Near Entry' || confirmationStarted) {
-    return { stage: 4, label: 'Almost Ready', bucket: 'ALMOST_READY', className: 'almost-ready', percent: entryStatus === 'Tradeable' ? 95 : 85 };
+  if (status.label === 'ALMOST READY' || entryStatus === 'Tradeable' || entryStatus === 'Near Entry') {
+    return { stage: 4, label: 'Almost Ready', bucket: 'ALMOST_READY', className: 'almost-ready', percent: entryStatus === 'Tradeable' || confirmationStarted ? 95 : 85 };
+  }
+  if (building) {
+    return { stage: 3, label: 'Setup Building', bucket: 'WAITING', className: 'wait', percent: 65 };
   }
   if (Number.isFinite(distanceAtr) && distanceAtr <= 1) {
     return { stage: 3, label: 'Setup Building', bucket: 'WAITING', className: 'wait', percent: 60 };
@@ -3261,6 +3354,157 @@ function renderBestContractBlock(setup) {
     </div>`;
 }
 
+function actionableExecutionRows() {
+  return scannerRows
+    .filter(setup => setupProgressState(setup).bucket === 'ENTER_NOW')
+    .sort((a, b) => String(a.ticker || '').localeCompare(String(b.ticker || '')));
+}
+
+function bestContractCost(setup) {
+  const contract = setup.best_contract || {};
+  const option = setup.option || {};
+  const suggested = setup.suggested_contract || {};
+  const fallback = setup.contract || {};
+  return Number(firstPresent(
+    contract.ask,
+    contract.mark,
+    contract.mid,
+    contract.lastPrice,
+    contract.last_price,
+    option.ask,
+    option.mark,
+    option.mid,
+    suggested.ask,
+    suggested.mark,
+    suggested.mid,
+    fallback.ask,
+    fallback.mark,
+    fallback.mid
+  ));
+}
+
+function executionContractInfo(setup) {
+  const contract = setup.best_contract || {};
+  const display = bestContractDisplay(setup);
+  const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
+  const strikeValue = Number(contract.strike);
+  const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
+  const expiry = contract.expiry || '';
+  const cost = bestContractCost(setup);
+  return {
+    available: Boolean(contract.available),
+    expiry,
+    expiryText: formatShortDate(expiry),
+    strike,
+    type,
+    cost,
+    costText: Number.isFinite(cost) ? fmtMoney(cost) : 'Price unavailable',
+    quality: String(contract.execution || '').toLowerCase() === 'excellent' ? '✅ Excellent' : contract.available ? '⚠️ Fair' : 'Unavailable',
+    qualityClass: String(contract.execution || '').toLowerCase() === 'excellent' ? 'excellent' : 'fair',
+    label: display.main,
+  };
+}
+
+function executionRiskText(setup, qty = 1) {
+  const cost = executionContractInfo(setup).cost;
+  const quantity = Math.max(1, Number.parseInt(qty, 10) || 1);
+  if (!Number.isFinite(cost)) return 'Risk unavailable';
+  return `Estimated risk: ${fmtMoney(cost * 100 * quantity)}`;
+}
+
+function updateExecutionRisk(idx) {
+  const setup = actionableExecutionRows()[idx];
+  const qty = document.getElementById(`executionQty-${idx}`)?.value || 1;
+  const el = document.getElementById(`executionRisk-${idx}`);
+  if (setup && el) el.textContent = executionRiskText(setup, qty);
+}
+
+function executionTradePlanText(setup, qty = 1) {
+  const contract = executionContractInfo(setup);
+  const quantity = Math.max(1, Number.parseInt(qty, 10) || 1);
+  return [
+    `Ticker: ${setup.ticker || '—'}`,
+    `Direction: ${renderDirectionText(setup.direction)}`,
+    `Expiration: ${contract.expiry || 'Unavailable'}`,
+    `Strike: ${contract.strike}`,
+    `Type: ${contract.type || 'Unavailable'}`,
+    `Scanner Grade: ${simpleSetupLabel(setupGradeValue(setup))}`,
+    `Entry: ${fmtMoney(setup.entry)}`,
+    `Stop: ${fmtMoney(setup.sl)}`,
+    `Target: ${fmtMoney(setup.tp1)}`,
+    `Contract Quality: ${contract.quality.replace(/[✅⚠️]/g, '').trim() || 'Unavailable'}`,
+    `Quantity: ${quantity}`,
+    `Estimated Risk: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Risk unavailable'}`,
+  ].join('\n');
+}
+
+async function copyExecutionTradePlan(idx) {
+  const setup = actionableExecutionRows()[idx];
+  if (!setup) return;
+  const qty = document.getElementById(`executionQty-${idx}`)?.value || 1;
+  const text = executionTradePlanText(setup, qty);
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Trade plan copied');
+  } catch {
+    window.prompt('Copy trade plan', text);
+  }
+}
+
+function openRobinhood() {
+  window.open('https://robinhood.com/', '_blank', 'noopener,noreferrer');
+}
+
+function renderExecutionTab() {
+  const list = document.getElementById('executionList');
+  const summary = document.getElementById('executionSummary');
+  if (!list || !summary) return;
+  const rows = actionableExecutionRows();
+  summary.textContent = rows.length
+    ? `${rows.length} actionable trade${rows.length === 1 ? '' : 's'} ready for handoff.`
+    : 'No ENTER NOW trades loaded. Run a scan or wait for an actionable setup.';
+  if (!rows.length) {
+    list.innerHTML = '<div class="execution-empty">No actionable ENTER NOW trades right now.</div>';
+    return;
+  }
+  list.innerHTML = rows.map((setup, idx) => {
+    const contract = executionContractInfo(setup);
+    const direction = renderDirectionText(setup.direction);
+    return `
+      <div class="execution-card">
+        <div class="execution-card-head">
+          <div>
+            <div class="execution-ticker ticker-with-direction">${escapeHtml(setup.ticker || '—')} ${renderDirectionMarker(setup.direction)}</div>
+            <div class="execution-grade">${readinessStars(setup)} ${simpleSetupLabel(setupGradeValue(setup))}</div>
+          </div>
+          <div class="execution-status">ENTER NOW</div>
+        </div>
+        <div class="execution-section">
+          <div class="execution-section-title">Trade Plan</div>
+          <div class="execution-line"><span>Direction</span><span class="${directionClass(setup.direction)}">${escapeHtml(direction)}</span></div>
+          <div class="execution-line"><span>Entry</span><span>${fmtMoney(setup.entry)}</span></div>
+          <div class="execution-line"><span>Stop</span><span>${fmtMoney(setup.sl)}</span></div>
+          <div class="execution-line"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
+        </div>
+        <div class="execution-section">
+          <div class="execution-section-title">Best Contract</div>
+          <div class="execution-contract-main">${escapeHtml(contract.label)}</div>
+          <div class="execution-contract-sub">Estimated cost: ${escapeHtml(contract.costText)}</div>
+          <div class="execution-quality ${contract.qualityClass}">Contract Quality: ${escapeHtml(contract.quality)}</div>
+          <div class="execution-risk-row">
+            <label class="execution-section-title" for="executionQty-${idx}">Quantity</label>
+            <input id="executionQty-${idx}" type="number" min="1" step="1" value="1" oninput="updateExecutionRisk(${idx})" />
+          </div>
+          <div id="executionRisk-${idx}" class="execution-risk">${executionRiskText(setup, 1)}</div>
+        </div>
+        <div class="execution-actions">
+          <button onclick="copyExecutionTradePlan(${idx})">Copy Trade Plan</button>
+          <button class="btn-secondary" onclick="openRobinhood()">Open Robinhood</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
 function earningsDisplay(setup) {
   const earnings = setup.earnings || {};
   const status = String(earnings.status || '').toLowerCase();
@@ -3499,7 +3743,6 @@ function renderCard(s) {
         <div class="index-simple-status ${state.className}">${state.label}</div>
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
         <div class="index-simple-direction ${directionClass(directionLabel)}">${renderDirectionText(directionLabel)}</div>
-        ${renderReadinessBar(s)}
       </div>
       ${renderTradePlanBlock(s)}
       ${renderPositionManagement(s)}
