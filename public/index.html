@@ -3263,11 +3263,19 @@ function renderBestContractBlock(setup) {
 
 function earningsDisplay(setup) {
   const earnings = setup.earnings || {};
+  const status = String(earnings.status || '').toLowerCase();
+  if (earnings.loading || status === 'loading' || status === 'pending') {
+    return {
+      className: 'earnings-neutral',
+      main: 'Loading...',
+      sub: '',
+    };
+  }
   if (!earnings.loaded || !earnings.date) {
     return {
       className: 'earnings-neutral',
-      main: 'Not loaded',
-      sub: 'Earnings date unavailable',
+      main: 'Unavailable',
+      sub: '',
     };
   }
   const days = Number(earnings.days_until);
@@ -3276,16 +3284,15 @@ function earningsDisplay(setup) {
     return {
       className: 'earnings-neutral',
       main: dateText,
-      sub: 'Days unavailable',
+      sub: '',
     };
   }
   const className = days <= 7 ? 'earnings-high' : days <= 14 ? 'earnings-moderate' : 'earnings-neutral';
   const dayText = days === 0 ? 'today' : days === 1 ? '1 day away' : `${days} days away`;
-  const caution = days <= 7 ? 'High caution' : days <= 14 ? 'Moderate caution' : 'Neutral';
   return {
     className,
-    main: `${dateText} · ${dayText}`,
-    sub: caution,
+    main: dateText,
+    sub: dayText,
   };
 }
 
@@ -3295,7 +3302,7 @@ function renderEarningsBlock(setup) {
     <div class="earnings-block ${earnings.className}">
       <div class="index-simple-label">Earnings</div>
       <div class="earnings-main">${escapeHtml(earnings.main)}</div>
-      <div class="earnings-sub">${escapeHtml(earnings.sub)}</div>
+      ${earnings.sub ? `<div class="earnings-sub">${escapeHtml(earnings.sub)}</div>` : ''}
     </div>`;
 }
 
