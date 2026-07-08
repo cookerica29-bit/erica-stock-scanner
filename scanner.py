@@ -57,6 +57,8 @@ _finviz_cache = {"tickers": [], "fetched_at": None}
 FINVIZ_CACHE_TTL = timedelta(hours=6)
 _option_chain_cache = {}
 OPTION_CHAIN_CACHE_TTL = timedelta(minutes=30)
+_earnings_cache = {}
+EARNINGS_CACHE_TTL = timedelta(hours=6)
 
 
 def get_finviz_watchlist() -> list:
@@ -224,6 +226,106 @@ def _safe_int(value):
         return int(value)
     except Exception:
         return None
+
+
+def _coerce_earnings_date(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) and value:
+        for item in value:
+            parsed = _coerce_earnings_date(item)
+            if parsed:
+                return parsed
+        return None
+    if isinstance(value, pd.Series):
+        for item in value.dropna().tolist():
+            parsed = _coerce_earnings_date(item)
+            if parsed:
+                return parsed
+        return None
+    if isinstance(value, pd.DataFrame):
+        for column in ["Earnings Date", "Earnings", "Date"]:
+            if column in value.columns:
+                parsed = _coerce_earnings_date(value[column])
+                if parsed:
+                    return parsed
+        return None
+    try:
+        timestamp = pd.to_datetime(value, errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(timestamp):
+        return None
+    try:
+        return timestamp.date()
+    except Exception:
+        return None
+
+
+def _extract_earnings_from_calendar(calendar):
+    if calendar is None:
+        return None
+    if isinstance(calendar, dict):
+        for key in ["Earnings Date", "Earnings", "Next Earnings Date"]:
+            parsed = _coerce_earnings_date(calendar.get(key))
+            if parsed:
+                return parsed
+        return None
+    if isinstance(calendar, pd.DataFrame):
+        return _coerce_earnings_date(calendar)
+    return None
+
+
+def _next_future_date(values):
+    dates = []
+    today = datetime.now().date()
+    try:
+        for value in list(values):
+            parsed = _coerce_earnings_date(value)
+            if parsed and parsed >= today:
+                dates.append(parsed)
+    except Exception:
+        return None
+    return min(dates) if dates else None
+
+
+def _earnings_for_ticker(ticker: str) -> dict:
+    now = datetime.utcnow()
+    cached = _earnings_cache.get(ticker)
+    if cached and now - cached.get("fetched_at", now) < EARNINGS_CACHE_TTL:
+        return dict(cached.get("data", {}))
+
+    data = {
+        "loaded": False,
+        "date": None,
+        "days_until": None,
+        "source": "unavailable",
+    }
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        earnings_date = None
+        try:
+            earnings_dates = ticker_obj.get_earnings_dates(limit=1)
+            if earnings_dates is not None:
+                earnings_date = _next_future_date(earnings_dates.index) or _coerce_earnings_date(earnings_dates.index)
+        except Exception:
+            earnings_date = None
+        if not earnings_date:
+            earnings_date = _extract_earnings_from_calendar(getattr(ticker_obj, "calendar", None))
+        if earnings_date:
+            today = datetime.now().date()
+            days_until = (earnings_date - today).days
+            data = {
+                "loaded": True,
+                "date": earnings_date.strftime("%Y-%m-%d"),
+                "days_until": days_until,
+                "source": "yfinance",
+            }
+    except Exception as e:
+        logger.warning(f"[earnings] fetch failed for {ticker}: {e}")
+
+    _earnings_cache[ticker] = {"fetched_at": now, "data": data}
+    return dict(data)
 
 
 def _option_symbol_from_row(ticker: str, expiry: str, strike: float, option_type: str, row: pd.Series) -> str:
@@ -2246,6 +2348,7 @@ def _enrich_stock_scout_fields(
         "setupGradeReason": setup_grade_reason,
         "confirmationStarted": confirmation_started,
         "confirmationReason": confirmation_reason,
+        "earnings": _earnings_for_ticker(result.get("ticker") or ""),
     })
     return result
 

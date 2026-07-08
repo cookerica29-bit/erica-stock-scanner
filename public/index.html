@@ -455,6 +455,20 @@
   .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; }
   .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; }
   .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
+  .earnings-block {
+    background:rgba(2,6,23,0.2);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:7px;
+    margin-top:9px;
+    padding:9px;
+  }
+  .earnings-main { color:var(--text); font-size:13px; font-weight:900; margin-top:3px; }
+  .earnings-sub { color:var(--muted); font-size:11px; margin-top:3px; }
+  .earnings-block.earnings-high { border-color:rgba(255,45,85,0.45); background:rgba(255,45,85,0.08); }
+  .earnings-block.earnings-high .earnings-main { color:#ff2d55; }
+  .earnings-block.earnings-moderate { border-color:rgba(251,191,36,0.45); background:rgba(251,191,36,0.08); }
+  .earnings-block.earnings-moderate .earnings-main { color:#fbbf24; }
+  .earnings-block.earnings-neutral .earnings-main { color:#cbd5e1; }
   .index-why { margin-top:10px; }
   .index-why summary { color:#93c5fd; cursor:pointer; font-size:11px; font-weight:850; }
   .index-why-list { color:var(--muted); line-height:1.45; margin:7px 0 0; padding-left:16px; }
@@ -757,7 +771,9 @@
     .index-plan-row span,
     .index-contract-main,
     .index-contract-sub,
-    .index-contract-note {
+    .index-contract-note,
+    .earnings-main,
+    .earnings-sub {
       min-width: 0;
       overflow-wrap: anywhere;
     }
@@ -2895,6 +2911,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
               ${renderTradePlanBlock(setup)}
               ${renderPositionManagement(setup)}
               ${renderSuggestedContractBlock(setup)}
+              ${renderEarningsBlock(setup)}
               ${renderCollapsedWhyBlock(why)}
             </div>`;
         }).join('')}
@@ -3195,6 +3212,44 @@ function renderSuggestedContractBlock(setup) {
     </div>`;
 }
 
+function earningsDisplay(setup) {
+  const earnings = setup.earnings || {};
+  if (!earnings.loaded || !earnings.date) {
+    return {
+      className: 'earnings-neutral',
+      main: 'Not loaded',
+      sub: 'Earnings date unavailable',
+    };
+  }
+  const days = Number(earnings.days_until);
+  const dateText = formatShortDate(earnings.date);
+  if (!Number.isFinite(days)) {
+    return {
+      className: 'earnings-neutral',
+      main: dateText,
+      sub: 'Days unavailable',
+    };
+  }
+  const className = days <= 7 ? 'earnings-high' : days <= 14 ? 'earnings-moderate' : 'earnings-neutral';
+  const dayText = days === 0 ? 'today' : days === 1 ? '1 day away' : `${days} days away`;
+  const caution = days <= 7 ? 'High caution' : days <= 14 ? 'Moderate caution' : 'Neutral';
+  return {
+    className,
+    main: `${dateText} · ${dayText}`,
+    sub: caution,
+  };
+}
+
+function renderEarningsBlock(setup) {
+  const earnings = earningsDisplay(setup);
+  return `
+    <div class="earnings-block ${earnings.className}">
+      <div class="index-simple-label">Earnings</div>
+      <div class="earnings-main">${escapeHtml(earnings.main)}</div>
+      <div class="earnings-sub">${escapeHtml(earnings.sub)}</div>
+    </div>`;
+}
+
 function renderCollapsedWhyBlock(items) {
   return `
     <details class="index-why" onclick="event.stopPropagation()">
@@ -3393,6 +3448,7 @@ function renderCard(s) {
       ${renderTradePlanBlock(s)}
       ${renderPositionManagement(s)}
       ${renderSuggestedContractBlock(s)}
+      ${renderEarningsBlock(s)}
       ${renderCollapsedWhyBlock(why)}
       ${renderMoreDetailsBlock(s, {
         trend,
