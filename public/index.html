@@ -3083,6 +3083,13 @@ function renderContractTypeText(type) {
   return `<span class="direction-value ${className}">${escapeHtml(label)}</span>`;
 }
 
+function contractTypePlainText(type) {
+  const raw = String(type || '').toUpperCase();
+  if (raw === 'CALL') return 'Call';
+  if (raw === 'PUT') return 'Put';
+  return raw ? formatDisplayLabel(raw) : 'N/A';
+}
+
 function contractTypeValue(setup) {
   const raw = String(setup?.option?.type || '').toUpperCase();
   if (raw === 'CALL' || raw === 'PUT') return raw;
@@ -3204,7 +3211,7 @@ function suggestedContractText(setup) {
   const priceText = Number.isFinite(price) ? `≈ ${fmtMoney(price)}` : 'Price not loaded';
   const expiry = selectedOptionExpiry(option, suggested, contract);
   return {
-    main: `${escapeHtml(strike)} ${renderContractTypeText(type)}`.trim(),
+    main: `${strike} ${contractTypePlainText(type)}`.trim(),
     sub: `${formatShortDate(expiry)} · ${priceText}`,
     fallbackNote: optionFallbackNote(option, suggested, contract),
   };
@@ -3228,19 +3235,19 @@ function bestContractDisplay(setup) {
       className: 'none',
       label: 'Options',
       main: '⚠️ No clean contract available',
-      execution: '⚠️ Review liquidity manually',
+      execution: '',
     };
   }
   const strikeValue = Number(contract.strike);
   const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
-  const type = renderContractTypeText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
+  const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
   const expiry = formatShortDate(contract.expiry);
   const execution = String(contract.execution || '').toLowerCase() === 'excellent' ? '✅ Excellent' : '⚠️ Fair';
   return {
     className: String(contract.execution || '').toLowerCase() === 'excellent' ? 'excellent' : 'fair',
     label: 'Best Contract',
-    main: `${expiry} · ${strike} ${type}`.trim(),
-    execution: `Execution: ${execution}`,
+    main: `${expiry} · $${strike} ${type}`.trim(),
+    execution: `Contract Quality: ${execution}`,
   };
 }
 
@@ -3250,7 +3257,7 @@ function renderBestContractBlock(setup) {
     <div class="index-contract best-contract ${contract.className}">
       <div class="index-simple-label">${contract.label}</div>
       <div class="index-contract-main">${escapeHtml(contract.main)}</div>
-      <div class="best-execution">${escapeHtml(contract.execution)}</div>
+      ${contract.execution ? `<div class="best-execution">${escapeHtml(contract.execution)}</div>` : ''}
     </div>`;
 }
 
