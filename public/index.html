@@ -1597,10 +1597,8 @@
 <div class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
   <button class="tab-btn" onclick="switchTab('execution')">Execution</button>
-  <button class="tab-btn" onclick="switchTab('trends')">Trending List</button>
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
-  <button class="tab-btn" onclick="switchTab('video')">Video Studio</button>
   <button class="tab-btn" onclick="switchTab('terms')">Terms</button>
 </div>
 
@@ -2373,21 +2371,20 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
-  const tabs = ['scanner','execution','trends','journal','analytics','video','terms'];
+  const tabs = ['scanner','execution','journal','analytics','terms'];
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
     b.classList.toggle('active', tabs[i] === tab);
   });
   document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
   document.getElementById('execution-panel').classList.toggle('active', tab === 'execution');
-  document.getElementById('trends-panel').classList.toggle('active', tab === 'trends');
+  document.getElementById('trends-panel')?.classList.remove('active');
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
   document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
-  document.getElementById('video-panel').classList.toggle('active', tab === 'video');
+  document.getElementById('video-panel')?.classList.remove('active');
   document.getElementById('terms-panel').classList.toggle('active', tab === 'terms');
   if (tab === 'execution') renderExecutionTab();
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics') renderAnalytics();
-  if (tab === 'video') renderVideoStudio();
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────

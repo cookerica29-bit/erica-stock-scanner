@@ -5,6 +5,7 @@ import numpy as np
 import logging
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
@@ -66,7 +67,7 @@ STOCK_UNIVERSE_FILTER = {
     "min_price": 10.0,
     "min_avg_volume": 1_000_000,
     "avg_volume_lookback": 30,
-    "min_option_expirations": 2,
+    "min_option_expirations": 1,
     "exclude_non_major_etfs": True,
     "allowlist": {
         "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
@@ -83,14 +84,65 @@ MAJOR_LIQUID_ETFS = {
 
 _finviz_cache = {"tickers": [], "fetched_at": None}
 FINVIZ_CACHE_TTL = timedelta(hours=6)
+_price_cache = {}
+PRICE_CACHE_TTL = timedelta(minutes=3)
 _option_chain_cache = {}
-OPTION_CHAIN_CACHE_TTL = timedelta(minutes=30)
+OPTION_CHAIN_CACHE_TTL = timedelta(minutes=8)
 _best_contract_cache = {}
-BEST_CONTRACT_CACHE_TTL = timedelta(minutes=12)
+BEST_CONTRACT_CACHE_TTL = timedelta(minutes=8)
 _option_chain_fetch_semaphore = threading.BoundedSemaphore(4)
 _earnings_cache = {}
-EARNINGS_CACHE_TTL = timedelta(hours=6)
+EARNINGS_CACHE_TTL = timedelta(hours=12)
 EARNINGS_UNAVAILABLE_CACHE_TTL = timedelta(hours=24)
+_cache_lock = threading.RLock()
+_cache_stats = Counter()
+_background_executor = ThreadPoolExecutor(max_workers=3)
+_background_jobs = set()
+_background_jobs_lock = threading.Lock()
+_background_refresh_started = False
+_background_last_refresh = {}
+
+
+def _cache_record(name: str, outcome: str) -> None:
+    with _cache_lock:
+        _cache_stats[f"{name}_{outcome}"] += 1
+    logger.debug("[cache] %s %s", name, outcome)
+
+
+def _cache_snapshot(reset: bool = True) -> dict:
+    with _cache_lock:
+        snapshot = dict(_cache_stats)
+        if reset:
+            _cache_stats.clear()
+    return snapshot
+
+
+def _submit_background_job(key: tuple, fn, *args, **kwargs) -> None:
+    with _background_jobs_lock:
+        if key in _background_jobs:
+            return
+        _background_jobs.add(key)
+
+    def _run():
+        try:
+            fn(*args, **kwargs)
+        except Exception as exc:
+            logger.warning("[background] refresh failed for %s: %s", key, exc)
+        finally:
+            with _background_jobs_lock:
+                _background_jobs.discard(key)
+
+    _background_executor.submit(_run)
+
+
+def _periodic_refresh_due(key: str, ttl_seconds: int) -> bool:
+    now = time.monotonic()
+    with _background_jobs_lock:
+        last = _background_last_refresh.get(key, 0)
+        if now - last < ttl_seconds:
+            return False
+        _background_last_refresh[key] = now
+        return True
 
 
 def get_finviz_watchlist() -> list:
@@ -192,19 +244,46 @@ def _fallback_option(ticker: str, direction: str, entry: float, reason: str = "o
 
 
 def _option_expirations_for_ticker(ticker: str) -> list:
+    ticker = str(ticker or "").upper()
     now = datetime.utcnow()
-    cached = _option_chain_cache.get(ticker)
-    if cached and now - cached.get("fetched_at", now) < OPTION_CHAIN_CACHE_TTL:
-        return list(cached.get("expirations", []))
+    with _cache_lock:
+        cached = _option_chain_cache.get(ticker)
+        if cached:
+            expirations = list(cached.get("expirations", []))
+            age = now - cached.get("fetched_at", now)
+            if age < OPTION_CHAIN_CACHE_TTL:
+                _cache_record("option_chains", "hit")
+                return expirations
+            if expirations:
+                _cache_record("option_chains", "stale")
+                _submit_background_job(("option_expirations", ticker), _refresh_option_expirations, ticker)
+                return expirations
+        _cache_record("option_chains", "miss")
+
+    return _fetch_option_expirations(ticker)
+
+
+def _fetch_option_expirations(ticker: str) -> list:
+    ticker = str(ticker or "").upper()
+    now = datetime.utcnow()
 
     expirations = []
     try:
+        _cache_record("api_option_expirations", "call")
         expirations = list(yf.Ticker(ticker).options or [])
     except Exception as e:
         logger.warning(f"[options] expiration fetch failed for {ticker}: {e}")
 
-    _option_chain_cache[ticker] = {"fetched_at": now, "expirations": expirations, "chains": {}}
+    with _cache_lock:
+        cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
+        cached["fetched_at"] = now
+        cached["expirations"] = expirations
+        cached.setdefault("chains", {})
     return expirations
+
+
+def _refresh_option_expirations(ticker: str) -> None:
+    _fetch_option_expirations(ticker)
 
 
 def _select_expiration(expirations: list, target_days: int = 37) -> Optional[str]:
@@ -224,23 +303,47 @@ def _select_expiration(expirations: list, target_days: int = 37) -> Optional[str
 
 
 def _option_chain_for_ticker(ticker: str, expiry: str):
+    ticker = str(ticker or "").upper()
     now = datetime.utcnow()
-    cached = _option_chain_cache.get(ticker)
-    if cached and now - cached.get("fetched_at", now) < OPTION_CHAIN_CACHE_TTL:
-        chains = cached.setdefault("chains", {})
-        if expiry in chains:
-            return chains[expiry]
+    with _cache_lock:
+        cached = _option_chain_cache.get(ticker)
+        if cached:
+            chains = cached.setdefault("chains", {})
+            if expiry in chains:
+                chain = chains[expiry]
+                age = now - cached.get("fetched_at", now)
+                if age < OPTION_CHAIN_CACHE_TTL:
+                    _cache_record("option_chains", "hit")
+                    return chain
+                _cache_record("option_chains", "stale")
+                _submit_background_job(("option_chain", ticker, expiry), _refresh_option_chain, ticker, expiry)
+                return chain
+        _cache_record("option_chains", "miss")
+
+    return _fetch_option_chain(ticker, expiry)
+
+
+def _fetch_option_chain(ticker: str, expiry: str):
+    ticker = str(ticker or "").upper()
+    now = datetime.utcnow()
 
     try:
         with _option_chain_fetch_semaphore:
+            _cache_record("api_option_chain", "call")
             chain = yf.Ticker(ticker).option_chain(expiry)
     except Exception as e:
         logger.warning(f"[options] chain fetch failed for {ticker} {expiry}: {e}")
         return None
 
-    cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
-    cached.setdefault("chains", {})[expiry] = chain
+    with _cache_lock:
+        cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
+        cached["fetched_at"] = now
+        cached.setdefault("chains", {})[expiry] = chain
     return chain
+
+
+def _refresh_option_chain(ticker: str, expiry: str) -> None:
+    _fetch_option_chain(ticker, expiry)
 
 
 def _latest_close(df: Optional[pd.DataFrame]) -> Optional[float]:
@@ -399,12 +502,26 @@ def _next_future_date(values):
 def _earnings_for_ticker(ticker: str) -> dict:
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
-    cached = _earnings_cache.get(ticker)
-    if cached:
-        cached_data = cached.get("data", {})
-        ttl = EARNINGS_CACHE_TTL if cached_data.get("loaded") else EARNINGS_UNAVAILABLE_CACHE_TTL
-        if now - cached.get("fetched_at", now) < ttl:
-            return dict(cached_data)
+    with _cache_lock:
+        cached = _earnings_cache.get(ticker)
+        if cached:
+            cached_data = cached.get("data", {})
+            ttl = EARNINGS_CACHE_TTL if cached_data.get("loaded") else EARNINGS_UNAVAILABLE_CACHE_TTL
+            if now - cached.get("fetched_at", now) < ttl:
+                _cache_record("earnings", "hit")
+                return dict(cached_data)
+            if cached_data:
+                _cache_record("earnings", "stale")
+                _submit_background_job(("earnings", ticker), _refresh_earnings, ticker)
+                return dict(cached_data)
+        _cache_record("earnings", "miss")
+
+    return _fetch_earnings_for_ticker(ticker)
+
+
+def _fetch_earnings_for_ticker(ticker: str) -> dict:
+    ticker = str(ticker or "").upper()
+    now = datetime.utcnow()
 
     data = {
         "loaded": False,
@@ -413,10 +530,12 @@ def _earnings_for_ticker(ticker: str) -> dict:
         "source": "unavailable",
     }
     if ticker in NO_EARNINGS_SYMBOLS:
-        _earnings_cache[ticker] = {"fetched_at": now, "data": data}
+        with _cache_lock:
+            _earnings_cache[ticker] = {"fetched_at": now, "data": data}
         return dict(data)
 
     try:
+        _cache_record("api_earnings", "call")
         ticker_obj = yf.Ticker(ticker)
         earnings_date = None
         try:
@@ -439,8 +558,13 @@ def _earnings_for_ticker(ticker: str) -> dict:
     except Exception as e:
         logger.warning(f"[earnings] fetch failed for {ticker}: {e}")
 
-    _earnings_cache[ticker] = {"fetched_at": now, "data": data}
+    with _cache_lock:
+        _earnings_cache[ticker] = {"fetched_at": now, "data": data}
     return dict(data)
+
+
+def _refresh_earnings(ticker: str) -> None:
+    _fetch_earnings_for_ticker(ticker)
 
 
 def _option_symbol_from_row(ticker: str, expiry: str, strike: float, option_type: str, row: pd.Series) -> str:
@@ -551,7 +675,8 @@ def _contract_identity(contract: dict) -> tuple:
 
 
 def _apply_contract_stability(cache_key: tuple, fresh: dict, now: datetime) -> dict:
-    cached = _best_contract_cache.get(cache_key)
+    with _cache_lock:
+        cached = _best_contract_cache.get(cache_key)
     if not cached:
         return fresh
     previous = dict(cached.get("data", {}))
@@ -601,7 +726,8 @@ def _apply_contract_stability(cache_key: tuple, fresh: dict, now: datetime) -> d
 
 def _store_best_contract(cache_key: tuple, result: dict, now: datetime) -> dict:
     stable = _apply_contract_stability(cache_key, result, now)
-    _best_contract_cache[cache_key] = {"fetched_at": now, "data": stable}
+    with _cache_lock:
+        _best_contract_cache[cache_key] = {"fetched_at": now, "data": stable}
     return dict(stable)
 
 
@@ -659,15 +785,29 @@ def _score_contract_row(row: pd.Series, strike: float, entry: float, dte: int) -
     return score, metrics, diagnostics
 
 
-def _best_contract(ticker: str, direction: str, entry: float) -> dict:
+def _refresh_best_contract(ticker: str, direction: str, entry: float) -> None:
+    _best_contract(ticker, direction, entry, allow_stale=False, force_refresh=True)
+
+
+def _best_contract(ticker: str, direction: str, entry: float, *, allow_stale: bool = True, force_refresh: bool = False) -> dict:
     option_type = "CALL" if direction == "LONG" else "PUT"
     cache_key = _best_contract_cache_key(ticker, direction, entry)
     now = datetime.utcnow()
-    cached = _best_contract_cache.get(cache_key)
-    if cached and now - cached.get("fetched_at", now) < BEST_CONTRACT_CACHE_TTL:
-        cached_data = dict(cached.get("data", {}))
-        cached_data["cache"] = "hit"
-        return cached_data
+    with _cache_lock:
+        cached = _best_contract_cache.get(cache_key)
+        if cached and not force_refresh:
+            cached_data = dict(cached.get("data", {}))
+            age = now - cached.get("fetched_at", now)
+            if age < BEST_CONTRACT_CACHE_TTL:
+                _cache_record("best_contract", "hit")
+                cached_data["cache"] = "hit"
+                return cached_data
+            if allow_stale and cached_data:
+                _cache_record("best_contract", "stale")
+                cached_data["cache"] = "stale"
+                _submit_background_job(("best_contract", ticker, direction, cache_key[2]), _refresh_best_contract, ticker, direction, entry)
+                return cached_data
+        _cache_record("best_contract", "miss")
 
     expirations = _parsed_expirations(_option_expirations_for_ticker(ticker))
     if not expirations:
@@ -1730,7 +1870,7 @@ def _build_chart_coach(
 
 # ── Batch data helpers ────────────────────────────────────────────────────────
 
-def _batch_download(tickers: list, period: str, interval: str) -> dict:
+def _download_price_batch_raw(tickers: list, period: str, interval: str) -> dict:
     """
     Download OHLCV data for multiple tickers in a single yfinance call.
     Returns {ticker: DataFrame}.  Falls back gracefully on any per-ticker error.
@@ -1738,6 +1878,7 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
     if not tickers:
         return {}
     try:
+        _cache_record("api_prices", "call")
         raw = yf.download(
             tickers, period=period, interval=interval,
             progress=False, auto_adjust=True, group_by="ticker",
@@ -1765,6 +1906,119 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
             pass
 
     return result
+
+
+def _price_cache_key(ticker: str, period: str, interval: str) -> tuple:
+    return (str(ticker or "").upper(), period, interval)
+
+
+def _refresh_price_cache(tickers: list, period: str, interval: str) -> None:
+    symbols = list(dict.fromkeys([str(t).strip().upper() for t in tickers if str(t).strip()]))
+    if not symbols:
+        return
+    fetched = _download_price_batch_raw(symbols, period, interval)
+    now = datetime.utcnow()
+    with _cache_lock:
+        for ticker, df in fetched.items():
+            _price_cache[_price_cache_key(ticker, period, interval)] = {
+                "fetched_at": now,
+                "data": df,
+            }
+    logger.info("[cache] refreshed prices period=%s interval=%s tickers=%s/%s", period, interval, len(fetched), len(symbols))
+
+
+def _batch_download(tickers: list, period: str, interval: str) -> dict:
+    if not tickers:
+        return {}
+    symbols = list(dict.fromkeys([str(t).strip().upper() for t in tickers if str(t).strip()]))
+    now = datetime.utcnow()
+    result = {}
+    missing = []
+    stale = []
+
+    with _cache_lock:
+        for ticker in symbols:
+            key = _price_cache_key(ticker, period, interval)
+            cached = _price_cache.get(key)
+            if not cached:
+                missing.append(ticker)
+                _cache_record("prices", "miss")
+                continue
+            age = now - cached.get("fetched_at", now)
+            data = cached.get("data")
+            if data is None or getattr(data, "empty", True):
+                missing.append(ticker)
+                _cache_record("prices", "miss")
+                continue
+            result[ticker] = data.copy()
+            if age <= PRICE_CACHE_TTL:
+                _cache_record("prices", "hit")
+            else:
+                stale.append(ticker)
+                _cache_record("prices", "stale")
+
+    if stale:
+        _submit_background_job(("prices", period, interval, tuple(stale)), _refresh_price_cache, stale, period, interval)
+
+    if missing:
+        fetched = _download_price_batch_raw(missing, period, interval)
+        fetched_at = datetime.utcnow()
+        with _cache_lock:
+            for ticker, df in fetched.items():
+                _price_cache[_price_cache_key(ticker, period, interval)] = {
+                    "fetched_at": fetched_at,
+                    "data": df,
+                }
+                result[ticker] = df.copy()
+
+    return result
+
+
+def _refresh_cached_best_contracts(limit: int = 40) -> None:
+    with _cache_lock:
+        keys = list(_best_contract_cache.keys())[:limit]
+    for key in keys:
+        try:
+            ticker, direction, price_region = key
+            entry = float(price_region)
+        except Exception:
+            continue
+        _submit_background_job(("best_contract_periodic", ticker, direction, price_region), _refresh_best_contract, ticker, direction, entry)
+
+
+def _background_refresh_loop() -> None:
+    time.sleep(30)
+    while True:
+        try:
+            symbols = list(dict.fromkeys(WATCHLIST))
+            if _periodic_refresh_due("prices_1d", 180):
+                _submit_background_job(("prices_periodic", "1y", "1d"), _refresh_price_cache, symbols, "1y", "1d")
+            if _periodic_refresh_due("prices_1wk", 300):
+                _submit_background_job(("prices_periodic", "2y", "1wk"), _refresh_price_cache, symbols, "2y", "1wk")
+            if _periodic_refresh_due("prices_4h", 300):
+                _submit_background_job(("prices_periodic", "60d", "4h"), _refresh_price_cache, symbols, "60d", "4h")
+
+            if _periodic_refresh_due("option_expirations", 600):
+                for ticker in list(STOCK_UNIVERSE_FILTER.get("allowlist", []))[:24]:
+                    _submit_background_job(("option_expirations_periodic", ticker), _refresh_option_expirations, ticker)
+                _refresh_cached_best_contracts()
+
+            if _periodic_refresh_due("earnings", 6 * 60 * 60):
+                for ticker in [s for s in symbols if s not in NO_EARNINGS_SYMBOLS][:40]:
+                    _submit_background_job(("earnings_periodic", ticker), _refresh_earnings, ticker)
+        except Exception as exc:
+            logger.warning("[background] refresh loop error: %s", exc)
+        time.sleep(30)
+
+
+def _ensure_background_refresh_started() -> None:
+    global _background_refresh_started
+    with _background_jobs_lock:
+        if _background_refresh_started:
+            return
+        _background_refresh_started = True
+    thread = threading.Thread(target=_background_refresh_loop, daemon=True, name="kairos-market-cache-refresh")
+    thread.start()
 
 
 # ── Trending list analysis ───────────────────────────────────────────────────
@@ -2757,6 +3011,7 @@ def _enrich_stock_scout_fields(
 
 def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
     scan_start = time.perf_counter()
+    _ensure_background_refresh_started()
     if watchlist is None:
         watchlist = get_finviz_watchlist()
     else:
@@ -2821,13 +3076,14 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
     best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
     evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") != "not_evaluated")
     total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
+    cache_stats = _cache_snapshot()
     slow_contracts = [
         f"{r.get('ticker')}:{(r.get('_scan_timing') or {}).get('best_contract_ms', 0):.0f}ms"
         for r in all_results
         if (r.get("_scan_timing") or {}).get("best_contract_ms", 0) >= 750
     ][:8]
     logger.info(
-        "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s universe=%s/%s skipped=%s skip_reasons=%s slow_contracts=%s",
+        "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s universe=%s/%s skipped=%s skip_reasons=%s cache=%s slow_contracts=%s",
         total_ms,
         price_stage_ms,
         process_stage_ms,
@@ -2839,6 +3095,7 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
         original_count,
         len(skipped_symbols),
         skip_counts,
+        cache_stats,
         ", ".join(slow_contracts) if slow_contracts else "none",
     )
     return rows, near_miss
