@@ -3,6 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
@@ -57,6 +59,9 @@ _finviz_cache = {"tickers": [], "fetched_at": None}
 FINVIZ_CACHE_TTL = timedelta(hours=6)
 _option_chain_cache = {}
 OPTION_CHAIN_CACHE_TTL = timedelta(minutes=30)
+_best_contract_cache = {}
+BEST_CONTRACT_CACHE_TTL = timedelta(minutes=12)
+_option_chain_fetch_semaphore = threading.BoundedSemaphore(4)
 _earnings_cache = {}
 EARNINGS_CACHE_TTL = timedelta(hours=6)
 
@@ -200,7 +205,8 @@ def _option_chain_for_ticker(ticker: str, expiry: str):
             return chains[expiry]
 
     try:
-        chain = yf.Ticker(ticker).option_chain(expiry)
+        with _option_chain_fetch_semaphore:
+            chain = yf.Ticker(ticker).option_chain(expiry)
     except Exception as e:
         logger.warning(f"[options] chain fetch failed for {ticker} {expiry}: {e}")
         return None
@@ -399,6 +405,28 @@ def _parsed_expirations(expirations: list) -> list:
     return parsed
 
 
+def _price_region(entry: float) -> str:
+    value = float(entry or 0)
+    if value <= 0:
+        return "0"
+    bucket = max(value * 0.01, 0.5)
+    region = round(value / bucket) * bucket
+    return f"{region:.2f}"
+
+
+def _best_contract_cache_key(ticker: str, direction: str, entry: float) -> tuple:
+    return (str(ticker or "").upper(), str(direction or "").upper(), _price_region(entry))
+
+
+def _unclean_contract(reason: str, source: str = "not_evaluated") -> dict:
+    return {
+        "available": False,
+        "execution": "No Clean Contract",
+        "reason": reason,
+        "source": source,
+    }
+
+
 def _score_range(value, bands) -> int:
     if value is None:
         return 0
@@ -455,18 +483,23 @@ def _score_contract_row(row: pd.Series, strike: float, entry: float, dte: int) -
 
 def _best_contract(ticker: str, direction: str, entry: float) -> dict:
     option_type = "CALL" if direction == "LONG" else "PUT"
+    cache_key = _best_contract_cache_key(ticker, direction, entry)
+    now = datetime.utcnow()
+    cached = _best_contract_cache.get(cache_key)
+    if cached and now - cached.get("fetched_at", now) < BEST_CONTRACT_CACHE_TTL:
+        cached_data = dict(cached.get("data", {}))
+        cached_data["cache"] = "hit"
+        return cached_data
+
     expirations = _parsed_expirations(_option_expirations_for_ticker(ticker))
     if not expirations:
-        return {
-            "available": False,
-            "execution": "No Clean Contract",
-            "reason": "No option expirations available",
-            "source": "unavailable",
-        }
+        result = _unclean_contract("No option expirations available", "unavailable")
+        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
+        return dict(result)
 
     candidates = []
     target_dte = 37
-    for expiry, dte in sorted(expirations, key=lambda item: (abs(item[1] - target_dte), item[1]))[:5]:
+    for expiry, dte in sorted(expirations, key=lambda item: (abs(item[1] - target_dte), item[1]))[:3]:
         chain = _option_chain_for_ticker(ticker, expiry)
         if chain is None:
             continue
@@ -475,7 +508,8 @@ def _best_contract(ticker: str, direction: str, entry: float) -> dict:
             continue
         contracts = contracts.copy()
         contracts["strike_distance"] = (contracts["strike"].astype(float) - float(entry)).abs()
-        for _, row in contracts.sort_values(["strike_distance", "strike"]).head(8).iterrows():
+        contracts = contracts[contracts["strike_distance"] <= max(float(entry) * 0.10, 1.0)]
+        for _, row in contracts.sort_values(["strike_distance", "strike"]).head(6).iterrows():
             strike = _safe_float(row.get("strike"))
             if strike is None:
                 continue
@@ -492,62 +526,76 @@ def _best_contract(ticker: str, direction: str, entry: float) -> dict:
             })
 
     if not candidates:
-        return {
-            "available": False,
-            "execution": "No Clean Contract",
-            "reason": "No contracts returned near the ideal strike",
-            "source": "unavailable",
-        }
+        result = _unclean_contract("No contracts returned near the ideal strike", "unavailable")
+        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
+        return dict(result)
 
     best = max(candidates, key=lambda item: item["score"])
     diagnostics = best.get("diagnostics", {})
     spread_pct = diagnostics.get("spread_pct")
     distance_pct = diagnostics.get("distance_pct")
     if distance_pct is not None and distance_pct > 10:
-        return {
-            "available": False,
-            "execution": "No Clean Contract",
-            "reason": "Closest contract strike is too far from the ideal strike",
-            "source": "option_chain",
+        result = {
+            **_unclean_contract("Closest contract strike is too far from the ideal strike", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
         }
+        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
+        return dict(result)
     if spread_pct is None or spread_pct > 35:
-        return {
-            "available": False,
-            "execution": "No Clean Contract",
-            "reason": "Best contract spread is too wide or unavailable",
-            "source": "option_chain",
+        result = {
+            **_unclean_contract("Best contract spread is too wide or unavailable", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
         }
+        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
+        return dict(result)
     if (best.get("open_interest") or 0) < 25 and (best.get("volume") or 0) < 1:
-        return {
-            "available": False,
-            "execution": "No Clean Contract",
-            "reason": "Best contract liquidity is too thin",
-            "source": "option_chain",
+        result = {
+            **_unclean_contract("Best contract liquidity is too thin", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
         }
+        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
+        return dict(result)
 
     execution = "Excellent" if best["score"] >= 75 else "Fair" if best["score"] >= 55 else "No Clean Contract"
     if execution == "No Clean Contract":
-        return {
-            "available": False,
-            "execution": execution,
+        result = {
+            **_unclean_contract("Spread, liquidity, DTE, or strike distance did not meet minimum quality", "option_chain"),
             "reason": "Spread, liquidity, DTE, or strike distance did not meet minimum quality",
-            "source": "option_chain",
             "best_score": best["score"],
             "diagnostics": best.get("diagnostics", {}),
         }
+        _best_contract_cache[cache_key] = {"fetched_at": now, "data": result}
+        return dict(result)
 
     best.update({
         "available": True,
         "execution": execution,
         "source": "option_chain",
+        "cache": "miss",
     })
-    return best
+    _best_contract_cache[cache_key] = {"fetched_at": now, "data": best}
+    return dict(best)
+
+
+def _has_valid_trade_plan(result: dict) -> bool:
+    direction = str(result.get("direction") or "").upper()
+    if direction not in {"LONG", "SHORT"}:
+        return False
+    return all(_safe_float(result.get(key)) is not None for key in ("entry", "sl", "tp1"))
+
+
+def _should_enrich_best_contract(result: dict, setup_grade: str, entry_status: str) -> bool:
+    trade_stage = str((result.get("trade_eval") or {}).get("trade_stage") or "").upper()
+    if trade_stage in {"A+ READY", "B+ TRADEABLE"}:
+        return _has_valid_trade_plan(result)
+    if setup_grade not in {"A", "B"}:
+        return False
+    if entry_status not in {"Tradeable", "Near Entry"}:
+        return False
+    return _has_valid_trade_plan(result)
 
 
 # ── Price Action Functions ────────────────────────────────────────────────────
@@ -2490,6 +2538,23 @@ def _enrich_stock_scout_fields(
         setup_status,
     )
 
+    earnings_start = time.perf_counter()
+    earnings = _earnings_for_ticker(result.get("ticker") or "")
+    earnings_ms = round((time.perf_counter() - earnings_start) * 1000, 1)
+
+    best_contract_start = time.perf_counter()
+    if _should_enrich_best_contract(result, setup_grade, entry_status):
+        best_contract = _best_contract(result.get("ticker") or "", result.get("direction") or "", result.get("entry") or 0)
+    else:
+        best_contract = _unclean_contract("Best contract not evaluated for non-actionable setup", "not_evaluated")
+    best_contract_ms = round((time.perf_counter() - best_contract_start) * 1000, 1)
+
+    timing = result.setdefault("_scan_timing", {})
+    timing.update({
+        "earnings_ms": earnings_ms,
+        "best_contract_ms": best_contract_ms,
+    })
+
     result.update({
         "stockTrend": daily_direction,
         "trendDirection": daily_direction,
@@ -2513,25 +2578,29 @@ def _enrich_stock_scout_fields(
         "setupGradeReason": setup_grade_reason,
         "confirmationStarted": confirmation_started,
         "confirmationReason": confirmation_reason,
-        "earnings": _earnings_for_ticker(result.get("ticker") or ""),
-        "best_contract": _best_contract(result.get("ticker") or "", result.get("direction") or "", result.get("entry") or 0),
+        "earnings": earnings,
+        "best_contract": best_contract,
     })
     return result
 
 
 def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
+    scan_start = time.perf_counter()
     if watchlist is None:
         watchlist = get_finviz_watchlist()
     else:
         watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))[:200]
 
     # ── Step 1: batch-download all OHLCV data (3 network calls total) ─────────
+    price_stage_start = time.perf_counter()
     daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
     weekly_data = _batch_download(watchlist, period="2y",  interval="1wk")
     h4_data     = _batch_download(watchlist, period="60d", interval="4h")
+    price_stage_ms = round((time.perf_counter() - price_stage_start) * 1000, 1)
 
     # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
     rows, near_miss = [], []
+    process_stage_start = time.perf_counter()
 
     def _process(ticker: str):
         return scan_ticker(
@@ -2554,6 +2623,28 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
 
     rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
     near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
+    process_stage_ms = round((time.perf_counter() - process_stage_start) * 1000, 1)
+    all_results = [*rows, *near_miss]
+    earnings_ms = round(sum((r.get("_scan_timing") or {}).get("earnings_ms", 0) for r in all_results), 1)
+    best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
+    evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") != "not_evaluated")
+    total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
+    slow_contracts = [
+        f"{r.get('ticker')}:{(r.get('_scan_timing') or {}).get('best_contract_ms', 0):.0f}ms"
+        for r in all_results
+        if (r.get("_scan_timing") or {}).get("best_contract_ms", 0) >= 750
+    ][:8]
+    logger.info(
+        "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s slow_contracts=%s",
+        total_ms,
+        price_stage_ms,
+        process_stage_ms,
+        earnings_ms,
+        best_contract_ms,
+        evaluated_contracts,
+        len(all_results),
+        ", ".join(slow_contracts) if slow_contracts else "none",
+    )
     return rows, near_miss
 
 
@@ -2563,7 +2654,9 @@ def scan_ticker(
     _weekly_df: Optional[pd.DataFrame] = None,
     _h4_df: Optional[pd.DataFrame] = None,
 ) -> Optional[dict]:
+    ticker_start = time.perf_counter()
     ticker = ticker.upper()
+    price_trend_start = time.perf_counter()
     daily_result = analyze_ticker(
         ticker,
         _daily_df=_daily_df,
@@ -2582,6 +2675,12 @@ def scan_ticker(
         _weekly_df=_weekly_df,
         timeframe="4H",
     )
+    price_trend_ms = round((time.perf_counter() - price_trend_start) * 1000, 1)
 
     best = _best_timeframe_result(daily_result, h4_result)
-    return _enrich_stock_scout_fields(best, daily_result, h4_result, _daily_df, h4_source)
+    enriched = _enrich_stock_scout_fields(best, daily_result, h4_result, _daily_df, h4_source)
+    if enriched is not None:
+        timing = enriched.setdefault("_scan_timing", {})
+        timing["price_trend_ms"] = price_trend_ms
+        timing["total_ticker_ms"] = round((time.perf_counter() - ticker_start) * 1000, 1)
+    return enriched
