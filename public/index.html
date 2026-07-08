@@ -407,30 +407,6 @@
   .index-simple-status.skip { color:#94a3b8; }
   .index-simple-status.too-late { color:#f97316; }
   .index-simple-direction { color:var(--text); font-size:13px; font-weight:850; margin-top:8px; }
-  .readiness-bar-wrap { margin-top:9px; }
-  .readiness-bar-track {
-    background:rgba(148,163,184,0.12);
-    border-radius:999px;
-    height:6px;
-    overflow:hidden;
-  }
-  .readiness-bar-fill {
-    background:#fbbf24;
-    border-radius:999px;
-    height:100%;
-    transition:width 0.2s ease;
-  }
-  .readiness-bar-fill.enter-now { background:var(--long); }
-  .readiness-bar-fill.almost-ready { background:#a78bfa; }
-  .readiness-bar-fill.skip,
-  .readiness-bar-fill.too-late { background:#64748b; }
-  .readiness-bar-label {
-    color:var(--muted);
-    display:flex;
-    font-size:10px;
-    justify-content:space-between;
-    margin-top:4px;
-  }
   .position-note {
     background:rgba(59,130,246,0.08);
     border:1px solid rgba(59,130,246,0.18);
@@ -2549,6 +2525,7 @@ function clearResults() {
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
   renderExecutionTab();
+  initializeScannerDefaults();
   const tickerSearch = document.getElementById('tickerInput');
   if (tickerSearch) tickerSearch.value = '';
 }
@@ -2928,6 +2905,16 @@ function bindTickerSearch() {
   input.addEventListener('keyup', renderScannerResults);
 }
 
+function initializeScannerDefaults() {
+  const statusFilter = document.getElementById('statusFilter');
+  if (statusFilter && !statusFilter.dataset.userTouched) {
+    statusFilter.value = 'ENTER_NOW';
+    statusFilter.addEventListener('change', () => {
+      statusFilter.dataset.userTouched = 'true';
+    }, { once: true });
+  }
+}
+
 function scrollToPriorityCard(ticker) {
   const targetTicker = String(ticker || '').toUpperCase();
   const tickerEls = Array.from(document.querySelectorAll('.card .ticker'));
@@ -2943,9 +2930,17 @@ function renderPriorityWatchlist(rows, nearMiss) {
   const box = document.getElementById('priority-watchlist');
   if (!box) return;
   const indexTickers = new Set(INDEX_WATCH_TICKERS);
+  const activeStatusFilter = document.getElementById('statusFilter')?.value || 'ENTER_NOW';
+  const statusMatches = setup => {
+    const bucket = setupProgressState(setup).bucket;
+    if (activeStatusFilter === 'all') return true;
+    if (activeStatusFilter === 'DEVELOPING') return ['ALMOST_READY', 'WAITING'].includes(bucket);
+    return bucket === activeStatusFilter;
+  };
   const sourceRows = indexWatchRows.length ? indexWatchRows : [...(rows || []), ...(nearMiss || [])];
   const pool = sourceRows
-    .filter(setup => indexTickers.has(String(setup?.ticker || '').toUpperCase()));
+    .filter(setup => indexTickers.has(String(setup?.ticker || '').toUpperCase()))
+    .filter(statusMatches);
   const seen = new Set();
   const indexRows = sortScannerCardsForDisplay(pool)
     .filter(setup => {
@@ -2956,7 +2951,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
     });
 
   if (!indexRows.length) {
-    renderIndexWatchlistMessage('Index Watchlist unavailable — check scanner response');
+    renderIndexWatchlistMessage('No index ETF cards match the current status filter.');
     return;
   }
 
@@ -3083,15 +3078,6 @@ function readinessStars(setup) {
 function renderReadinessBadge(setup) {
   const state = setupProgressState(setup);
   return `<span class="grade-badge ${state.className}">${state.label}</span>`;
-}
-
-function renderReadinessBar(setup) {
-  const state = setupProgressState(setup);
-  return `
-    <div class="readiness-bar-wrap">
-      <div class="readiness-bar-track"><div class="readiness-bar-fill ${state.className}" style="width:${state.percent}%"></div></div>
-      <div class="readiness-bar-label"><span>Progress</span><span>${state.percent}%</span></div>
-    </div>`;
 }
 
 function openJournalEntryForTicker(ticker) {
@@ -5578,6 +5564,7 @@ function exportCSV() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+initializeScannerDefaults();
 bindTickerSearch();
 setAutoScanButtonState();
 scheduleNextAutoScan();
