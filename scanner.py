@@ -61,6 +61,26 @@ NO_EARNINGS_SYMBOLS = {
     "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
 }
 
+STOCK_UNIVERSE_FILTER = {
+    "enabled": True,
+    "min_price": 10.0,
+    "min_avg_volume": 1_000_000,
+    "avg_volume_lookback": 30,
+    "min_option_expirations": 2,
+    "exclude_non_major_etfs": True,
+    "allowlist": {
+        "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
+        "XLE", "XLF", "XLK", "XLV", "XLU", "XLI", "XLB",
+        "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL",
+    },
+    "blocklist": set(),
+}
+
+MAJOR_LIQUID_ETFS = {
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
+    "XLE", "XLF", "XLK", "XLV", "XLU", "XLI", "XLB",
+}
+
 _finviz_cache = {"tickers": [], "fetched_at": None}
 FINVIZ_CACHE_TTL = timedelta(hours=6)
 _option_chain_cache = {}
@@ -221,6 +241,80 @@ def _option_chain_for_ticker(ticker: str, expiry: str):
     cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
     cached.setdefault("chains", {})[expiry] = chain
     return chain
+
+
+def _latest_close(df: Optional[pd.DataFrame]) -> Optional[float]:
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+    if close.empty:
+        return None
+    return float(close.iloc[-1])
+
+
+def _average_volume(df: Optional[pd.DataFrame], lookback: int = 30) -> Optional[float]:
+    if df is None or df.empty or "Volume" not in df.columns:
+        return None
+    volume = pd.to_numeric(df["Volume"], errors="coerce").dropna()
+    if volume.empty:
+        return None
+    return float(volume.tail(max(int(lookback or 1), 1)).mean())
+
+
+def _is_known_etf(ticker: str) -> bool:
+    return ticker in NO_EARNINGS_SYMBOLS
+
+
+def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -> Optional[str]:
+    config = STOCK_UNIVERSE_FILTER
+    if not config.get("enabled", True):
+        return None
+
+    ticker = str(ticker or "").upper()
+    allowlist = set(config.get("allowlist") or set())
+    blocklist = set(config.get("blocklist") or set())
+    if ticker in blocklist:
+        return "blocked symbol"
+
+    if config.get("exclude_non_major_etfs", True) and _is_known_etf(ticker) and ticker not in MAJOR_LIQUID_ETFS:
+        return "non-major ETF"
+
+    price = _latest_close(daily_df)
+    if price is None:
+        return "no price data"
+    min_price = float(config.get("min_price") or 0)
+    if price < min_price and ticker not in allowlist:
+        return "low price"
+
+    avg_volume = _average_volume(daily_df, int(config.get("avg_volume_lookback") or 30))
+    min_avg_volume = float(config.get("min_avg_volume") or 0)
+    if (avg_volume is None or avg_volume < min_avg_volume) and ticker not in allowlist:
+        return "low liquidity"
+
+    min_expirations = int(config.get("min_option_expirations") or 0)
+    if min_expirations > 0:
+        expirations = _option_expirations_for_ticker(ticker)
+        if not expirations:
+            return "no options"
+        if len(expirations) < min_expirations:
+            return "thin options chain"
+
+    return None
+
+
+def _prefilter_stock_universe(watchlist: list, daily_data: dict) -> tuple[list, list]:
+    accepted = []
+    skipped = []
+    for ticker in watchlist:
+        symbol = str(ticker or "").strip().upper()
+        if not symbol:
+            continue
+        reason = _stock_universe_skip_reason(symbol, daily_data.get(symbol))
+        if reason:
+            skipped.append({"ticker": symbol, "reason": reason})
+        else:
+            accepted.append(symbol)
+    return accepted, skipped
 
 
 def _safe_float(value):
@@ -2668,11 +2762,32 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
     else:
         watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))[:200]
 
-    # ── Step 1: batch-download all OHLCV data (3 network calls total) ─────────
+    original_count = len(watchlist)
+
+    # ── Step 1: batch-download daily OHLCV for cheap universe filtering ───────
     price_stage_start = time.perf_counter()
     daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
-    weekly_data = _batch_download(watchlist, period="2y",  interval="1wk")
-    h4_data     = _batch_download(watchlist, period="60d", interval="4h")
+    filtered_watchlist, skipped_symbols = _prefilter_stock_universe(watchlist, daily_data)
+    skip_counts = {}
+    for item in skipped_symbols:
+        reason = item.get("reason") or "unknown"
+        skip_counts[reason] = skip_counts.get(reason, 0) + 1
+    if skipped_symbols:
+        examples = ", ".join(f"{item['ticker']}:{item['reason']}" for item in skipped_symbols[:20])
+        logger.info(
+            "[universe filter] skipped=%s/%s reasons=%s examples=%s",
+            len(skipped_symbols),
+            original_count,
+            skip_counts,
+            examples,
+        )
+
+    if filtered_watchlist:
+        weekly_data = _batch_download(filtered_watchlist, period="2y",  interval="1wk")
+        h4_data     = _batch_download(filtered_watchlist, period="60d", interval="4h")
+    else:
+        weekly_data = {}
+        h4_data = {}
     price_stage_ms = round((time.perf_counter() - price_stage_start) * 1000, 1)
 
     # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
@@ -2688,7 +2803,7 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
         )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_process, t): t for t in watchlist}
+        futures = {pool.submit(_process, t): t for t in filtered_watchlist}
         for future in as_completed(futures):
             r = future.result()
             if r is None:
@@ -2712,7 +2827,7 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
         if (r.get("_scan_timing") or {}).get("best_contract_ms", 0) >= 750
     ][:8]
     logger.info(
-        "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s slow_contracts=%s",
+        "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s universe=%s/%s skipped=%s skip_reasons=%s slow_contracts=%s",
         total_ms,
         price_stage_ms,
         process_stage_ms,
@@ -2720,6 +2835,10 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
         best_contract_ms,
         evaluated_contracts,
         len(all_results),
+        len(filtered_watchlist),
+        original_count,
+        len(skipped_symbols),
+        skip_counts,
         ", ".join(slow_contracts) if slow_contracts else "none",
     )
     return rows, near_miss
