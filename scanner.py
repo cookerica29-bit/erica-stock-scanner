@@ -227,6 +227,26 @@ def _store_analysis_cache(key: tuple, rows: list, near_miss: list) -> dict:
     return cached
 
 
+def _hydrate_best_contracts_from_cache(rows: list) -> list:
+    hydrated = []
+    with _cache_lock:
+        best_contract_cache = dict(_best_contract_cache)
+    for row in rows or []:
+        if not isinstance(row, dict):
+            hydrated.append(row)
+            continue
+        item = dict(row)
+        contract = item.get("best_contract") or {}
+        is_loading = bool(contract.get("loading")) or str(contract.get("source") or "").lower() == "loading"
+        if is_loading:
+            cache_key = _best_contract_cache_key(item.get("ticker") or "", item.get("direction") or "", item.get("entry") or 0)
+            cached_contract = (best_contract_cache.get(cache_key) or {}).get("data")
+            if cached_contract and str(cached_contract.get("source") or "").lower() != "loading":
+                item["best_contract"] = dict(cached_contract)
+        hydrated.append(item)
+    return hydrated
+
+
 def _refresh_analysis_cache(key: tuple, watchlist: Optional[list]) -> None:
     rows, near_miss = scan_all(watchlist)
     _store_analysis_cache(key, rows, near_miss)
@@ -3279,8 +3299,8 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         refreshing_key = _analysis_refresh_key(key)
         _submit_background_job(refreshing_key, _refresh_analysis_cache, key, watchlist)
         return {
-            "rows": list(cached.get("rows", [])),
-            "near_miss": list(cached.get("near_miss", [])),
+            "rows": _hydrate_best_contracts_from_cache(list(cached.get("rows", []))),
+            "near_miss": _hydrate_best_contracts_from_cache(list(cached.get("near_miss", []))),
             "meta": _analysis_cache_meta(key, cached, True),
         }
 

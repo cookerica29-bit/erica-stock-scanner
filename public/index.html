@@ -2467,6 +2467,10 @@ let previousTradeStages = (() => {
 })();
 let aPlusReadyAlerts = new Set();
 let toastTimer = null;
+let contractRefreshTimer = null;
+let contractRefreshAttempts = 0;
+let indexContractRefreshTimer = null;
+let indexContractRefreshAttempts = 0;
 
 // ── Auto-scan ─────────────────────────────────────────────────────────────────
 const SCAN_SCHEDULE_ET = [
@@ -2714,6 +2718,8 @@ async function runScan() {
   const indexWatchlist = document.getElementById('priority-watchlist');
 
   btn.disabled = true;
+  clearContractRefreshPoll();
+  contractRefreshAttempts = 0;
   status.innerHTML = '<span class="spinner"></span>Scanning...';
   results.innerHTML = renderLoadingSkeletonCards(4);
   summary.textContent = '';
@@ -2746,6 +2752,9 @@ async function runScan() {
     scannerNearMiss = nextNearMiss;
     renderScannerResults();
     renderExecutionTab();
+    if (rowsHaveLoadingContracts([...nextRows, ...nextNearMiss])) {
+      scheduleContractRefreshPoll();
+    }
     refreshIndexWatchlistInBackground();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
@@ -2763,22 +2772,47 @@ function refreshIndexWatchlistInBackground() {
   });
 }
 
-async function loadIndexWatchlist() {
+function clearIndexContractRefreshPoll() {
+  if (indexContractRefreshTimer) {
+    clearTimeout(indexContractRefreshTimer);
+    indexContractRefreshTimer = null;
+  }
+}
+
+function scheduleIndexContractRefreshPoll() {
+  clearIndexContractRefreshPoll();
+  if (indexContractRefreshAttempts >= 4) return;
+  indexContractRefreshAttempts += 1;
+  indexContractRefreshTimer = setTimeout(() => {
+    loadIndexWatchlist({ silent: true }).catch(e => {
+      console.warn('[Index Watchlist] contract refresh poll failed:', e);
+    });
+  }, 7000);
+}
+
+async function loadIndexWatchlist(options = {}) {
   const box = document.getElementById('priority-watchlist');
   if (!box) {
     console.warn('[Index Watchlist] container not found');
     return;
   }
+  const silent = Boolean(options.silent);
+  if (!silent) {
+    clearIndexContractRefreshPoll();
+    indexContractRefreshAttempts = 0;
+  }
   console.info('[Index Watchlist] scanning', INDEX_WATCH_TICKERS.join(', '));
   box.style.display = 'block';
-  box.innerHTML = `
-    <div class="priority-watchlist index-watchlist">
-      <div class="priority-head">
-        <div class="priority-title">Index Watchlist</div>
-        <div class="priority-subtitle">Loading market snapshot</div>
-      </div>
-      <div class="priority-list">${renderLoadingSkeletonCards(3)}</div>
-    </div>`;
+  if (!silent) {
+    box.innerHTML = `
+      <div class="priority-watchlist index-watchlist">
+        <div class="priority-head">
+          <div class="priority-title">Index Watchlist</div>
+          <div class="priority-subtitle">Loading market snapshot</div>
+        </div>
+        <div class="priority-list">${renderLoadingSkeletonCards(3)}</div>
+      </div>`;
+  }
   try {
     const res = await fetchWithTimeout(`${API}/api/scan?tickers=${encodeURIComponent(INDEX_WATCH_TICKERS.join(','))}`, {}, 12000);
     if (!res.ok) throw new Error(`Index scan failed with HTTP ${res.status}`);
@@ -2794,6 +2828,9 @@ async function loadIndexWatchlist() {
     return;
   }
   renderPriorityWatchlist();
+  if (rowsHaveLoadingContracts(indexWatchRows)) {
+    scheduleIndexContractRefreshPoll();
+  }
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
@@ -2807,6 +2844,10 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 }
 
 function clearResults() {
+  clearContractRefreshPoll();
+  clearIndexContractRefreshPoll();
+  contractRefreshAttempts = 0;
+  indexContractRefreshAttempts = 0;
   scannerRows = [];
   scannerNearMiss = [];
   indexWatchRows = [];
@@ -2953,6 +2994,45 @@ function scanStatusText(meta) {
   if (meta.cache === 'refresh') return `Refreshed${suffix}`;
   if (meta.cache === 'miss' && meta.refreshing) return 'Kairos is warming data...';
   return 'Done';
+}
+
+function rowsHaveLoadingContracts(rows = []) {
+  return rows.some(setup => {
+    const contract = setup?.best_contract || {};
+    return Boolean(contract.loading) || String(contract.source || '').toLowerCase() === 'loading';
+  });
+}
+
+function clearContractRefreshPoll() {
+  if (contractRefreshTimer) {
+    clearTimeout(contractRefreshTimer);
+    contractRefreshTimer = null;
+  }
+}
+
+function scheduleContractRefreshPoll() {
+  clearContractRefreshPoll();
+  if (contractRefreshAttempts >= 4) return;
+  contractRefreshAttempts += 1;
+  contractRefreshTimer = setTimeout(async () => {
+    try {
+      const res = await fetchWithTimeout(`${API}/api/scan`, {}, 15000);
+      if (!res.ok) throw new Error(`Scan refresh failed with HTTP ${res.status}`);
+      const data = await res.json();
+      const nextRows = data.rows || [];
+      const nextNearMiss = data.near_miss || [];
+      scannerRows = nextRows;
+      scannerNearMiss = nextNearMiss;
+      updateDataStatus(data.meta || {});
+      renderScannerResults();
+      renderExecutionTab();
+      if (rowsHaveLoadingContracts([...nextRows, ...nextNearMiss])) {
+        scheduleContractRefreshPoll();
+      }
+    } catch (e) {
+      console.warn('[Contracts] background contract refresh poll failed:', e);
+    }
+  }, 7000);
 }
 
 function cacheStatusFromMeta(meta = {}) {
@@ -3817,8 +3897,9 @@ function bestContractDisplay(setup) {
   const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
   const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
   const expiry = formatShortDate(contract.expiry);
+  const scoreValue = Number(contract.score);
   return {
-    className: String(contract.execution || '').toLowerCase() === 'excellent' ? 'excellent' : 'fair',
+    className: Number.isFinite(scoreValue) && scoreValue >= 75 ? 'excellent' : 'fair',
     label: 'Contract Score',
     main: `${expiry} · $${strike} ${type}`.trim(),
     score: `Contract Score: ${contractScoreText(contract)}`,
