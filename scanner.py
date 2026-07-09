@@ -174,6 +174,10 @@ def _analysis_cache_key(watchlist: Optional[list]) -> tuple:
     return ("custom", symbols)
 
 
+def _analysis_refresh_key(key: tuple) -> tuple:
+    return ("analysis_refresh", key)
+
+
 def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
     generated_at = cached.get("generated_at")
     age_seconds = None
@@ -186,6 +190,30 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "stale": age_seconds is not None and age_seconds > ANALYSIS_CACHE_STALE_SECONDS,
         "refreshing": refreshing,
         "cache_key": "default" if key == ("default",) else "custom",
+    }
+
+
+def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
+    key = _analysis_cache_key(watchlist)
+    with _cache_lock:
+        cached = _analysis_cache.get(key)
+    with _background_jobs_lock:
+        refreshing = _analysis_refresh_key(key) in _background_jobs
+    if cached:
+        meta = _analysis_cache_meta(key, cached, refreshing)
+        status = "stale" if meta.get("stale") else "fresh"
+        if refreshing and not meta.get("stale"):
+            status = "warming"
+        return {**meta, "status": status, "has_cache": True}
+    return {
+        "cache": "miss",
+        "generated_at": None,
+        "age_seconds": None,
+        "stale": True,
+        "refreshing": refreshing,
+        "cache_key": "default" if key == ("default",) else "custom",
+        "status": "warming",
+        "has_cache": False,
     }
 
 
@@ -2151,6 +2179,8 @@ def _ensure_background_refresh_started() -> None:
 
 def start_market_cache_refresh() -> None:
     _ensure_background_refresh_started()
+    key = _analysis_cache_key(None)
+    _submit_background_job(_analysis_refresh_key(key), _refresh_analysis_cache, key, None)
 
 
 # ── Trending list analysis ───────────────────────────────────────────────────
@@ -3249,12 +3279,21 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
     had_cached_analysis = cached is not None
 
     if cached and not force_refresh:
-        refreshing_key = ("analysis_refresh", key)
+        refreshing_key = _analysis_refresh_key(key)
         _submit_background_job(refreshing_key, _refresh_analysis_cache, key, watchlist)
         return {
             "rows": list(cached.get("rows", [])),
             "near_miss": list(cached.get("near_miss", [])),
             "meta": _analysis_cache_meta(key, cached, True),
+        }
+
+    if not cached and not force_refresh:
+        refreshing_key = _analysis_refresh_key(key)
+        _submit_background_job(refreshing_key, _refresh_analysis_cache, key, watchlist)
+        return {
+            "rows": [],
+            "near_miss": [],
+            "meta": analysis_cache_status(watchlist),
         }
 
     rows, near_miss = scan_all(watchlist)

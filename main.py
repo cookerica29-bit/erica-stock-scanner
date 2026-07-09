@@ -3,7 +3,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from scanner import scan_cached, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
+from scanner import analysis_cache_status, scan_cached, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -58,6 +58,11 @@ def api_debug(ticker: str):
 @app.get("/api/watchlist")
 def api_watchlist():
     return {"watchlist": WATCHLIST}
+
+
+@app.get("/api/cache/status")
+def api_cache_status():
+    return analysis_cache_status()
 
 
 @app.get("/api/trends")
