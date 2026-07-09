@@ -3,7 +3,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from scanner import scan_all, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
+from scanner import scan_cached, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -31,14 +31,14 @@ def index():
 
 
 @app.get("/api/scan")
-def api_scan(tickers: str = Query(default="")):
+def api_scan(tickers: str = Query(default=""), refresh: bool = Query(default=False)):
     """Scan the full watchlist or a custom comma-separated list of tickers."""
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-        rows, near_miss = scan_all(watchlist)
+        result = scan_cached(watchlist, force_refresh=refresh)
     else:
-        rows, near_miss = scan_all()
-    return {"rows": rows, "near_miss": near_miss}
+        result = scan_cached(force_refresh=refresh)
+    return result
 
 
 @app.get("/api/scan/{ticker}")

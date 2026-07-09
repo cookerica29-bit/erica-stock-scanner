@@ -102,6 +102,8 @@ _background_jobs_lock = threading.Lock()
 _background_refresh_started = False
 _background_last_refresh = {}
 _active_scan_count = 0
+_analysis_cache = {}
+ANALYSIS_CACHE_STALE_SECONDS = 180
 
 
 def _cache_record(name: str, outcome: str) -> None:
@@ -163,6 +165,44 @@ def _scan_activity_finished() -> None:
 def _scan_is_active() -> bool:
     with _background_jobs_lock:
         return _active_scan_count > 0
+
+
+def _analysis_cache_key(watchlist: Optional[list]) -> tuple:
+    if watchlist is None:
+        return ("default",)
+    symbols = tuple(sorted(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()])))
+    return ("custom", symbols)
+
+
+def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
+    generated_at = cached.get("generated_at")
+    age_seconds = None
+    if generated_at:
+        age_seconds = max(0, (datetime.utcnow() - generated_at).total_seconds())
+    return {
+        "cache": "hit",
+        "generated_at": generated_at.isoformat() + "Z" if generated_at else None,
+        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+        "stale": age_seconds is not None and age_seconds > ANALYSIS_CACHE_STALE_SECONDS,
+        "refreshing": refreshing,
+        "cache_key": "default" if key == ("default",) else "custom",
+    }
+
+
+def _store_analysis_cache(key: tuple, rows: list, near_miss: list) -> dict:
+    cached = {
+        "rows": rows,
+        "near_miss": near_miss,
+        "generated_at": datetime.utcnow(),
+    }
+    with _cache_lock:
+        _analysis_cache[key] = cached
+    return cached
+
+
+def _refresh_analysis_cache(key: tuple, watchlist: Optional[list]) -> None:
+    rows, near_miss = scan_all(watchlist)
+    _store_analysis_cache(key, rows, near_miss)
 
 
 def get_finviz_watchlist() -> list:
@@ -3109,95 +3149,125 @@ def _enrich_stock_scout_fields(
 def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
     scan_start = time.perf_counter()
     _scan_activity_started()
-    _ensure_background_refresh_started()
-    if watchlist is None:
-        watchlist = get_finviz_watchlist()
-    else:
-        watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))[:200]
+    try:
+        _ensure_background_refresh_started()
+        if watchlist is None:
+            watchlist = get_finviz_watchlist()
+        else:
+            watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))[:200]
 
-    original_count = len(watchlist)
+        original_count = len(watchlist)
 
-    # ── Step 1: batch-download daily OHLCV for cheap universe filtering ───────
-    price_stage_start = time.perf_counter()
-    daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
-    filtered_watchlist, skipped_symbols = _prefilter_stock_universe(watchlist, daily_data)
-    skip_counts = {}
-    for item in skipped_symbols:
-        reason = item.get("reason") or "unknown"
-        skip_counts[reason] = skip_counts.get(reason, 0) + 1
-    if skipped_symbols:
-        examples = ", ".join(f"{item['ticker']}:{item['reason']}" for item in skipped_symbols[:20])
+        # ── Step 1: batch-download daily OHLCV for cheap universe filtering ───────
+        price_stage_start = time.perf_counter()
+        daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
+        filtered_watchlist, skipped_symbols = _prefilter_stock_universe(watchlist, daily_data)
+        skip_counts = {}
+        for item in skipped_symbols:
+            reason = item.get("reason") or "unknown"
+            skip_counts[reason] = skip_counts.get(reason, 0) + 1
+        if skipped_symbols:
+            examples = ", ".join(f"{item['ticker']}:{item['reason']}" for item in skipped_symbols[:20])
+            logger.info(
+                "[universe filter] skipped=%s/%s reasons=%s examples=%s",
+                len(skipped_symbols),
+                original_count,
+                skip_counts,
+                examples,
+            )
+
+        if filtered_watchlist:
+            weekly_data = _batch_download(filtered_watchlist, period="2y",  interval="1wk")
+            h4_data     = _batch_download(filtered_watchlist, period="60d", interval="4h")
+        else:
+            weekly_data = {}
+            h4_data = {}
+        price_stage_ms = round((time.perf_counter() - price_stage_start) * 1000, 1)
+
+        # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
+        rows, near_miss = [], []
+        process_stage_start = time.perf_counter()
+
+        def _process(ticker: str):
+            return scan_ticker(
+                ticker,
+                _daily_df=daily_data.get(ticker),
+                _weekly_df=weekly_data.get(ticker),
+                _h4_df=h4_data.get(ticker, pd.DataFrame()),
+            )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_process, t): t for t in filtered_watchlist}
+            for future in as_completed(futures):
+                r = future.result()
+                if r is None:
+                    continue
+                if r.get("setup_status") == "QUALIFIED":
+                    rows.append(r)
+                else:
+                    near_miss.append(r)
+
+        rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
+        near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
+        process_stage_ms = round((time.perf_counter() - process_stage_start) * 1000, 1)
+        all_results = [*rows, *near_miss]
+        earnings_ms = round(sum((r.get("_scan_timing") or {}).get("earnings_ms", 0) for r in all_results), 1)
+        best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
+        evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") != "not_evaluated")
+        total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
+        cache_stats = _cache_snapshot()
+        slow_contracts = [
+            f"{r.get('ticker')}:{(r.get('_scan_timing') or {}).get('best_contract_ms', 0):.0f}ms"
+            for r in all_results
+            if (r.get("_scan_timing") or {}).get("best_contract_ms", 0) >= 750
+        ][:8]
         logger.info(
-            "[universe filter] skipped=%s/%s reasons=%s examples=%s",
-            len(skipped_symbols),
+            "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s universe=%s/%s skipped=%s skip_reasons=%s cache=%s slow_contracts=%s",
+            total_ms,
+            price_stage_ms,
+            process_stage_ms,
+            earnings_ms,
+            best_contract_ms,
+            evaluated_contracts,
+            len(all_results),
+            len(filtered_watchlist),
             original_count,
+            len(skipped_symbols),
             skip_counts,
-            examples,
+            cache_stats,
+            ", ".join(slow_contracts) if slow_contracts else "none",
         )
+        return rows, near_miss
+    finally:
+        _scan_activity_finished()
 
-    if filtered_watchlist:
-        weekly_data = _batch_download(filtered_watchlist, period="2y",  interval="1wk")
-        h4_data     = _batch_download(filtered_watchlist, period="60d", interval="4h")
-    else:
-        weekly_data = {}
-        h4_data = {}
-    price_stage_ms = round((time.perf_counter() - price_stage_start) * 1000, 1)
 
-    # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
-    rows, near_miss = [], []
-    process_stage_start = time.perf_counter()
+def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False) -> dict:
+    key = _analysis_cache_key(watchlist)
+    with _cache_lock:
+        cached = _analysis_cache.get(key)
+    had_cached_analysis = cached is not None
 
-    def _process(ticker: str):
-        return scan_ticker(
-            ticker,
-            _daily_df=daily_data.get(ticker),
-            _weekly_df=weekly_data.get(ticker),
-            _h4_df=h4_data.get(ticker, pd.DataFrame()),
-        )
+    if cached and not force_refresh:
+        refreshing_key = ("analysis_refresh", key)
+        _submit_background_job(refreshing_key, _refresh_analysis_cache, key, watchlist)
+        return {
+            "rows": list(cached.get("rows", [])),
+            "near_miss": list(cached.get("near_miss", [])),
+            "meta": _analysis_cache_meta(key, cached, True),
+        }
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_process, t): t for t in filtered_watchlist}
-        for future in as_completed(futures):
-            r = future.result()
-            if r is None:
-                continue
-            if r.get("setup_status") == "QUALIFIED":
-                rows.append(r)
-            else:
-                near_miss.append(r)
-
-    rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
-    near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
-    process_stage_ms = round((time.perf_counter() - process_stage_start) * 1000, 1)
-    all_results = [*rows, *near_miss]
-    earnings_ms = round(sum((r.get("_scan_timing") or {}).get("earnings_ms", 0) for r in all_results), 1)
-    best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
-    evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") != "not_evaluated")
-    total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
-    cache_stats = _cache_snapshot()
-    slow_contracts = [
-        f"{r.get('ticker')}:{(r.get('_scan_timing') or {}).get('best_contract_ms', 0):.0f}ms"
-        for r in all_results
-        if (r.get("_scan_timing") or {}).get("best_contract_ms", 0) >= 750
-    ][:8]
-    logger.info(
-        "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s universe=%s/%s skipped=%s skip_reasons=%s cache=%s slow_contracts=%s",
-        total_ms,
-        price_stage_ms,
-        process_stage_ms,
-        earnings_ms,
-        best_contract_ms,
-        evaluated_contracts,
-        len(all_results),
-        len(filtered_watchlist),
-        original_count,
-        len(skipped_symbols),
-        skip_counts,
-        cache_stats,
-        ", ".join(slow_contracts) if slow_contracts else "none",
-    )
-    _scan_activity_finished()
-    return rows, near_miss
+    rows, near_miss = scan_all(watchlist)
+    cached = _store_analysis_cache(key, rows, near_miss)
+    return {
+        "rows": rows,
+        "near_miss": near_miss,
+        "meta": {
+            **_analysis_cache_meta(key, cached, False),
+            "cache": "refresh" if had_cached_analysis or force_refresh else "miss",
+            "refreshing": False,
+        },
+    }
 
 
 def scan_ticker(

@@ -1612,7 +1612,8 @@
     </div>
     <select id="statusFilter" onchange="renderScannerResults()">
       <option value="all">All Statuses</option>
-      <option value="ENTER_NOW" selected>Enter Now</option>
+      <option value="ACTIONABLE" selected>Actionable</option>
+      <option value="ENTER_NOW">Enter Now</option>
       <option value="DEVELOPING">Developing Setups</option>
       <option value="ALMOST_READY">Almost Ready</option>
       <option value="WAITING">Waiting</option>
@@ -2455,10 +2456,12 @@ async function runScan() {
   results.innerHTML = '';
   summary.textContent = '';
   if (indexWatchlist) indexWatchlist.innerHTML = '';
+  let scanMeta = null;
 
   try {
     const res  = await fetch(`${API}/api/scan`);
     const data = await res.json();
+    scanMeta = data.meta || null;
 
     const nextRows = data.rows || [];
     const nextNearMiss = data.near_miss || [];
@@ -2477,7 +2480,7 @@ async function runScan() {
     await loadIndexWatchlist();
   } finally {
     btn.disabled = false;
-    status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : 'Done';
+    status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : scanStatusText(scanMeta);
   }
 }
 
@@ -2635,6 +2638,25 @@ function handleAPlusReadyAlert(alert) {
   maybeSendBrowserNotification(ticker, message, isAPlus);
 }
 
+function formatScanAge(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value)) return '';
+  if (value < 60) return `${Math.max(0, Math.round(value))}s ago`;
+  const minutes = Math.round(value / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
+function scanStatusText(meta) {
+  if (!meta) return 'Done';
+  const age = formatScanAge(meta.age_seconds);
+  const suffix = age ? ` · Last updated ${age}` : '';
+  if (meta.refreshing) return `Showing cached results${suffix} · Data refreshing...`;
+  if (meta.cache === 'hit') return `Done${suffix}`;
+  if (meta.cache === 'refresh') return `Refreshed${suffix}`;
+  return 'Done';
+}
+
 function maybeSendBrowserNotification(ticker, message, isAPlus = true) {
   if (!('Notification' in window)) return;
 
@@ -2744,8 +2766,9 @@ function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
   if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
   const statusBucket = setupProgressState(s).bucket;
+  if (filters.status === 'ACTIONABLE' && !['ENTER_NOW', 'ALMOST_READY'].includes(statusBucket)) return false;
   if (filters.status === 'DEVELOPING' && !['ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
-  if (filters.status !== 'all' && filters.status !== 'DEVELOPING' && statusBucket !== filters.status) return false;
+  if (filters.status !== 'all' && filters.status !== 'ACTIONABLE' && filters.status !== 'DEVELOPING' && statusBucket !== filters.status) return false;
   if (filters.direction !== 'all' && String(s?.direction || '').toUpperCase() !== filters.direction) return false;
   if (filters.quality !== 'all' && setupGradeValue(s) !== filters.quality) return false;
   if (filters.contractType !== 'all' && contractTypeValue(s) !== filters.contractType) return false;
@@ -2905,7 +2928,7 @@ function bindTickerSearch() {
 function initializeScannerDefaults() {
   const statusFilter = document.getElementById('statusFilter');
   if (statusFilter && !statusFilter.dataset.userTouched) {
-    statusFilter.value = 'ENTER_NOW';
+    statusFilter.value = 'ACTIONABLE';
     statusFilter.addEventListener('change', () => {
       statusFilter.dataset.userTouched = 'true';
     }, { once: true });
@@ -2931,6 +2954,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
   const statusMatches = setup => {
     const bucket = setupProgressState(setup).bucket;
     if (activeStatusFilter === 'all') return true;
+    if (activeStatusFilter === 'ACTIONABLE') return ['ENTER_NOW', 'ALMOST_READY'].includes(bucket);
     if (activeStatusFilter === 'DEVELOPING') return ['ALMOST_READY', 'WAITING'].includes(bucket);
     return bucket === activeStatusFilter;
   };
