@@ -9,24 +9,33 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg:        #0d0f14;
-    --surface:   #161a22;
-    --surface2:  #1e2330;
-    --border:    #2a3040;
-    --text:      #e2e8f0;
-    --muted:     #6b7280;
+    --bg:        #111827;
+    --bg-soft:   #152033;
+    --surface:   #1a2435;
+    --surface2:  #233149;
+    --surface3:  #2b3b56;
+    --border:    #35435b;
+    --border-soft: rgba(148,163,184,0.18);
+    --text:      #f1f5f9;
+    --muted:     #94a3b8;
     --long:      #22c55e;
     --long-dim:  #166534;
     --short:     #ef4444;
     --short-dim: #7f1d1d;
-    --accent:    #6366f1;
+    --accent:    #8b5cf6;
+    --accent-soft: rgba(139,92,246,0.16);
+    --accent-strong: #a78bfa;
     --pass:      #22c55e;
     --fail:      #ef4444;
     --warn:      #f59e0b;
+    --card-shadow: 0 18px 45px rgba(2,6,23,0.36);
+    --card-shadow-hover: 0 24px 60px rgba(2,6,23,0.46);
   }
 
   body {
-    background: var(--bg);
+    background:
+      radial-gradient(circle at top left, rgba(139,92,246,0.12), transparent 34rem),
+      linear-gradient(180deg, #121b2b 0%, var(--bg) 42%, #0f172a 100%);
     color: var(--text);
     font-family: 'SF Mono', 'Fira Code', monospace;
     font-size: 13px;
@@ -35,7 +44,7 @@
   }
 
   header {
-    background: var(--surface);
+    background: rgba(26,36,53,0.9);
     border-bottom: 1px solid var(--border);
     padding: 16px 24px;
     display: flex;
@@ -48,7 +57,7 @@
 
   /* ── Tabs ──────────────────────────────────────────────────────────────── */
   .tab-bar {
-    background: var(--surface);
+    background: rgba(26,36,53,0.9);
     border-bottom: 1px solid var(--border);
     padding: 0 24px;
     display: flex;
@@ -75,9 +84,9 @@
     flex: 0 0 auto;
     padding: 10px 16px;
     white-space: nowrap;
-    transition: color 0.15s, border-color 0.15s;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
-  .tab-btn:hover { color: var(--text); opacity: 1; }
+  .tab-btn:hover { background: rgba(139,92,246,0.08); color: var(--text); opacity: 1; }
   .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
   .tab-panel { display: none; }
@@ -85,7 +94,7 @@
 
   /* ── Controls ──────────────────────────────────────────────────────────── */
   .controls {
-    background: var(--surface);
+    background: rgba(26,36,53,0.86);
     border-bottom: 1px solid var(--border);
     padding: 12px 24px;
     display: flex;
@@ -95,7 +104,7 @@
   }
 
   input[type="text"], input[type="number"], select, textarea {
-    background: var(--bg);
+    background: rgba(15,23,42,0.72);
     border: 1px solid var(--border);
     border-radius: 6px;
     color: var(--text);
@@ -109,7 +118,7 @@
   input[type="number"]:focus,
   select:focus,
   textarea:focus { border-color: var(--accent); }
-  input::placeholder { color: var(--muted); }
+  input::placeholder { color: #7c8ba1; }
   textarea { min-height: 74px; resize: vertical; width: 100%; }
   select option { background: var(--surface2); }
 
@@ -144,9 +153,10 @@
     font-size: 12px;
     font-weight: 600;
     padding: 7px 18px;
-    transition: opacity 0.15s;
+    box-shadow: 0 8px 20px rgba(139,92,246,0.22);
+    transition: opacity 0.15s, transform 0.15s ease, box-shadow 0.15s ease;
   }
-  button:hover { opacity: 0.85; }
+  button:hover { opacity: 0.92; transform: translateY(-1px); box-shadow: 0 12px 26px rgba(139,92,246,0.28); }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
   .btn-sm { padding: 5px 12px; font-size: 11px; }
@@ -166,10 +176,11 @@
     padding: 0 24px;
   }
   .snapshot-card {
-    background: rgba(22,26,34,0.72);
-    border: 1px solid rgba(148,163,184,0.12);
-    border-radius: 10px;
-    padding: 12px 14px;
+    background: rgba(26,36,53,0.82);
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
+    box-shadow: var(--card-shadow);
+    padding: 14px 16px;
   }
   .snapshot-title {
     color: var(--text);
@@ -199,9 +210,9 @@
   }
   .snapshot-badge {
     align-items: center;
-    background: rgba(15,23,42,0.62);
-    border: 1px solid rgba(148,163,184,0.12);
-    border-radius: 8px;
+    background: rgba(30,41,59,0.68);
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
     display: inline-flex;
     gap: 8px;
     min-height: 32px;
@@ -223,7 +234,7 @@
   .snapshot-badge.status-ready .count { color: var(--long); }
   .snapshot-badge.grade-b .count,
   .snapshot-badge.timing-reaction .count,
-  .snapshot-badge.status-tradeable .count { color: #60a5fa; }
+  .snapshot-badge.status-tradeable .count { color: var(--accent-strong); }
   .snapshot-badge.grade-c .count,
   .snapshot-badge.timing-not-ready .count { color: var(--muted); }
   .snapshot-badge.timing-area .count,
@@ -245,14 +256,51 @@
 
   .empty { grid-column: 1 / -1; text-align: center; padding: 60px 0; color: var(--muted); }
 
+  .skeleton-card {
+    background: linear-gradient(180deg, rgba(30,41,59,0.86), rgba(21,32,51,0.86));
+    border: 1px solid var(--border-soft);
+    border-radius: 18px;
+    box-shadow: var(--card-shadow);
+    min-height: 300px;
+    padding: 18px;
+  }
+  .skeleton-line,
+  .skeleton-pill,
+  .skeleton-box {
+    animation: skeletonPulse 1.35s ease-in-out infinite;
+    background: linear-gradient(90deg, rgba(148,163,184,0.1), rgba(148,163,184,0.2), rgba(148,163,184,0.1));
+    background-size: 240% 100%;
+    border-radius: 999px;
+  }
+  .skeleton-line { height: 13px; margin-top: 12px; width: 100%; }
+  .skeleton-line.short { width: 48%; }
+  .skeleton-line.medium { width: 68%; }
+  .skeleton-pill { height: 28px; width: 92px; }
+  .skeleton-box { border-radius: 14px; height: 86px; margin-top: 16px; }
+  .skeleton-head { align-items: center; display: flex; justify-content: space-between; gap: 12px; }
+  .skeleton-title { height: 30px; width: 118px; }
+  @keyframes skeletonPulse {
+    0% { background-position: 120% 0; opacity: 0.72; }
+    50% { opacity: 1; }
+    100% { background-position: -120% 0; opacity: 0.72; }
+  }
+
   /* ── Setup card ────────────────────────────────────────────────────────── */
   .card {
-    background: linear-gradient(180deg, rgba(24,31,43,0.96), rgba(18,24,34,0.96));
-    border: 1px solid rgba(148,163,184,0.12);
-    border-radius: 12px;
-    box-shadow: 0 14px 34px rgba(0,0,0,0.18);
+    background: linear-gradient(180deg, rgba(30,41,59,0.98), rgba(21,32,51,0.98));
+    border: 1px solid var(--border-soft);
+    border-radius: 18px;
+    box-shadow: var(--card-shadow);
     overflow: hidden;
     min-width: 0;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+  }
+  .card:hover,
+  .index-row:hover,
+  .execution-card:hover {
+    border-color: rgba(139,92,246,0.34);
+    box-shadow: var(--card-shadow-hover);
+    transform: translateY(-2px);
   }
   .card.a-plus-alert {
     border-color: rgba(34,197,94,0.85);
@@ -269,14 +317,14 @@
   .card-header {
     display: flex; align-items: center; justify-content: space-between;
     gap: 14px;
-    padding: 16px 18px 10px;
+    padding: 18px 20px 10px;
   }
   .card-action-row {
     display: flex;
     justify-content: flex-end;
     padding: 14px 18px 0;
   }
-  .ticker { font-size: 24px; font-weight: 800; letter-spacing: 0.02em; line-height: 1; }
+  .ticker { font-size: 29px; font-weight: 950; letter-spacing: 0.01em; line-height: 1; }
   .ticker-wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
   .card-header-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
   .card-header > div,
@@ -300,10 +348,10 @@
     padding: 3px 8px;
     text-align: center;
   }
-  .grade-badge.enter-now { background:rgba(34,197,94,0.14); border-color:rgba(34,197,94,0.35); color:#86efac; }
-  .grade-badge.wait { background:rgba(245,158,11,0.13); border-color:rgba(245,158,11,0.34); color:#fcd34d; }
-  .grade-badge.almost-ready { background:rgba(99,102,241,0.15); border-color:rgba(99,102,241,0.38); color:#c4b5fd; }
-  .grade-badge.skip { background:rgba(148,163,184,0.08); border-color:rgba(148,163,184,0.18); color:#94a3b8; }
+  .grade-badge.enter-now { background:rgba(34,197,94,0.15); border-color:rgba(34,197,94,0.38); color:#86efac; }
+  .grade-badge.wait { background:rgba(245,158,11,0.14); border-color:rgba(245,158,11,0.36); color:#fcd34d; }
+  .grade-badge.almost-ready { background:var(--accent-soft); border-color:rgba(139,92,246,0.44); color:#ddd6fe; }
+  .grade-badge.skip { background:rgba(148,163,184,0.1); border-color:rgba(148,163,184,0.2); color:#cbd5e1; }
   .grade-badge.too-late { background:rgba(249,115,22,0.13); border-color:rgba(249,115,22,0.34); color:#fdba74; }
   .action-badge {
     border: 1px solid rgba(148,163,184,0.18);
@@ -331,10 +379,11 @@
     padding: 5px 8px;
   }
   .priority-watchlist {
-    background: var(--surface);
-    border: 1px solid rgba(251,191,36,0.3);
-    border-radius: 12px;
-    padding: 14px 16px;
+    background: rgba(26,36,53,0.82);
+    border: 1px solid var(--border-soft);
+    border-radius: 16px;
+    box-shadow: var(--card-shadow);
+    padding: 16px 18px;
     margin: 16px auto;
     max-width: 1400px;
   }
@@ -386,24 +435,30 @@
     grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   }
   .index-row {
-    background: rgba(148,163,184,0.035);
-    border: 1px solid rgba(148,163,184,0.1);
-    border-radius: 8px;
+    background: linear-gradient(180deg, rgba(30,41,59,0.92), rgba(21,32,51,0.92));
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
+    box-shadow: 0 10px 26px rgba(2,6,23,0.22);
     cursor: pointer;
     font-size: 12px;
     padding: 12px;
     min-width: 0;
   }
-  .index-row:hover { background: rgba(148,163,184,0.075); }
+  .index-row:hover { background: linear-gradient(180deg, rgba(35,49,73,0.98), rgba(26,36,53,0.98)); }
   .index-simple-head { align-items:flex-start; display:flex; gap:10px; justify-content:space-between; margin-bottom:12px; }
-  .index-current-price { color:var(--text); font-size:15px; font-weight:850; margin-top:4px; }
+  .index-current-price { color:#cbd5e1; font-size:15px; font-weight:850; margin-top:5px; }
   .index-grade-stars { color:#fbbf24; font-size:12px; font-weight:900; letter-spacing:0.03em; margin-top:3px; }
-  .index-status-block { border-bottom:1px solid rgba(148,163,184,0.09); border-top:1px solid rgba(148,163,184,0.09); padding:9px 0; }
-  .index-simple-label { color:var(--muted); font-size:9px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
-  .index-simple-status { font-size:20px; font-weight:950; letter-spacing:0.02em; margin-top:2px; }
+  .index-status-block {
+    background: rgba(15,23,42,0.18);
+    border: 1px solid rgba(148,163,184,0.1);
+    border-radius: 12px;
+    padding: 11px 12px;
+  }
+  .index-simple-label { color:var(--muted); font-size:9px; font-weight:850; letter-spacing:0.09em; text-transform:uppercase; }
+  .index-simple-status { font-size:20px; font-weight:950; letter-spacing:0.01em; margin-top:3px; }
   .index-simple-status.enter-now { color:var(--long); }
   .index-simple-status.wait { color:#fbbf24; }
-  .index-simple-status.almost-ready { color:#c4b5fd; }
+  .index-simple-status.almost-ready { color:#ddd6fe; }
   .index-simple-status.skip { color:#94a3b8; }
   .index-simple-status.too-late { color:#f97316; }
   .index-simple-direction { color:var(--text); font-size:13px; font-weight:850; margin-top:8px; }
@@ -417,14 +472,22 @@
     margin-top:10px;
     padding:8px 9px;
   }
-  .index-plan { display:grid; gap:6px; margin-top:11px; }
+  .index-plan {
+    background: rgba(15,23,42,0.22);
+    border: 1px solid rgba(148,163,184,0.1);
+    border-radius: 12px;
+    display:grid;
+    gap:7px;
+    margin-top:11px;
+    padding:11px 12px;
+  }
   .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
-  .index-plan-row span:first-child { color:var(--muted); }
-  .index-plan-row span:last-child { color:var(--text); font-weight:800; }
+  .index-plan-row span:first-child { color:var(--muted); font-size:11px; }
+  .index-plan-row span:last-child { color:var(--text); font-weight:900; }
   .index-contract {
-    background:rgba(2,6,23,0.2);
-    border:1px solid rgba(148,163,184,0.08);
-    border-radius:7px;
+    background:rgba(15,23,42,0.28);
+    border:1px solid rgba(148,163,184,0.12);
+    border-radius:10px;
     margin-top:11px;
     padding:9px;
   }
@@ -451,10 +514,12 @@
   .execution-subtitle { color:var(--muted); font-size:12px; line-height:1.45; margin-top:4px; }
   .execution-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); }
   .execution-card {
-    background:linear-gradient(180deg, rgba(15,23,42,0.98), rgba(15,23,42,0.9));
+    background:linear-gradient(180deg, rgba(30,41,59,0.98), rgba(21,32,51,0.94));
     border:1px solid rgba(34,197,94,0.22);
-    border-radius:10px;
+    border-radius:16px;
+    box-shadow:var(--card-shadow);
     padding:14px;
+    transition:border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
   }
   .execution-card-head { align-items:flex-start; display:flex; gap:10px; justify-content:space-between; }
   .execution-ticker { color:var(--text); font-size:18px; font-weight:950; }
@@ -497,9 +562,9 @@
     text-align:center;
   }
   .earnings-block {
-    background:rgba(2,6,23,0.2);
-    border:1px solid rgba(148,163,184,0.08);
-    border-radius:7px;
+    background:rgba(15,23,42,0.28);
+    border:1px solid rgba(148,163,184,0.12);
+    border-radius:10px;
     margin-top:9px;
     padding:9px;
   }
@@ -558,7 +623,7 @@
   .confirmation-pill.confirmed { background: rgba(34,197,94,0.12); color: #86efac; }
   .confirmation-pill.waiting { background: rgba(148,163,184,0.09); color: #94a3b8; }
 
-  .card-body { padding: 0 18px 14px; }
+  .card-body { padding: 0 20px 16px; }
 
   .entry-pill {
     border-radius: 999px;
@@ -577,15 +642,127 @@
     align-items: baseline;
     display: flex;
     gap: 10px;
-    margin: 2px 0 16px;
+    margin: 2px 0 14px;
   }
-  .price-big { font-size: 22px; font-weight: 800; }
+  .price-big { color:#cbd5e1; font-size: 22px; font-weight: 850; }
   .price-meta { color: var(--muted); font-size: 11px; }
 
+  .trade-timeline {
+    background: rgba(15,23,42,0.26);
+    border: 1px solid rgba(148,163,184,0.12);
+    border-radius: 13px;
+    margin: 12px 0;
+    padding: 12px;
+  }
+  .trade-timeline-title {
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: 0.1em;
+    margin-bottom: 11px;
+    text-transform: uppercase;
+  }
+  .timeline-steps {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    position: relative;
+  }
+  .timeline-step {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    position: relative;
+    text-align: center;
+  }
+  .timeline-step::before {
+    background: rgba(148,163,184,0.18);
+    content: '';
+    height: 2px;
+    left: calc(-50% + 15px);
+    position: absolute;
+    right: calc(50% + 15px);
+    top: 10px;
+  }
+  .timeline-step:first-child::before { display: none; }
+  .timeline-dot {
+    align-items: center;
+    background: rgba(30,41,59,0.95);
+    border: 2px solid rgba(148,163,184,0.24);
+    border-radius: 999px;
+    color: var(--muted);
+    display: inline-flex;
+    font-size: 11px;
+    font-weight: 950;
+    height: 22px;
+    justify-content: center;
+    position: relative;
+    width: 22px;
+    z-index: 1;
+  }
+  .timeline-label {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 850;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+  .timeline-state {
+    color: #73839a;
+    font-size: 8px;
+    font-weight: 850;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+  .timeline-step.complete .timeline-dot {
+    background: rgba(34,197,94,0.16);
+    border-color: rgba(34,197,94,0.62);
+    color: #86efac;
+  }
+  .timeline-step.complete::before { background: rgba(34,197,94,0.48); }
+  .timeline-step.current .timeline-dot {
+    background: var(--accent-soft);
+    border-color: rgba(139,92,246,0.72);
+    box-shadow: 0 0 0 4px rgba(139,92,246,0.1);
+    color: #ddd6fe;
+  }
+  .timeline-step.current .timeline-label { color: var(--text); }
+  .timeline-step.current .timeline-state { color: var(--accent-strong); }
+  .timeline-step.complete .timeline-state { color: #86efac; }
+  .timeline-step.pending .timeline-dot {
+    background: rgba(15,23,42,0.58);
+    border-color: rgba(148,163,184,0.2);
+  }
+  .timeline-step.skip .timeline-dot {
+    background: rgba(148,163,184,0.08);
+    border-color: rgba(148,163,184,0.18);
+  }
+  .trade-timeline.enter-now .timeline-step.current .timeline-dot {
+    background: rgba(34,197,94,0.18);
+    border-color: rgba(34,197,94,0.72);
+    box-shadow: 0 0 0 4px rgba(34,197,94,0.1);
+    color: #86efac;
+  }
+  .trade-timeline.wait .timeline-step.current .timeline-dot {
+    background: rgba(245,158,11,0.16);
+    border-color: rgba(245,158,11,0.7);
+    box-shadow: 0 0 0 4px rgba(245,158,11,0.1);
+    color: #fcd34d;
+  }
+  .trade-timeline.skip .timeline-step.current .timeline-dot {
+    background: rgba(148,163,184,0.1);
+    border-color: rgba(148,163,184,0.28);
+    box-shadow: none;
+    color: #cbd5e1;
+  }
+
   .card-section {
-    background: rgba(2,6,23,0.18);
-    border: 1px solid rgba(148,163,184,0.08);
-    border-radius: 10px;
+    background: rgba(15,23,42,0.24);
+    border: 1px solid rgba(148,163,184,0.12);
+    border-radius: 13px;
     margin-bottom: 10px;
     padding: 12px;
   }
@@ -902,6 +1079,15 @@
       flex-direction: column;
       gap: 4px;
     }
+    .trade-timeline {
+      padding: 10px;
+    }
+    .timeline-steps {
+      gap: 6px;
+    }
+    .timeline-label {
+      font-size: 9px;
+    }
     .levels-table,
     .journal-table,
     .analytics-table,
@@ -1017,6 +1203,13 @@
     .stage-grid,
     .checklist {
       grid-template-columns: 1fr;
+    }
+    .timeline-steps {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      row-gap: 12px;
+    }
+    .timeline-step:nth-child(3)::before {
+      display: none;
     }
     .card-body { padding: 0 12px 10px; }
     .card-footer {
@@ -2453,9 +2646,19 @@ async function runScan() {
 
   btn.disabled = true;
   status.innerHTML = '<span class="spinner"></span>Scanning...';
-  results.innerHTML = '';
+  results.innerHTML = renderLoadingSkeletonCards(4);
   summary.textContent = '';
-  if (indexWatchlist) indexWatchlist.innerHTML = '';
+  if (indexWatchlist) {
+    indexWatchlist.style.display = 'block';
+    indexWatchlist.innerHTML = `
+      <div class="priority-watchlist index-watchlist">
+        <div class="priority-head">
+          <div class="priority-title">Index Watchlist</div>
+          <div class="priority-subtitle">Loading market snapshot</div>
+        </div>
+        <div class="priority-list">${renderLoadingSkeletonCards(3)}</div>
+      </div>`;
+  }
   let scanMeta = null;
 
   try {
@@ -2473,15 +2676,21 @@ async function runScan() {
     scannerNearMiss = nextNearMiss;
     renderScannerResults();
     renderExecutionTab();
-    await loadIndexWatchlist();
+    refreshIndexWatchlistInBackground();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
     results.innerHTML = '<div class="empty">Full scan is still unavailable. Index Watchlist can still load above.</div>';
-    await loadIndexWatchlist();
+    refreshIndexWatchlistInBackground();
   } finally {
     btn.disabled = false;
     status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : scanStatusText(scanMeta);
   }
+}
+
+function refreshIndexWatchlistInBackground() {
+  loadIndexWatchlist().catch(e => {
+    console.error('[Index Watchlist] background refresh failed:', e);
+  });
 }
 
 async function loadIndexWatchlist() {
@@ -2491,9 +2700,17 @@ async function loadIndexWatchlist() {
     return;
   }
   console.info('[Index Watchlist] scanning', INDEX_WATCH_TICKERS.join(', '));
-  renderIndexWatchlistMessage('Loading index watchlist...');
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="priority-watchlist index-watchlist">
+      <div class="priority-head">
+        <div class="priority-title">Index Watchlist</div>
+        <div class="priority-subtitle">Loading market snapshot</div>
+      </div>
+      <div class="priority-list">${renderLoadingSkeletonCards(3)}</div>
+    </div>`;
   try {
-    const res = await fetch(`${API}/api/scan?tickers=${encodeURIComponent(INDEX_WATCH_TICKERS.join(','))}`);
+    const res = await fetchWithTimeout(`${API}/api/scan?tickers=${encodeURIComponent(INDEX_WATCH_TICKERS.join(','))}`, {}, 12000);
     if (!res.ok) throw new Error(`Index scan failed with HTTP ${res.status}`);
     const data = await res.json();
     indexWatchRows = [...(data.rows || []), ...(data.near_miss || [])];
@@ -2507,6 +2724,16 @@ async function loadIndexWatchlist() {
     return;
   }
   renderPriorityWatchlist();
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function clearResults() {
@@ -3012,6 +3239,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
                 <div class="index-simple-label" style="margin-top:8px;">Direction</div>
                 <div class="index-simple-direction ${directionClass(direction)}">${renderDirectionText(direction)}</div>
               </div>
+              ${renderTradeReadinessTimeline(setup)}
               ${renderTradePlanBlock(setup)}
               ${renderPositionManagement(setup)}
               ${renderBestContractBlock(setup)}
@@ -3099,6 +3327,77 @@ function readinessStars(setup) {
 function renderReadinessBadge(setup) {
   const state = setupProgressState(setup);
   return `<span class="grade-badge ${state.className}">${state.label}</span>`;
+}
+
+function tradeReadinessStages(setup) {
+  const state = setupProgressState(setup);
+  const bucket = state.bucket;
+  const hasDirection = Boolean(setup.direction);
+  const hasPlan = hasValidTradePlan(setup);
+  const entryStatus = setup.entryStatus || 'Waiting';
+  const confirmationStarted = Boolean(setup.confirmationStarted || setup.trade_eval?.trigger_confirmed || setup.trade_eval?.rejection_confirmed);
+  const stages = ['Trend', 'Location', 'Confirmation', 'Execute'];
+
+  if (bucket === 'SKIP') {
+    return stages.map((label, idx) => ({ label, state: idx === 0 ? 'current skip' : 'pending skip' }));
+  }
+  if (bucket === 'ENTER_NOW') {
+    return stages.map((label, idx) => ({ label, state: idx === 3 ? 'current' : 'complete' }));
+  }
+  if (bucket === 'ALMOST_READY') {
+    return [
+      { label: 'Trend', state: 'complete' },
+      { label: 'Location', state: 'complete' },
+      { label: 'Confirmation', state: confirmationStarted || entryStatus === 'Tradeable' ? 'complete' : 'current' },
+      { label: 'Execute', state: confirmationStarted || entryStatus === 'Tradeable' ? 'current' : 'pending' },
+    ];
+  }
+  return [
+    { label: 'Trend', state: hasDirection ? 'complete' : 'current' },
+    { label: 'Location', state: hasPlan || entryStatus === 'Near Entry' ? 'current' : 'pending' },
+    { label: 'Confirmation', state: 'pending' },
+    { label: 'Execute', state: 'pending' },
+  ];
+}
+
+function renderTradeReadinessTimeline(setup) {
+  const state = setupProgressState(setup);
+  const steps = tradeReadinessStages(setup);
+  return `
+    <div class="trade-timeline ${state.className}">
+      <div class="trade-timeline-title">Trade Readiness</div>
+      <div class="timeline-steps">
+        ${steps.map(step => `
+          <div class="timeline-step ${step.state}">
+            <span class="timeline-dot">${step.state.includes('complete') ? '✓' : ''}</span>
+            <span class="timeline-label">${escapeHtml(step.label)}</span>
+            <span class="timeline-state">${escapeHtml(timelineStateLabel(step.state))}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+}
+
+function timelineStateLabel(state) {
+  if (String(state).includes('complete')) return 'Complete';
+  if (String(state).includes('current')) return 'Current';
+  return 'Pending';
+}
+
+function renderLoadingSkeletonCards(count = 4) {
+  return Array.from({ length: count }, () => `
+    <div class="skeleton-card">
+      <div class="skeleton-head">
+        <div class="skeleton-line skeleton-title"></div>
+        <div class="skeleton-pill"></div>
+      </div>
+      <div class="skeleton-line short"></div>
+      <div class="skeleton-box"></div>
+      <div class="skeleton-line medium"></div>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-box"></div>
+    </div>
+  `).join('');
 }
 
 function openJournalEntryForTicker(ticker) {
@@ -3756,6 +4055,7 @@ function renderCard(s) {
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
         <div class="index-simple-direction ${directionClass(directionLabel)}">${renderDirectionText(directionLabel)}</div>
       </div>
+      ${renderTradeReadinessTimeline(s)}
       ${renderTradePlanBlock(s)}
       ${renderPositionManagement(s)}
       ${renderBestContractBlock(s)}
