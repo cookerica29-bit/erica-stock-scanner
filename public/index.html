@@ -1834,7 +1834,7 @@
     </div>
     <select id="statusFilter" onchange="renderScannerResults()">
       <option value="all">All Statuses</option>
-      <option value="ACTIONABLE" selected>Actionable</option>
+      <option value="ACTIONABLE" selected>Opportunities</option>
       <option value="ENTER_NOW">Enter Now</option>
       <option value="DEVELOPING">Developing Setups</option>
       <option value="ALMOST_READY">Almost Ready</option>
@@ -3068,7 +3068,7 @@ function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
   if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
   const statusBucket = setupProgressState(s).bucket;
-  if (filters.status === 'ACTIONABLE' && !['ENTER_NOW', 'ALMOST_READY'].includes(statusBucket)) return false;
+  if (filters.status === 'ACTIONABLE' && !['ENTER_NOW', 'ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
   if (filters.status === 'DEVELOPING' && !['ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
   if (filters.status !== 'all' && filters.status !== 'ACTIONABLE' && filters.status !== 'DEVELOPING' && statusBucket !== filters.status) return false;
   if (filters.direction !== 'all' && String(s?.direction || '').toUpperCase() !== filters.direction) return false;
@@ -3257,7 +3257,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
   const statusMatches = setup => {
     const bucket = setupProgressState(setup).bucket;
     if (activeStatusFilter === 'all') return true;
-    if (activeStatusFilter === 'ACTIONABLE') return ['ENTER_NOW', 'ALMOST_READY'].includes(bucket);
+    if (activeStatusFilter === 'ACTIONABLE') return ['ENTER_NOW', 'ALMOST_READY', 'WAITING'].includes(bucket);
     if (activeStatusFilter === 'DEVELOPING') return ['ALMOST_READY', 'WAITING'].includes(bucket);
     return bucket === activeStatusFilter;
   };

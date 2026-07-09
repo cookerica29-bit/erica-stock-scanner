@@ -65,10 +65,10 @@ NO_EARNINGS_SYMBOLS = {
 STOCK_UNIVERSE_FILTER = {
     "enabled": True,
     "min_price": 10.0,
-    "min_avg_volume": 1_000_000,
+    "min_avg_volume": 0,
     "avg_volume_lookback": 30,
     "min_option_expirations": 1,
-    "exclude_non_major_etfs": True,
+    "exclude_non_major_etfs": False,
     "allowlist": {
         "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
         "XLE", "XLF", "XLK", "XLV", "XLU", "XLI", "XLB",
@@ -496,10 +496,11 @@ def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -
     if price < min_price and ticker not in allowlist:
         return "low price"
 
-    avg_volume = _average_volume(daily_df, int(config.get("avg_volume_lookback") or 30))
     min_avg_volume = float(config.get("min_avg_volume") or 0)
-    if (avg_volume is None or avg_volume < min_avg_volume) and ticker not in allowlist:
-        return "low liquidity"
+    if min_avg_volume > 0:
+        avg_volume = _average_volume(daily_df, int(config.get("avg_volume_lookback") or 30))
+        if (avg_volume is None or avg_volume < min_avg_volume) and ticker not in allowlist:
+            return "low liquidity"
 
     min_expirations = int(config.get("min_option_expirations") or 0)
     if min_expirations > 0:
