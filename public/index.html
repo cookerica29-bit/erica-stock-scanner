@@ -2698,7 +2698,7 @@ async function runScan() {
   let scanMeta = null;
 
   try {
-    const res  = await fetch(`${API}/api/scan`);
+    const res  = await fetchWithTimeout(`${API}/api/scan`, {}, 15000);
     const data = await res.json();
     scanMeta = data.meta || null;
     updateDataStatus(scanMeta || {});
@@ -2923,6 +2923,7 @@ function scanStatusText(meta) {
 }
 
 function cacheStatusFromMeta(meta = {}) {
+  if (meta.status === 'warming' && meta.has_cache && meta.generated_at) return meta.stale ? 'stale' : 'fresh';
   if (meta.status) return meta.status;
   if (meta.refreshing && (meta.has_cache === false || meta.cache === 'miss')) return 'warming';
   if (meta.stale) return 'stale';

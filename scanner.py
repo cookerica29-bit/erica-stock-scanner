@@ -202,8 +202,6 @@ def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
     if cached:
         meta = _analysis_cache_meta(key, cached, refreshing)
         status = "stale" if meta.get("stale") else "fresh"
-        if refreshing and not meta.get("stale"):
-            status = "warming"
         return {**meta, "status": status, "has_cache": True}
     return {
         "cache": "miss",
