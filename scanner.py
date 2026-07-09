@@ -62,9 +62,8 @@ NO_EARNINGS_SYMBOLS = {
     "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
 }
 
-STOCK_UNIVERSE_FILTER = {
+STOCK_TRADEABILITY_FILTER = {
     "enabled": True,
-    "min_price": 10.0,
     "min_avg_volume": 0,
     "avg_volume_lookback": 30,
     "min_option_expirations": 1,
@@ -76,6 +75,8 @@ STOCK_UNIVERSE_FILTER = {
     },
     "blocklist": set(),
 }
+
+STOCK_UNIVERSE_FILTER = STOCK_TRADEABILITY_FILTER
 
 MAJOR_LIQUID_ETFS = {
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
@@ -474,7 +475,7 @@ def _is_known_etf(ticker: str) -> bool:
 
 
 def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -> Optional[str]:
-    config = STOCK_UNIVERSE_FILTER
+    config = STOCK_TRADEABILITY_FILTER
     if not config.get("enabled", True):
         return None
 
@@ -490,9 +491,6 @@ def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -
     price = _latest_close(daily_df)
     if price is None:
         return "no price data"
-    min_price = float(config.get("min_price") or 0)
-    if price < min_price and ticker not in allowlist:
-        return "low price"
 
     min_avg_volume = float(config.get("min_avg_volume") or 0)
     if min_avg_volume > 0:
@@ -3187,7 +3185,7 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
 
         original_count = len(watchlist)
 
-        # ── Step 1: batch-download daily OHLCV for cheap universe filtering ───────
+        # ── Step 1: batch-download daily OHLCV for cheap tradeability filtering ───
         price_stage_start = time.perf_counter()
         daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
         filtered_watchlist, skipped_symbols = _prefilter_stock_universe(watchlist, daily_data)
@@ -3198,7 +3196,7 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
         if skipped_symbols:
             examples = ", ".join(f"{item['ticker']}:{item['reason']}" for item in skipped_symbols[:20])
             logger.info(
-                "[universe filter] skipped=%s/%s reasons=%s examples=%s",
+                "[tradeability filter] skipped=%s/%s reasons=%s examples=%s",
                 len(skipped_symbols),
                 original_count,
                 skip_counts,
