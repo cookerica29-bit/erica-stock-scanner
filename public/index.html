@@ -521,10 +521,35 @@
   .best-contract.fair { border-color:rgba(251,191,36,0.4); background:rgba(251,191,36,0.07); }
   .best-contract.none { border-color:rgba(251,191,36,0.24); background:rgba(251,191,36,0.05); }
   .best-contract .index-contract-main { font-size:13px; }
-  .best-execution { color:var(--muted); font-size:11px; font-weight:800; margin-top:4px; }
-  .best-contract.excellent .best-execution { color:#22c55e; }
-  .best-contract.fair .best-execution,
-  .best-contract.none .best-execution { color:#fbbf24; }
+  .contract-score-line { color:var(--text); font-size:11px; font-weight:900; margin-top:5px; }
+  .contract-score-unavailable { color:var(--muted); }
+  .contract-metrics {
+    display:grid;
+    gap:4px;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    margin-top:7px;
+  }
+  .contract-metric {
+    background:rgba(15,23,42,0.35);
+    border:1px solid rgba(148,163,184,0.1);
+    border-radius:7px;
+    min-width:0;
+    padding:5px 6px;
+  }
+  .contract-metric-label {
+    color:var(--muted);
+    font-size:9px;
+    font-weight:900;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+  }
+  .contract-metric-value {
+    color:var(--text);
+    font-size:11px;
+    font-weight:900;
+    margin-top:2px;
+    overflow-wrap:anywhere;
+  }
   .execution-panel { padding:20px 24px; max-width:1200px; margin:0 auto; }
   .execution-head {
     align-items:flex-start;
@@ -569,8 +594,7 @@
   .execution-line span:last-child { color:var(--text); font-weight:850; text-align:right; }
   .execution-contract-main { color:var(--text); font-size:14px; font-weight:950; margin-top:7px; }
   .execution-contract-sub { color:var(--muted); font-size:11px; margin-top:4px; }
-  .execution-quality { color:#22c55e; font-size:11px; font-weight:900; margin-top:5px; }
-  .execution-quality.fair { color:#fbbf24; }
+  .execution-quality { color:var(--text); font-size:11px; font-weight:900; margin-top:5px; }
   .execution-risk-row { align-items:center; display:flex; gap:10px; justify-content:space-between; margin-top:10px; }
   .execution-risk-row input { width:86px; }
   .execution-risk { color:#fbbf24; font-size:13px; font-weight:950; margin-top:7px; }
@@ -2135,8 +2159,17 @@
     <div class="term-card"><div class="term-title">Position</div><div class="term-copy">A trade that is currently open.</div></div>
     <div class="term-card"><div class="term-title">Ready</div><div class="term-copy">The setup has enough evidence to review for entry.</div></div>
     <div class="term-card"><div class="term-title">Wait</div><div class="term-copy">The setup is developing, but not ready yet.</div></div>
-    <div class="term-card"><div class="term-title">Skip</div><div class="term-copy">The setup is low quality or not worth attention now.</div></div>
+    <div class="term-card"><div class="term-title">Skip</div><div class="term-copy">The scanner did not rank this as a current setup.</div></div>
     <div class="term-card"><div class="term-title">Too Late</div><div class="term-copy">Price has moved too far from the planned entry.</div></div>
+  </div>
+  <div class="trend-head" style="margin-top:22px;">
+    <div class="trend-title">Kairos Philosophy</div>
+    <div class="trend-note">How to read scanner grades and scores.</div>
+  </div>
+  <div class="terms-grid">
+    <div class="term-card"><div class="term-title">Kairos Informs. The Trader Decides.</div><div class="term-copy">Kairos provides structured information; the final trading decision belongs to the trader.</div></div>
+    <div class="term-card"><div class="term-title">Ranked Opportunities</div><div class="term-copy">Kairos ranks opportunities instead of removing informed choice.</div></div>
+    <div class="term-card"><div class="term-title">Objective Methodology</div><div class="term-copy">Grades and scores are objective rankings based on the Kairos methodology.</div></div>
   </div>
 </div>
 
@@ -3704,34 +3737,92 @@ function renderSuggestedContractBlock(setup) {
     </div>`;
 }
 
+function contractScoreText(contract = {}) {
+  const score = Number(contract.score);
+  return Number.isFinite(score) ? `${Math.round(score)}/100` : 'Not Available';
+}
+
+function contractLiquidityText(contract = {}) {
+  const oiScore = Number(contract.open_interest_score);
+  const volumeScore = Number(contract.volume_score);
+  if (Number.isFinite(oiScore) || Number.isFinite(volumeScore)) {
+    return `${Math.round((Number.isFinite(oiScore) ? oiScore : 0) + (Number.isFinite(volumeScore) ? volumeScore : 0))}/35`;
+  }
+  const oi = Number(contract.open_interest);
+  const volume = Number(contract.volume);
+  if (Number.isFinite(oi) || Number.isFinite(volume)) {
+    return `OI ${Number.isFinite(oi) ? Math.round(oi).toLocaleString() : '—'} · Vol ${Number.isFinite(volume) ? Math.round(volume).toLocaleString() : '—'}`;
+  }
+  return '';
+}
+
+function contractSpreadText(contract = {}) {
+  const bid = Number(contract.bid);
+  const ask = Number(contract.ask);
+  const spread = Number(contract.spread);
+  const spreadPct = Number(contract.spread_pct);
+  const parts = [];
+  if (Number.isFinite(bid) && Number.isFinite(ask)) parts.push(`${fmtMoney(bid)} / ${fmtMoney(ask)}`);
+  if (Number.isFinite(spread)) parts.push(`spread ${fmtMoney(spread)}`);
+  if (Number.isFinite(spreadPct)) parts.push(`${spreadPct.toFixed(1)}%`);
+  return parts.join(' · ');
+}
+
+function contractMetricRows(contract = {}) {
+  const score = Number(contract.score);
+  const rows = [
+    ['Overall Score', Number.isFinite(score) ? `${Math.round(score)}/100` : ''],
+    ['Liquidity', contractLiquidityText(contract)],
+    ['Bid/Ask Spread', contractSpreadText(contract)],
+    ['Open Interest', Number.isFinite(Number(contract.open_interest)) ? Math.round(Number(contract.open_interest)).toLocaleString() : ''],
+    ['Volume', Number.isFinite(Number(contract.volume)) ? Math.round(Number(contract.volume)).toLocaleString() : ''],
+  ];
+  return rows.filter(([, value]) => String(value || '').trim());
+}
+
+function renderContractScoreMetrics(contract = {}) {
+  const rows = contractMetricRows(contract);
+  if (!rows.length) return '';
+  return `
+    <div class="contract-metrics">
+      ${rows.map(([label, value]) => `
+        <div class="contract-metric">
+          <div class="contract-metric-label">${escapeHtml(label)}</div>
+          <div class="contract-metric-value">${escapeHtml(value)}</div>
+        </div>`).join('')}
+    </div>`;
+}
+
 function bestContractDisplay(setup) {
   const contract = setup.best_contract || {};
   if (contract.loading || String(contract.source || '').toLowerCase() === 'loading') {
     return {
       className: 'none',
-      label: 'Options',
+      label: 'Contract Score',
       main: 'Loading...',
-      execution: '',
+      score: '',
+      metrics: '',
     };
   }
   if (!contract.available) {
     return {
       className: 'none',
-      label: 'Options',
-      main: '⚠️ No clean contract available',
-      execution: '',
+      label: 'Contract Score',
+      main: 'Not Available',
+      score: 'Contract Score: Not Available',
+      metrics: renderContractScoreMetrics(contract),
     };
   }
   const strikeValue = Number(contract.strike);
   const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
   const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
   const expiry = formatShortDate(contract.expiry);
-  const execution = String(contract.execution || '').toLowerCase() === 'excellent' ? '✅ Excellent' : '⚠️ Fair';
   return {
     className: String(contract.execution || '').toLowerCase() === 'excellent' ? 'excellent' : 'fair',
-    label: 'Best Contract',
+    label: 'Contract Score',
     main: `${expiry} · $${strike} ${type}`.trim(),
-    execution: `Contract Quality: ${execution}`,
+    score: `Contract Score: ${contractScoreText(contract)}`,
+    metrics: renderContractScoreMetrics(contract),
   };
 }
 
@@ -3741,7 +3832,8 @@ function renderBestContractBlock(setup) {
     <div class="index-contract best-contract ${contract.className}">
       <div class="index-simple-label">${contract.label}</div>
       <div class="index-contract-main">${escapeHtml(contract.main)}</div>
-      ${contract.execution ? `<div class="best-execution">${escapeHtml(contract.execution)}</div>` : ''}
+      ${contract.score ? `<div class="contract-score-line ${contract.className === 'none' ? 'contract-score-unavailable' : ''}">${escapeHtml(contract.score)}</div>` : ''}
+      ${contract.metrics || ''}
     </div>`;
 }
 
@@ -3790,8 +3882,8 @@ function executionContractInfo(setup) {
     type,
     cost,
     costText: Number.isFinite(cost) ? fmtMoney(cost) : 'Price unavailable',
-    quality: String(contract.execution || '').toLowerCase() === 'excellent' ? '✅ Excellent' : contract.available ? '⚠️ Fair' : 'Unavailable',
-    qualityClass: String(contract.execution || '').toLowerCase() === 'excellent' ? 'excellent' : 'fair',
+    score: contractScoreText(contract),
+    scoreMetrics: contractMetricRows(contract),
     label: display.main,
   };
 }
@@ -3823,7 +3915,7 @@ function executionTradePlanText(setup, qty = 1) {
     `Entry: ${fmtMoney(setup.entry)}`,
     `Stop: ${fmtMoney(setup.sl)}`,
     `Target: ${fmtMoney(setup.tp1)}`,
-    `Contract Quality: ${contract.quality.replace(/[✅⚠️]/g, '').trim() || 'Unavailable'}`,
+    `Contract Score: ${contract.score || 'Not Available'}`,
     `Quantity: ${quantity}`,
     `Estimated Contract Cost: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Unavailable'}`,
   ].join('\n');
@@ -3852,10 +3944,10 @@ function renderExecutionTab() {
   if (!list || !summary) return;
   const rows = actionableExecutionRows();
   summary.textContent = rows.length
-    ? `${rows.length} actionable trade${rows.length === 1 ? '' : 's'} ready for handoff.`
-    : 'No ENTER NOW trades loaded. Run a scan or wait for an actionable setup.';
+    ? `${rows.length} ENTER NOW setup${rows.length === 1 ? '' : 's'} loaded for handoff.`
+    : 'No ENTER NOW setups loaded. Run a scan or wait for a matching setup.';
   if (!rows.length) {
-    list.innerHTML = '<div class="execution-empty">No actionable ENTER NOW trades right now.</div>';
+    list.innerHTML = '<div class="execution-empty">No ENTER NOW setups right now.</div>';
     return;
   }
   list.innerHTML = rows.map((setup, idx) => {
@@ -3876,9 +3968,10 @@ function renderExecutionTab() {
           <div class="execution-line"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
         </div>
         <div class="execution-section">
-          <div class="execution-section-title">Best Contract</div>
+          <div class="execution-section-title">Contract Score</div>
           <div class="execution-contract-main">${escapeHtml(contract.label)}</div>
-          <div class="execution-quality ${contract.qualityClass}">Contract Quality: ${escapeHtml(contract.quality)}</div>
+          <div class="execution-quality">Contract Score: ${escapeHtml(contract.score || 'Not Available')}</div>
+          ${renderContractScoreMetrics(setup.best_contract || {})}
           <div class="execution-risk-row">
             <label class="execution-section-title" for="executionQty-${idx}">Quantity</label>
             <input id="executionQty-${idx}" type="number" min="1" step="1" value="1" oninput="updateExecutionRisk(${idx})" />
@@ -4108,7 +4201,7 @@ function renderCard(s) {
   const encoded = encodeURIComponent(JSON.stringify(s));
   const distanceText = s.distanceFromEntryAtr != null
     ? `${fmtNumber(s.distanceFromEntryAtr)} ATR / ${fmtNumber(s.distanceFromEntryPercent)}% from entry`
-    : 'No actionable entry distance yet';
+    : 'No entry distance available yet';
 
   return `
   <div class="card">
