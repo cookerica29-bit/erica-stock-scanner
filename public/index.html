@@ -277,6 +277,12 @@
     gap: 18px;
   }
 
+  .index-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(390px, 1fr));
+    gap: 18px;
+  }
+
   .empty { grid-column: 1 / -1; text-align: center; padding: 60px 0; color: var(--muted); }
 
   .skeleton-card {
@@ -517,39 +523,9 @@
   .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; }
   .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; }
   .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
-  .best-contract.excellent { border-color:rgba(34,197,94,0.35); background:rgba(34,197,94,0.07); }
-  .best-contract.fair { border-color:rgba(251,191,36,0.4); background:rgba(251,191,36,0.07); }
+  .best-contract.available { border-color:rgba(124,92,255,0.28); background:rgba(124,92,255,0.07); }
   .best-contract.none { border-color:rgba(251,191,36,0.24); background:rgba(251,191,36,0.05); }
   .best-contract .index-contract-main { font-size:13px; }
-  .contract-score-line { color:var(--text); font-size:11px; font-weight:900; margin-top:5px; }
-  .contract-score-unavailable { color:var(--muted); }
-  .contract-metrics {
-    display:grid;
-    gap:4px;
-    grid-template-columns:repeat(2, minmax(0, 1fr));
-    margin-top:7px;
-  }
-  .contract-metric {
-    background:rgba(15,23,42,0.35);
-    border:1px solid rgba(148,163,184,0.1);
-    border-radius:7px;
-    min-width:0;
-    padding:5px 6px;
-  }
-  .contract-metric-label {
-    color:var(--muted);
-    font-size:9px;
-    font-weight:900;
-    letter-spacing:0.06em;
-    text-transform:uppercase;
-  }
-  .contract-metric-value {
-    color:var(--text);
-    font-size:11px;
-    font-weight:900;
-    margin-top:2px;
-    overflow-wrap:anywhere;
-  }
   .execution-panel { padding:20px 24px; max-width:1200px; margin:0 auto; }
   .execution-head {
     align-items:flex-start;
@@ -594,7 +570,6 @@
   .execution-line span:last-child { color:var(--text); font-weight:850; text-align:right; }
   .execution-contract-main { color:var(--text); font-size:14px; font-weight:950; margin-top:7px; }
   .execution-contract-sub { color:var(--muted); font-size:11px; margin-top:4px; }
-  .execution-quality { color:var(--text); font-size:11px; font-weight:900; margin-top:5px; }
   .execution-risk-row { align-items:center; display:flex; gap:10px; justify-content:space-between; margin-top:10px; }
   .execution-risk-row input { width:86px; }
   .execution-risk { color:#fbbf24; font-size:13px; font-weight:950; margin-top:7px; }
@@ -1842,6 +1817,7 @@
 
 <div class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
+  <button class="tab-btn" onclick="switchTab('index')">Index Watchlist</button>
   <button class="tab-btn" onclick="switchTab('execution')">Execution</button>
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
@@ -1895,7 +1871,6 @@
     <span id="autoScanCountdown" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>
   </div>
   <div id="marketSnapshot" class="market-snapshot"></div>
-  <div id="priority-watchlist"></div>
   <main>
     <div id="summary"></div>
     <div id="results"></div>
@@ -1906,6 +1881,20 @@
       <div id="near-miss-results" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px;"></div>
     </div>
   </main>
+</div>
+
+<!-- ── Index Watchlist Tab ───────────────────────────────────────────────── -->
+<div id="index-panel" class="tab-panel">
+  <div class="execution-panel">
+    <div class="execution-head">
+      <div>
+        <div class="execution-title">Index Watchlist</div>
+        <div class="execution-subtitle">Major index ETFs ranked with the same readiness cards as the scanner.</div>
+      </div>
+      <button class="btn-secondary" onclick="loadIndexWatchlist()">Refresh</button>
+    </div>
+    <div id="priority-watchlist"></div>
+  </div>
 </div>
 
 <!-- ── Execution Tab ─────────────────────────────────────────────────────── -->
@@ -2437,7 +2426,7 @@ let scannerNearMiss = [];
 let indexWatchRows = [];
 let currentVideoProject = null;
 let videoProjectDirty = false;
-const INDEX_WATCH_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLF', 'XLK', 'SMH'];
+const INDEX_WATCH_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'GLD', 'XLE', 'XLF', 'XLK', 'SMH'];
 const TICKER_ALIASES = {
   APPLE: 'AAPL',
   MICROSOFT: 'MSFT',
@@ -2638,17 +2627,19 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
-  const tabs = ['scanner','execution','journal','analytics','terms'];
+  const tabs = ['scanner','index','execution','journal','analytics','terms'];
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
     b.classList.toggle('active', tabs[i] === tab);
   });
   document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
+  document.getElementById('index-panel').classList.toggle('active', tab === 'index');
   document.getElementById('execution-panel').classList.toggle('active', tab === 'execution');
   document.getElementById('trends-panel')?.classList.remove('active');
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
   document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
   document.getElementById('video-panel')?.classList.remove('active');
   document.getElementById('terms-panel').classList.toggle('active', tab === 'terms');
+  if (tab === 'index' && !indexWatchRows.length) loadIndexWatchlist();
   if (tab === 'execution') renderExecutionTab();
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics') renderAnalytics();
@@ -2715,7 +2706,6 @@ async function runScan() {
   const status  = document.getElementById('status');
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
-  const indexWatchlist = document.getElementById('priority-watchlist');
 
   btn.disabled = true;
   clearContractRefreshPoll();
@@ -2723,17 +2713,6 @@ async function runScan() {
   status.innerHTML = '<span class="spinner"></span>Scanning...';
   results.innerHTML = renderLoadingSkeletonCards(4);
   summary.textContent = '';
-  if (indexWatchlist) {
-    indexWatchlist.style.display = 'block';
-    indexWatchlist.innerHTML = `
-      <div class="priority-watchlist index-watchlist">
-        <div class="priority-head">
-          <div class="priority-title">Index Watchlist</div>
-          <div class="priority-subtitle">Loading market snapshot</div>
-        </div>
-        <div class="priority-list">${renderLoadingSkeletonCards(3)}</div>
-      </div>`;
-  }
   let scanMeta = null;
 
   try {
@@ -2755,21 +2734,13 @@ async function runScan() {
     if (rowsHaveLoadingContracts([...nextRows, ...nextNearMiss])) {
       scheduleContractRefreshPoll();
     }
-    refreshIndexWatchlistInBackground();
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
-    results.innerHTML = '<div class="empty">Full scan is still unavailable. Index Watchlist can still load above.</div>';
-    refreshIndexWatchlistInBackground();
+    results.innerHTML = '<div class="empty">Full scan is still unavailable.</div>';
   } finally {
     btn.disabled = false;
     status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : scanStatusText(scanMeta);
   }
-}
-
-function refreshIndexWatchlistInBackground() {
-  loadIndexWatchlist().catch(e => {
-    console.error('[Index Watchlist] background refresh failed:', e);
-  });
 }
 
 function clearIndexContractRefreshPoll() {
@@ -2813,10 +2784,12 @@ async function loadIndexWatchlist(options = {}) {
         <div class="priority-list">${renderLoadingSkeletonCards(3)}</div>
       </div>`;
   }
+  let indexMeta = null;
   try {
     const res = await fetchWithTimeout(`${API}/api/scan?tickers=${encodeURIComponent(INDEX_WATCH_TICKERS.join(','))}`, {}, 12000);
     if (!res.ok) throw new Error(`Index scan failed with HTTP ${res.status}`);
     const data = await res.json();
+    indexMeta = data.meta || null;
     indexWatchRows = [...(data.rows || []), ...(data.near_miss || [])];
     console.info('[Index Watchlist] rows received', indexWatchRows.length, indexWatchRows.map(r => r.ticker));
   } catch (e) {
@@ -2824,6 +2797,11 @@ async function loadIndexWatchlist(options = {}) {
     indexWatchRows = [];
   }
   if (!indexWatchRows.length) {
+    if (indexMeta?.refreshing) {
+      renderIndexWatchlistMessage('Index Watchlist is updating...');
+      scheduleIndexContractRefreshPoll();
+      return;
+    }
     renderIndexWatchlistMessage('Index Watchlist unavailable — check scanner response');
     return;
   }
@@ -2845,20 +2823,15 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 
 function clearResults() {
   clearContractRefreshPoll();
-  clearIndexContractRefreshPoll();
   contractRefreshAttempts = 0;
-  indexContractRefreshAttempts = 0;
   scannerRows = [];
   scannerNearMiss = [];
-  indexWatchRows = [];
   previousTradeStages = new Map();
   aPlusReadyAlerts = new Set();
   try { localStorage.removeItem(STAGE_CACHE_KEY); } catch {}
   document.getElementById('results').innerHTML = '';
   document.getElementById('near-miss-results').innerHTML = '';
   document.getElementById('near-miss-section').style.display = 'none';
-  document.getElementById('priority-watchlist').innerHTML = '';
-  document.getElementById('priority-watchlist').style.display = 'none';
   document.getElementById('marketSnapshot').innerHTML = '';
   document.getElementById('summary').textContent = '';
   document.getElementById('status').textContent = '';
@@ -3331,7 +3304,6 @@ function renderScannerResults() {
   } else {
     nmSection.style.display = 'none';
   }
-  renderPriorityWatchlist(scannerRows, scannerNearMiss);
 }
 
 function bindTickerSearch() {
@@ -3363,22 +3335,12 @@ function scrollToPriorityCard(ticker) {
   setTimeout(() => card.classList.remove('priority-card-focus'), 1800);
 }
 
-function renderPriorityWatchlist(rows, nearMiss) {
+function renderPriorityWatchlist() {
   const box = document.getElementById('priority-watchlist');
   if (!box) return;
   const indexTickers = new Set(INDEX_WATCH_TICKERS);
-  const activeStatusFilter = document.getElementById('statusFilter')?.value || 'ENTER_NOW';
-  const statusMatches = setup => {
-    const bucket = setupProgressState(setup).bucket;
-    if (activeStatusFilter === 'all') return true;
-    if (activeStatusFilter === 'ACTIONABLE') return ['ENTER_NOW', 'ALMOST_READY', 'WAITING'].includes(bucket);
-    if (activeStatusFilter === 'DEVELOPING') return ['ALMOST_READY', 'WAITING'].includes(bucket);
-    return bucket === activeStatusFilter;
-  };
-  const sourceRows = indexWatchRows.length ? indexWatchRows : [...(rows || []), ...(nearMiss || [])];
-  const pool = sourceRows
-    .filter(setup => indexTickers.has(String(setup?.ticker || '').toUpperCase()))
-    .filter(statusMatches);
+  const pool = indexWatchRows
+    .filter(setup => indexTickers.has(String(setup?.ticker || '').toUpperCase()));
   const seen = new Set();
   const indexRows = sortScannerCardsForDisplay(pool)
     .filter(setup => {
@@ -3389,7 +3351,7 @@ function renderPriorityWatchlist(rows, nearMiss) {
     });
 
   if (!indexRows.length) {
-    renderIndexWatchlistMessage('No index ETF cards match the current status filter.');
+    renderIndexWatchlistMessage('No index ETF cards loaded. Click Refresh to scan the index watchlist.');
     return;
   }
 
@@ -3400,43 +3362,8 @@ function renderPriorityWatchlist(rows, nearMiss) {
         <div class="priority-title">Index Watchlist</div>
         <div class="priority-subtitle">Major index ETFs ranked by entry status</div>
       </div>
-      <div class="priority-list">
-        ${indexRows.map(setup => {
-          const ticker = setup.ticker || '—';
-          const setupGrade = setup.setupGrade || '';
-          const trend = setup.stockTrend || setup.trendDirection || 'Mixed';
-          const setupTf = setup.setupTimeframeDirection || (setup.trend === 'LONG' ? 'Bullish' : setup.trend === 'SHORT' ? 'Bearish' : 'Mixed');
-          const phase = setupPhase(setup);
-          const setupStatus = setupStatusValue(setup);
-          const entryStatus = setup.entryStatus || 'Waiting';
-          const location = setup.stockLocation || formatLocationLabel(setup.trade_eval?.location, setup.trade_eval?.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
-          const direction = setup.direction || 'N/A';
-          const state = setupProgressState(setup);
-          const why = simpleWhyItems(setup, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
-          return `
-            <div class="index-row" onclick="scrollToPriorityCard('${String(ticker).replace(/'/g, "\\'")}')">
-              <div class="index-simple-head">
-                <div>
-                  <div class="priority-ticker ticker-with-direction">${escapeHtml(ticker)} ${renderDirectionMarker(direction)}</div>
-                  <div class="index-current-price">${fmtMoney(setup.price)}</div>
-                  <div class="index-grade-stars">${readinessStars(setup)} ${state.label}</div>
-                </div>
-                ${renderReadinessBadge(setup)}
-              </div>
-              <div class="index-status-block">
-                <div class="index-simple-label">Status</div>
-                <div class="index-simple-status ${state.className}">${state.label}</div>
-                <div class="index-simple-label" style="margin-top:8px;">Direction</div>
-                <div class="index-simple-direction ${directionClass(direction)}">${renderDirectionText(direction)}</div>
-              </div>
-              ${renderTradeReadinessTimeline(setup)}
-              ${renderTradePlanBlock(setup)}
-              ${renderPositionManagement(setup)}
-              ${renderBestContractBlock(setup)}
-              ${renderEarningsBlock(setup)}
-              ${renderCollapsedWhyBlock(why)}
-            </div>`;
-        }).join('')}
+      <div class="index-card-grid">
+        ${indexRows.map(renderCard).join('')}
       </div>
     </div>`;
 }
@@ -3717,160 +3644,8 @@ function formatShortDate(value) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function parseExpiryFromOptionSymbol(symbol) {
-  const raw = String(symbol || '').trim().toUpperCase();
-  const match = raw.match(/^[A-Z.\-]+(\d{2})(\d{2})(\d{2})[CP]\d{8}$/);
-  if (!match) return '';
-  const [, yy, mm, dd] = match;
-  return `20${yy}-${mm}-${dd}`;
-}
-
-function parseStrikeFromOptionSymbol(symbol) {
-  const raw = String(symbol || '').trim().toUpperCase();
-  const occMatch = raw.match(/^[A-Z.\-]+\d{6}[CP](\d{8})$/);
-  if (occMatch) {
-    const strike = Number(occMatch[1]) / 1000;
-    return Number.isFinite(strike) ? strike : null;
-  }
-  const fallbackMatch = raw.match(/\$(\d+(?:\.\d+)?)/);
-  if (fallbackMatch) {
-    const strike = Number(fallbackMatch[1]);
-    return Number.isFinite(strike) ? strike : null;
-  }
-  return null;
-}
-
 function firstPresent(...values) {
   return values.find(value => value !== undefined && value !== null && value !== '');
-}
-
-function selectedOptionExpiry(option = {}, suggested = {}, contract = {}) {
-  return firstPresent(
-    option.expiry,
-    option.expiration,
-    option.expiry_date,
-    option.expiration_date,
-    suggested.expiry,
-    suggested.expiration,
-    suggested.expiry_date,
-    suggested.expiration_date,
-    contract.expiry,
-    contract.expiration,
-    contract.expiry_date,
-    contract.expiration_date,
-    parseExpiryFromOptionSymbol(option.symbol),
-    parseExpiryFromOptionSymbol(suggested.symbol),
-    parseExpiryFromOptionSymbol(contract.symbol),
-    parseExpiryFromOptionSymbol(option.contractSymbol),
-    parseExpiryFromOptionSymbol(suggested.contractSymbol),
-    parseExpiryFromOptionSymbol(contract.contractSymbol)
-  );
-}
-
-function selectedOptionStrike(option = {}, suggested = {}, contract = {}) {
-  return firstPresent(
-    option.strike,
-    suggested.strike,
-    contract.strike,
-    parseStrikeFromOptionSymbol(option.symbol),
-    parseStrikeFromOptionSymbol(suggested.symbol),
-    parseStrikeFromOptionSymbol(contract.symbol),
-    parseStrikeFromOptionSymbol(option.contractSymbol),
-    parseStrikeFromOptionSymbol(suggested.contractSymbol),
-    parseStrikeFromOptionSymbol(contract.contractSymbol)
-  );
-}
-
-function optionFallbackNote(option = {}, suggested = {}, contract = {}) {
-  const source = firstPresent(option.source, suggested.source, contract.source);
-  if (String(source || '').toLowerCase() !== 'fallback') return '';
-  const reason = String(firstPresent(option.fallback_reason, suggested.fallback_reason, contract.fallback_reason) || '').trim();
-  return reason ? `Fallback estimate · ${reason}` : 'Fallback estimate';
-}
-
-function suggestedContractText(setup) {
-  const option = setup.option || {};
-  const suggested = setup.suggested_contract || {};
-  const contract = setup.contract || {};
-  const type = firstPresent(option.type, suggested.type, contract.type)
-    || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : '');
-  const strikeValue = Number(selectedOptionStrike(option, suggested, contract));
-  const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
-  const price = Number(firstPresent(option.ask, option.mid, option.mark, suggested.ask, suggested.mid, suggested.mark, contract.ask, contract.mid, contract.mark));
-  const priceText = Number.isFinite(price) ? `≈ ${fmtMoney(price)}` : 'Price not loaded';
-  const expiry = selectedOptionExpiry(option, suggested, contract);
-  return {
-    main: `${strike} ${contractTypePlainText(type)}`.trim(),
-    sub: `${formatShortDate(expiry)} · ${priceText}`,
-    fallbackNote: optionFallbackNote(option, suggested, contract),
-  };
-}
-
-function renderSuggestedContractBlock(setup) {
-  const option = suggestedContractText(setup);
-  return `
-    <div class="index-contract">
-      <div class="index-simple-label">Suggested Contract</div>
-      <div class="index-contract-main">${option.main}</div>
-      <div class="index-contract-sub">${option.sub}</div>
-      ${option.fallbackNote ? `<div class="index-contract-note">${escapeHtml(option.fallbackNote)}</div>` : ''}
-    </div>`;
-}
-
-function contractScoreText(contract = {}) {
-  const score = Number(contract.score);
-  return Number.isFinite(score) ? `${Math.round(score)}/100` : 'Not Available';
-}
-
-function contractLiquidityText(contract = {}) {
-  const oiScore = Number(contract.open_interest_score);
-  const volumeScore = Number(contract.volume_score);
-  if (Number.isFinite(oiScore) || Number.isFinite(volumeScore)) {
-    return `${Math.round((Number.isFinite(oiScore) ? oiScore : 0) + (Number.isFinite(volumeScore) ? volumeScore : 0))}/35`;
-  }
-  const oi = Number(contract.open_interest);
-  const volume = Number(contract.volume);
-  if (Number.isFinite(oi) || Number.isFinite(volume)) {
-    return `OI ${Number.isFinite(oi) ? Math.round(oi).toLocaleString() : '—'} · Vol ${Number.isFinite(volume) ? Math.round(volume).toLocaleString() : '—'}`;
-  }
-  return '';
-}
-
-function contractSpreadText(contract = {}) {
-  const bid = Number(contract.bid);
-  const ask = Number(contract.ask);
-  const spread = Number(contract.spread);
-  const spreadPct = Number(contract.spread_pct);
-  const parts = [];
-  if (Number.isFinite(bid) && Number.isFinite(ask)) parts.push(`${fmtMoney(bid)} / ${fmtMoney(ask)}`);
-  if (Number.isFinite(spread)) parts.push(`spread ${fmtMoney(spread)}`);
-  if (Number.isFinite(spreadPct)) parts.push(`${spreadPct.toFixed(1)}%`);
-  return parts.join(' · ');
-}
-
-function contractMetricRows(contract = {}) {
-  const score = Number(contract.score);
-  const rows = [
-    ['Overall Score', Number.isFinite(score) ? `${Math.round(score)}/100` : ''],
-    ['Liquidity', contractLiquidityText(contract)],
-    ['Bid/Ask Spread', contractSpreadText(contract)],
-    ['Open Interest', Number.isFinite(Number(contract.open_interest)) ? Math.round(Number(contract.open_interest)).toLocaleString() : ''],
-    ['Volume', Number.isFinite(Number(contract.volume)) ? Math.round(Number(contract.volume)).toLocaleString() : ''],
-  ];
-  return rows.filter(([, value]) => String(value || '').trim());
-}
-
-function renderContractScoreMetrics(contract = {}) {
-  const rows = contractMetricRows(contract);
-  if (!rows.length) return '';
-  return `
-    <div class="contract-metrics">
-      ${rows.map(([label, value]) => `
-        <div class="contract-metric">
-          <div class="contract-metric-label">${escapeHtml(label)}</div>
-          <div class="contract-metric-value">${escapeHtml(value)}</div>
-        </div>`).join('')}
-    </div>`;
 }
 
 function bestContractDisplay(setup) {
@@ -3878,32 +3653,25 @@ function bestContractDisplay(setup) {
   if (contract.loading || String(contract.source || '').toLowerCase() === 'loading') {
     return {
       className: 'none',
-      label: 'Contract Score',
-      main: 'Loading...',
-      score: '',
-      metrics: '',
+      label: 'Best Contract',
+      main: 'Updating...',
     };
   }
   if (!contract.available) {
     return {
       className: 'none',
-      label: 'Contract Score',
+      label: 'Best Contract',
       main: 'Not Available',
-      score: 'Contract Score: Not Available',
-      metrics: renderContractScoreMetrics(contract),
     };
   }
   const strikeValue = Number(contract.strike);
   const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
   const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
   const expiry = formatShortDate(contract.expiry);
-  const scoreValue = Number(contract.score);
   return {
-    className: Number.isFinite(scoreValue) && scoreValue >= 75 ? 'excellent' : 'fair',
-    label: 'Contract Score',
-    main: `${expiry} · $${strike} ${type}`.trim(),
-    score: `Contract Score: ${contractScoreText(contract)}`,
-    metrics: renderContractScoreMetrics(contract),
+    className: 'available',
+    label: 'Best Contract',
+    main: `${expiry} • $${strike} ${type}`.trim(),
   };
 }
 
@@ -3913,8 +3681,6 @@ function renderBestContractBlock(setup) {
     <div class="index-contract best-contract ${contract.className}">
       <div class="index-simple-label">${contract.label}</div>
       <div class="index-contract-main">${escapeHtml(contract.main)}</div>
-      ${contract.score ? `<div class="contract-score-line ${contract.className === 'none' ? 'contract-score-unavailable' : ''}">${escapeHtml(contract.score)}</div>` : ''}
-      ${contract.metrics || ''}
     </div>`;
 }
 
@@ -3963,8 +3729,6 @@ function executionContractInfo(setup) {
     type,
     cost,
     costText: Number.isFinite(cost) ? fmtMoney(cost) : 'Price unavailable',
-    score: contractScoreText(contract),
-    scoreMetrics: contractMetricRows(contract),
     label: display.main,
   };
 }
@@ -3996,7 +3760,7 @@ function executionTradePlanText(setup, qty = 1) {
     `Entry: ${fmtMoney(setup.entry)}`,
     `Stop: ${fmtMoney(setup.sl)}`,
     `Target: ${fmtMoney(setup.tp1)}`,
-    `Contract Score: ${contract.score || 'Not Available'}`,
+    `Best Contract: ${contract.label || 'Not Available'}`,
     `Quantity: ${quantity}`,
     `Estimated Contract Cost: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Unavailable'}`,
   ].join('\n');
@@ -4049,10 +3813,8 @@ function renderExecutionTab() {
           <div class="execution-line"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
         </div>
         <div class="execution-section">
-          <div class="execution-section-title">Contract Score</div>
+          <div class="execution-section-title">Best Contract</div>
           <div class="execution-contract-main">${escapeHtml(contract.label)}</div>
-          <div class="execution-quality">Contract Score: ${escapeHtml(contract.score || 'Not Available')}</div>
-          ${renderContractScoreMetrics(setup.best_contract || {})}
           <div class="execution-risk-row">
             <label class="execution-section-title" for="executionQty-${idx}">Quantity</label>
             <input id="executionQty-${idx}" type="number" min="1" step="1" value="1" oninput="updateExecutionRisk(${idx})" />
@@ -6148,7 +5910,6 @@ scheduleNextAutoScan();
 autoScanCountdownTimer = setInterval(updateCountdown, 1000);
 loadCacheStatus();
 setInterval(loadCacheStatus, 30000);
-loadIndexWatchlist();
 </script>
 </body>
 </html>
