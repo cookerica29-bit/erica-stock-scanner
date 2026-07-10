@@ -12,6 +12,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+STOCK_SCANNER_STRATEGY_VERSION = "v1.0"
+STOCK_SCANNER_STRATEGY_BASELINE_COMMIT = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
+
 WATCHLIST = [
     # ── Airlines ──────────────────────────────────────────────────────────────
     "DAL", "UAL", "AAL", "JBLU",
@@ -191,6 +194,8 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "stale": age_seconds is not None and age_seconds > ANALYSIS_CACHE_STALE_SECONDS,
         "refreshing": refreshing,
         "cache_key": "default" if key == ("default",) else "custom",
+        "strategy_version": STOCK_SCANNER_STRATEGY_VERSION,
+        "strategy_baseline": STOCK_SCANNER_STRATEGY_BASELINE_COMMIT,
     }
 
 
@@ -213,6 +218,8 @@ def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
         "cache_key": "default" if key == ("default",) else "custom",
         "status": "warming",
         "has_cache": False,
+        "strategy_version": STOCK_SCANNER_STRATEGY_VERSION,
+        "strategy_baseline": STOCK_SCANNER_STRATEGY_BASELINE_COMMIT,
     }
 
 
@@ -1681,6 +1688,9 @@ def _cap_quality_to_c(quality: dict, reason: str) -> dict:
     return capped
 
 
+# STRATEGY FREEZE v1.0
+# Do not modify qualification, direction, grading, entry, stop, target,
+# confirmation, or trade-stage logic without an explicit strategy version change.
 def _build_trade_stage_eval(
     *,
     df: pd.DataFrame,
@@ -2420,6 +2430,9 @@ def scan_trends(direction: str = "all", min_score: int = 0, hide_choppy: bool = 
 
 
 # ── Main Analysis ─────────────────────────────────────────────────────────────
+# STRATEGY FREEZE v1.0
+# Do not modify qualification, direction, grading, entry, stop, target,
+# confirmation, or trade-stage logic without an explicit strategy version change.
 
 def analyze_ticker(
     ticker: str,
@@ -3202,6 +3215,7 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
     scan_start = time.perf_counter()
     _scan_activity_started()
     try:
+        logger.info("Stock Scanner Strategy: %s", STOCK_SCANNER_STRATEGY_VERSION)
         _ensure_background_refresh_started()
         if watchlist is None:
             watchlist = get_finviz_watchlist()
