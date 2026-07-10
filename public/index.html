@@ -2976,6 +2976,7 @@ function scanStatusText(meta) {
   if (!meta) return 'Done';
   const age = formatScanAge(meta.age_seconds);
   const suffix = age ? ` · Last updated ${age}` : '';
+  if (meta.last_refresh_error && !meta.refreshing) return `Showing cached results${suffix} · Refresh failed`;
   if (meta.refreshing) return `Showing cached results${suffix} · Data refreshing...`;
   if (meta.cache === 'hit') return `Done${suffix}`;
   if (meta.cache === 'refresh') return `Refreshed${suffix}`;
@@ -3103,7 +3104,7 @@ function updateDataStatus(meta = {}) {
   const labels = {
     fresh: { icon: '🟢', label: 'Fresh', sub: age ? `Last updated ${age}` : 'Ready to scan' },
     warming: { icon: '🟡', label: 'Warming', sub: age ? `Last updated ${age} · refreshing` : 'Building market cache' },
-    stale: { icon: '🔴', label: 'Stale', sub: age ? `Last updated ${age}` : 'Data needs refresh' },
+    stale: { icon: '🔴', label: 'Stale', sub: age ? `Last updated ${age}${meta.last_refresh_error ? ' · refresh failed' : ''}` : (meta.last_refresh_error ? 'Refresh failed' : 'Data needs refresh') },
   };
   const config = labels[status] || labels.warming;
   el.innerHTML = `

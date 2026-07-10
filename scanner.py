@@ -108,6 +108,8 @@ _background_last_refresh = {}
 _active_scan_count = 0
 _analysis_cache = {}
 ANALYSIS_CACHE_STALE_SECONDS = 180
+ANALYSIS_REFRESH_TIMEOUT_SECONDS = 300
+_analysis_refresh_state = {}
 
 
 def _cache_record(name: str, outcome: str) -> None:
@@ -127,7 +129,7 @@ def _cache_snapshot(reset: bool = True) -> dict:
 def _submit_background_job(key: tuple, fn, *args, **kwargs) -> None:
     with _background_jobs_lock:
         if key in _background_jobs:
-            return
+            return False
         _background_jobs.add(key)
 
     def _run():
@@ -142,6 +144,7 @@ def _submit_background_job(key: tuple, fn, *args, **kwargs) -> None:
                 _background_jobs.discard(key)
 
     _background_executor.submit(_run)
+    return True
 
 
 def _periodic_refresh_due(key: str, ttl_seconds: int) -> bool:
@@ -182,20 +185,98 @@ def _analysis_refresh_key(key: tuple) -> tuple:
     return ("analysis_refresh", key)
 
 
+def _analysis_state_key(key: tuple) -> str:
+    if key == ("default",):
+        return "default"
+    return repr(key)
+
+
+def _analysis_refresh_snapshot(key: tuple) -> dict:
+    state_key = _analysis_state_key(key)
+    now = datetime.utcnow()
+    with _background_jobs_lock:
+        refresh_key = _analysis_refresh_key(key)
+        active = refresh_key in _background_jobs
+        state = dict(_analysis_refresh_state.get(state_key, {}))
+        started_at = state.get("refresh_started_at")
+        if active and started_at:
+            duration = (now - started_at).total_seconds()
+            if duration > ANALYSIS_REFRESH_TIMEOUT_SECONDS:
+                _background_jobs.discard(refresh_key)
+                active = False
+                state["last_refresh_error"] = f"Refresh exceeded {ANALYSIS_REFRESH_TIMEOUT_SECONDS}s timeout"
+                state["last_refresh_duration"] = round(duration, 1)
+                state["refresh_timed_out_at"] = now
+                _analysis_refresh_state[state_key] = state
+
+    started_at = state.get("refresh_started_at")
+    active_duration = None
+    if active and started_at:
+        active_duration = round((now - started_at).total_seconds(), 1)
+
+    return {
+        "refreshing": active,
+        "refresh_job_id": state.get("refresh_job_id"),
+        "refresh_started_at": started_at.isoformat() + "Z" if active and started_at else None,
+        "refresh_duration": active_duration,
+        "last_refresh_success_at": state.get("last_refresh_success_at").isoformat() + "Z" if state.get("last_refresh_success_at") else None,
+        "last_refresh_error": state.get("last_refresh_error"),
+        "last_refresh_duration": state.get("last_refresh_duration"),
+    }
+
+
+def _mark_analysis_refresh_started(key: tuple, job_id: str) -> None:
+    with _background_jobs_lock:
+        prior = _analysis_refresh_state.get(_analysis_state_key(key), {})
+        _analysis_refresh_state[_analysis_state_key(key)] = {
+            **prior,
+            "refresh_job_id": job_id,
+            "refresh_started_at": datetime.utcnow(),
+            "last_refresh_error": None,
+            "last_refresh_duration": None,
+        }
+
+
+def _mark_analysis_refresh_finished(key: tuple, started: float, error: Optional[Exception] = None) -> None:
+    duration = round(time.perf_counter() - started, 1)
+    with _background_jobs_lock:
+        state = _analysis_refresh_state.setdefault(_analysis_state_key(key), {})
+        state["last_refresh_duration"] = duration
+        if error is None:
+            state["last_refresh_success_at"] = datetime.utcnow()
+            state["last_refresh_error"] = None
+        else:
+            state["last_refresh_error"] = str(error)
+
+
+def _submit_analysis_refresh(key: tuple, watchlist: Optional[list], reason: str = "background") -> bool:
+    refresh_key = _analysis_refresh_key(key)
+    snapshot = _analysis_refresh_snapshot(key)
+    if snapshot.get("refreshing"):
+        return False
+    job_id = f"{_analysis_state_key(key)}:{int(time.time())}:{reason}"
+    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id)
+    if submitted:
+        _mark_analysis_refresh_started(key, job_id)
+    return submitted
+
+
 def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
     generated_at = cached.get("generated_at")
     age_seconds = None
     if generated_at:
         age_seconds = max(0, (datetime.utcnow() - generated_at).total_seconds())
+    refresh_snapshot = _analysis_refresh_snapshot(key)
     return {
         "cache": "hit",
         "generated_at": generated_at.isoformat() + "Z" if generated_at else None,
         "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
         "stale": age_seconds is not None and age_seconds > ANALYSIS_CACHE_STALE_SECONDS,
-        "refreshing": refreshing,
+        "refreshing": bool(refreshing and refresh_snapshot.get("refreshing")),
         "cache_key": "default" if key == ("default",) else "custom",
         "strategy_version": STOCK_SCANNER_STRATEGY_VERSION,
         "strategy_baseline": STOCK_SCANNER_STRATEGY_BASELINE_COMMIT,
+        **refresh_snapshot,
     }
 
 
@@ -203,8 +284,8 @@ def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
     key = _analysis_cache_key(watchlist)
     with _cache_lock:
         cached = _analysis_cache.get(key)
-    with _background_jobs_lock:
-        refreshing = _analysis_refresh_key(key) in _background_jobs
+    refresh_snapshot = _analysis_refresh_snapshot(key)
+    refreshing = bool(refresh_snapshot.get("refreshing"))
     if cached:
         meta = _analysis_cache_meta(key, cached, refreshing)
         status = "stale" if meta.get("stale") else "fresh"
@@ -220,6 +301,7 @@ def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
         "has_cache": False,
         "strategy_version": STOCK_SCANNER_STRATEGY_VERSION,
         "strategy_baseline": STOCK_SCANNER_STRATEGY_BASELINE_COMMIT,
+        **refresh_snapshot,
     }
 
 
@@ -259,9 +341,18 @@ def _hydrate_best_contracts_from_cache(rows: list) -> list:
     return hydrated
 
 
-def _refresh_analysis_cache(key: tuple, watchlist: Optional[list]) -> None:
-    rows, near_miss = scan_all(watchlist)
-    _store_analysis_cache(key, rows, near_miss)
+def _refresh_analysis_cache(key: tuple, watchlist: Optional[list], job_id: Optional[str] = None) -> None:
+    started = time.perf_counter()
+    try:
+        logger.info("[analysis refresh] start key=%s job=%s", _analysis_state_key(key), job_id)
+        rows, near_miss = scan_all(watchlist)
+        _store_analysis_cache(key, rows, near_miss)
+        _mark_analysis_refresh_finished(key, started)
+        logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", _analysis_state_key(key), job_id, len(rows), len(near_miss))
+    except Exception as exc:
+        _mark_analysis_refresh_finished(key, started, exc)
+        logger.exception("[analysis refresh] failed key=%s job=%s", _analysis_state_key(key), job_id)
+        raise
 
 
 def get_finviz_watchlist() -> list:
@@ -2212,7 +2303,7 @@ def _ensure_background_refresh_started() -> None:
 def start_market_cache_refresh() -> None:
     _ensure_background_refresh_started()
     key = _analysis_cache_key(None)
-    _submit_background_job(_analysis_refresh_key(key), _refresh_analysis_cache, key, None)
+    _submit_analysis_refresh(key, None, reason="startup")
 
 
 # ── Trending list analysis ───────────────────────────────────────────────────
@@ -3312,37 +3403,25 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
     key = _analysis_cache_key(watchlist)
     with _cache_lock:
         cached = _analysis_cache.get(key)
-    had_cached_analysis = cached is not None
 
-    if cached and not force_refresh:
-        refreshing_key = _analysis_refresh_key(key)
-        _submit_background_job(refreshing_key, _refresh_analysis_cache, key, watchlist)
+    if cached:
+        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
         return {
             "rows": _hydrate_best_contracts_from_cache(list(cached.get("rows", []))),
             "near_miss": _hydrate_best_contracts_from_cache(list(cached.get("near_miss", []))),
-            "meta": _analysis_cache_meta(key, cached, True),
+            "meta": {
+                **_analysis_cache_meta(key, cached, True),
+                "refresh_requested": bool(force_refresh),
+            },
         }
 
-    if not cached and not force_refresh:
-        refreshing_key = _analysis_refresh_key(key)
-        _submit_background_job(refreshing_key, _refresh_analysis_cache, key, watchlist)
+    if not cached:
+        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
         return {
             "rows": [],
             "near_miss": [],
             "meta": analysis_cache_status(watchlist),
         }
-
-    rows, near_miss = scan_all(watchlist)
-    cached = _store_analysis_cache(key, rows, near_miss)
-    return {
-        "rows": rows,
-        "near_miss": near_miss,
-        "meta": {
-            **_analysis_cache_meta(key, cached, False),
-            "cache": "refresh" if had_cached_analysis or force_refresh else "miss",
-            "refreshing": False,
-        },
-    }
 
 
 def scan_ticker(
