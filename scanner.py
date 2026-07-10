@@ -237,8 +237,13 @@ def _hydrate_best_contracts_from_cache(rows: list) -> list:
             continue
         item = dict(row)
         contract = item.get("best_contract") or {}
-        is_loading = bool(contract.get("loading")) or str(contract.get("source") or "").lower() == "loading"
-        if is_loading:
+        source = str(contract.get("source") or "").lower()
+        is_unresolved = (
+            not contract
+            or bool(contract.get("loading"))
+            or source in {"", "loading", "not_evaluated"}
+        )
+        if is_unresolved:
             cache_key = _best_contract_cache_key(item.get("ticker") or "", item.get("direction") or "", item.get("entry") or 0)
             cached_contract = (best_contract_cache.get(cache_key) or {}).get("data")
             if cached_contract and str(cached_contract.get("source") or "").lower() != "loading":

@@ -524,6 +524,7 @@
   .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; }
   .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
   .best-contract.available { border-color:rgba(124,92,255,0.28); background:rgba(124,92,255,0.07); }
+  .best-contract.pending { border-color:rgba(124,92,255,0.22); background:rgba(124,92,255,0.05); }
   .best-contract.none { border-color:rgba(251,191,36,0.24); background:rgba(251,191,36,0.05); }
   .best-contract .index-contract-main { font-size:13px; }
   .execution-panel { padding:20px 24px; max-width:1200px; margin:0 auto; }
@@ -2458,8 +2459,11 @@ let aPlusReadyAlerts = new Set();
 let toastTimer = null;
 let contractRefreshTimer = null;
 let contractRefreshAttempts = 0;
+const CONTRACT_PENDING_MAX_ATTEMPTS = 4;
+let contractPendingTimedOutKeys = new Set();
 let indexContractRefreshTimer = null;
 let indexContractRefreshAttempts = 0;
+let indexContractPendingTimedOutKeys = new Set();
 
 // ── Auto-scan ─────────────────────────────────────────────────────────────────
 const SCAN_SCHEDULE_ET = [
@@ -2710,6 +2714,7 @@ async function runScan() {
   btn.disabled = true;
   clearContractRefreshPoll();
   contractRefreshAttempts = 0;
+  contractPendingTimedOutKeys = new Set();
   status.innerHTML = '<span class="spinner"></span>Scanning...';
   results.innerHTML = renderLoadingSkeletonCards(4);
   summary.textContent = '';
@@ -2731,7 +2736,7 @@ async function runScan() {
     scannerNearMiss = nextNearMiss;
     renderScannerResults();
     renderExecutionTab();
-    if (rowsHaveLoadingContracts([...nextRows, ...nextNearMiss])) {
+    if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
       scheduleContractRefreshPoll();
     }
   } catch (e) {
@@ -2752,11 +2757,17 @@ function clearIndexContractRefreshPoll() {
 
 function scheduleIndexContractRefreshPoll() {
   clearIndexContractRefreshPoll();
-  if (indexContractRefreshAttempts >= 4) return;
+  if (indexContractRefreshAttempts >= CONTRACT_PENDING_MAX_ATTEMPTS) {
+    markPendingContractsTimedOut(indexWatchRows, indexContractPendingTimedOutKeys);
+    renderPriorityWatchlist();
+    return;
+  }
   indexContractRefreshAttempts += 1;
   indexContractRefreshTimer = setTimeout(() => {
     loadIndexWatchlist({ silent: true }).catch(e => {
       console.warn('[Index Watchlist] contract refresh poll failed:', e);
+      markPendingContractsTimedOut(indexWatchRows, indexContractPendingTimedOutKeys);
+      renderPriorityWatchlist();
     });
   }, 7000);
 }
@@ -2771,6 +2782,7 @@ async function loadIndexWatchlist(options = {}) {
   if (!silent) {
     clearIndexContractRefreshPoll();
     indexContractRefreshAttempts = 0;
+    indexContractPendingTimedOutKeys = new Set();
   }
   console.info('[Index Watchlist] scanning', INDEX_WATCH_TICKERS.join(', '));
   box.style.display = 'block';
@@ -2806,7 +2818,7 @@ async function loadIndexWatchlist(options = {}) {
     return;
   }
   renderPriorityWatchlist();
-  if (rowsHaveLoadingContracts(indexWatchRows)) {
+  if (rowsHavePendingContracts(indexWatchRows)) {
     scheduleIndexContractRefreshPoll();
   }
 }
@@ -2824,6 +2836,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 function clearResults() {
   clearContractRefreshPoll();
   contractRefreshAttempts = 0;
+  contractPendingTimedOutKeys = new Set();
   scannerRows = [];
   scannerNearMiss = [];
   previousTradeStages = new Map();
@@ -2969,11 +2982,64 @@ function scanStatusText(meta) {
   return 'Done';
 }
 
-function rowsHaveLoadingContracts(rows = []) {
-  return rows.some(setup => {
-    const contract = setup?.best_contract || {};
-    return Boolean(contract.loading) || String(contract.source || '').toLowerCase() === 'loading';
+function contractPendingKey(setup) {
+  return [
+    String(setup?.ticker || '').trim().toUpperCase(),
+    String(setup?.direction || '').trim().toUpperCase(),
+    Number(setup?.entry || 0).toFixed(2),
+  ].join('|');
+}
+
+function contractRawLifecycleState(setup) {
+  const contract = setup?.best_contract;
+  if (contract && contract.available === true) {
+    const hasContractText = firstPresent(contract.expiry, contract.expiration)
+      && contract.strike !== undefined
+      && contract.strike !== null
+      && contract.type;
+    return hasContractText ? 'available' : 'pending';
+  }
+  const source = String(contract?.source || '').toLowerCase();
+  if (contract && contract.available === false && ['unavailable', 'option_chain'].includes(source)) {
+    return 'confirmed_unavailable';
+  }
+  return 'pending';
+}
+
+function contractLifecycleState(setup) {
+  const rawState = contractRawLifecycleState(setup);
+  if (rawState !== 'pending') return rawState;
+  const key = contractPendingKey(setup);
+  return (contractPendingTimedOutKeys.has(key) || indexContractPendingTimedOutKeys.has(key))
+    ? 'confirmed_unavailable'
+    : 'pending';
+}
+
+function rowsHavePendingContracts(rows = []) {
+  return rows.some(setup => contractRawLifecycleState(setup) === 'pending');
+}
+
+function markPendingContractsTimedOut(rows = [], targetSet = contractPendingTimedOutKeys) {
+  rows.forEach(setup => {
+    if (contractRawLifecycleState(setup) === 'pending') {
+      targetSet.add(contractPendingKey(setup));
+    }
   });
+}
+
+function currentScannerFilters() {
+  return {
+    status: document.getElementById('statusFilter')?.value || 'all',
+    direction: document.getElementById('directionFilter')?.value || 'all',
+    quality: document.getElementById('qualityFilter')?.value || 'all',
+    contractType: document.getElementById('contractTypeFilter')?.value || 'all',
+    tickerSearch: tickerQueryParts(document.getElementById('tickerInput')?.value || ''),
+  };
+}
+
+function visibleScannerRowsForContractPoll() {
+  const filters = currentScannerFilters();
+  return [...scannerRows, ...scannerNearMiss].filter(setup => passesFrameworkFilters(setup, filters));
 }
 
 function clearContractRefreshPoll() {
@@ -2985,7 +3051,12 @@ function clearContractRefreshPoll() {
 
 function scheduleContractRefreshPoll() {
   clearContractRefreshPoll();
-  if (contractRefreshAttempts >= 4) return;
+  if (contractRefreshAttempts >= CONTRACT_PENDING_MAX_ATTEMPTS) {
+    markPendingContractsTimedOut(visibleScannerRowsForContractPoll(), contractPendingTimedOutKeys);
+    renderScannerResults();
+    renderExecutionTab();
+    return;
+  }
   contractRefreshAttempts += 1;
   contractRefreshTimer = setTimeout(async () => {
     try {
@@ -2999,11 +3070,14 @@ function scheduleContractRefreshPoll() {
       updateDataStatus(data.meta || {});
       renderScannerResults();
       renderExecutionTab();
-      if (rowsHaveLoadingContracts([...nextRows, ...nextNearMiss])) {
+      if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
         scheduleContractRefreshPoll();
       }
     } catch (e) {
       console.warn('[Contracts] background contract refresh poll failed:', e);
+      markPendingContractsTimedOut(visibleScannerRowsForContractPoll(), contractPendingTimedOutKeys);
+      renderScannerResults();
+      renderExecutionTab();
     }
   }, 7000);
 }
@@ -3650,14 +3724,15 @@ function firstPresent(...values) {
 
 function bestContractDisplay(setup) {
   const contract = setup.best_contract || {};
-  if (contract.loading || String(contract.source || '').toLowerCase() === 'loading') {
+  const lifecycle = contractLifecycleState(setup);
+  if (lifecycle === 'pending') {
     return {
-      className: 'none',
+      className: 'pending',
       label: 'Best Contract',
       main: 'Updating...',
     };
   }
-  if (!contract.available) {
+  if (lifecycle === 'confirmed_unavailable') {
     return {
       className: 'none',
       label: 'Best Contract',
@@ -3667,7 +3742,7 @@ function bestContractDisplay(setup) {
   const strikeValue = Number(contract.strike);
   const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
   const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
-  const expiry = formatShortDate(contract.expiry);
+  const expiry = formatShortDate(firstPresent(contract.expiry, contract.expiration));
   return {
     className: 'available',
     label: 'Best Contract',
@@ -3719,7 +3794,7 @@ function executionContractInfo(setup) {
   const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
   const strikeValue = Number(contract.strike);
   const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
-  const expiry = contract.expiry || '';
+  const expiry = firstPresent(contract.expiry, contract.expiration) || '';
   const cost = bestContractCost(setup);
   return {
     available: Boolean(contract.available),
