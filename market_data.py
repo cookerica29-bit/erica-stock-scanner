@@ -121,6 +121,14 @@ def _period_start(period: str) -> datetime:
     return now - timedelta(days=365)
 
 
+def _alpaca_period_start(period: str, interval: str) -> datetime:
+    start = _period_start(period)
+    interval = str(interval or "").strip().lower()
+    if interval == "1wk":
+        start = start - timedelta(days=start.weekday())
+    return start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _alpaca_timeframe(interval: str) -> str:
     mapping = {
         "1d": "1Day",
@@ -214,7 +222,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         if not symbols:
             return pd.DataFrame()
 
-        start = _period_start(period)
+        start = _alpaca_period_start(period, interval)
         params = {
             "symbols": ",".join(self.normalize_symbol(s) for s in symbols),
             "timeframe": _alpaca_timeframe(interval),
@@ -526,6 +534,12 @@ def _provider_diagnostics(
         "detected_gap_count": _detected_gap_count(df, interval),
         "sufficient_history": (df is not None and len(df) >= minimum_candles),
         "minimum_required_candles": minimum_candles,
+        "requested_interval": interval,
+        "provider_timeframe": _provider_timeframe(provider_name, interval),
+        "bar_construction": "provider_native",
+        "regular_session_filter": "provider_default",
+        "recent_timestamps": _recent_timestamps(df),
+        "recent_timestamps_et": _recent_timestamps_et(df),
         "columns": [] if df is None else [str(c) for c in df.columns],
     }
 
@@ -549,6 +563,7 @@ def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, i
     common = sorted(yahoo_index & alpaca_index)
     latest_match = None
     latest_ohlcv_delta = None
+    stats = _empty_comparison_stats()
     matched_latest = None
     if common:
         matched_latest = common[-1]
@@ -560,6 +575,7 @@ def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, i
             a = a.iloc[-1]
         latest_match = _canonical_timestamp_key(yahoo_df.index[-1], interval) == _canonical_timestamp_key(alpaca_df.index[-1], interval)
         latest_ohlcv_delta = _ohlcv_delta(y, a)
+        stats = _comparison_stats(yahoo_df, alpaca_df, yahoo_lookup, alpaca_lookup, common)
     missing_in_alpaca = sorted(yahoo_index - alpaca_index)
     missing_in_yahoo = sorted(alpaca_index - yahoo_index)
     return {
@@ -568,6 +584,7 @@ def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, i
         "latest_timestamp_match": latest_match,
         "matched_latest_completed": matched_latest,
         "latest_ohlcv_delta": latest_ohlcv_delta,
+        "stats": stats,
         "missing_in_alpaca": _sample_timestamps(missing_in_alpaca),
         "missing_in_yahoo": _sample_timestamps(missing_in_yahoo),
         "missing_in_alpaca_count": len(missing_in_alpaca),
@@ -629,6 +646,67 @@ def _ohlcv_delta(yahoo_row, alpaca_row) -> dict:
     return delta
 
 
+def _empty_comparison_stats() -> dict:
+    return {
+        "matched_candles": 0,
+        "near_exact_price_matches": 0,
+        "max_ohlc_percent_difference": None,
+        "median_ohlc_percent_difference": None,
+        "max_volume_percent_difference": None,
+        "median_volume_percent_difference": None,
+    }
+
+
+def _comparison_stats(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, yahoo_lookup: dict, alpaca_lookup: dict, common: list[str]) -> dict:
+    ohlc_pcts = []
+    volume_pcts = []
+    near_exact = 0
+    for key in common:
+        y = yahoo_df.loc[yahoo_lookup[key]]
+        a = alpaca_df.loc[alpaca_lookup[key]]
+        if isinstance(y, pd.DataFrame):
+            y = y.iloc[-1]
+        if isinstance(a, pd.DataFrame):
+            a = a.iloc[-1]
+        row_price_pcts = []
+        for column in ["Open", "High", "Low", "Close"]:
+            yv = _safe_float(y.get(column))
+            av = _safe_float(a.get(column))
+            if yv is None or av is None or yv == 0:
+                continue
+            pct = abs((av - yv) / yv * 100)
+            ohlc_pcts.append(pct)
+            row_price_pcts.append(pct)
+        if row_price_pcts and max(row_price_pcts) <= 0.001:
+            near_exact += 1
+        yv = _safe_float(y.get("Volume"))
+        av = _safe_float(a.get("Volume"))
+        if yv is not None and av is not None and yv != 0:
+            volume_pcts.append(abs((av - yv) / yv * 100))
+    return {
+        "matched_candles": len(common),
+        "near_exact_price_matches": near_exact,
+        "max_ohlc_percent_difference": _max_or_none(ohlc_pcts),
+        "median_ohlc_percent_difference": _median_or_none(ohlc_pcts),
+        "max_volume_percent_difference": _max_or_none(volume_pcts),
+        "median_volume_percent_difference": _median_or_none(volume_pcts),
+    }
+
+
+def _max_or_none(values: list[float]) -> Optional[float]:
+    return max(values) if values else None
+
+
+def _median_or_none(values: list[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
 def _canonical_timestamp_key(value, interval: str) -> str:
     ts = pd.Timestamp(value)
     interval = str(interval or "").lower()
@@ -656,6 +734,32 @@ def _timestamp_to_iso(value) -> Optional[str]:
         return pd.Timestamp(value).isoformat()
     except Exception:
         return str(value)
+
+
+def _provider_timeframe(provider_name: str, interval: str) -> str:
+    if provider_name == ALPACA_PROVIDER_NAME:
+        return _alpaca_timeframe(interval)
+    return interval
+
+
+def _recent_timestamps(df: pd.DataFrame, limit: int = 10) -> list[str]:
+    if df is None or df.empty:
+        return []
+    return [_timestamp_to_iso(value) for value in list(df.index)[-limit:]]
+
+
+def _recent_timestamps_et(df: pd.DataFrame, limit: int = 10) -> list[str]:
+    if df is None or df.empty:
+        return []
+    values = []
+    for value in list(df.index)[-limit:]:
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(EASTERN_TZ)
+        else:
+            ts = ts.tz_convert(EASTERN_TZ)
+        values.append(ts.isoformat())
+    return values
 
 
 def _duplicate_timestamp_count(df: pd.DataFrame) -> int:
