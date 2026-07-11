@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from scanner import analysis_cache_status, scan_cached, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
+from market_data import alpaca_credentials_configured, comparison_diagnostics, configured_provider_name
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -63,6 +64,25 @@ def api_watchlist():
 @app.get("/api/cache/status")
 def api_cache_status():
     return analysis_cache_status()
+
+
+@app.get("/api/data-provider/status")
+def api_data_provider_status():
+    return {
+        "stock_data_provider": configured_provider_name(),
+        "default_provider": "yahoo",
+        "alpaca_configured": alpaca_credentials_configured(),
+        "note": "Yahoo remains the default scanner provider. Alpaca is available only for backend comparison diagnostics.",
+    }
+
+
+@app.get("/api/data-provider/compare")
+def api_data_provider_compare(
+    ticker: str = Query(default="AAPL"),
+    period: str = Query(default="60d"),
+    interval: str = Query(default="4h"),
+):
+    return comparison_diagnostics(ticker=ticker, period=period, interval=interval)
 
 
 @app.get("/api/trends")

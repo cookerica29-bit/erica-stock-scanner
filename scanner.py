@@ -1,5 +1,4 @@
 # v2 — BOS + Order Block strategy (replaces EMA pullback)
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import logging
@@ -10,7 +9,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 
+from market_data import MarketDataFacade
+
 logger = logging.getLogger(__name__)
+yf = MarketDataFacade()
 
 STOCK_SCANNER_STRATEGY_VERSION = "v1.0"
 STOCK_SCANNER_STRATEGY_BASELINE_COMMIT = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
