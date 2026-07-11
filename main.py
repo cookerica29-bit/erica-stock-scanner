@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from scanner import analysis_cache_status, scan_cached, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
-from market_data import alpaca_credentials_configured, comparison_diagnostics, configured_provider_name
+from market_data import alpaca_credentials_configured, comparison_diagnostics, configured_provider_name, validate_watchlist_candles
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -81,7 +81,12 @@ def api_data_provider_compare(
     ticker: str = Query(default="AAPL"),
     period: str = Query(default="60d"),
     interval: str = Query(default="4h"),
+    full: bool = Query(default=False),
+    tickers: str = Query(default=""),
 ):
+    if full:
+        watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else WATCHLIST
+        return validate_watchlist_candles(watchlist)
     return comparison_diagnostics(ticker=ticker, period=period, interval=interval)
 
 
