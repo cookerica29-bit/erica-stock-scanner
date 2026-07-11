@@ -379,7 +379,7 @@ def validate_candle_pair(ticker: str, period: str = "60d", interval: str = "4h")
         error=alpaca_error,
         timing_context=timing,
     )
-    comparison = _compare_completed_frames(yahoo_df, alpaca_df)
+    comparison = _compare_completed_frames(yahoo_df, alpaca_df, interval)
     result, readiness, classifications = _classify_validation_result(yahoo_diag, alpaca_diag, comparison, timing)
 
     return {
@@ -530,7 +530,7 @@ def _provider_diagnostics(
     }
 
 
-def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame) -> dict:
+def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, interval: str) -> dict:
     if yahoo_df is None or alpaca_df is None or yahoo_df.empty or alpaca_df.empty:
         return {
             "completed_timestamp_matches": 0,
@@ -538,10 +538,12 @@ def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame) -
             "latest_ohlcv_delta": None,
             "missing_in_alpaca": [],
             "missing_in_yahoo": [],
+            "missing_in_alpaca_count": 0,
+            "missing_in_yahoo_count": 0,
             "matched_latest_completed": None,
         }
-    yahoo_lookup = {str(i): i for i in getattr(yahoo_df, "index", [])}
-    alpaca_lookup = {str(i): i for i in getattr(alpaca_df, "index", [])}
+    yahoo_lookup = {_canonical_timestamp_key(i, interval): i for i in getattr(yahoo_df, "index", [])}
+    alpaca_lookup = {_canonical_timestamp_key(i, interval): i for i in getattr(alpaca_df, "index", [])}
     yahoo_index = set(yahoo_lookup.keys())
     alpaca_index = set(alpaca_lookup.keys())
     common = sorted(yahoo_index & alpaca_index)
@@ -556,16 +558,20 @@ def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame) -
             y = y.iloc[-1]
         if isinstance(a, pd.DataFrame):
             a = a.iloc[-1]
-        latest_match = str(yahoo_df.index[-1]) == str(alpaca_df.index[-1])
+        latest_match = _canonical_timestamp_key(yahoo_df.index[-1], interval) == _canonical_timestamp_key(alpaca_df.index[-1], interval)
         latest_ohlcv_delta = _ohlcv_delta(y, a)
+    missing_in_alpaca = sorted(yahoo_index - alpaca_index)
+    missing_in_yahoo = sorted(alpaca_index - yahoo_index)
     return {
         "candle_count_delta": int((0 if alpaca_df is None else len(alpaca_df)) - (0 if yahoo_df is None else len(yahoo_df))),
         "completed_timestamp_matches": len(common),
         "latest_timestamp_match": latest_match,
         "matched_latest_completed": matched_latest,
         "latest_ohlcv_delta": latest_ohlcv_delta,
-        "missing_in_alpaca": sorted(yahoo_index - alpaca_index),
-        "missing_in_yahoo": sorted(alpaca_index - yahoo_index),
+        "missing_in_alpaca": _sample_timestamps(missing_in_alpaca),
+        "missing_in_yahoo": _sample_timestamps(missing_in_yahoo),
+        "missing_in_alpaca_count": len(missing_in_alpaca),
+        "missing_in_yahoo_count": len(missing_in_yahoo),
     }
 
 
@@ -621,6 +627,26 @@ def _ohlcv_delta(yahoo_row, alpaca_row) -> dict:
             "percent": pct,
         }
     return delta
+
+
+def _canonical_timestamp_key(value, interval: str) -> str:
+    ts = pd.Timestamp(value)
+    interval = str(interval or "").lower()
+    if ts.tzinfo is None:
+        ts_et = ts.tz_localize(EASTERN_TZ)
+    else:
+        ts_et = ts.tz_convert(EASTERN_TZ)
+    if interval in {"1d", "1wk"}:
+        return ts_et.date().isoformat()
+    return ts_et.isoformat()
+
+
+def _sample_timestamps(values: list[str], limit: int = 12) -> list[str]:
+    if len(values) <= limit:
+        return values
+    head = values[: limit // 2]
+    tail = values[-(limit // 2):]
+    return [*head, "...", *tail]
 
 
 def _timestamp_to_iso(value) -> Optional[str]:
