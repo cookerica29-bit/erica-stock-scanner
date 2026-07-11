@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -135,6 +135,23 @@ def _alpaca_timeframe(interval: str) -> str:
     return mapping.get(str(interval or "").strip().lower(), str(interval or "1Day"))
 
 
+def _normalize_alpaca_base_url(base_url: str) -> str:
+    normalized = str(base_url or DEFAULT_ALPACA_DATA_BASE_URL).strip().strip("\"'")
+    if not normalized:
+        normalized = DEFAULT_ALPACA_DATA_BASE_URL
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"https://{normalized}"
+    normalized = normalized.rstrip("/")
+    for suffix in ("/v2/stocks/bars", "/v2/stocks", "/v2"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+            break
+    parsed = urlparse(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        return DEFAULT_ALPACA_DATA_BASE_URL
+    return normalized
+
+
 class YahooMarketDataProvider(MarketDataProvider):
     name = YAHOO_PROVIDER_NAME
 
@@ -170,7 +187,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
     ) -> None:
         self.api_key = api_key or os.getenv("ALPACA_API_KEY", "")
         self.secret_key = secret_key or os.getenv("ALPACA_SECRET_KEY", "")
-        self.base_url = (base_url or os.getenv("ALPACA_DATA_BASE_URL") or DEFAULT_ALPACA_DATA_BASE_URL).rstrip("/")
+        self.base_url = _normalize_alpaca_base_url(base_url or os.getenv("ALPACA_DATA_BASE_URL") or DEFAULT_ALPACA_DATA_BASE_URL)
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key or not self.secret_key:
@@ -211,7 +228,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
             with urlopen(req, timeout=int(os.getenv("ALPACA_DATA_TIMEOUT", "20"))) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
-            logger.warning("[alpaca] candle request failed symbols=%s interval=%s: %s", symbols, interval, exc)
+            logger.warning("[alpaca] candle request failed symbols=%s interval=%s error=%s", symbols, interval, _classify_error(exc))
             return pd.DataFrame() if len(symbols) == 1 else _empty_multi_symbol_frame(symbols)
 
         bars_by_symbol = payload.get("bars") or {}
