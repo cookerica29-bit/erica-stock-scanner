@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Stock Options Scanner</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>" />
+<title>Kairos</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%238b5cf6'/%3E%3Ctext x='50' y='66' text-anchor='middle' font-family='Arial,sans-serif' font-size='58' font-weight='800' fill='white'%3EK%3C/text%3E%3C/svg%3E" />
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -520,14 +520,35 @@
     margin-top:11px;
     padding:9px;
   }
-  .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; }
-  .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; }
+  .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; overflow-wrap:anywhere; }
+  .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; overflow-wrap:anywhere; }
   .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
-  .best-contract.available { border-color:rgba(124,92,255,0.28); background:rgba(124,92,255,0.07); }
-  .best-contract.pending { border-color:rgba(124,92,255,0.22); background:rgba(124,92,255,0.05); }
-  .best-contract.neutral { border-color:rgba(148,163,184,0.18); background:rgba(148,163,184,0.05); }
-  .best-contract.none { border-color:rgba(251,191,36,0.24); background:rgba(251,191,36,0.05); }
-  .best-contract .index-contract-main { font-size:13px; }
+  .suggested-contract.available { border-color:rgba(124,92,255,0.28); background:rgba(124,92,255,0.07); }
+  .suggested-contract.pending { border-color:rgba(124,92,255,0.22); background:rgba(124,92,255,0.05); }
+  .suggested-contract.neutral { border-color:rgba(148,163,184,0.18); background:rgba(148,163,184,0.05); }
+  .suggested-contract.none { border-color:rgba(148,163,184,0.18); background:rgba(148,163,184,0.06); }
+  .suggested-contract.high { border-color:rgba(34,197,94,0.26); background:rgba(34,197,94,0.07); }
+  .suggested-contract.moderate { border-color:rgba(245,158,11,0.26); background:rgba(245,158,11,0.06); }
+  .suggested-contract.low { border-color:rgba(249,115,22,0.28); background:rgba(249,115,22,0.06); }
+  .suggested-contract.very-low { border-color:rgba(239,68,68,0.28); background:rgba(239,68,68,0.06); }
+  .suggested-contract .index-contract-main { font-size:13px; }
+  .contract-confidence { font-size:11px; font-weight:950; margin-top:8px; }
+  .contract-confidence.high { color:var(--long); }
+  .contract-confidence.moderate { color:#fbbf24; }
+  .contract-confidence.low { color:#fb923c; }
+  .contract-confidence.very-low { color:var(--fail); }
+  .contract-reasons { color:var(--muted); display:grid; gap:3px; font-size:10.5px; line-height:1.35; margin-top:7px; }
+  .contract-reason-title { color:var(--text); font-size:10px; font-weight:900; letter-spacing:0.06em; margin-top:7px; text-transform:uppercase; }
+  .contract-cost { border-top:1px solid rgba(148,163,184,0.13); margin-top:8px; padding-top:8px; }
+  .contract-cost-label { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:0.06em; text-transform:uppercase; }
+  .contract-cost-value { color:var(--text); font-size:12px; font-weight:950; margin-top:3px; }
+  .contract-details { margin-top:8px; }
+  .contract-details summary { color:var(--accent-strong); cursor:pointer; font-size:10.5px; font-weight:900; list-style:none; }
+  .contract-details summary::-webkit-details-marker { display:none; }
+  .contract-detail-grid { display:grid; gap:5px 8px; grid-template-columns:repeat(2, minmax(0, 1fr)); margin-top:8px; }
+  .contract-detail-grid div { min-width:0; }
+  .contract-detail-grid span:first-child { color:var(--muted); display:block; font-size:9.5px; text-transform:uppercase; }
+  .contract-detail-grid span:last-child { color:var(--text); display:block; font-size:11px; font-weight:850; overflow-wrap:anywhere; }
   .execution-panel { padding:20px 24px; max-width:1200px; margin:0 auto; }
   .execution-head {
     align-items:flex-start;
@@ -1020,7 +1041,7 @@
     .index-contract-main,
     .index-contract-sub,
     .index-contract-note,
-    .best-execution,
+    .suggested-contract,
     .earnings-main,
     .earnings-sub {
       min-width: 0;
@@ -1813,7 +1834,7 @@
 <body>
 
 <header>
-  <h1>📈 Stock Options Scanner</h1>
+  <h1>Kairos</h1>
   <span class="header-meta">BOS + Order Block · Daily · 2R+ minimum</span>
 </header>
 
@@ -3735,62 +3756,12 @@ function firstPresent(...values) {
   return values.find(value => value !== undefined && value !== null && value !== '');
 }
 
-function bestContractDisplay(setup) {
-  const contract = setup.best_contract || {};
-  const lifecycle = contractLifecycleState(setup);
-  if (lifecycle === 'pending') {
-    return {
-      className: 'pending',
-      label: 'Best Contract',
-      main: 'Updating...',
-    };
-  }
-  if (lifecycle === 'confirmed_unavailable') {
-    return {
-      className: 'none',
-      label: 'Best Contract',
-      main: 'Not Available',
-    };
-  }
-  if (lifecycle === 'not_evaluated') {
-    return {
-      className: 'neutral',
-      label: 'Best Contract',
-      main: 'Not Evaluated',
-    };
-  }
-  const strikeValue = Number(contract.strike);
-  const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
-  const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
-  const expiry = formatShortDate(firstPresent(contract.expiry, contract.expiration));
-  return {
-    className: 'available',
-    label: 'Best Contract',
-    main: `${expiry} • $${strike} ${type}`.trim(),
-  };
-}
-
-function renderBestContractBlock(setup) {
-  const contract = bestContractDisplay(setup);
-  return `
-    <div class="index-contract best-contract ${contract.className}">
-      <div class="index-simple-label">${contract.label}</div>
-      <div class="index-contract-main">${escapeHtml(contract.main)}</div>
-    </div>`;
-}
-
-function actionableExecutionRows() {
-  return scannerRows
-    .filter(setup => setupProgressState(setup).bucket === 'ENTER_NOW')
-    .sort((a, b) => String(a.ticker || '').localeCompare(String(b.ticker || '')));
-}
-
-function bestContractCost(setup) {
+function contractPremium(setup) {
   const contract = setup.best_contract || {};
   const option = setup.option || {};
   const suggested = setup.suggested_contract || {};
   const fallback = setup.contract || {};
-  return Number(firstPresent(
+  const value = Number(firstPresent(
     contract.ask,
     contract.mark,
     contract.mid,
@@ -3806,6 +3777,226 @@ function bestContractCost(setup) {
     fallback.mark,
     fallback.mid
   ));
+  return Number.isFinite(value) ? value : NaN;
+}
+
+function contractEntryCost(setup) {
+  const premium = contractPremium(setup);
+  return Number.isFinite(premium) ? premium * 100 : NaN;
+}
+
+function unavailableContractReason(contract = {}) {
+  const reason = String(contract.reason || '').toLowerCase();
+  if (reason.includes('no option expirations') || reason.includes('no listed')) return 'No listed options';
+  if (reason.includes('price')) return 'Price data unavailable';
+  if (reason.includes('no contracts') || reason.includes('strike') || reason.includes('liquidity') || reason.includes('spread')) return 'No suitable contract found';
+  if (reason.includes('not evaluated')) return 'Contract data not evaluated for this setup';
+  return 'Contract data unavailable';
+}
+
+function contractConfidence(setup) {
+  const contract = setup.best_contract || {};
+  const score = Number(firstPresent(contract.score, contract.best_score));
+  const execution = String(contract.execution || '').toLowerCase();
+  const spreadPct = Number(firstPresent(contract.spread_pct, contract.diagnostics?.spread_pct));
+  const volume = Number(contract.volume);
+  const openInterest = Number(firstPresent(contract.open_interest, contract.openInterest));
+
+  if (execution.includes('excellent') || score >= 75) {
+    return {
+      key: 'high',
+      status: '🟢 Ready to trade',
+      label: 'Kairos Confidence: High',
+      title: 'Suggested because:',
+      positives: ['✓ Tight bid/ask spread', '✓ Strong liquidity', '✓ Healthy option volume'],
+      cautions: [],
+    };
+  }
+  if (execution.includes('fair') || score >= 55) {
+    return {
+      key: 'moderate',
+      status: '🟡 Ready to trade',
+      label: 'Kairos Confidence: Moderate',
+      title: 'Suggested because:',
+      positives: ['✓ Acceptable liquidity'],
+      cautionsTitle: 'Watch for:',
+      cautions: ['• Slightly wider bid/ask spread', '• Lower option volume'],
+    };
+  }
+  if (score >= 40 || (Number.isFinite(spreadPct) && spreadPct <= 35) || volume > 0 || openInterest >= 25) {
+    return {
+      key: 'low',
+      status: '🟠 Use with caution',
+      label: 'Kairos Confidence: Low',
+      title: 'Watch for:',
+      positives: [],
+      cautions: ['• Wide bid/ask spread', '• Low option volume', '• Weak open interest'],
+    };
+  }
+  return {
+    key: 'very-low',
+    status: '🔴 Not recommended',
+    label: 'Kairos Confidence: Very Low',
+    title: 'Reason:',
+    positives: [],
+    cautions: ['• Poor liquidity', '• Very wide bid/ask spread', '• Low open interest'],
+  };
+}
+
+function bestContractDisplay(setup) {
+  const contract = setup.best_contract || {};
+  const lifecycle = contractLifecycleState(setup);
+  if (lifecycle === 'pending') {
+    return {
+      className: 'pending',
+      label: '🎯 Suggested Contract',
+      main: 'Updating...',
+      sub: 'Options data is refreshing.',
+    };
+  }
+  if (lifecycle === 'confirmed_unavailable') {
+    const source = String(contract.source || '').toLowerCase();
+    const score = Number(firstPresent(contract.best_score, contract.score));
+    if (source === 'option_chain' && Number.isFinite(score)) {
+      const confidence = score >= 40
+        ? {
+            key: 'low',
+            status: '🟠 Use with caution',
+            label: 'Kairos Confidence: Low',
+            title: 'Watch for:',
+            positives: [],
+            cautions: ['• Wide bid/ask spread', '• Low option volume', '• Weak open interest'],
+          }
+        : {
+            key: 'very-low',
+            status: '🔴 Not recommended',
+            label: 'Kairos Confidence: Very Low',
+            title: 'Reason:',
+            positives: [],
+            cautions: ['• Poor liquidity', '• Very wide bid/ask spread', '• Low open interest'],
+          };
+      return {
+        className: `none ${confidence.key}`,
+        label: '🎯 Suggested Contract',
+        main: 'No suitable contract found',
+        confidence,
+        cost: NaN,
+      };
+    }
+    return {
+      className: 'none',
+      label: '🎯 Suggested Contract',
+      main: '⚪ Contract suggestion unavailable',
+      sub: 'Options data is not available for this ticker right now.',
+      reason: unavailableContractReason(contract),
+    };
+  }
+  if (lifecycle === 'not_evaluated') {
+    return {
+      className: 'neutral',
+      label: '🎯 Suggested Contract',
+      main: 'Not Evaluated',
+      sub: 'Contract data is only evaluated for actionable setups.',
+    };
+  }
+  const strikeValue = Number(contract.strike);
+  const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
+  const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
+  const expiry = formatShortDate(firstPresent(contract.expiry, contract.expiration));
+  const confidence = contractConfidence(setup);
+  const cost = contractEntryCost(setup);
+  return {
+    className: `available ${confidence.key}`,
+    label: '🎯 Suggested Contract',
+    main: `${expiry} • $${strike} ${type}`.trim(),
+    confidence,
+    cost,
+    details: {
+      bid: contract.bid,
+      ask: contract.ask,
+      spread: contract.spread,
+      delta: contract.delta,
+      openInterest: firstPresent(contract.open_interest, contract.openInterest),
+      volume: contract.volume,
+      expiry,
+      strike: Number.isFinite(strikeValue) ? `$${strike}` : '—',
+      type,
+    },
+  };
+}
+
+function renderContractReasons(display) {
+  const confidence = display.confidence;
+  if (!confidence) {
+    return display.reason
+      ? `<div class="index-contract-sub">${escapeHtml(display.reason)}</div>`
+      : '';
+  }
+  const positiveLines = confidence.positives || [];
+  const cautionLines = confidence.cautions || [];
+  return `
+    <div class="index-contract-main">${escapeHtml(confidence.status)}</div>
+    <div class="contract-confidence ${confidence.key}">${escapeHtml(confidence.label)}</div>
+    ${positiveLines.length ? `
+      <div class="contract-reason-title">${escapeHtml(confidence.title || 'Suggested because:')}</div>
+      <div class="contract-reasons">${positiveLines.map(line => `<div>${escapeHtml(line)}</div>`).join('')}</div>
+    ` : ''}
+    ${cautionLines.length ? `
+      <div class="contract-reason-title">${escapeHtml(confidence.cautionsTitle || confidence.title || 'Watch for:')}</div>
+      <div class="contract-reasons">${cautionLines.map(line => `<div>${escapeHtml(line)}</div>`).join('')}</div>
+    ` : ''}`;
+}
+
+function renderContractDetails(display, setup) {
+  if (!display.details) return '';
+  const cost = Number.isFinite(display.cost) ? `≈ ${fmtMoney(display.cost)} per contract` : 'Unavailable';
+  const rows = [
+    ['Bid', fmtMoney(display.details.bid)],
+    ['Ask', fmtMoney(display.details.ask)],
+    ['Spread', fmtMoney(display.details.spread)],
+    ['Delta', fmtNumber(display.details.delta)],
+    ['Open Interest', fmtNumber(display.details.openInterest, 0)],
+    ['Volume', fmtNumber(display.details.volume, 0)],
+    ['Expiration', display.details.expiry],
+    ['Strike', display.details.strike],
+    ['Entry Cost', cost],
+  ];
+  return `
+    <details class="contract-details">
+      <summary>View contract details ▾</summary>
+      <div class="contract-detail-grid">
+        ${rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>`).join('')}
+      </div>
+    </details>`;
+}
+
+function renderBestContractBlock(setup) {
+  const contract = bestContractDisplay(setup);
+  const entryCost = Number.isFinite(contract.cost) ? `≈ ${fmtMoney(contract.cost)} per contract` : 'Unavailable';
+  return `
+    <div class="index-contract suggested-contract ${contract.className}">
+      <div class="index-simple-label">${contract.label}</div>
+      <div class="index-contract-main">${escapeHtml(contract.main)}</div>
+      ${contract.sub ? `<div class="index-contract-sub">${escapeHtml(contract.sub)}</div>` : ''}
+      ${renderContractReasons(contract)}
+      ${contract.confidence ? `
+        <div class="contract-cost">
+          <div class="contract-cost-label">Estimated Entry Cost</div>
+          <div class="contract-cost-value">${escapeHtml(entryCost)}</div>
+        </div>
+        ${renderContractDetails(contract, setup)}
+      ` : ''}
+    </div>`;
+}
+
+function actionableExecutionRows() {
+  return scannerRows
+    .filter(setup => setupProgressState(setup).bucket === 'ENTER_NOW')
+    .sort((a, b) => String(a.ticker || '').localeCompare(String(b.ticker || '')));
+}
+
+function bestContractCost(setup) {
+  return contractPremium(setup);
 }
 
 function executionContractInfo(setup) {
@@ -3831,8 +4022,8 @@ function executionContractInfo(setup) {
 function executionContractCostText(setup, qty = 1) {
   const cost = executionContractInfo(setup).cost;
   const quantity = Math.max(1, Number.parseInt(qty, 10) || 1);
-  if (!Number.isFinite(cost)) return 'Estimated Contract Cost: Unavailable';
-  return `Estimated Contract Cost: ${fmtMoney(cost * 100 * quantity)}`;
+  if (!Number.isFinite(cost)) return 'Estimated Entry Cost: Unavailable';
+  return `Estimated Entry Cost: ${fmtMoney(cost * 100 * quantity)}`;
 }
 
 function updateExecutionRisk(idx) {
@@ -3855,9 +4046,9 @@ function executionTradePlanText(setup, qty = 1) {
     `Entry: ${fmtMoney(setup.entry)}`,
     `Stop: ${fmtMoney(setup.sl)}`,
     `Target: ${fmtMoney(setup.tp1)}`,
-    `Best Contract: ${contract.label || 'Not Available'}`,
+    `Suggested Contract: ${contract.label || 'Unavailable'}`,
     `Quantity: ${quantity}`,
-    `Estimated Contract Cost: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Unavailable'}`,
+    `Estimated Entry Cost: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Unavailable'}`,
   ].join('\n');
 }
 
@@ -3908,7 +4099,7 @@ function renderExecutionTab() {
           <div class="execution-line"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
         </div>
         <div class="execution-section">
-          <div class="execution-section-title">Best Contract</div>
+          <div class="execution-section-title">🎯 Suggested Contract</div>
           <div class="execution-contract-main">${escapeHtml(contract.label)}</div>
           <div class="execution-risk-row">
             <label class="execution-section-title" for="executionQty-${idx}">Quantity</label>
@@ -4879,7 +5070,7 @@ function gradeMix(trades) {
 function buildScannerIntroOutline() {
   return {
     titles: [
-      'Why I Built My Stock Options Scanner',
+      'Why I Built Kairos',
       'Inside My Scanner: Trend, Location, Confirmation',
       'How I Use A/B/C Setup Grades for Trade Review',
       'Building a Cleaner Options Watchlist Workflow',
