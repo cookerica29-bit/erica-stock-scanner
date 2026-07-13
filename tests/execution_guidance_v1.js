@@ -18,19 +18,33 @@ function setup(overrides = {}) {
 // Label data for cards: Current Price and Planned Entry remain separate.
 const rows = guidance.executionPlanRows(setup());
 assert.deepStrictEqual(rows.map(row => row.label), ['Current Price', 'Planned Entry', 'Stop', 'Target']);
+assert.strictEqual(rows.find(row => row.label === 'Planned Entry').key, 'planned-entry');
 assert.strictEqual(rows.find(row => row.label === 'Current Price').value, 75);
 assert.strictEqual(rows.find(row => row.label === 'Planned Entry').value, 70);
 assert.notStrictEqual(guidance.currentPrice(setup()), guidance.plannedEntry(setup()));
+
+const multiTargetRows = guidance.executionPlanRows(setup({ tp1: 65, tp3: 60 }));
+assert.deepStrictEqual(multiTargetRows.map(row => row.label), ['Current Price', 'Planned Entry', 'Stop', 'TP1', 'Final Target']);
+assert.strictEqual(multiTargetRows.find(row => row.label === 'TP1').value, 65);
+assert.strictEqual(multiTargetRows.find(row => row.label === 'Final Target').value, 60);
 
 // Almost Ready is not setup-confirmed; it waits for confirmation, not entry fill.
 const almostReady = guidance.nextStep(setup(), { bucket: 'ALMOST_READY' }, 'pending');
 assert.strictEqual(almostReady.label, 'Next Step');
 assert.deepStrictEqual(almostReady.lines, ['Setup is still developing. Wait for full confirmation.']);
 assert.strictEqual(guidance.executionState(setup(), { bucket: 'ALMOST_READY' }), 'SETUP_NOT_CONFIRMED');
+assert.deepStrictEqual(guidance.cardStatus(setup(), { bucket: 'ALMOST_READY' }), { label: 'ALMOST READY', className: 'almost-ready' });
+const almostStages = guidance.readinessStages(setup(), { bucket: 'ALMOST_READY' });
+assert.ok(almostStages.some(stage => stage.label === 'Confirm' && stage.status === 'Waiting'));
+assert.ok(almostStages.some(stage => stage.label === 'Execute' && stage.status === 'Not Ready'));
 
 // Enter Now can remain confirmed while current price differs from Planned Entry.
 const confirmedWaiting = setup({ price: 75, entry: 70, entryStatus: 'Near Entry', distanceFromEntryAtr: 0.5 });
 assert.strictEqual(guidance.executionState(confirmedWaiting, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_WAITING_FOR_ENTRY');
+assert.deepStrictEqual(guidance.cardStatus(confirmedWaiting, { bucket: 'ENTER_NOW' }), { label: 'ENTER NOW', className: 'enter-now' });
+const waitingStages = guidance.readinessStages(confirmedWaiting, { bucket: 'ENTER_NOW' });
+assert.deepStrictEqual(waitingStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Complete', 'Execute:Waiting']);
+assert.ok(waitingStages.find(stage => stage.label === 'Execute').state.includes('execute-waiting'));
 const enterWaiting = guidance.nextStep(confirmedWaiting, { bucket: 'ENTER_NOW' }, 'available');
 assert.deepStrictEqual(enterWaiting.lines, [
   'Setup confirmed. Wait for price to reach the planned entry at $70.00.',
@@ -43,6 +57,9 @@ assert.deepStrictEqual(guidance.nextStep(confirmedWaiting, { bucket: 'ENTER_NOW'
 // Entry-reached Enter Now uses execute wording only when a validated contract exists.
 const reached = setup({ price: 70.02, entry: 70, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 });
 assert.strictEqual(guidance.executionState(reached, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_ENTRY_REACHED');
+const reachedStages = guidance.readinessStages(reached, { bucket: 'ENTER_NOW' });
+assert.deepStrictEqual(reachedStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Complete', 'Execute:Ready']);
+assert.ok(reachedStages.find(stage => stage.label === 'Execute').state.includes('execute-ready'));
 const enterWithContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'available');
 assert.deepStrictEqual(enterWithContract.lines, ['Price is at the planned entry. You can execute this trade.']);
 
@@ -67,10 +84,12 @@ assert.ok(aReady.lines[0].startsWith('Setup confirmed.'));
 // Watchlist/building setups remain monitoring-only.
 const building = guidance.nextStep(setup({ entryStatus: 'Waiting', trade_eval: { trade_stage: 'BUILDING / WATCHLIST' } }), { bucket: 'WAITING' }, 'pending');
 assert.deepStrictEqual(building.lines, ['Continue monitoring. The setup is still developing.']);
+assert.deepStrictEqual(guidance.cardStatus(setup({ entryStatus: 'Waiting' }), { bucket: 'WAITING' }), { label: 'BUILDING', className: 'wait' });
 
 // Invalidated/no-trade setups explicitly say no entry.
 const invalid = guidance.nextStep(setup({ trade_eval: { trade_stage: 'RANGE / NO TRADE' } }), { bucket: 'SKIP' }, 'pending');
 assert.deepStrictEqual(invalid.lines, ['No entry. The setup is not currently valid.']);
+assert.deepStrictEqual(guidance.cardStatus(setup({ trade_eval: { trade_stage: 'RANGE / NO TRADE' } }), { bucket: 'SKIP' }), { label: 'NO TRADE', className: 'skip' });
 
 // Nike-style unfilled planned entry remains unfilled: price and planned entry are not forced together.
 const nike = setup({ ticker: 'NKE', price: 77.25, entry: 70.5, direction: 'SHORT' });

@@ -97,6 +97,57 @@
     return 'SETUP_CONFIRMED_WAITING_FOR_ENTRY';
   }
 
+  function cardStatus(setup = {}, readiness = {}) {
+    if (isNoTrade(setup, readiness)) return { label: 'NO TRADE', className: 'skip' };
+    if (isConfirmedSetup(setup, readiness)) return { label: 'ENTER NOW', className: 'enter-now' };
+    const bucket = upper(readiness.bucket);
+    if (bucket === 'ALMOST_READY' || upper(setup.entryStatus) === 'NEAR ENTRY') return { label: 'ALMOST READY', className: 'almost-ready' };
+    return { label: 'BUILDING', className: 'wait' };
+  }
+
+  function readinessStages(setup = {}, readiness = {}) {
+    if (isNoTrade(setup, readiness)) {
+      return [
+        { label: 'Trend', state: 'current skip', status: 'Review' },
+        { label: 'Zone', state: 'pending skip', status: 'Muted' },
+        { label: 'Confirm', state: 'pending skip', status: 'Muted' },
+        { label: 'Execute', state: 'pending skip execute-not-ready', status: 'Not Ready' },
+      ];
+    }
+    const entryState = executionState(setup, readiness);
+    if (isConfirmedSetup(setup, readiness)) {
+      const executeState = entryState === 'SETUP_CONFIRMED_ENTRY_REACHED'
+        ? { state: 'complete execute-ready', status: 'Ready' }
+        : entryState === 'SETUP_CONFIRMED_ENTRY_PASSED'
+          ? { state: 'current execute-not-ready', status: 'Not Ready' }
+          : { state: 'current execute-waiting', status: 'Waiting' };
+      return [
+        { label: 'Trend', state: 'complete', status: 'Complete' },
+        { label: 'Zone', state: 'complete', status: 'Complete' },
+        { label: 'Confirm', state: 'complete', status: 'Complete' },
+        { label: 'Execute', ...executeState },
+      ];
+    }
+    const bucket = upper(readiness.bucket);
+    const entryStatus = upper(setup.entryStatus);
+    const confirmationStarted = Boolean(setup.confirmationStarted || (setup.trade_eval && (setup.trade_eval.trigger_confirmed || setup.trade_eval.rejection_confirmed)));
+    if (bucket === 'ALMOST_READY' || entryStatus === 'NEAR ENTRY' || entryStatus === 'TRADEABLE') {
+      const confirmComplete = confirmationStarted && entryStatus === 'TRADEABLE';
+      return [
+        { label: 'Trend', state: 'complete', status: 'Complete' },
+        { label: 'Zone', state: 'complete', status: 'Complete' },
+        { label: 'Confirm', state: confirmComplete ? 'complete' : 'current', status: confirmComplete ? 'Complete' : 'Waiting' },
+        { label: 'Execute', state: 'pending execute-not-ready', status: 'Not Ready' },
+      ];
+    }
+    return [
+      { label: 'Trend', state: setup.direction ? 'complete' : 'current', status: setup.direction ? 'Complete' : 'Waiting' },
+      { label: 'Zone', state: 'current', status: 'Building' },
+      { label: 'Confirm', state: 'pending', status: 'Not Ready' },
+      { label: 'Execute', state: 'pending execute-not-ready', status: 'Not Ready' },
+    ];
+  }
+
   function nextStep(setup = {}, readiness = {}, contractLifecycle = 'pending') {
     const bucket = upper(readiness.bucket);
     const entryStatus = String(setup.entryStatus || '').trim();
@@ -164,11 +215,19 @@
   }
 
   function executionPlanRows(setup = {}) {
+    const tp1 = finiteNumber(setup.tp1 ?? setup.target ?? setup.target_price);
+    const finalTarget = finiteNumber(setup.final_target ?? setup.finalTarget ?? setup.tp3 ?? setup.tp2);
+    const targetRows = finalTarget !== null && tp1 !== null && finalTarget !== tp1
+      ? [
+          { label: 'TP1', value: tp1, key: 'tp1' },
+          { label: 'Final Target', value: finalTarget, key: 'final-target' },
+        ]
+      : [{ label: 'Target', value: tp1, key: 'target' }];
     return [
-      { label: 'Current Price', value: currentPrice(setup) },
-      { label: 'Planned Entry', value: plannedEntry(setup) },
-      { label: 'Stop', value: finiteNumber(setup.sl ?? setup.stop ?? setup.stop_price) },
-      { label: 'Target', value: finiteNumber(setup.tp1 ?? setup.target ?? setup.target_price) },
+      { label: 'Current Price', value: currentPrice(setup), key: 'current-price' },
+      { label: 'Planned Entry', value: plannedEntry(setup), key: 'planned-entry' },
+      { label: 'Stop', value: finiteNumber(setup.sl ?? setup.stop ?? setup.stop_price), key: 'stop' },
+      ...targetRows,
     ];
   }
 
@@ -178,6 +237,8 @@
     nextStep,
     executionState,
     isConfirmedSetup,
+    cardStatus,
+    readinessStages,
     executionPlanRows,
   };
 });

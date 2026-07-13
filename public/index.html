@@ -513,6 +513,15 @@
   .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
   .index-plan-row span:first-child { color:var(--muted); font-size:11px; }
   .index-plan-row span:last-child { color:var(--text); font-weight:900; }
+  .index-plan-row.planned-entry {
+    background: rgba(124,92,255,0.08);
+    border: 1px solid rgba(124,92,255,0.18);
+    border-radius: 8px;
+    margin: 1px -4px;
+    padding: 6px 7px;
+  }
+  .index-plan-row.planned-entry span:first-child { color:#ddd6fe; font-weight:900; }
+  .index-plan-row.planned-entry span:last-child { color:#fff; font-size:15px; font-weight:1000; }
   .index-contract {
     background:rgba(30,41,59,0.28);
     border:1px solid rgba(148,163,184,0.12);
@@ -802,6 +811,28 @@
     box-shadow: 0 0 0 4px rgba(34,197,94,0.1);
     color: #86efac;
   }
+  .timeline-step.execute-not-ready .timeline-dot {
+    background: rgba(43,54,72,0.72);
+    border-color: rgba(148,163,184,0.22);
+    box-shadow: none;
+    color: #94a3b8;
+  }
+  .timeline-step.execute-waiting .timeline-dot {
+    background: rgba(124,92,255,0.14);
+    border-color: rgba(167,139,250,0.7);
+    box-shadow: 0 0 0 4px rgba(124,92,255,0.1);
+    color: #ddd6fe;
+  }
+  .timeline-step.execute-waiting .timeline-label,
+  .timeline-step.execute-waiting .timeline-state { color:#ddd6fe; }
+  .timeline-step.execute-ready .timeline-dot {
+    background: rgba(34,197,94,0.22);
+    border: 3px solid rgba(34,197,94,0.92);
+    box-shadow: 0 0 0 5px rgba(34,197,94,0.13), 0 0 18px rgba(34,197,94,0.26);
+    color:#bbf7d0;
+  }
+  .timeline-step.execute-ready .timeline-label,
+  .timeline-step.execute-ready .timeline-state { color:#bbf7d0; }
   .trade-timeline.wait .timeline-step.current .timeline-dot {
     background: rgba(245,158,11,0.16);
     border-color: rgba(245,158,11,0.7);
@@ -3671,11 +3702,16 @@ function readinessStars(setup) {
 }
 
 function renderReadinessBadge(setup) {
-  const state = setupProgressState(setup);
-  return `<span class="grade-badge ${state.className}">${state.label}</span>`;
+  const status = window.KairosExecutionGuidance?.cardStatus
+    ? window.KairosExecutionGuidance.cardStatus(setup, setupProgressState(setup))
+    : { label: setupProgressState(setup).label, className: setupProgressState(setup).className };
+  return `<span class="grade-badge ${status.className}">${escapeHtml(status.label)}</span>`;
 }
 
 function tradeReadinessStages(setup) {
+  if (window.KairosExecutionGuidance?.readinessStages) {
+    return window.KairosExecutionGuidance.readinessStages(setup, setupProgressState(setup));
+  }
   const state = setupProgressState(setup);
   const bucket = state.bucket;
   const hasDirection = Boolean(setup.direction);
@@ -3717,7 +3753,7 @@ function renderTradeReadinessTimeline(setup) {
           <div class="timeline-step ${step.state}">
             <span class="timeline-dot">${step.state.includes('complete') ? '✓' : ''}</span>
             <span class="timeline-label">${escapeHtml(step.label)}</span>
-            <span class="timeline-state">${escapeHtml(timelineStateLabel(step.state))}</span>
+            <span class="timeline-state">${escapeHtml(step.status || timelineStateLabel(step.state))}</span>
           </div>
         `).join('')}
       </div>
@@ -3880,8 +3916,8 @@ function renderTradePlanBlock(setup) {
   return `
     <div class="index-plan">
       <div class="index-simple-label">Execution Plan</div>
-      ${rows.map(row => `<div class="index-plan-row"><span>${escapeHtml(row.label)}</span><span>${fmtMoney(row.value)}</span></div>`).join('')}
-      <div class="index-plan-row"><span>R:R</span><span>${rewardRiskText(setup)}</span></div>
+      ${rows.map(row => `<div class="index-plan-row ${escapeHtml(row.key || '')}"><span>${escapeHtml(row.label)}</span><span>${fmtMoney(row.value)}</span></div>`).join('')}
+      <div class="index-plan-row risk-reward"><span>Risk/Reward</span><span>${rewardRiskText(setup)}</span></div>
     </div>`;
 }
 
@@ -4548,6 +4584,9 @@ function renderCard(s) {
   const entryStatus = s.entryStatus || 'Waiting';
   const directionLabel = s.direction || 'N/A';
   const state = setupProgressState(s);
+  const cardStatus = window.KairosExecutionGuidance?.cardStatus
+    ? window.KairosExecutionGuidance.cardStatus(s, state)
+    : { label: state.label, className: state.className };
   const why = simpleWhyItems(s, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
   const encoded = encodeURIComponent(JSON.stringify(s));
   const distanceText = s.distanceFromEntryAtr != null
@@ -4568,11 +4607,11 @@ function renderCard(s) {
     <div class="card-body">
       <div class="price-row">
         <span class="price-big">${fmtMoney(s.price)}</span>
-        <span class="price-meta">${readinessStars(s)} ${state.label}</span>
+        <span class="price-meta">${readinessStars(s)} ${cardStatus.label}</span>
       </div>
       <div class="index-status-block">
         <div class="index-simple-label">Status</div>
-        <div class="index-simple-status ${state.className}">${state.label}</div>
+        <div class="index-simple-status ${cardStatus.className}">${cardStatus.label}</div>
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
         <div class="index-simple-direction ${directionClass(directionLabel)}">${renderDirectionText(directionLabel)}</div>
         ${renderNextStepBlock(s)}
