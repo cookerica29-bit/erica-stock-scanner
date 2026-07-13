@@ -135,6 +135,9 @@ assert.ok(building.includes('Continue monitoring. The setup is still developing.
 
 const loadingEarnings = htmlFor(setup({ earnings: { status: 'loading', started_at: new Date().toISOString() } }));
 assert.ok(loadingEarnings.includes('Loading...'));
+const staleLoadingEarnings = htmlFor(setup({ earnings: { loaded: false, loading: true, status: 'loading', date: null, days_until: null, source: 'background_refresh' } }));
+assert.ok(staleLoadingEarnings.includes('Data unavailable'));
+assert.ok(!staleLoadingEarnings.includes('Loading...'));
 const datedEarnings = htmlFor(setup({
   earnings: { status: 'loaded', loaded: true, date: '2026-07-30', days_until: 17, source: 'cache' },
 }));

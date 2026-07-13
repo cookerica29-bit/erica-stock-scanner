@@ -138,8 +138,12 @@
       };
     }
 
-    if (pending && (ageMs === null || ageMs <= EARNINGS_TIMEOUT_MS)) {
+    if (pending && ageMs !== null && ageMs <= EARNINGS_TIMEOUT_MS) {
       return { state: 'loading', className: 'earnings-neutral', main: 'Loading...', sub: '', source };
+    }
+
+    if (pending) {
+      return { state: 'failed', className: 'earnings-neutral', main: 'Data unavailable', sub: '', source };
     }
 
     if (error || ['error', 'failed', 'failure', 'provider_error'].includes(status)) {
