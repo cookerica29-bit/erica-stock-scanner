@@ -4721,6 +4721,32 @@ function suggestedExpirationAnalytics(expectedMoveResult) {
     : { status: 'learning', min_dte: null, max_dte: null };
 }
 
+function expectedMoveReleaseReadiness(expectedMoveResult, expirationResult) {
+  return window.KairosExpectedMove
+    ? window.KairosExpectedMove.expectedMoveReleaseReadiness(expectedMoveResult, expirationResult)
+    : {
+      release_status: 'learning',
+      card_ready: false,
+      reasons: ['analytics module unavailable'],
+      warnings: [],
+      target_sample_count: 0,
+      minimum_required: 30,
+      confidence: 'insufficient',
+    };
+}
+
+function expectedMoveDurationDistribution(durations = []) {
+  return window.KairosExpectedMove
+    ? window.KairosExpectedMove.durationDistributionBuckets(durations)
+    : [];
+}
+
+function buildExpectedMoveCardFields(readinessResult) {
+  return window.KairosExpectedMove
+    ? window.KairosExpectedMove.buildExpectedMoveCardFields(readinessResult)
+    : null;
+}
+
 function marketObservationFromSetup(setup = {}) {
   const price = coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price));
   const high = coerceNumber(firstPresent(setup.high, setup.day_high, setup.current_high, price));
@@ -6878,45 +6904,101 @@ function renderExpectedMoveDiagnostics(entries = []) {
     ${renderExpectedMoveCompletedSamples(diag.completedSamples)}`;
 }
 
+function formatRate(value) {
+  const num = coerceNumber(value);
+  return num == null ? '—' : `${fmtNumber(num * 100)}%`;
+}
+
+function formatExpectedMoveRange(result = {}) {
+  return result.expected_move_min_days && result.expected_move_max_days
+    ? `${result.expected_move_min_days}–${result.expected_move_max_days} trading days`
+    : 'Learning';
+}
+
+function formatExpirationRange(result = {}) {
+  return result.suggested_expiration_min_dte && result.suggested_expiration_max_dte
+    ? `${result.suggested_expiration_min_dte}–${result.suggested_expiration_max_dte} DTE`
+    : 'Learning';
+}
+
+function renderDurationBuckets(durations = []) {
+  const buckets = expectedMoveDurationDistribution(durations);
+  return buckets.map(bucket => `${escapeHtml(bucket.label)}: ${escapeHtml(String(bucket.count))}`).join(' · ') || '—';
+}
+
+function renderAuditList(items = []) {
+  return items && items.length ? items.map(item => `<div>• ${escapeHtml(item)}</div>`).join('') : '<div>—</div>';
+}
+
+function renderExpectedMoveAudit(group, expiration, readiness) {
+  const policy = expiration?.policy || {};
+  const cardFields = buildExpectedMoveCardFields(readiness);
+  return `
+    <details class="expected-move-audit" style="margin:10px 0 16px;border:1px solid var(--border);border-radius:10px;padding:10px;background:rgba(255,255,255,0.02);">
+      <summary style="cursor:pointer;font-weight:700;">Audit: ${escapeHtml(group.key)}</summary>
+      <div class="journal-stats" style="margin:10px 0;">
+        <div class="stat-card"><div class="stat-label">Normalized Grade</div><div class="stat-value">${escapeHtml(group.criteria?.grade || '—')}</div></div>
+        <div class="stat-card"><div class="stat-label">Direction</div><div class="stat-value">${escapeHtml(group.criteria?.direction || '—')}</div></div>
+        <div class="stat-card"><div class="stat-label">Timeframe</div><div class="stat-value">${escapeHtml(group.criteria?.timeframe || '—')}</div></div>
+        <div class="stat-card"><div class="stat-label">Release Status</div><div class="stat-value">${escapeHtml(readiness.release_status || 'learning')}</div></div>
+      </div>
+      <table class="analytics-table">
+        <tbody>
+          <tr><th>Exact Group Requested</th><td>${escapeHtml(JSON.stringify(readiness.group_requested || group.criteria || {}))}</td></tr>
+          <tr><th>Group Used</th><td>${escapeHtml(JSON.stringify(readiness.group_used || null))}</td></tr>
+          <tr><th>Fallback Level</th><td>${escapeHtml(group.result?.fallback_level || 'Exact')}</td></tr>
+          <tr><th>Samples</th><td>Total ${group.sample_count} · Target ${group.target_sample_count} · Stops ${group.stopped_sample_count} · Manual ${group.manual_close_count} · Expired ${group.expired_count}</td></tr>
+          <tr><th>Excluded</th><td>${group.exclusion_count} · ${escapeHtml(Object.entries(group.exclusion_reasons || {}).map(([k, v]) => `${k}: ${v}`).join('; ') || '—')}</td></tr>
+          <tr><th>Duration Stats</th><td>Median ${fmtNumber(group.median_days_to_target)} · Mean ${fmtNumber(group.mean_days_to_target)} · P10 ${fmtNumber(group.p10_days_to_target)} · P25 ${fmtNumber(group.p25_days_to_target)} · P75 ${fmtNumber(group.p75_days_to_target)} · P90 ${fmtNumber(group.p90_days_to_target)}</td></tr>
+          <tr><th>Stability</th><td>IQR ${fmtNumber(group.iqr_days_to_target)} · Std Dev ${fmtNumber(group.standard_deviation_days_to_target)} · MAD ${fmtNumber(group.median_absolute_deviation_days_to_target)} · IQR/Median ${fmtNumber(group.iqr_to_median_ratio)} · StdDev/Median ${fmtNumber(group.stddev_to_median_ratio)}</td></tr>
+          <tr><th>Rates</th><td>Target ${formatRate(group.target_completion_rate)} · Exclusion ${formatRate(readiness.exclusion_rate)} · Stop ${formatRate(group.stop_completion_rate)} · Manual ${formatRate(group.manual_close_rate)} · Expired ${formatRate(group.expiry_rate)}</td></tr>
+          <tr><th>Behavior</th><td>Median MFE ${fmtNumber(group.median_mfe_r)}R · Median MAE ${fmtNumber(group.median_mae_r)}R · Target Distance ${fmtNumber(group.median_target_distance_atr)} ATR</td></tr>
+          <tr><th>Duration Distribution</th><td>${renderDurationBuckets(group.target_durations || [])}</td></tr>
+          <tr><th>Expected Move</th><td>${formatExpectedMoveRange(readiness)} · confidence ${escapeHtml(readiness.confidence || 'insufficient')}</td></tr>
+          <tr><th>Suggested Expiration Audit</th><td>Upper ${policy.upper_expected_trading_days ?? '—'} trading days · conversion ${policy.trading_day_to_calendar_day_conversion ?? '—'} · multiplier ${policy.safety_multiplier ?? '—'} · buffer ${policy.safety_buffer_calendar_days ?? '—'} · raw min ${policy.raw_minimum_dte ?? '—'} · rounded min ${policy.rounded_minimum_dte ?? '—'} · max ${policy.recommended_maximum_dte ?? '—'}</td></tr>
+          <tr><th>Suggested Expiration</th><td>${formatExpirationRange(readiness)}</td></tr>
+          <tr><th>Release Flags</th><td>${escapeHtml((readiness.flags || []).join(', ') || '—')}</td></tr>
+          <tr><th>Reasons</th><td>${renderAuditList(readiness.reasons || [])}</td></tr>
+          <tr><th>Warnings</th><td>${renderAuditList(readiness.warnings || [])}</td></tr>
+          <tr><th>Future Card Contract</th><td>${cardFields ? escapeHtml(`${cardFields.expected_move_label} · ${cardFields.suggested_expiration_label}`) : 'Not card ready'}</td></tr>
+        </tbody>
+      </table>
+    </details>`;
+}
+
 function renderExpectedMoveLearningGroups(groups = []) {
-  const rows = groups.slice(0, 12).map(group => `
+  const evaluated = groups.map(group => {
+    const expiration = suggestedExpirationAnalytics(group.result);
+    const readiness = expectedMoveReleaseReadiness(group.result, expiration);
+    return { group, expiration, readiness };
+  });
+  const rows = evaluated.map(({ group, readiness }) => `
     <tr>
       <td><strong>${escapeHtml(group.key)}</strong></td>
-      <td>${group.sample_count}</td>
-      <td>${group.target_sample_count}</td>
-      <td>${group.stopped_sample_count}</td>
-      <td>${group.manual_close_count}</td>
-      <td>${group.expired_count}</td>
-      <td>${group.exclusion_count}</td>
-      <td>${escapeHtml(Object.entries(group.exclusion_reasons || {}).map(([k, v]) => `${k}: ${v}`).join('; ') || '—')}</td>
-      <td>${fmtNumber(group.median_days_to_target)}</td>
-      <td>${fmtNumber(group.p25_days_to_target)}</td>
-      <td>${fmtNumber(group.p75_days_to_target)}</td>
-      <td>${fmtNumber(group.p10_days_to_target)}</td>
-      <td>${fmtNumber(group.p90_days_to_target)}</td>
-      <td>${fmtNumber(group.iqr_days_to_target)}</td>
-      <td>${fmtNumber(group.standard_deviation_days_to_target)}</td>
-      <td>${fmtNumber(group.median_absolute_deviation_days_to_target)}</td>
-      <td>${group.result?.expected_move_min_days && group.result?.expected_move_max_days ? `${group.result.expected_move_min_days}-${group.result.expected_move_max_days}` : 'Learning'}</td>
-      <td>${escapeHtml(group.result?.confidence || 'insufficient')}</td>
-      <td>${group.result?.fallback_used ? escapeHtml(group.result.fallback_level || 'fallback') : 'Exact'}</td>
-      <td>${fmtNumber(group.median_mfe_r)}</td>
-      <td>${fmtNumber(group.median_mae_r)}</td>
-      <td>${fmtNumber(group.target_completion_rate == null ? null : group.target_completion_rate * 100)}%</td>
-      <td>${fmtNumber(group.median_target_distance_atr)}</td>
-      <td>${(() => {
-        const exp = suggestedExpirationAnalytics(group.result);
-        return exp.status === 'learning' ? 'Learning' : `${exp.min_dte}-${exp.max_dte} DTE`;
-      })()}</td>
+      <td>${escapeHtml(readiness.release_status || 'learning')}</td>
+      <td>${readiness.card_ready ? 'Yes' : 'No'}</td>
+      <td>${readiness.target_sample_count ?? 0}</td>
+      <td>${readiness.minimum_required ?? 30}</td>
+      <td>${formatExpectedMoveRange(readiness)}</td>
+      <td>${formatExpirationRange(readiness)}</td>
+      <td>${escapeHtml(readiness.confidence || 'insufficient')}</td>
+      <td>${formatRate(readiness.target_completion_rate)}</td>
+      <td>${formatRate(readiness.exclusion_rate)}</td>
+      <td>${readiness.fallback_used ? escapeHtml(group.result?.fallback_level || 'fallback') : 'Exact'}</td>
+      <td>${escapeHtml((readiness.reasons || [])[0] || 'Ready')}</td>
     </tr>`).join('');
+  const audits = evaluated.map(({ group, expiration, readiness }) => renderExpectedMoveAudit(group, expiration, readiness)).join('');
   return `
-    <h3 style="margin-top:18px;">Expected Move Analytics</h3>
+    <h3 style="margin-top:18px;">Expected Move Release Readiness</h3>
+    <div class="analytics-empty" style="margin-bottom:10px;">Analytics-only validation. Fallback-derived results cannot become card ready.</div>
     <table class="analytics-table">
       <thead>
-        <tr><th>Normalized Group</th><th>Completed</th><th>Target Samples</th><th>Stops</th><th>Manual</th><th>Expired</th><th>Excluded</th><th>Exclusion Reasons</th><th>Median</th><th>P25</th><th>P75</th><th>P10</th><th>P90</th><th>IQR</th><th>Std Dev</th><th>MAD</th><th>Expected Move</th><th>Confidence</th><th>Fallback</th><th>Median MFE R</th><th>Median MAE R</th><th>Target %</th><th>Target ATR</th><th>Expiration Test</th></tr>
+        <tr><th>Group</th><th>Release Status</th><th>Card Ready</th><th>Target Samples</th><th>Required Samples</th><th>Expected Move</th><th>Suggested Expiration</th><th>Confidence</th><th>Target Rate</th><th>Exclusion Rate</th><th>Fallback</th><th>Primary Reason</th></tr>
       </thead>
-      <tbody>${rows || '<tr><td colspan="24" style="text-align:center;color:var(--muted);padding:18px;">No completed setup groups yet.</td></tr>'}</tbody>
-    </table>`;
+      <tbody>${rows || '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:18px;">No completed setup groups yet.</td></tr>'}</tbody>
+    </table>
+    <h3 style="margin-top:18px;">Expected Move Audit</h3>
+    ${audits || '<div class="analytics-empty">No group audits yet.</div>'}`;
 }
 
 function renderExpectedMoveCompletedSamples(samples = []) {

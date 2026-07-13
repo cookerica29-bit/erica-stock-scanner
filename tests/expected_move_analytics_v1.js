@@ -140,4 +140,101 @@ assert.ok(expiration.min_dte >= low.expected_move_max_days);
 const noExpiration = analytics.suggestedExpirationAnalytics(learning);
 assert.strictEqual(noExpiration.status, 'learning');
 
+// Release readiness: insufficient samples remain learning with a clear reason.
+const learningExpiration = analytics.suggestedExpirationAnalytics(learning);
+const learningReadiness = analytics.expectedMoveReleaseReadiness(learning, learningExpiration);
+assert.strictEqual(learningReadiness.release_status, 'learning');
+assert.strictEqual(learningReadiness.card_ready, false);
+assert.ok(learningReadiness.reasons.includes('29 of 30 required target completions'));
+
+// Fully qualified exact groups can become card-ready.
+const exactReadySet = many(100, i => targetSetup({ grade: 'A+ READY', direction: 'SHORT', timeframe: '4H', days: 6 + (i % 5) }));
+const exactReady = analytics.expectedMoveAnalytics(exactReadySet, { grade: 'A+ READY', direction: 'SHORT', timeframe: '4H' });
+const exactExpiration = analytics.suggestedExpirationAnalytics(exactReady);
+const exactReadiness = analytics.expectedMoveReleaseReadiness(exactReady, exactExpiration);
+assert.strictEqual(exactReadiness.release_status, 'ready_for_release');
+assert.strictEqual(exactReadiness.card_ready, true);
+assert.strictEqual(exactReadiness.exact_group_used, true);
+
+// Sufficient but unstable distributions stay in testing.
+const unstableSet = [
+  ...many(50, () => targetSetup({ days: 1 })),
+  ...many(50, () => targetSetup({ days: 100 })),
+];
+const unstable = analytics.expectedMoveAnalytics(unstableSet, { grade: 'A+ READY', direction: 'LONG', timeframe: 'Daily' });
+const unstableReadiness = analytics.expectedMoveReleaseReadiness(unstable, analytics.suggestedExpirationAnalytics(unstable));
+assert.strictEqual(unstableReadiness.release_status, 'testing');
+assert.strictEqual(unstableReadiness.card_ready, false);
+assert.ok(unstableReadiness.flags.includes(analytics.READINESS_FLAGS.BROAD_IQR));
+
+// Fallback groups never become card-ready even when the fallback estimate is qualified.
+const fallbackReadiness = analytics.expectedMoveReleaseReadiness(fallback, analytics.suggestedExpirationAnalytics(fallback));
+assert.strictEqual(fallbackReadiness.card_ready, false);
+assert.ok(fallbackReadiness.flags.includes(analytics.READINESS_FLAGS.FALLBACK_USED));
+
+// Low confidence never becomes card-ready.
+const lowReadiness = analytics.expectedMoveReleaseReadiness(low, expiration);
+assert.strictEqual(lowReadiness.release_status, 'testing');
+assert.strictEqual(lowReadiness.card_ready, false);
+assert.ok(lowReadiness.flags.includes(analytics.READINESS_FLAGS.LOW_CONFIDENCE));
+
+// High exclusion rate blocks card readiness and reports the reason.
+const invalidDuration = targetSetup({ days: 7 });
+delete invalidDuration.trading_days_to_target;
+const highExclusions = [
+  ...many(100, i => targetSetup({ days: 6 + (i % 5) })),
+  ...many(30, () => ({ ...invalidDuration })),
+];
+const highExclusionResult = analytics.expectedMoveAnalytics(highExclusions, { grade: 'A+ READY', direction: 'LONG', timeframe: 'Daily' });
+const highExclusionReadiness = analytics.expectedMoveReleaseReadiness(highExclusionResult, analytics.suggestedExpirationAnalytics(highExclusionResult));
+assert.strictEqual(highExclusionReadiness.card_ready, false);
+assert.ok(highExclusionReadiness.flags.includes(analytics.READINESS_FLAGS.HIGH_EXCLUSION_RATE));
+
+// Low target completion rate blocks card readiness.
+const lowTargetRateSet = [
+  ...many(100, i => targetSetup({ days: 5 + (i % 5) })),
+  ...many(250, i => stopSetup({ days: 1 + (i % 3) })),
+];
+const lowTargetRate = analytics.expectedMoveAnalytics(lowTargetRateSet, { grade: 'A+ READY', direction: 'LONG', timeframe: 'Daily' });
+const lowTargetRateReadiness = analytics.expectedMoveReleaseReadiness(lowTargetRate, analytics.suggestedExpirationAnalytics(lowTargetRate));
+assert.strictEqual(lowTargetRateReadiness.card_ready, false);
+assert.ok(lowTargetRateReadiness.flags.includes(analytics.READINESS_FLAGS.LOW_TARGET_COMPLETION_RATE));
+
+// Unsafe Suggested Expiration and invalid Expected Move bounds produce blocked readiness.
+const unsafeExpiration = analytics.expectedMoveReleaseReadiness(exactReady, { status: 'internal_only', min_dte: 1, max_dte: 2 });
+assert.strictEqual(unsafeExpiration.release_status, 'blocked');
+assert.ok(unsafeExpiration.flags.includes(analytics.READINESS_FLAGS.UNSAFE_EXPIRATION));
+
+const invalidExpected = {
+  ...exactReady,
+  expected_move_min_days: 10,
+  expected_move_max_days: 5,
+};
+const invalidExpectedReadiness = analytics.expectedMoveReleaseReadiness(invalidExpected, { status: 'internal_only', min_dte: 21, max_dte: 45 });
+assert.strictEqual(invalidExpectedReadiness.release_status, 'blocked');
+assert.ok(invalidExpectedReadiness.flags.includes(analytics.READINESS_FLAGS.INVALID_EXPECTED_MOVE));
+
+// Multiple failure reasons are preserved.
+const multipleFailures = analytics.expectedMoveReleaseReadiness(lowTargetRate, { status: 'internal_only', min_dte: 1, max_dte: 2 });
+assert.ok(multipleFailures.reasons.length >= 2);
+
+// Exact groups can pass independently of broader fallback groups; A+/B+, long/short, and timeframes stay separate.
+assert.strictEqual(exactReadiness.group_requested.grade, 'A_PLUS_READY');
+assert.strictEqual(exactReadiness.group_requested.direction, 'SHORT');
+assert.strictEqual(exactReadiness.group_requested.timeframe, '4H');
+assert.notDeepStrictEqual(exactReadiness.group_requested, bLongDaily.group_requested);
+
+// Distribution buckets and snapshots are deterministic diagnostics.
+const buckets = analytics.durationDistributionBuckets([1, 2, 4, 6, 9, 13, 21, 30]);
+assert.deepStrictEqual(buckets.map(b => b.count), [2, 1, 1, 1, 1, 2]);
+const snapshot = analytics.buildAnalyticsSnapshot(exactReadiness, '2026-07-13T12:00:00Z');
+assert.strictEqual(snapshot.group_key, 'A_PLUS_READY|SHORT|4H');
+assert.strictEqual(snapshot.release_status, 'ready_for_release');
+
+// Future card contract returns exactly two fields when ready and null otherwise.
+const cardFields = analytics.buildExpectedMoveCardFields(exactReadiness);
+assert.deepStrictEqual(Object.keys(cardFields).sort(), ['expected_move_label', 'suggested_expiration_label']);
+assert.strictEqual(cardFields.expected_move_label.includes('trading days'), true);
+assert.strictEqual(analytics.buildExpectedMoveCardFields(lowReadiness), null);
+
 console.log('Expected Move analytics v1 tests passed');

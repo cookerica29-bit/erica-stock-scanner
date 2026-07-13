@@ -27,6 +27,28 @@
     },
   };
 
+  const READINESS_CONFIG = {
+    minimumTargetSamples: 30,
+    maximumExclusionRate: 0.20,
+    minimumTargetCompletionRate: 0.35,
+    maximumIqrToMedianRatio: 1.25,
+    maximumStddevToMedianRatio: 1.50,
+    minimumConfidence: 'moderate',
+  };
+
+  const READINESS_FLAGS = {
+    INSUFFICIENT_SAMPLES: 'INSUFFICIENT_SAMPLES',
+    FALLBACK_USED: 'FALLBACK_USED',
+    LOW_CONFIDENCE: 'LOW_CONFIDENCE',
+    HIGH_EXCLUSION_RATE: 'HIGH_EXCLUSION_RATE',
+    LOW_TARGET_COMPLETION_RATE: 'LOW_TARGET_COMPLETION_RATE',
+    BROAD_IQR: 'BROAD_IQR',
+    HIGH_VARIABILITY: 'HIGH_VARIABILITY',
+    INVALID_EXPECTED_MOVE: 'INVALID_EXPECTED_MOVE',
+    UNSAFE_EXPIRATION: 'UNSAFE_EXPIRATION',
+    DATA_INCONSISTENCY: 'DATA_INCONSISTENCY',
+  };
+
   function finiteNumber(value) {
     if (value === null || value === undefined || value === '') return null;
     const parsed = Number(value);
@@ -119,6 +141,30 @@
   function max(values) {
     const nums = values.map(Number).filter(Number.isFinite);
     return nums.length ? Math.max(...nums) : null;
+  }
+
+  function round(value, places = 4) {
+    const num = finiteNumber(value);
+    if (num === null) return null;
+    const scale = Math.pow(10, places);
+    return Math.round(num * scale) / scale;
+  }
+
+  function confidenceRank(confidence) {
+    if (confidence === 'high') return 3;
+    if (confidence === 'moderate') return 2;
+    if (confidence === 'low') return 1;
+    return 0;
+  }
+
+  function sameGroup(a, b) {
+    if (!a || !b) return false;
+    return a.grade === b.grade && a.direction === b.direction && a.timeframe === b.timeframe;
+  }
+
+  function percent(value) {
+    const num = finiteNumber(value);
+    return num === null ? null : Math.round(num * 100);
   }
 
   function isCompleted(entry = {}) {
@@ -226,6 +272,9 @@
       standard_deviation_days_to_target: standardDeviation(durations),
       median_absolute_deviation_days_to_target: medianAbsoluteDeviation(durations),
       iqr_days_to_target: iqr,
+      iqr_to_median_ratio: med ? iqr / med : null,
+      stddev_to_median_ratio: med ? standardDeviation(durations) / med : null,
+      target_durations: durations.slice().sort((a, b) => a - b),
       median_mfe_r: median(groupEntries.map(entry => entry.maximum_favorable_excursion_r)),
       median_mae_r: median(groupEntries.map(entry => entry.maximum_adverse_excursion_r)),
       median_target_distance_atr: median(groupEntries.map(entry => entry.target_distance_atr)),
@@ -326,11 +375,12 @@
     }
     const upper = finiteNumber(expectedMoveResult.expected_move_max_days);
     if (upper === null) return { status: 'learning', min_dte: null, max_dte: null };
-    const rawMin = Math.ceil(
+    const rawMinimumDte = (
       upper * CONFIG.expiration.upperBoundMultiplier * CONFIG.expiration.tradingToCalendarRatio
       + CONFIG.expiration.safetyBufferCalendarDays
     );
-    const minDte = Math.max(CONFIG.expiration.minimumDte, rawMin, upper);
+    const roundedMinimumDte = Math.ceil(rawMinimumDte);
+    const minDte = Math.max(CONFIG.expiration.minimumDte, roundedMinimumDte, upper);
     const maxDte = minDte + CONFIG.expiration.rangeWidth;
     return {
       status: 'internal_only',
@@ -338,14 +388,206 @@
       max_dte: maxDte,
       policy: {
         upper_expected_trading_days: upper,
+        trading_day_to_calendar_day_conversion: CONFIG.expiration.tradingToCalendarRatio,
+        safety_multiplier: CONFIG.expiration.upperBoundMultiplier,
         minimum_calendar_dte_formula: 'ceil(upper * 2 * 7/5 + safety_buffer)',
         safety_buffer_calendar_days: CONFIG.expiration.safetyBufferCalendarDays,
+        raw_minimum_dte: round(rawMinimumDte, 2),
+        rounded_minimum_dte: roundedMinimumDte,
+        recommended_maximum_dte: maxDte,
       },
+    };
+  }
+
+  function durationDistributionBuckets(values = []) {
+    const buckets = [
+      { label: '1-3', min: 1, max: 3, count: 0 },
+      { label: '4-5', min: 4, max: 5, count: 0 },
+      { label: '6-8', min: 6, max: 8, count: 0 },
+      { label: '9-12', min: 9, max: 12, count: 0 },
+      { label: '13-20', min: 13, max: 20, count: 0 },
+      { label: '21+', min: 21, max: Infinity, count: 0 },
+    ];
+    values.map(Number).filter(Number.isFinite).forEach(value => {
+      const bucket = buckets.find(row => value >= row.min && value <= row.max);
+      if (bucket) bucket.count += 1;
+    });
+    return buckets.map(({ label, count }) => ({ label, count }));
+  }
+
+  function expectedMoveReleaseReadiness(expectedMoveResult = {}, expirationResult = {}) {
+    const stats = expectedMoveResult.stats || {};
+    const targetCount = finiteNumber(expectedMoveResult.target_sample_count) || 0;
+    const minimumRequired = READINESS_CONFIG.minimumTargetSamples;
+    const reasons = [];
+    const warnings = [];
+    const flags = [];
+    const criticalFlags = new Set([
+      READINESS_FLAGS.INVALID_EXPECTED_MOVE,
+      READINESS_FLAGS.UNSAFE_EXPIRATION,
+      READINESS_FLAGS.DATA_INCONSISTENCY,
+    ]);
+
+    const expectedMin = finiteNumber(expectedMoveResult.expected_move_min_days);
+    const expectedMax = finiteNumber(expectedMoveResult.expected_move_max_days);
+    const expirationMin = finiteNumber(expirationResult.min_dte);
+    const expirationMax = finiteNumber(expirationResult.max_dte);
+    const groupRequested = expectedMoveResult.group_requested || null;
+    const groupUsed = expectedMoveResult.group_used || null;
+    const fallbackUsed = Boolean(expectedMoveResult.fallback_used);
+    const exactGroupUsed = !fallbackUsed && sameGroup(groupRequested, groupUsed);
+
+    if (!expectedMoveResult || !groupRequested || !stats) {
+      flags.push(READINESS_FLAGS.DATA_INCONSISTENCY);
+      reasons.push('analytics result inconsistent');
+    }
+
+    if (targetCount < minimumRequired) {
+      flags.push(READINESS_FLAGS.INSUFFICIENT_SAMPLES);
+      reasons.push(`${targetCount} of ${minimumRequired} required target completions`);
+    }
+
+    if (fallbackUsed) {
+      flags.push(READINESS_FLAGS.FALLBACK_USED);
+      reasons.push('fallback group required');
+    }
+
+    if (confidenceRank(expectedMoveResult.confidence) < confidenceRank(READINESS_CONFIG.minimumConfidence)) {
+      flags.push(READINESS_FLAGS.LOW_CONFIDENCE);
+      reasons.push(`confidence below ${READINESS_CONFIG.minimumConfidence}`);
+    }
+
+    const exclusionRate = stats.exclusion_count || stats.exclusion_count === 0
+      ? (stats.exclusion_count / Math.max(1, (stats.target_sample_count || 0) + stats.exclusion_count))
+      : null;
+    if (exclusionRate !== null && exclusionRate > READINESS_CONFIG.maximumExclusionRate) {
+      flags.push(READINESS_FLAGS.HIGH_EXCLUSION_RATE);
+      reasons.push(`exclusion rate ${percent(exclusionRate)}% exceeds ${percent(READINESS_CONFIG.maximumExclusionRate)}%`);
+    }
+
+    const targetRate = finiteNumber(stats.target_completion_rate);
+    if (targetRate !== null && targetRate < READINESS_CONFIG.minimumTargetCompletionRate) {
+      flags.push(READINESS_FLAGS.LOW_TARGET_COMPLETION_RATE);
+      reasons.push(`target completion rate ${percent(targetRate)}% is below ${percent(READINESS_CONFIG.minimumTargetCompletionRate)}%`);
+    }
+
+    const iqrRatio = finiteNumber(stats.iqr_to_median_ratio);
+    if (iqrRatio !== null && iqrRatio > READINESS_CONFIG.maximumIqrToMedianRatio) {
+      flags.push(READINESS_FLAGS.BROAD_IQR);
+      reasons.push('duration IQR is too broad');
+    }
+
+    const stddevRatio = finiteNumber(stats.stddev_to_median_ratio);
+    if (stddevRatio !== null && stddevRatio > READINESS_CONFIG.maximumStddevToMedianRatio) {
+      flags.push(READINESS_FLAGS.HIGH_VARIABILITY);
+      reasons.push('duration standard deviation is unstable');
+    }
+
+    const expectedBoundsValid = expectedMin !== null && expectedMax !== null && expectedMin >= 1 && expectedMax >= expectedMin;
+    if (!expectedBoundsValid && targetCount >= minimumRequired) {
+      flags.push(READINESS_FLAGS.INVALID_EXPECTED_MOVE);
+      reasons.push('invalid Expected Move bounds');
+    }
+
+    const expirationBoundsValid = expirationMin !== null && expirationMax !== null && expirationMin >= 1 && expirationMax >= expirationMin;
+    if (expectedBoundsValid && (!expirationBoundsValid || expirationMin < expectedMax)) {
+      flags.push(READINESS_FLAGS.UNSAFE_EXPIRATION);
+      reasons.push('Suggested Expiration shorter than Expected Move');
+    }
+
+    if (targetCount > (stats.sample_count || 0)) {
+      flags.push(READINESS_FLAGS.DATA_INCONSISTENCY);
+      reasons.push('analytics result inconsistent');
+    }
+
+    if (stats.target_durations && stats.target_durations.length && targetCount >= minimumRequired) {
+      const buckets = durationDistributionBuckets(stats.target_durations);
+      const nonEmptyBuckets = buckets.filter(bucket => bucket.count > 0).length;
+      if (nonEmptyBuckets > 4) warnings.push('duration samples are widely distributed');
+    }
+
+    const uniqueFlags = Array.from(new Set(flags));
+    const hasCritical = uniqueFlags.some(flag => criticalFlags.has(flag));
+    let releaseStatus = 'ready_for_release';
+    if (hasCritical) releaseStatus = 'blocked';
+    else if (targetCount < minimumRequired) releaseStatus = 'learning';
+    else if (reasons.length) releaseStatus = 'testing';
+
+    const cardReady = releaseStatus === 'ready_for_release'
+      && exactGroupUsed
+      && !fallbackUsed
+      && targetCount >= minimumRequired
+      && expectedMoveResult.status === 'ready'
+      && confidenceRank(expectedMoveResult.confidence) >= confidenceRank(READINESS_CONFIG.minimumConfidence)
+      && expectedBoundsValid
+      && expirationBoundsValid
+      && expirationMin >= expectedMax
+      && (exclusionRate === null || exclusionRate <= READINESS_CONFIG.maximumExclusionRate)
+      && (targetRate === null || targetRate >= READINESS_CONFIG.minimumTargetCompletionRate)
+      && (iqrRatio === null || iqrRatio <= READINESS_CONFIG.maximumIqrToMedianRatio)
+      && (stddevRatio === null || stddevRatio <= READINESS_CONFIG.maximumStddevToMedianRatio);
+
+    return {
+      release_status: releaseStatus,
+      card_ready: cardReady,
+      reasons: Array.from(new Set(reasons)),
+      warnings,
+      flags: uniqueFlags,
+      group_requested: groupRequested,
+      group_used: groupUsed,
+      exact_group_used: exactGroupUsed,
+      fallback_used: fallbackUsed,
+      target_sample_count: targetCount,
+      minimum_required: minimumRequired,
+      confidence: expectedMoveResult.confidence || 'insufficient',
+      expected_move_min_days: expectedBoundsValid ? expectedMin : null,
+      expected_move_max_days: expectedBoundsValid ? expectedMax : null,
+      median_days_to_target: expectedMoveResult.median_days_to_target ?? null,
+      p25_days_to_target: expectedMoveResult.p25_days_to_target ?? null,
+      p75_days_to_target: expectedMoveResult.p75_days_to_target ?? null,
+      suggested_expiration_min_dte: expirationBoundsValid ? expirationMin : null,
+      suggested_expiration_max_dte: expirationBoundsValid ? expirationMax : null,
+      target_completion_rate: targetRate,
+      exclusion_rate: exclusionRate,
+      iqr_to_median_ratio: iqrRatio,
+      stddev_to_median_ratio: stddevRatio,
+      expiration_audit: expirationResult.policy || null,
+    };
+  }
+
+  function buildAnalyticsSnapshot(readinessResult = {}, timestamp = new Date().toISOString()) {
+    const group = readinessResult.group_requested || {};
+    return {
+      analytics_snapshot_timestamp: timestamp,
+      group_key: [group.grade, group.direction, group.timeframe].filter(Boolean).join('|') || null,
+      target_sample_count: readinessResult.target_sample_count || 0,
+      median_days: readinessResult.median_days_to_target ?? null,
+      p25_days: readinessResult.p25_days_to_target ?? null,
+      p75_days: readinessResult.p75_days_to_target ?? null,
+      target_completion_rate: readinessResult.target_completion_rate ?? null,
+      exclusion_rate: readinessResult.exclusion_rate ?? null,
+      confidence: readinessResult.confidence || 'insufficient',
+      release_status: readinessResult.release_status || 'learning',
+    };
+  }
+
+  function buildExpectedMoveCardFields(readinessResult = {}) {
+    if (!readinessResult.card_ready) return null;
+    const minDays = finiteNumber(readinessResult.expected_move_min_days);
+    const maxDays = finiteNumber(readinessResult.expected_move_max_days);
+    const minDte = finiteNumber(readinessResult.suggested_expiration_min_dte);
+    const maxDte = finiteNumber(readinessResult.suggested_expiration_max_dte);
+    if (minDays === null || maxDays === null || minDte === null || maxDte === null) return null;
+    return {
+      expected_move_label: `${minDays}\u2013${maxDays} trading days`,
+      suggested_expiration_label: `${minDte}\u2013${maxDte} DTE`,
     };
   }
 
   return {
     CONFIG,
+    READINESS_CONFIG,
+    READINESS_FLAGS,
     normalizeGrade,
     normalizeDirection,
     normalizeTimeframe,
@@ -355,5 +597,9 @@
     expectedMoveAnalytics,
     buildGroupDiagnostics,
     suggestedExpirationAnalytics,
+    expectedMoveReleaseReadiness,
+    durationDistributionBuckets,
+    buildAnalyticsSnapshot,
+    buildExpectedMoveCardFields,
   };
 });
