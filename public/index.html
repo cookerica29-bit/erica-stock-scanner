@@ -2447,6 +2447,7 @@
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
 const JOURNAL_DUPLICATE_PREVENTION_KEY = 'stock_scanner_journal_duplicate_preventions';
+const EXPECTED_MOVE_TRACKING_WINDOW_DAYS = 30;
 const VIDEO_PROJECTS_KEY = 'stock_scanner_video_projects';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
 let scannerRows = [];
@@ -2761,6 +2762,7 @@ async function runScan() {
 
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
+    refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
     renderScannerResults();
     renderExecutionTab();
     if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
@@ -2830,6 +2832,7 @@ async function loadIndexWatchlist(options = {}) {
     const data = await res.json();
     indexMeta = data.meta || null;
     indexWatchRows = [...(data.rows || []), ...(data.near_miss || [])];
+    refreshExpectedMoveTrackingFromRows(indexWatchRows);
     console.info('[Index Watchlist] rows received', indexWatchRows.length, indexWatchRows.map(r => r.ticker));
   } catch (e) {
     console.error('[Index Watchlist] scan failed:', e);
@@ -3105,6 +3108,7 @@ function scheduleContractRefreshPoll() {
       const nextNearMiss = data.near_miss || [];
       scannerRows = nextRows;
       scannerNearMiss = nextNearMiss;
+      refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
       updateDataStatus(data.meta || {});
       renderScannerResults();
       renderExecutionTab();
@@ -4648,12 +4652,17 @@ function defaultTrackingFields(startedAt = null) {
     first_entry_touch_at: null,
     first_target_touch_at: null,
     first_stop_touch_at: null,
+    highest_price_reached: null,
+    lowest_price_reached: null,
     trading_days_to_entry: null,
     trading_days_to_target: null,
     trading_days_to_stop: null,
+    trading_days_elapsed: null,
     bars_to_entry: null,
     bars_to_target: null,
     bars_to_stop: null,
+    bars_elapsed: 0,
+    last_tracking_bar_time: null,
     maximum_favorable_excursion: null,
     maximum_adverse_excursion: null,
     maximum_favorable_excursion_percent: null,
@@ -4668,6 +4677,9 @@ function defaultTrackingFields(startedAt = null) {
     time_to_0_5r: null,
     time_to_1r: null,
     time_to_2r: null,
+    trade_progress_status: 'WAITING',
+    final_trading_days: null,
+    final_bar_count: null,
   };
 }
 
@@ -4694,6 +4706,272 @@ function calculateExcursionsFromPrices(direction, entryPrice, highPrice, lowPric
 
 function expectedMoveAnalytics() {
   return { status: 'learning' };
+}
+
+function expectedMoveGroupKey(entry = {}) {
+  return [
+    entry.setup_grade || entry.setupGrade || 'Unknown Grade',
+    String(entry.direction || 'Unknown').toUpperCase(),
+    entry.scanner_timeframe || entry.timeframe || 'Unknown TF',
+    entry.trend_state || entry.trendState || entry.trend || 'Unknown Trend',
+    entry.confirmation_status || (entry.confirmationStarted ? 'Started' : 'Pending'),
+  ].join(' | ');
+}
+
+function median(values = []) {
+  const nums = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  const mid = Math.floor(nums.length / 2);
+  return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+}
+
+function average(values = []) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  return nums.length ? nums.reduce((sum, value) => sum + value, 0) / nums.length : null;
+}
+
+function minFinite(values = []) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  return nums.length ? Math.min(...nums) : null;
+}
+
+function maxFinite(values = []) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  return nums.length ? Math.max(...nums) : null;
+}
+
+function expectedMoveLearningGroups(entries = []) {
+  const completed = entries.filter(e => e.tracking_status === 'completed');
+  const groups = new Map();
+  completed.forEach(entry => {
+    const key = expectedMoveGroupKey(entry);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  });
+  return Array.from(groups.entries()).map(([key, rows]) => {
+    const durations = rows.map(e => firstPresent(e.trading_days_to_target, e.trading_days_to_stop, e.final_trading_days, e.trading_days_elapsed));
+    const mfeR = rows.map(e => e.maximum_favorable_excursion_r);
+    const maeR = rows.map(e => e.maximum_adverse_excursion_r);
+    const atrTraveled = rows.map(e => firstPresent(e.maximum_favorable_excursion_atr, e.target_distance_atr));
+    return {
+      key,
+      count: rows.length,
+      status: rows.length >= 30 ? 'ready' : 'learning',
+      medianDuration: median(durations),
+      averageDuration: average(durations),
+      minDuration: minFinite(durations),
+      maxDuration: maxFinite(durations),
+      medianMfe: median(mfeR),
+      medianMae: median(maeR),
+      medianAtr: median(atrTraveled),
+      samples: rows,
+    };
+  }).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+}
+
+function marketObservationFromSetup(setup = {}) {
+  const price = coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price));
+  const high = coerceNumber(firstPresent(setup.high, setup.day_high, setup.current_high, price));
+  const low = coerceNumber(firstPresent(setup.low, setup.day_low, setup.current_low, price));
+  if (price == null && high == null && low == null) return null;
+  return {
+    ticker: String(setup.ticker || '').toUpperCase(),
+    observed_at: firstPresent(setup.scannedAt, setup.updated_at, setup.signal_timestamp, new Date().toISOString()),
+    price,
+    high: high ?? price,
+    low: low ?? price,
+    bar_time: firstPresent(setup.candleTime, setup.candle_timestamp, setup.scannedAt, new Date().toISOString()),
+  };
+}
+
+function latestMarketObservations(rows = []) {
+  const map = new Map();
+  rows.forEach(row => {
+    const obs = marketObservationFromSetup(row);
+    if (!obs?.ticker) return;
+    map.set(obs.ticker, obs);
+  });
+  return map;
+}
+
+function isJournalEntryManuallyClosed(entry = {}) {
+  return ['Win', 'Loss'].includes(entry.result)
+    || ['TP1', 'TP2', 'TP3', 'Stop Loss', 'Manual Close', 'Expired'].includes(entry.outcome)
+    || ['Winner', 'Stopped', 'Failed', 'Breakeven'].includes(entry.reviewResult);
+}
+
+function isActiveTrackedSetup(entry = {}) {
+  if (entry.tracking_status === 'completed' || entry.completion_reason) return false;
+  if (isJournalEntryManuallyClosed(entry)) return false;
+  const started = firstPresent(entry.tracking_started_at, entry.signal_timestamp, entry.createdAt);
+  const elapsed = countWeekdaysBetween(started, new Date().toISOString());
+  if (elapsed != null && elapsed > EXPECTED_MOVE_TRACKING_WINDOW_DAYS) return true;
+  return true;
+}
+
+function entryRisk(entry = {}) {
+  const entryPrice = coerceNumber(firstPresent(entry.entry_price, entry.entry));
+  const stopPrice = coerceNumber(firstPresent(entry.stop_price, entry.plannedStop));
+  if (entryPrice == null || stopPrice == null) return null;
+  const risk = Math.abs(entryPrice - stopPrice);
+  return risk > 0 ? risk : null;
+}
+
+function hasEntryTouched(entry = {}, obs = {}) {
+  const entryPrice = coerceNumber(firstPresent(entry.entry_price, entry.entry));
+  if (entryPrice == null || obs.high == null || obs.low == null) return false;
+  return obs.low <= entryPrice && obs.high >= entryPrice;
+}
+
+function milestoneReached(entry = {}, rMultiple = 1) {
+  const mfeR = coerceNumber(entry.maximum_favorable_excursion_r);
+  return mfeR != null && mfeR >= rMultiple;
+}
+
+function updateEntryProgressStatus(entry = {}) {
+  if (entry.tracking_status === 'completed') {
+    entry.trade_progress_status = 'COMPLETE';
+    return entry;
+  }
+  if (!entry.first_entry_touch_at) {
+    entry.trade_progress_status = 'WAITING';
+  } else if (milestoneReached(entry, 2)) {
+    entry.trade_progress_status = 'TARGET NEAR';
+  } else if (milestoneReached(entry, 1)) {
+    entry.trade_progress_status = 'TREND DEVELOPING';
+  } else if (milestoneReached(entry, 0.5)) {
+    entry.trade_progress_status = 'MOVE STARTED';
+  } else {
+    entry.trade_progress_status = 'ENTRY REACHED';
+  }
+  return entry;
+}
+
+function mergeExcursionMeasurements(entry = {}, obs = {}) {
+  const entryPrice = coerceNumber(firstPresent(entry.entry_price, entry.entry));
+  if (entryPrice == null || !entry.first_entry_touch_at) return entry;
+  const high = coerceNumber(firstPresent(obs.high, obs.price));
+  const low = coerceNumber(firstPresent(obs.low, obs.price));
+  if (high == null || low == null) return entry;
+  entry.highest_price_reached = entry.highest_price_reached == null ? high : Math.max(entry.highest_price_reached, high);
+  entry.lowest_price_reached = entry.lowest_price_reached == null ? low : Math.min(entry.lowest_price_reached, low);
+  const excursions = calculateExcursionsFromPrices(
+    entry.direction,
+    entryPrice,
+    entry.highest_price_reached,
+    entry.lowest_price_reached,
+    coerceNumber(entry.atr_at_signal),
+    coerceNumber(firstPresent(entry.stop_price, entry.plannedStop))
+  );
+  if (excursions) Object.assign(entry, excursions);
+  return entry;
+}
+
+function markRMilestone(entry = {}, rMultiple, field, timeField, obsTime) {
+  if (!entry[field] && milestoneReached(entry, rMultiple)) {
+    entry[field] = true;
+    entry[timeField] = obsTime;
+  }
+  return entry;
+}
+
+function updateTrackingDurations(entry = {}, obsTime = new Date().toISOString(), barTime = obsTime) {
+  const startedAt = firstPresent(entry.tracking_started_at, entry.signal_timestamp, entry.createdAt);
+  entry.trading_days_elapsed = countWeekdaysBetween(startedAt, obsTime);
+  const isNewBar = !entry.last_tracking_bar_time || String(entry.last_tracking_bar_time) !== String(barTime);
+  if (isNewBar) {
+    entry.bars_elapsed = (coerceInteger(entry.bars_elapsed) || 0) + 1;
+    entry.last_tracking_bar_time = barTime;
+  }
+  if (entry.first_entry_touch_at) {
+    entry.trading_days_to_entry = entry.trading_days_to_entry ?? countWeekdaysBetween(startedAt, entry.first_entry_touch_at);
+    entry.bars_to_entry = entry.bars_to_entry ?? entry.bars_elapsed;
+  }
+  if (entry.first_target_touch_at) {
+    entry.trading_days_to_target = entry.trading_days_to_target ?? countWeekdaysBetween(startedAt, entry.first_target_touch_at);
+    entry.bars_to_target = entry.bars_to_target ?? entry.bars_elapsed;
+  }
+  if (entry.first_stop_touch_at) {
+    entry.trading_days_to_stop = entry.trading_days_to_stop ?? countWeekdaysBetween(startedAt, entry.first_stop_touch_at);
+    entry.bars_to_stop = entry.bars_to_stop ?? entry.bars_elapsed;
+  }
+  return entry;
+}
+
+function completeTracking(entry = {}, reason, obsTime) {
+  if (entry.tracking_status === 'completed') return entry;
+  entry.tracking_status = 'completed';
+  entry.completion_reason = reason;
+  entry.tracking_completed_at = obsTime;
+  entry.final_trading_days = entry.trading_days_elapsed;
+  entry.final_bar_count = entry.bars_elapsed;
+  entry.trade_progress_status = 'COMPLETE';
+  return entry;
+}
+
+function updateTrackedSetupWithObservation(entry = {}, obs = {}) {
+  const updated = { ...entry };
+  const obsTime = obs.observed_at || new Date().toISOString();
+  const barTime = obs.bar_time || obsTime;
+  updated.tracking_started_at = firstPresent(updated.tracking_started_at, updated.signal_timestamp, updated.createdAt, obsTime);
+  if (!updated.first_entry_touch_at && hasEntryTouched(updated, obs)) {
+    updated.first_entry_touch_at = obsTime;
+  }
+  mergeExcursionMeasurements(updated, obs);
+  markRMilestone(updated, 0.5, 'reached_0_5r', 'time_to_0_5r', obsTime);
+  markRMilestone(updated, 1, 'reached_1r', 'time_to_1r', obsTime);
+  markRMilestone(updated, 2, 'reached_2r', 'time_to_2r', obsTime);
+
+  const direction = String(updated.direction || '').toUpperCase();
+  const target = coerceNumber(firstPresent(updated.target_price, updated.plannedTp1));
+  const stop = coerceNumber(firstPresent(updated.stop_price, updated.plannedStop));
+  if (updated.first_entry_touch_at && target != null) {
+    const targetTouched = direction === 'SHORT' ? obs.low <= target : obs.high >= target;
+    if (targetTouched && !updated.first_target_touch_at) updated.first_target_touch_at = obsTime;
+  }
+  if (updated.first_entry_touch_at && stop != null) {
+    const stopTouched = direction === 'SHORT' ? obs.high >= stop : obs.low <= stop;
+    if (stopTouched && !updated.first_stop_touch_at) updated.first_stop_touch_at = obsTime;
+  }
+  updateTrackingDurations(updated, obsTime, barTime);
+
+  if (updated.first_target_touch_at) completeTracking(updated, 'target', updated.first_target_touch_at);
+  else if (updated.first_stop_touch_at) completeTracking(updated, 'stop', updated.first_stop_touch_at);
+  else if ((updated.trading_days_elapsed ?? 0) >= EXPECTED_MOVE_TRACKING_WINDOW_DAYS) completeTracking(updated, 'tracking_window_expired', obsTime);
+  updateEntryProgressStatus(updated);
+  return updated;
+}
+
+function refreshExpectedMoveTrackingFromRows(rows = []) {
+  const entries = loadJournal();
+  if (!entries.length || !rows.length) return { updated: 0, active: 0 };
+  const observations = latestMarketObservations(rows);
+  let updatedCount = 0;
+  let activeCount = 0;
+  const nextEntries = entries.map(entry => {
+    if (!isActiveTrackedSetup(entry)) return entry;
+    activeCount += 1;
+    const obs = observations.get(String(entry.ticker || '').toUpperCase());
+    if (!obs) {
+      const startedAt = firstPresent(entry.tracking_started_at, entry.signal_timestamp, entry.createdAt);
+      const elapsed = countWeekdaysBetween(startedAt, new Date().toISOString());
+      if (elapsed != null && elapsed >= EXPECTED_MOVE_TRACKING_WINDOW_DAYS) {
+        updatedCount += 1;
+        const expired = { ...entry, trading_days_elapsed: elapsed };
+        return completeTracking(expired, 'tracking_window_expired', new Date().toISOString());
+      }
+      return entry;
+    }
+    const updated = updateTrackedSetupWithObservation(entry, obs);
+    if (JSON.stringify(updated) !== JSON.stringify(entry)) updatedCount += 1;
+    return updated;
+  });
+  if (updatedCount > 0) {
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(nextEntries));
+    renderJournal();
+    renderAnalytics();
+  }
+  return { updated: updatedCount, active: activeCount };
 }
 
 function setChecked(id, value = false) {
@@ -5015,6 +5293,9 @@ function applyManualTrackingCompletion(entry = {}) {
   else if (outcome === 'Stop Loss') entry.completion_reason = entry.completion_reason || 'stop';
   else if (outcome === 'Manual Close') entry.completion_reason = entry.completion_reason || 'manually_closed';
   else if (outcome === 'Expired') entry.completion_reason = entry.completion_reason || 'tracking_window_expired';
+  else if (entry.reviewResult === 'Winner') entry.completion_reason = entry.completion_reason || 'target';
+  else if (entry.reviewResult === 'Stopped' || entry.reviewResult === 'Failed') entry.completion_reason = entry.completion_reason || 'stop';
+  else if (entry.reviewResult === 'Breakeven' || ['Win', 'Loss'].includes(entry.result)) entry.completion_reason = entry.completion_reason || 'manually_closed';
   if (entry.completion_reason) {
     entry.tracking_status = 'completed';
     entry.tracking_completed_at = entry.tracking_completed_at || new Date().toISOString();
@@ -6561,15 +6842,24 @@ function expectedMoveDiagnostics(entries = []) {
   const missing = key => entries.filter(e => e[key] === null || e[key] === undefined || e[key] === '').length;
   const completedReason = reason => entries.filter(e => e.completion_reason === reason).length;
   const active = entries.filter(e => e.tracking_status !== 'completed').length;
+  const completed = entries.filter(e => e.tracking_status === 'completed');
+  const groups = expectedMoveLearningGroups(entries);
   const samples = entries
     .slice()
     .sort((a, b) => String(b.signal_timestamp || b.createdAt || '').localeCompare(String(a.signal_timestamp || a.createdAt || '')))
     .slice(0, 8);
+  const completedSamples = completed
+    .slice()
+    .sort((a, b) => String(b.tracking_completed_at || '').localeCompare(String(a.tracking_completed_at || '')))
+    .slice(0, 8);
   return {
-    status: expectedMoveAnalytics().status,
+    status: completed.length < 30 ? 'learning' : expectedMoveAnalytics().status,
     counts: {
       totalTracked: entries.length,
       active,
+      completed: completed.length,
+      learningGroups: groups.length,
+      groupsStillLearning: groups.filter(g => g.status === 'learning').length,
       completedByTarget: completedReason('target'),
       completedByStop: completedReason('stop'),
       manuallyClosed: completedReason('manually_closed'),
@@ -6582,7 +6872,9 @@ function expectedMoveDiagnostics(entries = []) {
       missingExpiration: missing('expiration_date'),
       duplicatePreventionCount: duplicatePreventionCount(),
     },
+    groups,
     samples,
+    completedSamples,
   };
 }
 
@@ -6591,6 +6883,9 @@ function renderExpectedMoveDiagnostics(entries = []) {
   const cards = [
     ['Tracked Setups', diag.counts.totalTracked],
     ['Active', diag.counts.active],
+    ['Completed', diag.counts.completed],
+    ['Learning Groups', diag.counts.learningGroups],
+    ['Groups Learning', diag.counts.groupsStillLearning],
     ['Target', diag.counts.completedByTarget],
     ['Stop', diag.counts.completedByStop],
     ['Manual', diag.counts.manuallyClosed],
@@ -6626,6 +6921,56 @@ function renderExpectedMoveDiagnostics(entries = []) {
         <tr><th>Ticker</th><th>Direction</th><th>Grade</th><th>Signal Date</th><th>Entry Date</th><th>Completion</th><th>Days to Target/Stop</th><th>MFE R</th><th>MAE R</th><th>Target ATR</th></tr>
       </thead>
       <tbody>${sampleRows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No tracked setups yet.</td></tr>'}</tbody>
+    </table>
+    ${renderExpectedMoveLearningGroups(diag.groups)}
+    ${renderExpectedMoveCompletedSamples(diag.completedSamples)}`;
+}
+
+function renderExpectedMoveLearningGroups(groups = []) {
+  const rows = groups.slice(0, 12).map(group => `
+    <tr>
+      <td><strong>${escapeHtml(group.key)}</strong></td>
+      <td>${group.count}</td>
+      <td>${group.status === 'learning' ? 'Learning' : 'Ready'}</td>
+      <td>${fmtNumber(group.medianDuration)}</td>
+      <td>${fmtNumber(group.averageDuration)}</td>
+      <td>${fmtNumber(group.minDuration)}</td>
+      <td>${fmtNumber(group.maxDuration)}</td>
+      <td>${fmtNumber(group.medianMfe)}</td>
+      <td>${fmtNumber(group.medianMae)}</td>
+      <td>${fmtNumber(group.medianAtr)}</td>
+    </tr>`).join('');
+  return `
+    <h3 style="margin-top:18px;">Expected Move Analytics</h3>
+    <table class="analytics-table">
+      <thead>
+        <tr><th>Group</th><th>Completed</th><th>Status</th><th>Median Duration</th><th>Average</th><th>Min</th><th>Max</th><th>Median MFE R</th><th>Median MAE R</th><th>Median ATR</th></tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No completed setup groups yet.</td></tr>'}</tbody>
+    </table>`;
+}
+
+function renderExpectedMoveCompletedSamples(samples = []) {
+  const rows = samples.map(e => `
+    <tr>
+      <td><strong>${escapeHtml(e.ticker || '—')}</strong></td>
+      <td>${escapeHtml(e.setup_grade || e.setupGrade || '—')}</td>
+      <td class="direction-value ${directionClass(e.direction)}">${escapeHtml(e.direction || '—')}</td>
+      <td>${escapeHtml(e.completion_reason || '—')}</td>
+      <td>${e.final_trading_days ?? e.trading_days_to_target ?? e.trading_days_to_stop ?? '—'}</td>
+      <td>${e.final_bar_count ?? e.bars_to_target ?? e.bars_to_stop ?? '—'}</td>
+      <td>${fmtNumber(e.maximum_favorable_excursion_r)}</td>
+      <td>${fmtNumber(e.maximum_adverse_excursion_r)}</td>
+      <td>${fmtNumber(e.maximum_favorable_excursion_atr)}</td>
+      <td>${fmtNumber(e.maximum_adverse_excursion_atr)}</td>
+    </tr>`).join('');
+  return `
+    <h3 style="margin-top:18px;">Sample Completed Setups</h3>
+    <table class="analytics-table">
+      <thead>
+        <tr><th>Ticker</th><th>Grade</th><th>Direction</th><th>Completion</th><th>Trading Days</th><th>Bars</th><th>MFE R</th><th>MAE R</th><th>MFE ATR</th><th>MAE ATR</th></tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No completed samples yet.</td></tr>'}</tbody>
     </table>`;
 }
 
@@ -6671,7 +7016,7 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult','setup_id','option_type','strike_price','expiration_date','days_to_expiration_at_entry','premium_paid','breakeven_price','option_bid_at_entry','option_ask_at_entry','option_spread_at_entry','open_interest_at_entry','option_volume_at_entry','implied_volatility_at_entry','underlying_price_at_entry','setup_grade_snapshot','scanner_status_snapshot','confirmation_status','scanner_timeframe','signal_timestamp','signal_market_date','underlying_price_at_signal','entry_price_snapshot','stop_price_snapshot','target_price_snapshot','atr_at_signal','target_distance','target_distance_atr','trend_state','relative_volume_snapshot','atr_expansion_snapshot','tracking_status','tracking_started_at','tracking_completed_at','completion_reason','first_entry_touch_at','first_target_touch_at','first_stop_touch_at','trading_days_to_entry','trading_days_to_target','trading_days_to_stop','bars_to_entry','bars_to_target','bars_to_stop','maximum_favorable_excursion','maximum_adverse_excursion','maximum_favorable_excursion_percent','maximum_adverse_excursion_percent','maximum_favorable_excursion_atr','maximum_adverse_excursion_atr','maximum_favorable_excursion_r','maximum_adverse_excursion_r','reached_0_5r','reached_1r','reached_2r','time_to_0_5r','time_to_1r','time_to_2r'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult','setup_id','option_type','strike_price','expiration_date','days_to_expiration_at_entry','premium_paid','breakeven_price','option_bid_at_entry','option_ask_at_entry','option_spread_at_entry','open_interest_at_entry','option_volume_at_entry','implied_volatility_at_entry','underlying_price_at_entry','setup_grade_snapshot','scanner_status_snapshot','confirmation_status','scanner_timeframe','signal_timestamp','signal_market_date','underlying_price_at_signal','entry_price_snapshot','stop_price_snapshot','target_price_snapshot','atr_at_signal','target_distance','target_distance_atr','trend_state','relative_volume_snapshot','atr_expansion_snapshot','tracking_status','trade_progress_status','tracking_started_at','tracking_completed_at','completion_reason','highest_price_reached','lowest_price_reached','first_entry_touch_at','first_target_touch_at','first_stop_touch_at','trading_days_elapsed','trading_days_to_entry','trading_days_to_target','trading_days_to_stop','bars_elapsed','last_tracking_bar_time','bars_to_entry','bars_to_target','bars_to_stop','final_trading_days','final_bar_count','maximum_favorable_excursion','maximum_adverse_excursion','maximum_favorable_excursion_percent','maximum_adverse_excursion_percent','maximum_favorable_excursion_atr','maximum_adverse_excursion_atr','maximum_favorable_excursion_r','maximum_adverse_excursion_r','reached_0_5r','reached_1r','reached_2r','time_to_0_5r','time_to_1r','time_to_2r'];
   const rows = entries.map(e => [
     e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', `"${e.trend || ''}"`, `"${e.setupTf || ''}"`, `"${e.phase || ''}"`, `"${e.setupStatus || ''}"`, `"${e.entryStatus || ''}"`, e.setupGrade || '', `"${e.setupGradeReason || ''}"`, e.confirmationStarted ? 'Yes' : 'No', `"${e.confirmationReason || ''}"`, e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
@@ -6682,7 +7027,7 @@ function exportCSV() {
     e.directionCorrect || 'Pending', e.entryQuality || 'Pending', e.reviewResult || 'Pending', `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
     e.setup_id || '', e.option_type || '', e.strike_price ?? '', e.expiration_date || '', e.days_to_expiration_at_entry ?? '', e.premium_paid ?? '', e.breakeven_price ?? '', e.option_bid_at_entry ?? '', e.option_ask_at_entry ?? '', e.option_spread_at_entry ?? '', e.open_interest_at_entry ?? '', e.option_volume_at_entry ?? '', e.implied_volatility_at_entry ?? '', e.underlying_price_at_entry ?? '',
     e.setup_grade || '', e.scanner_status || '', e.confirmation_status || '', e.scanner_timeframe || '', e.signal_timestamp || '', e.signal_market_date || '', e.underlying_price_at_signal ?? '', e.entry_price ?? '', e.stop_price ?? '', e.target_price ?? '', e.atr_at_signal ?? '', e.target_distance ?? '', e.target_distance_atr ?? '', `"${e.trend_state || ''}"`, e.relative_volume ?? '', e.atr_expansion ?? '',
-    e.tracking_status || '', e.tracking_started_at || '', e.tracking_completed_at || '', e.completion_reason || '', e.first_entry_touch_at || '', e.first_target_touch_at || '', e.first_stop_touch_at || '', e.trading_days_to_entry ?? '', e.trading_days_to_target ?? '', e.trading_days_to_stop ?? '', e.bars_to_entry ?? '', e.bars_to_target ?? '', e.bars_to_stop ?? '', e.maximum_favorable_excursion ?? '', e.maximum_adverse_excursion ?? '', e.maximum_favorable_excursion_percent ?? '', e.maximum_adverse_excursion_percent ?? '', e.maximum_favorable_excursion_atr ?? '', e.maximum_adverse_excursion_atr ?? '', e.maximum_favorable_excursion_r ?? '', e.maximum_adverse_excursion_r ?? '', e.reached_0_5r ? 'Yes' : 'No', e.reached_1r ? 'Yes' : 'No', e.reached_2r ? 'Yes' : 'No', e.time_to_0_5r ?? '', e.time_to_1r ?? '', e.time_to_2r ?? '',
+    e.tracking_status || '', e.trade_progress_status || '', e.tracking_started_at || '', e.tracking_completed_at || '', e.completion_reason || '', e.highest_price_reached ?? '', e.lowest_price_reached ?? '', e.first_entry_touch_at || '', e.first_target_touch_at || '', e.first_stop_touch_at || '', e.trading_days_elapsed ?? '', e.trading_days_to_entry ?? '', e.trading_days_to_target ?? '', e.trading_days_to_stop ?? '', e.bars_elapsed ?? '', e.last_tracking_bar_time || '', e.bars_to_entry ?? '', e.bars_to_target ?? '', e.bars_to_stop ?? '', e.final_trading_days ?? '', e.final_bar_count ?? '', e.maximum_favorable_excursion ?? '', e.maximum_adverse_excursion ?? '', e.maximum_favorable_excursion_percent ?? '', e.maximum_adverse_excursion_percent ?? '', e.maximum_favorable_excursion_atr ?? '', e.maximum_adverse_excursion_atr ?? '', e.maximum_favorable_excursion_r ?? '', e.maximum_adverse_excursion_r ?? '', e.reached_0_5r ? 'Yes' : 'No', e.reached_1r ? 'Yes' : 'No', e.reached_2r ? 'Yes' : 'No', e.time_to_0_5r ?? '', e.time_to_1r ?? '', e.time_to_2r ?? '',
   ]);
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
   const a = document.createElement('a');
