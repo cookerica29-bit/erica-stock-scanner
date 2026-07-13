@@ -2443,6 +2443,7 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
+<script src="/expected_move_analytics.js"></script>
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
@@ -4704,69 +4705,20 @@ function calculateExcursionsFromPrices(direction, entryPrice, highPrice, lowPric
   };
 }
 
-function expectedMoveAnalytics() {
-  return { status: 'learning' };
-}
-
-function expectedMoveGroupKey(entry = {}) {
-  return [
-    entry.setup_grade || entry.setupGrade || 'Unknown Grade',
-    String(entry.direction || 'Unknown').toUpperCase(),
-    entry.scanner_timeframe || entry.timeframe || 'Unknown TF',
-    entry.trend_state || entry.trendState || entry.trend || 'Unknown Trend',
-    entry.confirmation_status || (entry.confirmationStarted ? 'Started' : 'Pending'),
-  ].join(' | ');
-}
-
-function median(values = []) {
-  const nums = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
-  if (!nums.length) return null;
-  const mid = Math.floor(nums.length / 2);
-  return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
-}
-
-function average(values = []) {
-  const nums = values.map(Number).filter(Number.isFinite);
-  return nums.length ? nums.reduce((sum, value) => sum + value, 0) / nums.length : null;
-}
-
-function minFinite(values = []) {
-  const nums = values.map(Number).filter(Number.isFinite);
-  return nums.length ? Math.min(...nums) : null;
-}
-
-function maxFinite(values = []) {
-  const nums = values.map(Number).filter(Number.isFinite);
-  return nums.length ? Math.max(...nums) : null;
+function expectedMoveAnalytics(criteria = {}, entries = loadJournal()) {
+  return window.KairosExpectedMove
+    ? window.KairosExpectedMove.expectedMoveAnalytics(entries, criteria)
+    : { status: 'learning', confidence: 'insufficient', sample_count: 0, target_sample_count: 0 };
 }
 
 function expectedMoveLearningGroups(entries = []) {
-  const completed = entries.filter(e => e.tracking_status === 'completed');
-  const groups = new Map();
-  completed.forEach(entry => {
-    const key = expectedMoveGroupKey(entry);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(entry);
-  });
-  return Array.from(groups.entries()).map(([key, rows]) => {
-    const durations = rows.map(e => firstPresent(e.trading_days_to_target, e.trading_days_to_stop, e.final_trading_days, e.trading_days_elapsed));
-    const mfeR = rows.map(e => e.maximum_favorable_excursion_r);
-    const maeR = rows.map(e => e.maximum_adverse_excursion_r);
-    const atrTraveled = rows.map(e => firstPresent(e.maximum_favorable_excursion_atr, e.target_distance_atr));
-    return {
-      key,
-      count: rows.length,
-      status: rows.length >= 30 ? 'ready' : 'learning',
-      medianDuration: median(durations),
-      averageDuration: average(durations),
-      minDuration: minFinite(durations),
-      maxDuration: maxFinite(durations),
-      medianMfe: median(mfeR),
-      medianMae: median(maeR),
-      medianAtr: median(atrTraveled),
-      samples: rows,
-    };
-  }).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+  return window.KairosExpectedMove ? window.KairosExpectedMove.buildGroupDiagnostics(entries) : [];
+}
+
+function suggestedExpirationAnalytics(expectedMoveResult) {
+  return window.KairosExpectedMove
+    ? window.KairosExpectedMove.suggestedExpirationAnalytics(expectedMoveResult)
+    : { status: 'learning', min_dte: null, max_dte: null };
 }
 
 function marketObservationFromSetup(setup = {}) {
@@ -6853,7 +6805,7 @@ function expectedMoveDiagnostics(entries = []) {
     .sort((a, b) => String(b.tracking_completed_at || '').localeCompare(String(a.tracking_completed_at || '')))
     .slice(0, 8);
   return {
-    status: completed.length < 30 ? 'learning' : expectedMoveAnalytics().status,
+    status: groups.some(group => group.result?.status === 'ready' || group.result?.status === 'early_estimate') ? 'ready' : 'learning',
     counts: {
       totalTracked: entries.length,
       active,
@@ -6930,23 +6882,40 @@ function renderExpectedMoveLearningGroups(groups = []) {
   const rows = groups.slice(0, 12).map(group => `
     <tr>
       <td><strong>${escapeHtml(group.key)}</strong></td>
-      <td>${group.count}</td>
-      <td>${group.status === 'learning' ? 'Learning' : 'Ready'}</td>
-      <td>${fmtNumber(group.medianDuration)}</td>
-      <td>${fmtNumber(group.averageDuration)}</td>
-      <td>${fmtNumber(group.minDuration)}</td>
-      <td>${fmtNumber(group.maxDuration)}</td>
-      <td>${fmtNumber(group.medianMfe)}</td>
-      <td>${fmtNumber(group.medianMae)}</td>
-      <td>${fmtNumber(group.medianAtr)}</td>
+      <td>${group.sample_count}</td>
+      <td>${group.target_sample_count}</td>
+      <td>${group.stopped_sample_count}</td>
+      <td>${group.manual_close_count}</td>
+      <td>${group.expired_count}</td>
+      <td>${group.exclusion_count}</td>
+      <td>${escapeHtml(Object.entries(group.exclusion_reasons || {}).map(([k, v]) => `${k}: ${v}`).join('; ') || '—')}</td>
+      <td>${fmtNumber(group.median_days_to_target)}</td>
+      <td>${fmtNumber(group.p25_days_to_target)}</td>
+      <td>${fmtNumber(group.p75_days_to_target)}</td>
+      <td>${fmtNumber(group.p10_days_to_target)}</td>
+      <td>${fmtNumber(group.p90_days_to_target)}</td>
+      <td>${fmtNumber(group.iqr_days_to_target)}</td>
+      <td>${fmtNumber(group.standard_deviation_days_to_target)}</td>
+      <td>${fmtNumber(group.median_absolute_deviation_days_to_target)}</td>
+      <td>${group.result?.expected_move_min_days && group.result?.expected_move_max_days ? `${group.result.expected_move_min_days}-${group.result.expected_move_max_days}` : 'Learning'}</td>
+      <td>${escapeHtml(group.result?.confidence || 'insufficient')}</td>
+      <td>${group.result?.fallback_used ? escapeHtml(group.result.fallback_level || 'fallback') : 'Exact'}</td>
+      <td>${fmtNumber(group.median_mfe_r)}</td>
+      <td>${fmtNumber(group.median_mae_r)}</td>
+      <td>${fmtNumber(group.target_completion_rate == null ? null : group.target_completion_rate * 100)}%</td>
+      <td>${fmtNumber(group.median_target_distance_atr)}</td>
+      <td>${(() => {
+        const exp = suggestedExpirationAnalytics(group.result);
+        return exp.status === 'learning' ? 'Learning' : `${exp.min_dte}-${exp.max_dte} DTE`;
+      })()}</td>
     </tr>`).join('');
   return `
     <h3 style="margin-top:18px;">Expected Move Analytics</h3>
     <table class="analytics-table">
       <thead>
-        <tr><th>Group</th><th>Completed</th><th>Status</th><th>Median Duration</th><th>Average</th><th>Min</th><th>Max</th><th>Median MFE R</th><th>Median MAE R</th><th>Median ATR</th></tr>
+        <tr><th>Normalized Group</th><th>Completed</th><th>Target Samples</th><th>Stops</th><th>Manual</th><th>Expired</th><th>Excluded</th><th>Exclusion Reasons</th><th>Median</th><th>P25</th><th>P75</th><th>P10</th><th>P90</th><th>IQR</th><th>Std Dev</th><th>MAD</th><th>Expected Move</th><th>Confidence</th><th>Fallback</th><th>Median MFE R</th><th>Median MAE R</th><th>Target %</th><th>Target ATR</th><th>Expiration Test</th></tr>
       </thead>
-      <tbody>${rows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No completed setup groups yet.</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="24" style="text-align:center;color:var(--muted);padding:18px;">No completed setup groups yet.</td></tr>'}</tbody>
     </table>`;
 }
 
