@@ -67,7 +67,7 @@
       }
       return {
         label: 'Next Step',
-        lines: ['Price is in the planned entry zone.', 'Select an option contract before executing.'],
+        lines: ['Price is in the planned entry zone.', 'Verify and select the live option contract before executing.'],
       };
     }
 

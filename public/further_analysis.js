@@ -140,6 +140,11 @@
       premium: firstPresent(setup.premium_paid, source.mark, source.mid, source.ask),
       breakeven: firstPresent(setup.breakeven_price, source.breakeven),
       underlying: firstPresent(setup.underlying_price_at_entry, setup.underlying_price, setup.price),
+      source: firstPresent(setup.contract_guidance_source, best.available === true ? 'validated_live' : ''),
+      potentialType: firstPresent(setup.potential_option_type),
+      potentialStrike: firstPresent(setup.potential_strike),
+      potentialExpirationMinDte: firstPresent(setup.potential_expiration_min_dte),
+      potentialExpirationMaxDte: firstPresent(setup.potential_expiration_max_dte),
     };
   }
 

@@ -33,7 +33,7 @@ const enterWithContract = guidance.nextStep(setup({ entryStatus: 'Tradeable' }),
 assert.deepStrictEqual(enterWithContract.lines, ['Price is in the planned entry zone. You can execute this trade.']);
 
 const enterWithoutContract = guidance.nextStep(setup({ entryStatus: 'Tradeable' }), { bucket: 'ENTER_NOW' }, 'confirmed_unavailable');
-assert.deepStrictEqual(enterWithoutContract.lines, ['Price is in the planned entry zone.', 'Select an option contract before executing.']);
+assert.deepStrictEqual(enterWithoutContract.lines, ['Price is in the planned entry zone.', 'Verify and select the live option contract before executing.']);
 
 // Tradeable but not Enter Now keeps the wording grounded in the existing production meaning.
 const tradeable = guidance.nextStep(setup({ entryStatus: 'Tradeable' }), { bucket: 'ALMOST_READY' }, 'available');
