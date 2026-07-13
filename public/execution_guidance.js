@@ -51,10 +51,12 @@
     const bucket = upper(readiness.bucket);
     const tradeStage = upper(setup.trade_eval && setup.trade_eval.trade_stage);
     const setupStatus = upper(setup.setupStatus || setup.stockSetupStatus);
-    return bucket === 'SKIP'
-      || tradeStage.includes('NO TRADE')
+    if (tradeStage.includes('NO TRADE')
       || tradeStage.includes('INVALID')
-      || setupStatus.includes('INVALID');
+      || setupStatus.includes('INVALID')) {
+      return true;
+    }
+    return bucket === 'SKIP' && !isConfirmedSetup(setup, readiness) && !hasDevelopingSetupSignal(setup, readiness);
   }
 
   function isDeveloping(setup = {}, readiness = {}) {
@@ -64,6 +66,18 @@
       || tradeStage.includes('BUILDING')
       || tradeStage.includes('WATCHLIST')
       || upper(setup.entryStatus) === 'WAITING';
+  }
+
+  function hasDevelopingSetupSignal(setup = {}, readiness = {}) {
+    const entryStatus = upper(setup.entryStatus);
+    const tradeStage = upper(setup.trade_eval && setup.trade_eval.trade_stage);
+    const setupGrade = upper(setup.setupGrade || setup.setup_grade);
+    return ['ALMOST_READY', 'ALMOST READY', 'WAITING'].includes(upper(readiness.bucket))
+      || ['NEAR ENTRY', 'TRADEABLE', 'WAITING'].includes(entryStatus)
+      || tradeStage.includes('BUILDING')
+      || tradeStage.includes('WATCHLIST')
+      || setupGrade.includes('B+')
+      || setupGrade === 'B';
   }
 
   function hasAvailableContract(contractLifecycle) {
@@ -97,6 +111,13 @@
     return 'SETUP_CONFIRMED_WAITING_FOR_ENTRY';
   }
 
+  function executeVisualState(executionStateValue) {
+    if (executionStateValue === 'SETUP_CONFIRMED_ENTRY_REACHED') return 'ready';
+    if (executionStateValue === 'SETUP_CONFIRMED_WAITING_FOR_ENTRY') return 'waiting';
+    if (executionStateValue === 'SETUP_CONFIRMED_ENTRY_PASSED') return 'passed';
+    return 'not-ready';
+  }
+
   function cardStatus(setup = {}, readiness = {}) {
     if (isNoTrade(setup, readiness)) return { label: 'NO TRADE', className: 'skip' };
     if (isConfirmedSetup(setup, readiness)) return { label: 'ENTER NOW', className: 'enter-now' };
@@ -117,10 +138,10 @@
     const entryState = executionState(setup, readiness);
     if (isConfirmedSetup(setup, readiness)) {
       const executeState = entryState === 'SETUP_CONFIRMED_ENTRY_REACHED'
-        ? { state: 'complete execute-ready', status: 'Ready' }
+        ? { state: 'complete execute-entry-ready', status: 'Ready' }
         : entryState === 'SETUP_CONFIRMED_ENTRY_PASSED'
-          ? { state: 'current execute-not-ready', status: 'Not Ready' }
-          : { state: 'current execute-waiting', status: 'Waiting' };
+          ? { state: 'current execute-entry-passed', status: 'Passed' }
+          : { state: 'current execute-waiting-entry', status: 'Waiting' };
       return [
         { label: 'Trend', state: 'complete', status: 'Complete' },
         { label: 'Zone', state: 'complete', status: 'Complete' },
@@ -236,6 +257,7 @@
     currentPrice,
     nextStep,
     executionState,
+    executeVisualState,
     isConfirmedSetup,
     cardStatus,
     readinessStages,

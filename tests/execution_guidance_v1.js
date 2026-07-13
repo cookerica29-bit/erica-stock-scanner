@@ -44,7 +44,7 @@ assert.strictEqual(guidance.executionState(confirmedWaiting, { bucket: 'ENTER_NO
 assert.deepStrictEqual(guidance.cardStatus(confirmedWaiting, { bucket: 'ENTER_NOW' }), { label: 'ENTER NOW', className: 'enter-now' });
 const waitingStages = guidance.readinessStages(confirmedWaiting, { bucket: 'ENTER_NOW' });
 assert.deepStrictEqual(waitingStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Complete', 'Execute:Waiting']);
-assert.ok(waitingStages.find(stage => stage.label === 'Execute').state.includes('execute-waiting'));
+assert.ok(waitingStages.find(stage => stage.label === 'Execute').state.includes('execute-waiting-entry'));
 const enterWaiting = guidance.nextStep(confirmedWaiting, { bucket: 'ENTER_NOW' }, 'available');
 assert.deepStrictEqual(enterWaiting.lines, [
   'Setup confirmed. Wait for price to reach the planned entry at $70.00.',
@@ -59,7 +59,7 @@ const reached = setup({ price: 70.02, entry: 70, entryStatus: 'Tradeable', dista
 assert.strictEqual(guidance.executionState(reached, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_ENTRY_REACHED');
 const reachedStages = guidance.readinessStages(reached, { bucket: 'ENTER_NOW' });
 assert.deepStrictEqual(reachedStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Complete', 'Execute:Ready']);
-assert.ok(reachedStages.find(stage => stage.label === 'Execute').state.includes('execute-ready'));
+assert.ok(reachedStages.find(stage => stage.label === 'Execute').state.includes('execute-entry-ready'));
 const enterWithContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'available');
 assert.deepStrictEqual(enterWithContract.lines, ['Price is at the planned entry. You can execute this trade.']);
 

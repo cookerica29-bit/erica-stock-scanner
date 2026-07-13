@@ -817,22 +817,30 @@
     box-shadow: none;
     color: #94a3b8;
   }
-  .timeline-step.execute-waiting .timeline-dot {
+  .timeline-step.execute-waiting-entry .timeline-dot {
     background: rgba(124,92,255,0.14);
     border-color: rgba(167,139,250,0.7);
     box-shadow: 0 0 0 4px rgba(124,92,255,0.1);
     color: #ddd6fe;
   }
-  .timeline-step.execute-waiting .timeline-label,
-  .timeline-step.execute-waiting .timeline-state { color:#ddd6fe; }
-  .timeline-step.execute-ready .timeline-dot {
+  .timeline-step.execute-waiting-entry .timeline-label,
+  .timeline-step.execute-waiting-entry .timeline-state { color:#ddd6fe; }
+  .timeline-step.execute-entry-ready .timeline-dot {
     background: rgba(34,197,94,0.22);
     border: 3px solid rgba(34,197,94,0.92);
     box-shadow: 0 0 0 5px rgba(34,197,94,0.13), 0 0 18px rgba(34,197,94,0.26);
     color:#bbf7d0;
   }
-  .timeline-step.execute-ready .timeline-label,
-  .timeline-step.execute-ready .timeline-state { color:#bbf7d0; }
+  .timeline-step.execute-entry-ready .timeline-label,
+  .timeline-step.execute-entry-ready .timeline-state { color:#bbf7d0; }
+  .timeline-step.execute-entry-passed .timeline-dot {
+    background: rgba(245,158,11,0.12);
+    border-color: rgba(245,158,11,0.58);
+    box-shadow: none;
+    color:#fcd34d;
+  }
+  .timeline-step.execute-entry-passed .timeline-label,
+  .timeline-step.execute-entry-passed .timeline-state { color:#fcd34d; }
   .trade-timeline.wait .timeline-step.current .timeline-dot {
     background: rgba(245,158,11,0.16);
     border-color: rgba(245,158,11,0.7);
@@ -2571,11 +2579,11 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="/expected_move_analytics.js"></script>
-<script src="/further_analysis.js"></script>
-<script src="/setup_funnel_diagnostics.js"></script>
-<script src="/execution_guidance.js"></script>
-<script src="/contract_guidance.js"></script>
+<script src="/expected_move_analytics.js?v=20260713-card-workflow"></script>
+<script src="/further_analysis.js?v=20260713-card-workflow"></script>
+<script src="/setup_funnel_diagnostics.js?v=20260713-card-workflow"></script>
+<script src="/execution_guidance.js?v=20260713-card-workflow"></script>
+<script src="/contract_guidance.js?v=20260713-card-workflow"></script>
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
@@ -3894,9 +3902,12 @@ function rewardRiskText(setup) {
 function renderNextStepBlock(setup) {
   const readiness = setupProgressState(setup);
   const lifecycle = contractGuidanceLifecycleForNextStep(setup);
+  const fallbackGuidance = setupProgressState(setup).bucket === 'ENTER_NOW'
+    ? { label: 'Next Step', lines: [`Setup confirmed. Wait for price to reach the planned entry at ${fmtMoney(setup.entry)}.`] }
+    : { label: 'Next Step', lines: ['Continue monitoring. The setup is still developing.'] };
   const guidance = window.KairosExecutionGuidance
     ? window.KairosExecutionGuidance.nextStep(setup, readiness, lifecycle)
-    : { label: 'Next Step', lines: ['Continue monitoring. The setup is still developing.'] };
+    : fallbackGuidance;
   return `
     <div class="next-step-box">
       <div class="index-simple-label">${escapeHtml(guidance.label)}</div>
@@ -4587,6 +4598,12 @@ function renderCard(s) {
   const cardStatus = window.KairosExecutionGuidance?.cardStatus
     ? window.KairosExecutionGuidance.cardStatus(s, state)
     : { label: state.label, className: state.className };
+  const executionState = window.KairosExecutionGuidance?.executionState
+    ? window.KairosExecutionGuidance.executionState(s, state)
+    : (state.bucket === 'ENTER_NOW' ? 'SETUP_CONFIRMED_WAITING_FOR_ENTRY' : 'NOT_READY');
+  const executeVisualState = window.KairosExecutionGuidance?.executeVisualState
+    ? window.KairosExecutionGuidance.executeVisualState(executionState)
+    : 'not-ready';
   const why = simpleWhyItems(s, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
   const encoded = encodeURIComponent(JSON.stringify(s));
   const distanceText = s.distanceFromEntryAtr != null
@@ -4594,7 +4611,7 @@ function renderCard(s) {
     : 'No entry distance available yet';
 
   return `
-  <div class="card">
+  <div class="card" data-normalized-status="${escapeHtml(String(cardStatus.label || state.bucket).toUpperCase().replace(/\s+/g, '_'))}" data-execution-state="${escapeHtml(executionState)}" data-execute-visual-state="${escapeHtml(executeVisualState)}">
     <div class="card-header">
       <div class="ticker-wrap">
         <span class="ticker ticker-with-direction">${escapeHtml(s.ticker)} ${renderDirectionMarker(directionLabel)}</span>

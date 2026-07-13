@@ -9,10 +9,14 @@ assert.ok(html.includes('planned-entry'), 'Planned Entry row should have a disti
 assert.ok(html.includes('.index-plan-row.planned-entry'), 'Planned Entry styling should exist');
 
 assert.ok(html.includes('execute-not-ready'), 'Execute not-ready state should exist');
-assert.ok(html.includes('execute-waiting'), 'Execute waiting-for-entry state should exist');
-assert.ok(html.includes('execute-ready'), 'Execute ready state should exist');
-assert.ok(html.includes('.timeline-step.execute-ready .timeline-dot'), 'Execute ready circle styling should exist');
+assert.ok(html.includes('execute-waiting-entry'), 'Execute waiting-for-entry state should exist');
+assert.ok(html.includes('execute-entry-ready'), 'Execute ready state should exist');
+assert.ok(html.includes('execute-entry-passed'), 'Execute passed state should exist');
+assert.ok(html.includes('.timeline-step.execute-entry-ready .timeline-dot'), 'Execute ready circle styling should exist');
 assert.ok(html.includes('box-shadow: 0 0 0 5px rgba(34,197,94,0.13)'), 'Execute ready state should use a restrained green glow');
+assert.ok(html.includes('data-normalized-status'), 'Cards should expose normalized status diagnostics');
+assert.ok(html.includes('data-execution-state'), 'Cards should expose execution-state diagnostics');
+assert.ok(html.includes('data-execute-visual-state'), 'Cards should expose execute visual-state diagnostics');
 
 assert.ok(html.includes("label: '🎯 Suggested Contract'"), 'Validated live contracts should keep Suggested Contract heading');
 assert.ok(html.includes("label: '🎯 Potential Contract'"), 'Fallback estimates should use Potential Contract heading');
