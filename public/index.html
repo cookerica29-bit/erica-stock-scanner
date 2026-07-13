@@ -2046,6 +2046,10 @@
       <div id="analyticsByPhase"></div>
     </div>
   </div>
+  <div class="analytics-card" style="margin-top:16px;">
+    <h3>Expected Move Data Diagnostics</h3>
+    <div id="expectedMoveDiagnostics"></div>
+  </div>
 </div>
 
 <!-- ── Video Studio Tab ──────────────────────────────────────────────────── -->
@@ -2442,6 +2446,7 @@
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
+const JOURNAL_DUPLICATE_PREVENTION_KEY = 'stock_scanner_journal_duplicate_preventions';
 const VIDEO_PROJECTS_KEY = 'stock_scanner_video_projects';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
 let scannerRows = [];
@@ -4453,6 +4458,244 @@ function getNumber(id) {
   return Number.isFinite(value) ? value : null;
 }
 
+function coerceNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function coerceInteger(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeOptionType(value, direction = '') {
+  const raw = String(value || '').trim().toUpperCase();
+  if (['CALL', 'C', 'LONG'].includes(raw)) return 'CALL';
+  if (['PUT', 'P', 'SHORT'].includes(raw)) return 'PUT';
+  if (direction === 'LONG') return 'CALL';
+  if (direction === 'SHORT') return 'PUT';
+  return raw || 'N/A';
+}
+
+function normalizeDateText(value) {
+  if (!value) return '';
+  const text = String(value).trim();
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  return text;
+}
+
+function daysUntilDate(startValue, endValue) {
+  const start = startValue ? new Date(startValue) : new Date();
+  const end = endValue ? new Date(endValue) : null;
+  if (!end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  return Math.max(0, Math.ceil((end.setHours(0,0,0,0) - start.setHours(0,0,0,0)) / 86400000));
+}
+
+function countWeekdaysBetween(startValue, endValue) {
+  const start = startValue ? new Date(startValue) : null;
+  const end = endValue ? new Date(endValue) : null;
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return null;
+  const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const finish = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  let days = 0;
+  while (cursor < finish) {
+    cursor.setDate(cursor.getDate() + 1);
+    const weekday = cursor.getDay();
+    if (weekday !== 0 && weekday !== 6) days += 1;
+  }
+  return days;
+}
+
+function stableHash(input) {
+  let hash = 2166136261;
+  const text = String(input || '');
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function setupIdentityTimestamp(setup = {}) {
+  return firstPresent(
+    setup.signal_timestamp,
+    setup.signalTimestamp,
+    setup.signal_candle_timestamp,
+    setup.signalCandleTimestamp,
+    setup.candle_timestamp,
+    setup.candleTime,
+    setup.signal_market_date,
+    setup.market_date,
+    ''
+  );
+}
+
+function setupIdentityParts(setup = {}) {
+  return [
+    String(setup.ticker || '').toUpperCase(),
+    String(setup.direction || '').toUpperCase(),
+    setup.timeframe || setup.scanner_timeframe || setup.setupTf || '',
+    setupIdentityTimestamp(setup),
+    coerceNumber(firstPresent(setup.entry, setup.entry_price)),
+    coerceNumber(firstPresent(setup.sl, setup.stop, setup.stop_price)),
+    coerceNumber(firstPresent(setup.tp1, setup.target, setup.target_price)),
+  ].map(value => value === null || value === undefined ? '' : String(value));
+}
+
+function setupIdFromSetup(setup = {}) {
+  const parts = setupIdentityParts(setup);
+  return `stock:${parts[0] || 'UNKNOWN'}:${stableHash(parts.join('|'))}`;
+}
+
+function setupIdFromJournalEntry(entry = {}) {
+  if (entry.setup_id) return entry.setup_id;
+  const setupLike = {
+    ticker: entry.ticker,
+    direction: entry.direction,
+    timeframe: entry.scanner_timeframe || entry.timeframe || entry.setupTf,
+    signal_timestamp: entry.signal_timestamp || entry.signal_market_date || entry.createdAt || entry.date,
+    entry: firstPresent(entry.entry_price, entry.entry),
+    sl: firstPresent(entry.stop_price, entry.plannedStop),
+    tp1: firstPresent(entry.target_price, entry.plannedTp1),
+  };
+  return `legacy:${setupIdFromSetup(setupLike).replace(/^stock:/, '')}`;
+}
+
+function selectedContractFromSetup(setup = {}) {
+  const best = setup.best_contract || {};
+  const option = setup.option || {};
+  const suggested = setup.suggested_contract || {};
+  const contract = setup.contract || {};
+  const source = [best, option, suggested, contract].find(item =>
+    item && (firstPresent(item.strike, item.strike_price) || firstPresent(item.expiry, item.expiration, item.expiration_date) || item.type || item.option_type || item.symbol)
+  ) || {};
+  const optionType = normalizeOptionType(firstPresent(source.type, source.option_type, option.type, best.type), setup.direction);
+  const strike = coerceNumber(firstPresent(source.strike, source.strike_price));
+  const expiry = normalizeDateText(firstPresent(source.expiry, source.expiration, source.expiration_date));
+  const bid = coerceNumber(firstPresent(source.bid, source.option_bid, source.bid_at_entry));
+  const ask = coerceNumber(firstPresent(source.ask, source.mark, source.price, source.option_ask, source.ask_at_entry));
+  const spread = coerceNumber(firstPresent(source.spread, source.bid_ask_spread, source.spread_at_entry));
+  const openInterest = coerceInteger(firstPresent(source.open_interest, source.openInterest, source.oi));
+  const volume = coerceInteger(firstPresent(source.volume, source.option_volume));
+  const iv = coerceNumber(firstPresent(source.implied_volatility, source.iv));
+  const contracts = coerceInteger(firstPresent(setup.contracts, source.contracts)) || 1;
+  const premium = coerceNumber(firstPresent(setup.premium_paid, source.premium_paid, ask));
+  const direction = String(setup.direction || '').toUpperCase();
+  const breakeven = strike != null && premium != null
+    ? direction === 'SHORT' || optionType === 'PUT'
+      ? strike - premium
+      : strike + premium
+    : null;
+  return {
+    option_symbol: firstPresent(source.symbol, source.contract_symbol, option.symbol, ''),
+    option_type: optionType,
+    strike_price: strike,
+    expiration_date: expiry || '',
+    days_to_expiration_at_entry: expiry ? daysUntilDate(firstPresent(setup.signal_timestamp, setup.scannedAt, new Date().toISOString()), expiry) : null,
+    contracts,
+    premium_paid: premium,
+    breakeven_price: breakeven,
+    option_bid_at_entry: bid,
+    option_ask_at_entry: ask,
+    option_spread_at_entry: spread,
+    open_interest_at_entry: openInterest,
+    option_volume_at_entry: volume,
+    implied_volatility_at_entry: iv,
+    underlying_price_at_entry: coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price, setup.entry)),
+  };
+}
+
+function scannerSnapshotFromSetup(setup = {}, ev = {}) {
+  const signalTimestamp = firstPresent(setup.signal_timestamp, setup.signalTimestamp, setup.candle_timestamp, setup.candleTime, setup.scannedAt, null);
+  const signalMarketDate = firstPresent(setup.signal_market_date, setup.market_date, signalTimestamp ? String(signalTimestamp).slice(0, 10) : null);
+  const entry = coerceNumber(firstPresent(setup.entry, setup.entry_price));
+  const stop = coerceNumber(firstPresent(setup.sl, setup.stop, setup.stop_price));
+  const target = coerceNumber(firstPresent(setup.tp1, setup.target, setup.target_price));
+  const atr = coerceNumber(firstPresent(setup.atr_at_signal, setup.atr, setup.atrValue));
+  const targetDistance = entry != null && target != null ? Math.abs(target - entry) : null;
+  return {
+    setup_id: setupIdFromSetup(setup),
+    ticker: String(setup.ticker || '').toUpperCase(),
+    direction: setup.direction || 'N/A',
+    setup_grade: firstPresent(setup.setupGrade, setup.setup_grade, setup.quality?.grade, null),
+    scanner_status: firstPresent(setup.scanner_status, setup.scannerStatus, scannerStatusFromStage(ev.trade_stage), null),
+    confirmation_status: firstPresent(setup.confirmation_status, setup.confirmationStatus, setup.confirmationStarted ? 'Started' : 'Pending', null),
+    scanner_timeframe: firstPresent(setup.scanner_timeframe, setup.timeframe, setup.setupTf, null),
+    signal_timestamp: signalTimestamp,
+    signal_market_date: signalMarketDate,
+    underlying_price_at_signal: coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price)),
+    entry_price: entry,
+    stop_price: stop,
+    target_price: target,
+    atr_at_signal: atr,
+    target_distance: targetDistance,
+    target_distance_atr: atr && atr > 0 && targetDistance != null ? targetDistance / atr : null,
+    trend_state: firstPresent(setup.trend_state, setup.trendState, setup.stockTrend, setup.trendDirection, setup.trend, null),
+    relative_volume: coerceNumber(firstPresent(setup.relative_volume, setup.relativeVolume, setup.trendReview?.relative_volume)),
+    atr_expansion: coerceNumber(firstPresent(setup.atr_expansion, setup.atrExpansion, setup.trendReview?.atr_expansion)),
+  };
+}
+
+function defaultTrackingFields(startedAt = null) {
+  return {
+    tracking_status: 'active',
+    tracking_started_at: startedAt,
+    tracking_completed_at: null,
+    completion_reason: null,
+    first_entry_touch_at: null,
+    first_target_touch_at: null,
+    first_stop_touch_at: null,
+    trading_days_to_entry: null,
+    trading_days_to_target: null,
+    trading_days_to_stop: null,
+    bars_to_entry: null,
+    bars_to_target: null,
+    bars_to_stop: null,
+    maximum_favorable_excursion: null,
+    maximum_adverse_excursion: null,
+    maximum_favorable_excursion_percent: null,
+    maximum_adverse_excursion_percent: null,
+    maximum_favorable_excursion_atr: null,
+    maximum_adverse_excursion_atr: null,
+    maximum_favorable_excursion_r: null,
+    maximum_adverse_excursion_r: null,
+    reached_0_5r: false,
+    reached_1r: false,
+    reached_2r: false,
+    time_to_0_5r: null,
+    time_to_1r: null,
+    time_to_2r: null,
+  };
+}
+
+function calculateExcursionsFromPrices(direction, entryPrice, highPrice, lowPrice, atr = null, stopPrice = null) {
+  const entry = coerceNumber(entryPrice);
+  const high = coerceNumber(highPrice);
+  const low = coerceNumber(lowPrice);
+  if (entry == null || high == null || low == null) return null;
+  const isShort = String(direction || '').toUpperCase() === 'SHORT';
+  const mfe = isShort ? entry - low : high - entry;
+  const mae = isShort ? high - entry : entry - low;
+  const risk = stopPrice != null ? Math.abs(entry - coerceNumber(stopPrice)) : null;
+  return {
+    maximum_favorable_excursion: mfe,
+    maximum_adverse_excursion: mae,
+    maximum_favorable_excursion_percent: entry ? (mfe / entry) * 100 : null,
+    maximum_adverse_excursion_percent: entry ? (mae / entry) * 100 : null,
+    maximum_favorable_excursion_atr: atr && atr > 0 ? mfe / atr : null,
+    maximum_adverse_excursion_atr: atr && atr > 0 ? mae / atr : null,
+    maximum_favorable_excursion_r: risk && risk > 0 ? mfe / risk : null,
+    maximum_adverse_excursion_r: risk && risk > 0 ? mae / risk : null,
+  };
+}
+
+function expectedMoveAnalytics() {
+  return { status: 'learning' };
+}
+
 function setChecked(id, value = false) {
   const el = document.getElementById(id);
   if (el) el.checked = Boolean(value);
@@ -4518,6 +4761,7 @@ function openLogModal(setupJson) {
   const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
   const ev = s.trade_eval || {};
   const trendReview = s.trendReview || {};
+  const selectedContract = selectedContractFromSetup(s);
   _editId = null;
   _pendingSetup = s;
   setSetupReviewBox(s);
@@ -4526,7 +4770,7 @@ function openLogModal(setupJson) {
   setValue('f_ticker', s.ticker || '');
   setValue('f_direction', s.direction || 'LONG');
   setValue('f_timeframe', s.timeframe || 'N/A');
-  setValue('f_option', s.option?.symbol || '');
+  setValue('f_option', selectedContract.option_symbol || '');
   setValue('f_scannerStatus', scannerStatusFromStage(ev.trade_stage));
   setValue('f_trendScore', trendReview.trend_score ?? s.quality?.score ?? '');
   setValue('f_trendState', trendReview.status || [s.stockTrend || s.trendDirection, s.stockPhase || s.phase, s.stockSetupStatus || s.setupStatus].filter(Boolean).join(' · ') || s.structureLabel || s.trend || '');
@@ -4534,20 +4778,20 @@ function openLogModal(setupJson) {
   setValue('f_relativeVolume', trendReview.relative_volume ?? '');
   setValue('f_atrExpansion', trendReview.atr_expansion ?? '');
   setValue('f_setupNotes', trendReview.notes || s.quality?.coach_note || '');
-  setValue('f_strike', s.option?.strike ?? '');
-  setValue('f_optionType', s.option?.type || (s.direction === 'LONG' ? 'CALL' : s.direction === 'SHORT' ? 'PUT' : 'N/A'));
-  setValue('f_askAtSelection', s.option?.ask ?? '');
-  setValue('f_bidAskSpread', s.option?.spread ?? s.option?.spread_pct ?? '');
-  setValue('f_openInterest', s.option?.open_interest ?? '');
-  setValue('f_optionVolume', s.option?.volume ?? '');
+  setValue('f_strike', selectedContract.strike_price ?? '');
+  setValue('f_optionType', selectedContract.option_type || 'N/A');
+  setValue('f_askAtSelection', selectedContract.option_ask_at_entry ?? '');
+  setValue('f_bidAskSpread', selectedContract.option_spread_at_entry ?? '');
+  setValue('f_openInterest', selectedContract.open_interest_at_entry ?? '');
+  setValue('f_optionVolume', selectedContract.option_volume_at_entry ?? '');
   setValue('f_entry', s.entry || '');
   setValue('f_plannedStop', s.sl || '');
   setValue('f_plannedTp1', s.tp1 || '');
   setValue('f_plannedTp2', s.tp2 || '');
   setValue('f_plannedTp3', s.tp3 || '');
   setValue('f_rResult', '');
-  setValue('f_expiry', s.option?.expiry || '');
-  setValue('f_contracts', 1);
+  setValue('f_expiry', selectedContract.expiration_date || '');
+  setValue('f_contracts', selectedContract.contracts || 1);
   setValue('f_accountSize', localStorage.getItem('stock_scanner_account_size') || '');
   setValue('f_riskPct', localStorage.getItem('stock_scanner_risk_pct') || '');
   setValue('f_maxRisk', '');
@@ -4589,7 +4833,7 @@ function openEditModal(id) {
   setValue('f_ticker', entry.ticker || '');
   setValue('f_direction', entry.direction || 'LONG');
   setValue('f_timeframe', entry.timeframe || 'N/A');
-  setValue('f_option', entry.option || '');
+  setValue('f_option', entry.option || entry.option_symbol || '');
   setValue('f_scannerStatus', entry.scannerStatus || 'WATCH');
   setValue('f_trendScore', entry.trendScore ?? '');
   setValue('f_trendState', entry.trendState || '');
@@ -4597,19 +4841,19 @@ function openEditModal(id) {
   setValue('f_relativeVolume', entry.relativeVolume ?? '');
   setValue('f_atrExpansion', entry.atrExpansion ?? '');
   setValue('f_setupNotes', entry.setupNotes || '');
-  setValue('f_strike', entry.strike ?? '');
-  setValue('f_optionType', entry.optionType || 'N/A');
-  setValue('f_askAtSelection', entry.askAtSelection ?? '');
-  setValue('f_bidAskSpread', entry.bidAskSpread ?? '');
-  setValue('f_openInterest', entry.openInterest ?? '');
-  setValue('f_optionVolume', entry.optionVolume ?? '');
+  setValue('f_strike', entry.strike ?? entry.strike_price ?? '');
+  setValue('f_optionType', entry.optionType || entry.option_type || 'N/A');
+  setValue('f_askAtSelection', entry.askAtSelection ?? entry.option_ask_at_entry ?? '');
+  setValue('f_bidAskSpread', entry.bidAskSpread ?? entry.option_spread_at_entry ?? '');
+  setValue('f_openInterest', entry.openInterest ?? entry.open_interest_at_entry ?? '');
+  setValue('f_optionVolume', entry.optionVolume ?? entry.option_volume_at_entry ?? '');
   setValue('f_entry', entry.entry ?? '');
   setValue('f_plannedStop', entry.plannedStop ?? '');
   setValue('f_plannedTp1', entry.plannedTp1 ?? '');
   setValue('f_plannedTp2', entry.plannedTp2 ?? '');
   setValue('f_plannedTp3', entry.plannedTp3 ?? '');
   setValue('f_rResult', entry.rResult ?? '');
-  setValue('f_expiry', entry.expiry || '');
+  setValue('f_expiry', entry.expiry || entry.expiration_date || '');
   setValue('f_contracts', entry.contracts || 1);
   setValue('f_accountSize', entry.accountSize ?? localStorage.getItem('stock_scanner_account_size') ?? '');
   setValue('f_riskPct', entry.riskPct ?? localStorage.getItem('stock_scanner_risk_pct') ?? '');
@@ -4706,6 +4950,104 @@ document.getElementById('f_outcome').addEventListener('change', syncResultFromOu
 document.getElementById('f_beforeShot').addEventListener('change', e => readShotFile(e.target, 'before'));
 document.getElementById('f_afterShot').addEventListener('change', e => readShotFile(e.target, 'after'));
 
+function journalContractFieldsFromForm(updated = {}) {
+  const optionType = normalizeOptionType(updated.optionType, updated.direction);
+  const strike = coerceNumber(updated.strike);
+  const expiry = normalizeDateText(updated.expiry);
+  const premium = coerceNumber(updated.askAtSelection);
+  const breakeven = strike != null && premium != null
+    ? optionType === 'PUT'
+      ? strike - premium
+      : strike + premium
+    : null;
+  return {
+    option_symbol: updated.option || '',
+    option_type: optionType,
+    strike_price: strike,
+    expiration_date: expiry,
+    days_to_expiration_at_entry: expiry ? daysUntilDate(updated.signal_timestamp || updated.createdAt || new Date().toISOString(), expiry) : null,
+    contracts: coerceInteger(updated.contracts) || 1,
+    premium_paid: premium,
+    breakeven_price: breakeven,
+    option_ask_at_entry: premium,
+    option_spread_at_entry: coerceNumber(updated.bidAskSpread),
+    open_interest_at_entry: coerceInteger(updated.openInterest),
+    option_volume_at_entry: coerceInteger(updated.optionVolume),
+    underlying_price_at_entry: coerceNumber(updated.entry),
+  };
+}
+
+function mergeJournalEdit(existing = {}, updated = {}) {
+  const merged = { ...existing, ...updated };
+  [
+    'option_bid_at_entry',
+    'implied_volatility_at_entry',
+    'underlying_price_at_signal',
+    'atr_at_signal',
+    'relative_volume',
+    'atr_expansion',
+  ].forEach(key => {
+    if ((updated[key] === undefined || updated[key] === null || updated[key] === '') && existing[key] !== undefined) {
+      merged[key] = existing[key];
+    }
+  });
+  return mirrorJournalCompatibilityFields(merged);
+}
+
+function mirrorJournalCompatibilityFields(entry = {}) {
+  entry.option = firstPresent(entry.option, entry.option_symbol, '');
+  entry.optionType = firstPresent(entry.optionType, entry.option_type, 'N/A');
+  entry.strike = coerceNumber(firstPresent(entry.strike, entry.strike_price));
+  entry.expiry = firstPresent(entry.expiry, entry.expiration_date, '');
+  entry.askAtSelection = coerceNumber(firstPresent(entry.askAtSelection, entry.option_ask_at_entry, entry.premium_paid));
+  entry.bidAskSpread = coerceNumber(firstPresent(entry.bidAskSpread, entry.option_spread_at_entry));
+  entry.openInterest = coerceInteger(firstPresent(entry.openInterest, entry.open_interest_at_entry));
+  entry.optionVolume = coerceInteger(firstPresent(entry.optionVolume, entry.option_volume_at_entry));
+  entry.entry = coerceNumber(firstPresent(entry.entry, entry.entry_price));
+  entry.plannedStop = coerceNumber(firstPresent(entry.plannedStop, entry.stop_price));
+  entry.plannedTp1 = coerceNumber(firstPresent(entry.plannedTp1, entry.target_price));
+  return entry;
+}
+
+function applyManualTrackingCompletion(entry = {}) {
+  const outcome = entry.outcome || entry.result || 'Open';
+  if (outcome === 'TP1') entry.completion_reason = entry.completion_reason || 'target';
+  else if (outcome === 'Stop Loss') entry.completion_reason = entry.completion_reason || 'stop';
+  else if (outcome === 'Manual Close') entry.completion_reason = entry.completion_reason || 'manually_closed';
+  else if (outcome === 'Expired') entry.completion_reason = entry.completion_reason || 'tracking_window_expired';
+  if (entry.completion_reason) {
+    entry.tracking_status = 'completed';
+    entry.tracking_completed_at = entry.tracking_completed_at || new Date().toISOString();
+  }
+  if (entry.first_entry_touch_at && entry.tracking_started_at) {
+    entry.trading_days_to_entry = entry.trading_days_to_entry ?? countWeekdaysBetween(entry.tracking_started_at, entry.first_entry_touch_at);
+  }
+  if (entry.first_target_touch_at && entry.tracking_started_at) {
+    entry.trading_days_to_target = entry.trading_days_to_target ?? countWeekdaysBetween(entry.tracking_started_at, entry.first_target_touch_at);
+  }
+  if (entry.first_stop_touch_at && entry.tracking_started_at) {
+    entry.trading_days_to_stop = entry.trading_days_to_stop ?? countWeekdaysBetween(entry.tracking_started_at, entry.first_stop_touch_at);
+  }
+  return entry;
+}
+
+function fillMissingOnly(existing = {}, incoming = {}) {
+  const merged = { ...existing };
+  Object.entries(incoming).forEach(([key, value]) => {
+    const missing = merged[key] === undefined || merged[key] === null || merged[key] === '';
+    if (missing && value !== undefined && value !== null && value !== '') merged[key] = value;
+  });
+  return merged;
+}
+
+function duplicatePreventionCount() {
+  return Number(localStorage.getItem(JOURNAL_DUPLICATE_PREVENTION_KEY) || 0) || 0;
+}
+
+function incrementDuplicatePreventionCount() {
+  localStorage.setItem(JOURNAL_DUPLICATE_PREVENTION_KEY, String(duplicatePreventionCount() + 1));
+}
+
 function saveJournalEntry() {
   const ticker = getValue('f_ticker').trim().toUpperCase();
   if (!ticker) { alert('Ticker is required'); return; }
@@ -4760,6 +5102,8 @@ function saveJournalEntry() {
     beforeShot: _beforeShotData,
     afterShot: _afterShotData,
   };
+  const formContractFields = journalContractFieldsFromForm(updated);
+  Object.assign(updated, formContractFields);
   updated.pnlPct = updated.entry && updated.exit
     ? (((updated.direction === 'LONG' || updated.direction === 'CALL') ? updated.exit - updated.entry : updated.entry - updated.exit) / updated.entry) * 100
     : null;
@@ -4767,6 +5111,9 @@ function saveJournalEntry() {
   if (updated.riskPct) localStorage.setItem('stock_scanner_risk_pct', updated.riskPct);
   if (_pendingSetup) {
     const ev = _pendingSetup.trade_eval || {};
+    const snapshot = scannerSnapshotFromSetup(_pendingSetup, ev);
+    const selectedContract = selectedContractFromSetup(_pendingSetup);
+    Object.assign(updated, defaultTrackingFields(snapshot.signal_timestamp || new Date().toISOString()), snapshot, selectedContract, formContractFields);
     updated.trend = _pendingSetup.stockTrend || _pendingSetup.trendDirection || '';
     updated.setupTf = _pendingSetup.setupTimeframeDirection || _pendingSetup.timeframe || '';
     updated.phase = _pendingSetup.stockPhase || _pendingSetup.phase || '';
@@ -4793,14 +5140,31 @@ function saveJournalEntry() {
     updated.plannedTp1 = _pendingSetup.tp1 ?? updated.plannedTp1;
     updated.plannedTp2 = updated.plannedTp2 ?? _pendingSetup.tp2 ?? null;
     updated.plannedTp3 = updated.plannedTp3 ?? _pendingSetup.tp3 ?? null;
+    if (updated.expiration_date) {
+      updated.days_to_expiration_at_entry = daysUntilDate(updated.signal_timestamp || updated.createdAt || new Date().toISOString(), updated.expiration_date);
+    }
   }
+  if (!_pendingSetup && _editId === null && !updated.setup_id) updated.setup_id = setupIdFromJournalEntry(updated);
+  updated.target_distance = updated.target_distance ?? (updated.entry_price != null && updated.target_price != null ? Math.abs(updated.target_price - updated.entry_price) : null);
+  updated.target_distance_atr = updated.target_distance_atr ?? (updated.atr_at_signal && updated.atr_at_signal > 0 && updated.target_distance != null ? updated.target_distance / updated.atr_at_signal : null);
+  mirrorJournalCompatibilityFields(updated);
+  applyManualTrackingCompletion(updated);
   const entries = loadJournal();
   if (_editId !== null) {
     const idx = entries.findIndex(e => e.id === _editId);
-    if (idx !== -1) entries[idx] = { ...entries[idx], ...updated, updatedAt: new Date().toISOString() };
+    if (idx !== -1) entries[idx] = mergeJournalEdit(entries[idx], { ...updated, updatedAt: new Date().toISOString() });
   } else {
     const createdAt = new Date().toISOString();
-    entries.push({ id: Date.now(), date: createdAt.slice(0, 10), createdAt, updatedAt: createdAt, ...updated });
+    const newEntry = { id: Date.now(), date: createdAt.slice(0, 10), createdAt, updatedAt: createdAt, ...updated };
+    const duplicateIdx = entries.findIndex(e => e.setup_id && newEntry.setup_id && e.setup_id === newEntry.setup_id);
+    if (duplicateIdx !== -1) {
+      entries[duplicateIdx] = mirrorJournalCompatibilityFields(fillMissingOnly(entries[duplicateIdx], newEntry));
+      entries[duplicateIdx].updatedAt = createdAt;
+      incrementDuplicatePreventionCount();
+      showToast('Existing journal setup updated');
+    } else {
+      entries.push(newEntry);
+    }
   }
   saveJournal(entries);
   closeModalDirect();
@@ -4808,8 +5172,64 @@ function saveJournalEntry() {
 
 // ── Journal storage ──────────────────────────────────────────────────────────
 
+function migrateJournalEntry(entry = {}) {
+  const migrated = { ...entry };
+  migrated.setup_id = migrated.setup_id || setupIdFromJournalEntry(migrated);
+  migrated.option_symbol = firstPresent(migrated.option_symbol, migrated.option, '');
+  migrated.option_type = firstPresent(migrated.option_type, migrated.optionType, 'N/A');
+  migrated.strike_price = coerceNumber(firstPresent(migrated.strike_price, migrated.strike));
+  migrated.expiration_date = firstPresent(migrated.expiration_date, migrated.expiry, '');
+  migrated.contracts = coerceInteger(firstPresent(migrated.contracts, 1)) || 1;
+  migrated.premium_paid = coerceNumber(firstPresent(migrated.premium_paid, migrated.askAtSelection));
+  migrated.breakeven_price = coerceNumber(migrated.breakeven_price);
+  migrated.option_bid_at_entry = coerceNumber(migrated.option_bid_at_entry);
+  migrated.option_ask_at_entry = coerceNumber(firstPresent(migrated.option_ask_at_entry, migrated.askAtSelection));
+  migrated.option_spread_at_entry = coerceNumber(firstPresent(migrated.option_spread_at_entry, migrated.bidAskSpread));
+  migrated.open_interest_at_entry = coerceInteger(firstPresent(migrated.open_interest_at_entry, migrated.openInterest));
+  migrated.option_volume_at_entry = coerceInteger(firstPresent(migrated.option_volume_at_entry, migrated.optionVolume));
+  migrated.implied_volatility_at_entry = coerceNumber(migrated.implied_volatility_at_entry);
+  migrated.underlying_price_at_entry = coerceNumber(firstPresent(migrated.underlying_price_at_entry, migrated.entry));
+
+  migrated.setup_grade = firstPresent(migrated.setup_grade, migrated.setupGrade, null);
+  migrated.scanner_status = firstPresent(migrated.scanner_status, migrated.scannerStatus, null);
+  migrated.confirmation_status = firstPresent(migrated.confirmation_status, migrated.confirmationStarted ? 'Started' : 'Pending', null);
+  migrated.scanner_timeframe = firstPresent(migrated.scanner_timeframe, migrated.timeframe, migrated.setupTf, null);
+  migrated.signal_timestamp = firstPresent(migrated.signal_timestamp, migrated.createdAt, null);
+  migrated.signal_market_date = firstPresent(migrated.signal_market_date, migrated.date, migrated.signal_timestamp ? String(migrated.signal_timestamp).slice(0, 10) : null);
+  migrated.underlying_price_at_signal = coerceNumber(firstPresent(migrated.underlying_price_at_signal, migrated.entry));
+  migrated.entry_price = coerceNumber(firstPresent(migrated.entry_price, migrated.entry));
+  migrated.stop_price = coerceNumber(firstPresent(migrated.stop_price, migrated.plannedStop));
+  migrated.target_price = coerceNumber(firstPresent(migrated.target_price, migrated.plannedTp1));
+  migrated.atr_at_signal = coerceNumber(migrated.atr_at_signal);
+  migrated.target_distance = migrated.target_distance ?? (migrated.entry_price != null && migrated.target_price != null ? Math.abs(migrated.target_price - migrated.entry_price) : null);
+  migrated.target_distance_atr = migrated.target_distance_atr ?? (migrated.atr_at_signal && migrated.atr_at_signal > 0 && migrated.target_distance != null ? migrated.target_distance / migrated.atr_at_signal : null);
+  migrated.trend_state = firstPresent(migrated.trend_state, migrated.trendState, migrated.trend, null);
+  migrated.relative_volume = coerceNumber(firstPresent(migrated.relative_volume, migrated.relativeVolume));
+  migrated.atr_expansion = coerceNumber(firstPresent(migrated.atr_expansion, migrated.atrExpansion));
+  migrated.days_to_expiration_at_entry = migrated.days_to_expiration_at_entry ?? (migrated.expiration_date ? daysUntilDate(migrated.signal_timestamp || migrated.createdAt, migrated.expiration_date) : null);
+
+  const trackingDefaults = defaultTrackingFields(firstPresent(migrated.tracking_started_at, migrated.signal_timestamp, migrated.createdAt, null));
+  Object.entries(trackingDefaults).forEach(([key, value]) => {
+    if (migrated[key] === undefined) migrated[key] = value;
+  });
+  mirrorJournalCompatibilityFields(migrated);
+  applyManualTrackingCompletion(migrated);
+  return migrated;
+}
+
+function migrateJournalEntries(entries = []) {
+  const before = JSON.stringify(entries);
+  const migrated = entries.map(migrateJournalEntry);
+  return { entries: migrated, changed: JSON.stringify(migrated) !== before };
+}
+
 function loadJournal() {
-  try { return JSON.parse(localStorage.getItem(JOURNAL_KEY) || '[]'); }
+  try {
+    const raw = JSON.parse(localStorage.getItem(JOURNAL_KEY) || '[]');
+    const { entries, changed } = migrateJournalEntries(Array.isArray(raw) ? raw : []);
+    if (changed) localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+    return entries;
+  }
   catch { return []; }
 }
 function saveJournal(entries) {
@@ -5943,18 +6363,23 @@ function updateEntryLifecycle(id, action) {
   const idx = entries.findIndex(e => e.id === id);
   if (idx === -1) return;
   const e = { ...entries[idx] };
+  const now = new Date().toISOString();
   if (action === 'tp1') {
     e.outcome = 'TP1';
     e.result = 'Win';
     e.exit = e.plannedTp1 || e.exit;
     e.rResult = e.rResult ?? 2;
     e.reviewResult = 'Winner';
+    e.first_target_touch_at = e.first_target_touch_at || now;
+    e.completion_reason = e.completion_reason || 'target';
   } else if (action === 'stop') {
     e.outcome = 'Stop Loss';
     e.result = 'Loss';
     e.exit = e.plannedStop || e.exit;
     e.rResult = -1;
     e.reviewResult = 'Stopped';
+    e.first_stop_touch_at = e.first_stop_touch_at || now;
+    e.completion_reason = e.completion_reason || 'stop';
   } else if (action === 'breakeven') {
     e.plannedStop = e.entry || e.plannedStop;
     e.outcome = e.outcome === 'Open' ? 'Open' : e.outcome;
@@ -5966,6 +6391,7 @@ function updateEntryLifecycle(id, action) {
   e.pnl = calcPnlFromLevels(e);
   e.pnlPct = calcPnlPctFromLevels(e);
   e.rResult = calcRFromLevels(e);
+  applyManualTrackingCompletion(e);
   entries[idx] = e;
   saveJournal(entries);
 }
@@ -6131,6 +6557,78 @@ function renderAnalyticsTable(rows, label = 'Group') {
     </table>`;
 }
 
+function expectedMoveDiagnostics(entries = []) {
+  const missing = key => entries.filter(e => e[key] === null || e[key] === undefined || e[key] === '').length;
+  const completedReason = reason => entries.filter(e => e.completion_reason === reason).length;
+  const active = entries.filter(e => e.tracking_status !== 'completed').length;
+  const samples = entries
+    .slice()
+    .sort((a, b) => String(b.signal_timestamp || b.createdAt || '').localeCompare(String(a.signal_timestamp || a.createdAt || '')))
+    .slice(0, 8);
+  return {
+    status: expectedMoveAnalytics().status,
+    counts: {
+      totalTracked: entries.length,
+      active,
+      completedByTarget: completedReason('target'),
+      completedByStop: completedReason('stop'),
+      manuallyClosed: completedReason('manually_closed'),
+      expired: completedReason('tracking_window_expired'),
+      missingAtr: missing('atr_at_signal'),
+      missingEntry: missing('entry_price'),
+      missingTarget: missing('target_price'),
+      missingOptionType: missing('option_type'),
+      missingStrike: missing('strike_price'),
+      missingExpiration: missing('expiration_date'),
+      duplicatePreventionCount: duplicatePreventionCount(),
+    },
+    samples,
+  };
+}
+
+function renderExpectedMoveDiagnostics(entries = []) {
+  const diag = expectedMoveDiagnostics(entries);
+  const cards = [
+    ['Tracked Setups', diag.counts.totalTracked],
+    ['Active', diag.counts.active],
+    ['Target', diag.counts.completedByTarget],
+    ['Stop', diag.counts.completedByStop],
+    ['Manual', diag.counts.manuallyClosed],
+    ['Expired', diag.counts.expired],
+    ['Missing ATR', diag.counts.missingAtr],
+    ['Missing Entry', diag.counts.missingEntry],
+    ['Missing Target', diag.counts.missingTarget],
+    ['Missing Option Type', diag.counts.missingOptionType],
+    ['Missing Strike', diag.counts.missingStrike],
+    ['Missing Expiration', diag.counts.missingExpiration],
+    ['Duplicates Prevented', diag.counts.duplicatePreventionCount],
+  ];
+  const sampleRows = diag.samples.map(e => `
+    <tr>
+      <td><strong>${escapeHtml(e.ticker || '—')}</strong></td>
+      <td class="direction-value ${directionClass(e.direction)}">${escapeHtml(e.direction || '—')}</td>
+      <td>${escapeHtml(e.setup_grade || e.setupGrade || '—')}</td>
+      <td>${escapeHtml(e.signal_market_date || e.date || '—')}</td>
+      <td>${escapeHtml(e.first_entry_touch_at ? String(e.first_entry_touch_at).slice(0, 10) : '—')}</td>
+      <td>${escapeHtml(e.completion_reason || '—')}</td>
+      <td>${e.trading_days_to_target ?? e.trading_days_to_stop ?? '—'}</td>
+      <td>${fmtNumber(e.maximum_favorable_excursion_r)}</td>
+      <td>${fmtNumber(e.maximum_adverse_excursion_r)}</td>
+      <td>${fmtNumber(e.target_distance_atr)}</td>
+    </tr>`).join('');
+  return `
+    <div class="analytics-empty" style="margin-bottom:10px;">Expected move model status: ${escapeHtml(diag.status)}. These diagnostics are internal only and do not change scanner cards.</div>
+    <div class="journal-stats" style="margin-bottom:12px;">
+      ${cards.map(([label, value]) => `<div class="stat-card"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(String(value))}</div></div>`).join('')}
+    </div>
+    <table class="analytics-table">
+      <thead>
+        <tr><th>Ticker</th><th>Direction</th><th>Grade</th><th>Signal Date</th><th>Entry Date</th><th>Completion</th><th>Days to Target/Stop</th><th>MFE R</th><th>MAE R</th><th>Target ATR</th></tr>
+      </thead>
+      <tbody>${sampleRows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No tracked setups yet.</td></tr>'}</tbody>
+    </table>`;
+}
+
 function renderAnalytics() {
   const all = loadJournal();
   const closed = all.filter(e => e.result !== 'Open');
@@ -6164,6 +6662,8 @@ function renderAnalytics() {
   document.getElementById('analyticsBySetupStatus').innerHTML = renderAnalyticsTable(setupStatusRows, 'Setup Status');
   document.getElementById('analyticsByMistake').innerHTML = renderAnalyticsTable(mistakeRows, 'Mistake');
   document.getElementById('analyticsByPhase').innerHTML = renderAnalyticsTable(phaseRows, 'Phase');
+  const expectedMoveEl = document.getElementById('expectedMoveDiagnostics');
+  if (expectedMoveEl) expectedMoveEl.innerHTML = renderExpectedMoveDiagnostics(all);
 }
 
 // ── CSV Export ───────────────────────────────────────────────────────────────
@@ -6171,7 +6671,7 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult','setup_id','option_type','strike_price','expiration_date','days_to_expiration_at_entry','premium_paid','breakeven_price','option_bid_at_entry','option_ask_at_entry','option_spread_at_entry','open_interest_at_entry','option_volume_at_entry','implied_volatility_at_entry','underlying_price_at_entry','setup_grade_snapshot','scanner_status_snapshot','confirmation_status','scanner_timeframe','signal_timestamp','signal_market_date','underlying_price_at_signal','entry_price_snapshot','stop_price_snapshot','target_price_snapshot','atr_at_signal','target_distance','target_distance_atr','trend_state','relative_volume_snapshot','atr_expansion_snapshot','tracking_status','tracking_started_at','tracking_completed_at','completion_reason','first_entry_touch_at','first_target_touch_at','first_stop_touch_at','trading_days_to_entry','trading_days_to_target','trading_days_to_stop','bars_to_entry','bars_to_target','bars_to_stop','maximum_favorable_excursion','maximum_adverse_excursion','maximum_favorable_excursion_percent','maximum_adverse_excursion_percent','maximum_favorable_excursion_atr','maximum_adverse_excursion_atr','maximum_favorable_excursion_r','maximum_adverse_excursion_r','reached_0_5r','reached_1r','reached_2r','time_to_0_5r','time_to_1r','time_to_2r'];
   const rows = entries.map(e => [
     e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', `"${e.trend || ''}"`, `"${e.setupTf || ''}"`, `"${e.phase || ''}"`, `"${e.setupStatus || ''}"`, `"${e.entryStatus || ''}"`, e.setupGrade || '', `"${e.setupGradeReason || ''}"`, e.confirmationStarted ? 'Yes' : 'No', `"${e.confirmationReason || ''}"`, e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
@@ -6180,6 +6680,9 @@ function exportCSV() {
     e.accountSize ?? '', e.riskPct ?? '', e.maxRisk ?? '',
     checklistComplete(e) ? 'Yes' : 'No', e.beforeShot ? 'Yes' : 'No', e.afterShot ? 'Yes' : 'No',
     e.directionCorrect || 'Pending', e.entryQuality || 'Pending', e.reviewResult || 'Pending', `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
+    e.setup_id || '', e.option_type || '', e.strike_price ?? '', e.expiration_date || '', e.days_to_expiration_at_entry ?? '', e.premium_paid ?? '', e.breakeven_price ?? '', e.option_bid_at_entry ?? '', e.option_ask_at_entry ?? '', e.option_spread_at_entry ?? '', e.open_interest_at_entry ?? '', e.option_volume_at_entry ?? '', e.implied_volatility_at_entry ?? '', e.underlying_price_at_entry ?? '',
+    e.setup_grade || '', e.scanner_status || '', e.confirmation_status || '', e.scanner_timeframe || '', e.signal_timestamp || '', e.signal_market_date || '', e.underlying_price_at_signal ?? '', e.entry_price ?? '', e.stop_price ?? '', e.target_price ?? '', e.atr_at_signal ?? '', e.target_distance ?? '', e.target_distance_atr ?? '', `"${e.trend_state || ''}"`, e.relative_volume ?? '', e.atr_expansion ?? '',
+    e.tracking_status || '', e.tracking_started_at || '', e.tracking_completed_at || '', e.completion_reason || '', e.first_entry_touch_at || '', e.first_target_touch_at || '', e.first_stop_touch_at || '', e.trading_days_to_entry ?? '', e.trading_days_to_target ?? '', e.trading_days_to_stop ?? '', e.bars_to_entry ?? '', e.bars_to_target ?? '', e.bars_to_stop ?? '', e.maximum_favorable_excursion ?? '', e.maximum_adverse_excursion ?? '', e.maximum_favorable_excursion_percent ?? '', e.maximum_adverse_excursion_percent ?? '', e.maximum_favorable_excursion_atr ?? '', e.maximum_adverse_excursion_atr ?? '', e.maximum_favorable_excursion_r ?? '', e.maximum_adverse_excursion_r ?? '', e.reached_0_5r ? 'Yes' : 'No', e.reached_1r ? 'Yes' : 'No', e.reached_2r ? 'Yes' : 'No', e.time_to_0_5r ?? '', e.time_to_1r ?? '', e.time_to_2r ?? '',
   ]);
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
   const a = document.createElement('a');
