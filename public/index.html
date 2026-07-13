@@ -2133,6 +2133,10 @@
     <h3>Expected Move Data Diagnostics</h3>
     <div id="expectedMoveDiagnostics"></div>
   </div>
+  <div class="analytics-card" style="margin-top:16px;">
+    <h3>Enter Now Funnel</h3>
+    <div id="enterNowFunnelDiagnostics"></div>
+  </div>
 </div>
 
 <!-- ── Video Studio Tab ──────────────────────────────────────────────────── -->
@@ -2528,6 +2532,7 @@
 
 <script src="/expected_move_analytics.js"></script>
 <script src="/further_analysis.js"></script>
+<script src="/setup_funnel_diagnostics.js"></script>
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
@@ -2536,6 +2541,7 @@ const EXPECTED_MOVE_TRACKING_WINDOW_DAYS = 30;
 const VIDEO_PROJECTS_KEY = 'stock_scanner_video_projects';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
 const FURTHER_ANALYSIS_SELECTED_KEY = 'kairos_further_analysis_selected_setup';
+const ENTER_NOW_FUNNEL_HISTORY_LIMIT = 20;
 let scannerRows = [];
 let scannerNearMiss = [];
 let indexWatchRows = [];
@@ -2851,6 +2857,7 @@ async function runScan() {
 
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
+    recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
     refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
     renderScannerResults();
     renderExecutionTab();
@@ -4837,6 +4844,43 @@ function buildExpectedMoveCardFields(readinessResult) {
   return window.KairosExpectedMove
     ? window.KairosExpectedMove.buildExpectedMoveCardFields(readinessResult)
     : null;
+}
+
+function funnelHistory() {
+  return window.KairosSetupFunnel
+    ? window.KairosSetupFunnel.loadHistory(localStorage)
+    : [];
+}
+
+function funnelEnrichedSetup(setup = {}) {
+  const progress = setupProgressState(setup);
+  return {
+    ...setup,
+    funnel_setup_id: window.KairosSetupFunnel?.setupIdentity ? window.KairosSetupFunnel.setupIdentity(setup) : undefined,
+    progress_bucket: progress.bucket,
+    progress_label: progress.label,
+    grade_value: setupGradeValue(setup),
+    simple_status: simpleStatus(setup).label,
+    contract_lifecycle: contractLifecycleState(setup),
+  };
+}
+
+function recordEnterNowFunnelSnapshot(rows = [], nearMiss = [], meta = {}) {
+  if (!window.KairosSetupFunnel) return null;
+  const timestamp = meta.generated_at || new Date().toISOString();
+  const snapshot = window.KairosSetupFunnel.createScanSnapshot({
+    rows: rows.map(funnelEnrichedSetup),
+    nearMiss: nearMiss.map(funnelEnrichedSetup),
+    meta: {
+      ...meta,
+      symbols_requested: meta.symbols_requested || meta.requested_count || rows.length + nearMiss.length,
+      symbols_processed: meta.symbols_processed || rows.length + nearMiss.length,
+      symbols_failed: meta.symbols_failed || 0,
+    },
+    timestamp,
+  });
+  window.KairosSetupFunnel.recordScan(localStorage, snapshot);
+  return snapshot;
 }
 
 function furtherAnalysisRows() {
@@ -7333,6 +7377,141 @@ function renderExpectedMoveCompletedSamples(samples = []) {
     </table>`;
 }
 
+function formatFunnelReason(reason) {
+  return formatDisplayLabel(String(reason || '—').replace(/_/g, ' '));
+}
+
+function formatFunnelRate(value) {
+  const num = coerceNumber(value);
+  return num == null ? '—' : `${fmtNumber(num * 100)}%`;
+}
+
+function renderFunnelStageSummary(snapshot) {
+  const c = snapshot.stage_counts || {};
+  const cards = [
+    ['Symbols scanned', snapshot.symbols_processed],
+    ['Directional setups', c.directional_setup_found || 0],
+    ['Bias aligned', c.bias_aligned || 0],
+    ['Location aligned', c.location_aligned || 0],
+    ['Grade eligible', c.grade_eligible || 0],
+    ['Area reached', c.area_reached || 0],
+    ['Reaction started', c.reaction_started || 0],
+    ['Enter Now', c.enter_now || 0],
+  ];
+  return `<div class="journal-stats" style="margin-bottom:12px;">${cards.map(([label, value]) => `<div class="stat-card"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(String(value ?? 0))}</div></div>`).join('')}</div>`;
+}
+
+function renderFunnelConversions(snapshot) {
+  const r = snapshot.conversion_rates || {};
+  const rows = [
+    ['Directional → Grade eligible', r.directional_to_grade_eligible],
+    ['Grade eligible → Area reached', r.grade_eligible_to_area_reached],
+    ['Area reached → Reaction started', r.area_reached_to_reaction_started],
+    ['Reaction started → Enter Now', r.reaction_started_to_enter_now],
+    ['Overall Enter Now rate', r.overall_enter_now_rate],
+  ].map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td>${formatFunnelRate(value)}</td></tr>`).join('');
+  return `
+    <h3 style="margin-top:18px;">Conversion Rates</h3>
+    <table class="analytics-table"><tbody>${rows}</tbody></table>`;
+}
+
+function renderFunnelReasonTable(title, counts = {}, total = 0) {
+  const rows = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([reason, count]) => `<tr><td>${escapeHtml(formatFunnelReason(reason))}</td><td>${count}</td><td>${total ? fmtNumber(count / total * 100) : '—'}%</td></tr>`)
+    .join('');
+  return `
+    <h3 style="margin-top:18px;">${escapeHtml(title)}</h3>
+    <table class="analytics-table">
+      <thead><tr><th>Reason</th><th>Count</th><th>% of Non-Enter-Now</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:18px;">No blockers recorded.</td></tr>'}</tbody>
+    </table>`;
+}
+
+function renderFunnelLargestBottleneck(snapshot) {
+  const largest = snapshot.largest_bottleneck;
+  if (!largest) return '<div class="analytics-empty" style="padding:12px 0;">No largest bottleneck yet.</div>';
+  const reactionNotEntered = (snapshot.setups || []).filter(setup =>
+    setup.stage_flags?.reaction_started && !setup.enter_now_eligible && setup.primary_blocking_reason === largest.reason
+  ).length;
+  const reactionTotal = snapshot.stage_counts?.reaction_started || 0;
+  const detail = reactionNotEntered && reactionTotal
+    ? `${reactionNotEntered} of ${reactionTotal} Reaction Started setups did not reach Enter Now`
+    : `${largest.count} non-Enter-Now setup${largest.count === 1 ? '' : 's'} stopped here`;
+  return `
+    <div class="analysis-status-card" style="margin-top:12px;">
+      <div class="analysis-status-main">Largest bottleneck: ${escapeHtml(formatFunnelReason(largest.reason))}</div>
+      <div class="analysis-status-sub">${escapeHtml(detail)}</div>
+    </div>`;
+}
+
+function renderFunnelHistory(history = []) {
+  const rows = history.slice(0, ENTER_NOW_FUNNEL_HISTORY_LIMIT).map(scan => `
+    <tr>
+      <td>${escapeHtml(new Date(scan.scan_timestamp).toLocaleString())}</td>
+      <td>${scan.symbols_processed ?? 0}</td>
+      <td>${scan.stage_counts?.grade_eligible || 0}</td>
+      <td>${scan.stage_counts?.reaction_started || 0}</td>
+      <td>${scan.stage_counts?.enter_now || 0}</td>
+      <td>${formatFunnelRate(scan.conversion_rates?.overall_enter_now_rate)}</td>
+      <td>${escapeHtml(formatFunnelReason(scan.largest_bottleneck?.reason || '—'))}</td>
+      <td>${escapeHtml(scan.diagnostic_classification || '—')}</td>
+    </tr>`).join('');
+  return `
+    <h3 style="margin-top:18px;">Recent Funnel History</h3>
+    <table class="analytics-table">
+      <thead><tr><th>Date/Time</th><th>Processed</th><th>Grade Eligible</th><th>Reaction Started</th><th>Enter Now</th><th>Enter Now Rate</th><th>Largest Blocker</th><th>Classification</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:18px;">No funnel history yet.</td></tr>'}</tbody>
+    </table>`;
+}
+
+function renderFunnelDailyAggregation(history = []) {
+  const days = window.KairosSetupFunnel ? window.KairosSetupFunnel.dailyAggregation(history) : [];
+  const rows = days.map(day => `
+    <tr>
+      <td>${escapeHtml(day.market_date)}</td>
+      <td>${day.unique_setups_seen}</td>
+      <td>${day.unique_enter_now_setups}</td>
+      <td>${day.a_plus_enter_now}</td>
+      <td>${day.b_plus_tradeable_enter_now}</td>
+      <td>${day.long_enter_now}</td>
+      <td>${day.short_enter_now}</td>
+      <td>${escapeHtml(Object.entries(day.enter_now_by_timeframe || {}).map(([tf, count]) => `${tf}: ${count}`).join(' · ') || '—')}</td>
+    </tr>`).join('');
+  return `
+    <h3 style="margin-top:18px;">Daily Aggregation</h3>
+    <table class="analytics-table">
+      <thead><tr><th>Market Date</th><th>Unique Setups</th><th>Unique Enter Now</th><th>A+ Enter Now</th><th>B+ Enter Now</th><th>Long Enter Now</th><th>Short Enter Now</th><th>Enter Now by Timeframe</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:18px;">No daily funnel data yet.</td></tr>'}</tbody>
+    </table>`;
+}
+
+function renderEnterNowFunnelDiagnostics() {
+  const el = document.getElementById('enterNowFunnelDiagnostics');
+  if (!el) return;
+  if (!window.KairosSetupFunnel) {
+    el.innerHTML = '<div class="analytics-empty">Funnel diagnostics module unavailable.</div>';
+    return;
+  }
+  const history = funnelHistory();
+  const latest = history[0];
+  if (!latest) {
+    el.innerHTML = '<div class="analytics-empty">No completed scan funnel snapshots yet. Run a stock scan to populate diagnostics.</div>';
+    return;
+  }
+  const nonEnterTotal = Math.max(0, (latest.symbols_processed || 0) - (latest.stage_counts?.enter_now || 0));
+  el.innerHTML = `
+    <div class="analytics-empty" style="padding:0 0 10px;text-align:left;">Latest scan: ${escapeHtml(new Date(latest.scan_timestamp).toLocaleString())} · ${escapeHtml(latest.diagnostic_classification || '—')}</div>
+    ${renderFunnelStageSummary(latest)}
+    ${renderFunnelConversions(latest)}
+    ${renderFunnelLargestBottleneck(latest)}
+    ${renderFunnelReasonTable('Primary Blocking Reasons', latest.primary_blocking_reason_counts, nonEnterTotal)}
+    ${renderFunnelReasonTable('All Blocking Reasons', latest.all_blocking_reason_counts, nonEnterTotal)}
+    ${renderFunnelHistory(history)}
+    ${renderFunnelDailyAggregation(history)}
+  `;
+}
+
 function renderAnalytics() {
   const all = loadJournal();
   const closed = all.filter(e => e.result !== 'Open');
@@ -7368,6 +7547,7 @@ function renderAnalytics() {
   document.getElementById('analyticsByPhase').innerHTML = renderAnalyticsTable(phaseRows, 'Phase');
   const expectedMoveEl = document.getElementById('expectedMoveDiagnostics');
   if (expectedMoveEl) expectedMoveEl.innerHTML = renderExpectedMoveDiagnostics(all);
+  renderEnterNowFunnelDiagnostics();
 }
 
 // ── CSV Export ───────────────────────────────────────────────────────────────
