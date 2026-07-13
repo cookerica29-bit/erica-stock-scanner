@@ -1012,7 +1012,12 @@
     .index-watchlist .priority-list,
     .terms-grid,
     .analytics-grid,
+    .analysis-grid,
+    .analysis-two-col,
     .journal-stats {
+      grid-template-columns: 1fr;
+    }
+    .analysis-selector {
       grid-template-columns: 1fr;
     }
     .snapshot-badge {
@@ -1055,6 +1060,7 @@
     #terms-panel,
     #trends-panel,
     #analytics-panel,
+    #further-panel,
     #video-panel {
       max-width: 100%;
       padding: 14px 12px;
@@ -1207,6 +1213,7 @@
     #terms-panel,
     #trends-panel,
     #analytics-panel,
+    #further-panel,
     #video-panel {
       padding-left: 10px;
       padding-right: 10px;
@@ -1583,6 +1590,62 @@
   .analytics-table tr:last-child td { border-bottom: none; }
   .analytics-empty { color: var(--muted); padding: 32px 0; text-align: center; }
 
+  /* ── Further Analysis panel ────────────────────────────────────────────── */
+  #further-panel { padding: 20px 24px; max-width: 1320px; margin: 0 auto; }
+  .analysis-shell { display: grid; gap: 14px; }
+  .analysis-selector {
+    align-items: end;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: grid;
+    gap: 8px;
+    grid-template-columns: minmax(240px, 1fr) auto;
+    padding: 14px;
+  }
+  .analysis-header {
+    background: linear-gradient(135deg, rgba(124,92,255,0.15), rgba(34,197,94,0.06));
+    border: 1px solid rgba(124,92,255,0.28);
+    border-radius: 12px;
+    padding: 18px;
+  }
+  .analysis-title { color: var(--text); font-size: 28px; font-weight: 950; letter-spacing: 0.01em; }
+  .analysis-subtitle { color: var(--muted); font-size: 13px; font-weight: 800; margin-top: 4px; }
+  .analysis-grid {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .analysis-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    min-width: 0;
+  }
+  .analysis-section.full { grid-column: 1 / -1; }
+  .analysis-section h3 {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 950;
+    letter-spacing: 0.07em;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+  .analysis-lines { color: var(--text-soft); display: grid; gap: 7px; font-size: 13px; line-height: 1.45; }
+  .analysis-kv { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analysis-kv div { min-width: 0; }
+  .analysis-kv span:first-child { color: var(--muted); display: block; font-size: 10px; font-weight: 900; letter-spacing: 0.06em; text-transform: uppercase; }
+  .analysis-kv span:last-child { color: var(--text); display: block; font-size: 13px; font-weight: 850; margin-top: 2px; overflow-wrap: anywhere; }
+  .analysis-pill-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .analysis-pill { border:1px solid var(--border); border-radius:999px; color:var(--text-soft); font-size:11px; font-weight:850; padding:6px 9px; }
+  .analysis-two-col { display:grid; gap:14px; grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .analysis-list { color: var(--text-soft); display:grid; gap:7px; font-size:13px; line-height:1.4; }
+  .analysis-empty-small { color: var(--muted); font-size: 13px; padding: 10px 0; }
+  .analysis-status-card { border:1px solid rgba(124,92,255,0.24); border-radius:10px; padding:12px; background:rgba(124,92,255,0.07); }
+  .analysis-status-main { color:var(--text); font-size:18px; font-weight:950; }
+  .analysis-status-sub { color:var(--muted); font-size:12px; margin-top:4px; }
+
   /* ── Trending list panel ───────────────────────────────────────────────── */
   #trends-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
   .trend-head { display:flex; justify-content:space-between; align-items:flex-end; gap:16px; margin-bottom:12px; }
@@ -1842,6 +1905,7 @@
   <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
   <button class="tab-btn" onclick="switchTab('index')">Index Watchlist</button>
   <button class="tab-btn" onclick="switchTab('execution')">Execution</button>
+  <button class="tab-btn" onclick="switchTab('further')">Further Analysis</button>
   <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
   <button class="tab-btn" onclick="switchTab('terms')">Terms</button>
@@ -1932,6 +1996,25 @@
     </div>
     <div id="executionSummary" class="execution-subtitle"></div>
     <div id="executionList" class="execution-grid"></div>
+  </div>
+</div>
+
+<!-- ── Further Analysis Tab ──────────────────────────────────────────────── -->
+<div id="further-panel" class="tab-panel">
+  <div class="analysis-shell">
+    <div class="analysis-selector">
+      <div>
+        <label class="control-label" for="furtherSetupSelect">Setup to analyze</label>
+        <select id="furtherSetupSelect" onchange="selectFurtherAnalysisSetup(this.value)">
+          <option value="">No scanner setups loaded</option>
+        </select>
+        <div class="control-hint">Uses the latest scanner rows already loaded in the dashboard. No new setups are created.</div>
+      </div>
+      <button class="btn-secondary" onclick="renderFurtherAnalysisTab()">Refresh View</button>
+    </div>
+    <div id="furtherAnalysisBody">
+      <div class="analytics-empty">Run a scan, then choose a setup for deeper analysis.</div>
+    </div>
   </div>
 </div>
 
@@ -2444,6 +2527,7 @@
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="/expected_move_analytics.js"></script>
+<script src="/further_analysis.js"></script>
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
@@ -2451,9 +2535,11 @@ const JOURNAL_DUPLICATE_PREVENTION_KEY = 'stock_scanner_journal_duplicate_preven
 const EXPECTED_MOVE_TRACKING_WINDOW_DAYS = 30;
 const VIDEO_PROJECTS_KEY = 'stock_scanner_video_projects';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
+const FURTHER_ANALYSIS_SELECTED_KEY = 'kairos_further_analysis_selected_setup';
 let scannerRows = [];
 let scannerNearMiss = [];
 let indexWatchRows = [];
+let selectedFurtherAnalysisSetupId = localStorage.getItem(FURTHER_ANALYSIS_SELECTED_KEY) || '';
 let currentVideoProject = null;
 let videoProjectDirty = false;
 const INDEX_WATCH_TICKERS = ['SPY', 'QQQ', 'IWM', 'DIA', 'GLD', 'XLE', 'XLF', 'XLK', 'SMH'];
@@ -2660,13 +2746,14 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
-  const tabs = ['scanner','index','execution','journal','analytics','terms'];
+  const tabs = ['scanner','index','execution','further','journal','analytics','terms'];
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
     b.classList.toggle('active', tabs[i] === tab);
   });
   document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
   document.getElementById('index-panel').classList.toggle('active', tab === 'index');
   document.getElementById('execution-panel').classList.toggle('active', tab === 'execution');
+  document.getElementById('further-panel').classList.toggle('active', tab === 'further');
   document.getElementById('trends-panel')?.classList.remove('active');
   document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
   document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
@@ -2674,6 +2761,7 @@ function switchTab(tab) {
   document.getElementById('terms-panel').classList.toggle('active', tab === 'terms');
   if (tab === 'index' && !indexWatchRows.length) loadIndexWatchlist();
   if (tab === 'execution') renderExecutionTab();
+  if (tab === 'further') renderFurtherAnalysisTab();
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics') renderAnalytics();
 }
@@ -2766,6 +2854,7 @@ async function runScan() {
     refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
     renderScannerResults();
     renderExecutionTab();
+    renderFurtherAnalysisTab();
     if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
       scheduleContractRefreshPoll();
     }
@@ -3097,6 +3186,7 @@ function scheduleContractRefreshPoll() {
     markPendingContractsTimedOut(visibleScannerRowsForContractPoll(), contractPendingTimedOutKeys);
     renderScannerResults();
     renderExecutionTab();
+    renderFurtherAnalysisTab();
     return;
   }
   contractRefreshAttempts += 1;
@@ -3113,6 +3203,7 @@ function scheduleContractRefreshPoll() {
       updateDataStatus(data.meta || {});
       renderScannerResults();
       renderExecutionTab();
+      renderFurtherAnalysisTab();
       if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
         scheduleContractRefreshPoll();
       }
@@ -3121,6 +3212,7 @@ function scheduleContractRefreshPoll() {
       markPendingContractsTimedOut(visibleScannerRowsForContractPoll(), contractPendingTimedOutKeys);
       renderScannerResults();
       renderExecutionTab();
+      renderFurtherAnalysisTab();
     }
   }, 7000);
 }
@@ -4745,6 +4837,222 @@ function buildExpectedMoveCardFields(readinessResult) {
   return window.KairosExpectedMove
     ? window.KairosExpectedMove.buildExpectedMoveCardFields(readinessResult)
     : null;
+}
+
+function furtherAnalysisRows() {
+  const map = new Map();
+  [...scannerRows, ...scannerNearMiss].forEach(setup => {
+    const id = window.KairosFurtherAnalysis?.setupIdentity
+      ? window.KairosFurtherAnalysis.setupIdentity(setup)
+      : `${setup.ticker || 'UNKNOWN'}|${setup.direction || ''}|${setup.timeframe || ''}|${setup.entry || ''}|${setup.sl || ''}|${setup.tp1 || ''}`;
+    if (!map.has(id)) map.set(id, { ...setup, __furtherId: id });
+  });
+  return Array.from(map.values()).sort((a, b) => String(a.ticker || '').localeCompare(String(b.ticker || '')));
+}
+
+function selectFurtherAnalysisSetup(id) {
+  selectedFurtherAnalysisSetupId = id || '';
+  if (selectedFurtherAnalysisSetupId) {
+    localStorage.setItem(FURTHER_ANALYSIS_SELECTED_KEY, selectedFurtherAnalysisSetupId);
+  } else {
+    localStorage.removeItem(FURTHER_ANALYSIS_SELECTED_KEY);
+  }
+  renderFurtherAnalysisTab();
+}
+
+function analysisValue(value, options = {}) {
+  if (value === undefined || value === null || value === '') return '—';
+  const num = coerceNumber(value);
+  if (options.money && num != null) return fmtMoney(num);
+  if (options.percent && num != null) return `${fmtNumber(num * 100)}%`;
+  if (options.number && num != null) return fmtNumber(num);
+  return String(value);
+}
+
+function renderAnalysisKv(rows = [], options = {}) {
+  const html = rows
+    .filter(row => row && row.value !== undefined && row.value !== null && row.value !== '' && row.value !== 0)
+    .map(row => `<div><span>${escapeHtml(row.label)}</span><span>${escapeHtml(analysisValue(row.value, row.options || options))}</span></div>`)
+    .join('');
+  return html ? `<div class="analysis-kv">${html}</div>` : '<div class="analysis-empty-small">No data available.</div>';
+}
+
+function renderAnalysisLines(lines = []) {
+  const clean = lines.filter(Boolean);
+  return clean.length
+    ? `<div class="analysis-lines">${clean.map(line => `<div>${escapeHtml(line)}</div>`).join('')}</div>`
+    : '<div class="analysis-empty-small">No grounded details available yet.</div>';
+}
+
+function renderAnalysisList(items = []) {
+  const clean = items.filter(Boolean);
+  return clean.length
+    ? `<div class="analysis-list">${clean.map(item => `<div>• ${escapeHtml(item)}</div>`).join('')}</div>`
+    : '<div class="analysis-empty-small">No grounded items available.</div>';
+}
+
+function renderFurtherExpectedMove(readiness, expectedMoveResult) {
+  const cardFields = buildExpectedMoveCardFields(readiness);
+  if (cardFields) {
+    const evidence = [
+      { label: 'Confidence', value: readiness.confidence },
+      { label: 'Target Samples', value: readiness.target_sample_count },
+      { label: 'Median Target Time', value: expectedMoveResult?.median_days_to_target, options: { number: true } },
+      { label: 'P25-P75 Duration', value: `${expectedMoveResult?.p25_days_to_target ?? '—'}-${expectedMoveResult?.p75_days_to_target ?? '—'} days` },
+      { label: 'Target Completion Rate', value: readiness.target_completion_rate, options: { percent: true } },
+      { label: 'Exact Group Used', value: readiness.exact_group_used ? 'Yes' : 'No' },
+    ];
+    return `
+      <div class="analysis-status-card">
+        <div class="analysis-status-main">Expected Move: ${escapeHtml(cardFields.expected_move_label)}</div>
+        <div class="analysis-status-sub">Suggested Expiration: ${escapeHtml(cardFields.suggested_expiration_label)}</div>
+      </div>
+      <div style="margin-top:10px;">${renderAnalysisKv(evidence)}</div>`;
+  }
+  const reason = (readiness.reasons || [])[0] || 'Analytics are still learning for this exact setup group.';
+  const fallback = readiness.fallback_used
+    ? `<div class="analysis-empty-small">Fallback diagnostic available: ${escapeHtml(expectedMoveResult?.fallback_level || 'fallback')}. It is not presented as an exact recommendation.</div>`
+    : '';
+  return `
+    <div class="analysis-status-card">
+      <div class="analysis-status-main">Expected Move: Learning</div>
+      <div class="analysis-status-sub">${escapeHtml(reason)}</div>
+    </div>
+    ${fallback}`;
+}
+
+function renderFurtherOptionContract(model, readiness) {
+  const c = model.contract || {};
+  const comparison = model.expiration_comparison || {};
+  const rows = [
+    { label: 'Type', value: c.type },
+    { label: 'Strike', value: c.strike, options: { money: true } },
+    { label: 'Expiration', value: c.expiration },
+    { label: 'DTE', value: c.dte },
+    { label: 'Bid', value: c.bid, options: { money: true } },
+    { label: 'Ask', value: c.ask, options: { money: true } },
+    { label: 'Spread', value: c.spread, options: { money: true } },
+    { label: 'Open Interest', value: c.openInterest },
+    { label: 'Volume', value: c.volume },
+    { label: 'Implied Volatility', value: c.impliedVolatility },
+    { label: 'Premium', value: c.premium, options: { money: true } },
+    { label: 'Breakeven', value: c.breakeven, options: { money: true } },
+    { label: 'Underlying Price', value: c.underlying, options: { money: true } },
+    { label: 'Selected Expiration', value: comparison.selected ? `${comparison.selected} DTE` : '—' },
+    { label: 'Recommended Range', value: comparison.range || (readiness.card_ready ? '—' : 'Learning') },
+    { label: 'Enough Time', value: comparison.enoughTime || 'Learning' },
+  ];
+  return renderAnalysisKv(rows);
+}
+
+function renderFurtherAnalysisTab() {
+  const select = document.getElementById('furtherSetupSelect');
+  const body = document.getElementById('furtherAnalysisBody');
+  if (!body) return;
+  const rows = furtherAnalysisRows();
+  if (!rows.length) {
+    if (select) select.innerHTML = '<option value="">No scanner setups loaded</option>';
+    body.innerHTML = '<div class="analytics-empty">No scanner setups available. Run a scan first.</div>';
+    return;
+  }
+
+  if (!rows.some(row => row.__furtherId === selectedFurtherAnalysisSetupId)) {
+    selectedFurtherAnalysisSetupId = rows[0].__furtherId;
+    localStorage.setItem(FURTHER_ANALYSIS_SELECTED_KEY, selectedFurtherAnalysisSetupId);
+  }
+  if (select) {
+    select.innerHTML = rows.map(row => {
+      const label = window.KairosFurtherAnalysis?.selectorLabel ? window.KairosFurtherAnalysis.selectorLabel(row) : row.ticker || row.__furtherId;
+      return `<option value="${escapeHtml(row.__furtherId)}" ${row.__furtherId === selectedFurtherAnalysisSetupId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }).join('');
+  }
+
+  const setup = rows.find(row => row.__furtherId === selectedFurtherAnalysisSetupId) || rows[0];
+  const criteria = window.KairosFurtherAnalysis?.setupCriteria
+    ? window.KairosFurtherAnalysis.setupCriteria(setup)
+    : { grade: setup.setupGrade, direction: setup.direction, timeframe: setup.timeframe };
+  const expectedMoveResult = expectedMoveAnalytics(criteria);
+  const expirationResult = suggestedExpirationAnalytics(expectedMoveResult);
+  const readiness = expectedMoveReleaseReadiness(expectedMoveResult, expirationResult);
+  const stats = expectedMoveResult?.stats || {};
+  const model = window.KairosFurtherAnalysis?.buildAnalysisModel
+    ? window.KairosFurtherAnalysis.buildAnalysisModel(setup, readiness, stats)
+    : null;
+  if (!model) {
+    body.innerHTML = '<div class="analytics-empty">Analysis module unavailable.</div>';
+    return;
+  }
+
+  const directionLabel = simpleDirection(setup.direction);
+  const grade = firstPresent(setup.setupGrade, setup.setup_grade, setup.scanner_status, setup.entryStatus, 'Ungraded');
+  const timeframe = firstPresent(setup.timeframe, setup.scanner_timeframe, setup.setupTf, 'No timeframe');
+  const confirmation = firstPresent(setup.confirmationReason, setup.confirmation_status, setup.confirmationStatus, setup.confirmationStarted ? 'Confirmation started' : 'Not confirmed');
+  const status = model.status || setup.entryStatus || 'Watching';
+  const headerPills = [
+    `${directionLabel} Setup`,
+    grade,
+    timeframe,
+    `Status: ${status}`,
+    `Confirmation: ${confirmation}`,
+  ];
+
+  body.innerHTML = `
+    <div class="analysis-header">
+      <div class="analysis-title">${escapeHtml(setup.ticker || 'Selected Setup')}</div>
+      <div class="analysis-subtitle">${escapeHtml(directionLabel)} Setup · ${escapeHtml(grade)} · ${escapeHtml(timeframe)}</div>
+      <div class="analysis-pill-row">${headerPills.map(item => `<span class="analysis-pill">${escapeHtml(item)}</span>`).join('')}</div>
+    </div>
+    <div class="analysis-grid">
+      <section class="analysis-section">
+        <h3>Trade Thesis</h3>
+        ${renderAnalysisLines(model.thesis)}
+      </section>
+      <section class="analysis-section">
+        <h3>Key Levels</h3>
+        ${renderAnalysisKv(model.key_levels.map(row => ({ ...row, options: { money: !String(row.label).includes('Risk') } })))}
+      </section>
+      <section class="analysis-section">
+        <h3>Expected Move</h3>
+        ${renderFurtherExpectedMove(readiness, expectedMoveResult)}
+      </section>
+      <section class="analysis-section">
+        <h3>Historical Behavior</h3>
+        <div class="analysis-empty-small">Similar completed setups only. This is not the live setup outcome.</div>
+        ${renderAnalysisKv(model.historical_behavior.map(([label, value]) => ({
+          label,
+          value,
+          options: label.includes('rate') ? { percent: true } : { number: true },
+        })))}
+      </section>
+      <section class="analysis-section">
+        <h3>Option Contract</h3>
+        ${renderFurtherOptionContract(model, readiness)}
+      </section>
+      <section class="analysis-section">
+        <h3>Risk and Timing</h3>
+        ${renderAnalysisList(model.risks)}
+      </section>
+      <section class="analysis-section full">
+        <div class="analysis-two-col">
+          <div>
+            <h3>What Helps the Setup</h3>
+            ${renderAnalysisList(model.helps_hurts.helps)}
+          </div>
+          <div>
+            <h3>What Hurts the Setup</h3>
+            ${renderAnalysisList(model.helps_hurts.hurts)}
+          </div>
+        </div>
+      </section>
+      <section class="analysis-section full">
+        <h3>Current Setup Status</h3>
+        <div class="analysis-status-main">${escapeHtml(status)}</div>
+      </section>
+      <section class="analysis-section full">
+        <h3>Bottom Line</h3>
+        ${renderAnalysisLines(model.bottom_line)}
+      </section>
+    </div>`;
 }
 
 function marketObservationFromSetup(setup = {}) {
