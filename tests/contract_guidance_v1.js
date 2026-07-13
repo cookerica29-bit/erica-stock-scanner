@@ -78,7 +78,7 @@ assert.strictEqual(guidance.potentialContract(setup({ direction: '' }), readyExp
 assert.strictEqual(guidance.potentialContract(setup({ entry: null }), readyExpiration).reason, 'missing planned entry');
 
 // Next Step never says execute when only a fallback contract exists.
-const fallbackStep = execution.nextStep(setup(), { bucket: 'ENTER_NOW' }, 'potential');
+const fallbackStep = execution.nextStep(setup({ price: 314.54, entryStatus: 'Tradeable' }), { bucket: 'ENTER_NOW' }, 'potential');
 assert.ok(fallbackStep.lines.join(' ').includes('Verify and select the live option contract'));
 assert.ok(!fallbackStep.lines.join(' ').includes('You can execute this trade'));
 

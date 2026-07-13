@@ -22,22 +22,47 @@ assert.strictEqual(rows.find(row => row.label === 'Current Price').value, 75);
 assert.strictEqual(rows.find(row => row.label === 'Planned Entry').value, 70);
 assert.notStrictEqual(guidance.currentPrice(setup()), guidance.plannedEntry(setup()));
 
-// Almost Ready tells the trader to wait and optionally set an alert at the planned entry.
+// Almost Ready is not setup-confirmed; it waits for confirmation, not entry fill.
 const almostReady = guidance.nextStep(setup(), { bucket: 'ALMOST_READY' }, 'pending');
 assert.strictEqual(almostReady.label, 'Next Step');
-assert.ok(almostReady.lines.includes('Waiting for price to reach the planned entry.'));
-assert.ok(almostReady.lines.includes('Set an alert at $70.00.'));
+assert.deepStrictEqual(almostReady.lines, ['Setup is still developing. Wait for full confirmation.']);
+assert.strictEqual(guidance.executionState(setup(), { bucket: 'ALMOST_READY' }), 'SETUP_NOT_CONFIRMED');
 
-// Enter Now only uses execute wording when a suggested contract is available.
-const enterWithContract = guidance.nextStep(setup({ entryStatus: 'Tradeable' }), { bucket: 'ENTER_NOW' }, 'available');
-assert.deepStrictEqual(enterWithContract.lines, ['Price is in the planned entry zone. You can execute this trade.']);
+// Enter Now can remain confirmed while current price differs from Planned Entry.
+const confirmedWaiting = setup({ price: 75, entry: 70, entryStatus: 'Near Entry', distanceFromEntryAtr: 0.5 });
+assert.strictEqual(guidance.executionState(confirmedWaiting, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_WAITING_FOR_ENTRY');
+const enterWaiting = guidance.nextStep(confirmedWaiting, { bucket: 'ENTER_NOW' }, 'available');
+assert.deepStrictEqual(enterWaiting.lines, [
+  'Setup confirmed. Wait for price to reach the planned entry at $70.00.',
+  'Set an alert at $70.00.',
+]);
 
-const enterWithoutContract = guidance.nextStep(setup({ entryStatus: 'Tradeable' }), { bucket: 'ENTER_NOW' }, 'confirmed_unavailable');
-assert.deepStrictEqual(enterWithoutContract.lines, ['Price is in the planned entry zone.', 'Verify and select the live option contract before executing.']);
+// Contract guidance never overrides waiting for Planned Entry.
+assert.deepStrictEqual(guidance.nextStep(confirmedWaiting, { bucket: 'ENTER_NOW' }, 'potential').lines, enterWaiting.lines);
 
-// Tradeable but not Enter Now keeps the wording grounded in the existing production meaning.
+// Entry-reached Enter Now uses execute wording only when a validated contract exists.
+const reached = setup({ price: 70.02, entry: 70, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 });
+assert.strictEqual(guidance.executionState(reached, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_ENTRY_REACHED');
+const enterWithContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'available');
+assert.deepStrictEqual(enterWithContract.lines, ['Price is at the planned entry. You can execute this trade.']);
+
+const enterWithoutContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'potential');
+assert.deepStrictEqual(enterWithoutContract.lines, ['Price is at the planned entry.', 'Verify and select the live option contract before executing.']);
+
+// Tradeable but not Enter Now keeps the wording grounded in existing production meaning.
 const tradeable = guidance.nextStep(setup({ entryStatus: 'Tradeable' }), { bucket: 'ALMOST_READY' }, 'available');
 assert.deepStrictEqual(tradeable.lines, ['Monitor price near the planned entry.']);
+
+// Existing too-far/stale fields produce do-not-chase wording without changing scanner status.
+const passed = guidance.nextStep(setup({ entryStatus: 'Too Far' }), { bucket: 'ENTER_NOW' }, 'available');
+assert.deepStrictEqual(passed.lines, ['Do not chase. Price moved beyond the planned entry.']);
+
+// BAM-style / mixed-case Enter Now variants normalize into confirmed setup handling.
+const bam = guidance.nextStep(setup({ status: 'Enter Now', price: 75, entry: 70 }), {}, 'available');
+assert.ok(bam.lines[0].startsWith('Setup confirmed.'));
+assert.ok(!bam.lines.join(' ').includes('still developing'));
+const aReady = guidance.nextStep(setup({ trade_eval: { trade_stage: 'A+ READY' }, price: 75, entry: 70 }), {}, 'available');
+assert.ok(aReady.lines[0].startsWith('Setup confirmed.'));
 
 // Watchlist/building setups remain monitoring-only.
 const building = guidance.nextStep(setup({ entryStatus: 'Waiting', trade_eval: { trade_stage: 'BUILDING / WATCHLIST' } }), { bucket: 'WAITING' }, 'pending');
@@ -51,6 +76,11 @@ assert.deepStrictEqual(invalid.lines, ['No entry. The setup is not currently val
 const nike = setup({ ticker: 'NKE', price: 77.25, entry: 70.5, direction: 'SHORT' });
 assert.strictEqual(guidance.currentPrice(nike), 77.25);
 assert.strictEqual(guidance.plannedEntry(nike), 70.5);
+assert.strictEqual(guidance.executionState(nike, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_WAITING_FOR_ENTRY');
+assert.deepStrictEqual(
+  guidance.nextStep(setup({ ticker: 'NKE', price: 82, entry: 70.5, direction: 'SHORT', entryStatus: 'Too Far' }), { bucket: 'ENTER_NOW' }, 'available').lines,
+  ['Do not chase. Price moved beyond the planned entry.']
+);
 
 // Helpers do not mutate scanner status or eligibility fields.
 const original = setup({ progress_bucket: 'ALMOST_READY', setupGrade: 'B+ TRADEABLE' });
