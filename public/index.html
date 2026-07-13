@@ -2579,11 +2579,12 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="/expected_move_analytics.js?v=20260713-card-workflow"></script>
-<script src="/further_analysis.js?v=20260713-card-workflow"></script>
-<script src="/setup_funnel_diagnostics.js?v=20260713-card-workflow"></script>
-<script src="/execution_guidance.js?v=20260713-card-workflow"></script>
-<script src="/contract_guidance.js?v=20260713-card-workflow"></script>
+<script src="/expected_move_analytics.js?v=20260713-card-data"></script>
+<script src="/card_data.js?v=20260713-card-data"></script>
+<script src="/further_analysis.js?v=20260713-card-data"></script>
+<script src="/setup_funnel_diagnostics.js?v=20260713-card-data"></script>
+<script src="/execution_guidance.js?v=20260713-card-data"></script>
+<script src="/contract_guidance.js?v=20260713-card-data"></script>
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
@@ -3916,7 +3917,9 @@ function renderNextStepBlock(setup) {
 }
 
 function renderTradePlanBlock(setup) {
-  const rows = window.KairosExecutionGuidance
+  const rows = window.KairosCardData
+    ? window.KairosCardData.executionPlanRows(setup)
+    : window.KairosExecutionGuidance
     ? window.KairosExecutionGuidance.executionPlanRows(setup)
     : [
       { label: 'Current Price', value: setup.price },
@@ -4385,38 +4388,8 @@ function renderExecutionTab() {
 }
 
 function earningsDisplay(setup) {
-  const earnings = setup.earnings || {};
-  const status = String(earnings.status || '').toLowerCase();
-  if (earnings.loading || status === 'loading' || status === 'pending') {
-    return {
-      className: 'earnings-neutral',
-      main: 'Loading...',
-      sub: '',
-    };
-  }
-  if (!earnings.loaded || !earnings.date) {
-    return {
-      className: 'earnings-neutral',
-      main: 'Unavailable',
-      sub: '',
-    };
-  }
-  const days = Number(earnings.days_until);
-  const dateText = formatShortDate(earnings.date);
-  if (!Number.isFinite(days)) {
-    return {
-      className: 'earnings-neutral',
-      main: dateText,
-      sub: '',
-    };
-  }
-  const className = days <= 7 ? 'earnings-high' : days <= 14 ? 'earnings-moderate' : 'earnings-neutral';
-  const dayText = days === 0 ? 'today' : days === 1 ? '1 day away' : `${days} days away`;
-  return {
-    className,
-    main: dateText,
-    sub: dayText,
-  };
+  if (window.KairosCardData) return window.KairosCardData.normalizeEarnings(setup);
+  return { className: 'earnings-neutral', main: 'Unavailable', sub: '' };
 }
 
 function renderEarningsBlock(setup) {
@@ -4926,6 +4899,9 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
   const target = coerceNumber(firstPresent(setup.tp1, setup.target, setup.target_price));
   const atr = coerceNumber(firstPresent(setup.atr_at_signal, setup.atr, setup.atrValue));
   const targetDistance = entry != null && target != null ? Math.abs(target - entry) : null;
+  const earnings = window.KairosCardData
+    ? window.KairosCardData.normalizeEarnings(setup)
+    : { date: firstPresent(setup.earnings_date, setup.earningsDate), days_until: firstPresent(setup.days_until_earnings, setup.daysUntilEarnings), source: firstPresent(setup.earnings_source, setup.earningsSource) };
   return {
     setup_id: setupIdFromSetup(setup),
     ticker: String(setup.ticker || '').toUpperCase(),
@@ -4946,6 +4922,9 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
     trend_state: firstPresent(setup.trend_state, setup.trendState, setup.stockTrend, setup.trendDirection, setup.trend, null),
     relative_volume: coerceNumber(firstPresent(setup.relative_volume, setup.relativeVolume, setup.trendReview?.relative_volume)),
     atr_expansion: coerceNumber(firstPresent(setup.atr_expansion, setup.atrExpansion, setup.trendReview?.atr_expansion)),
+    earnings_date: earnings.date || '',
+    days_until_earnings: earnings.days_until ?? null,
+    earnings_source: earnings.source || firstPresent(setup.earnings_source, setup.earningsSource, ''),
   };
 }
 
@@ -6082,6 +6061,9 @@ function migrateJournalEntry(entry = {}) {
   migrated.relative_volume = coerceNumber(firstPresent(migrated.relative_volume, migrated.relativeVolume));
   migrated.atr_expansion = coerceNumber(firstPresent(migrated.atr_expansion, migrated.atrExpansion));
   migrated.days_to_expiration_at_entry = migrated.days_to_expiration_at_entry ?? (migrated.expiration_date ? daysUntilDate(migrated.signal_timestamp || migrated.createdAt, migrated.expiration_date) : null);
+  migrated.earnings_date = firstPresent(migrated.earnings_date, migrated.earningsDate, '');
+  migrated.days_until_earnings = migrated.days_until_earnings ?? migrated.daysUntilEarnings ?? null;
+  migrated.earnings_source = firstPresent(migrated.earnings_source, migrated.earningsSource, '');
 
   const trackingDefaults = defaultTrackingFields(firstPresent(migrated.tracking_started_at, migrated.signal_timestamp, migrated.createdAt, null));
   Object.entries(trackingDefaults).forEach(([key, value]) => {
@@ -7440,6 +7422,9 @@ function expectedMoveDiagnostics(entries = []) {
         setup => contractLifecycleState(setup)
       )
     : {};
+  const cardData = window.KairosCardData
+    ? window.KairosCardData.diagnostics([...scannerRows, ...scannerNearMiss])
+    : {};
   const missing = key => entries.filter(e => e[key] === null || e[key] === undefined || e[key] === '').length;
   const completedReason = reason => entries.filter(e => e.completion_reason === reason).length;
   const active = entries.filter(e => e.tracking_status !== 'completed').length;
@@ -7479,6 +7464,7 @@ function expectedMoveDiagnostics(entries = []) {
       missingDirectionForContract: contractGuidance.missing_direction_count || 0,
     },
     contractGuidance,
+    cardData,
     groups,
     samples,
     completedSamples,
@@ -7537,6 +7523,17 @@ function renderExpectedMoveDiagnostics(entries = []) {
     <div class="analytics-empty" style="margin:10px 0;text-align:left;">
       Contract guidance diagnostics · strike increments: ${escapeHtml(Object.entries(diag.contractGuidance.estimated_strike_increment_used || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '—')}
       · live failure reasons: ${escapeHtml(Object.entries(diag.contractGuidance.live_failure_reasons || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '—')}
+    </div>
+    <div class="analytics-empty" style="margin:10px 0;text-align:left;">
+      Card data diagnostics · earnings started ${escapeHtml(String(diag.cardData.earnings_requests_started || 0))}
+      · resolved ${escapeHtml(String(diag.cardData.earnings_requests_resolved || 0))}
+      · unavailable ${escapeHtml(String(diag.cardData.earnings_unavailable || 0))}
+      · failed ${escapeHtml(String(diag.cardData.earnings_failed || 0))}
+      · stuck ${escapeHtml(String(diag.cardData.earnings_stuck_beyond_timeout || 0))}
+      · TP1 ${escapeHtml(String(diag.cardData.cards_with_tp1 || 0))}
+      · TP2 ${escapeHtml(String(diag.cardData.cards_with_tp2 || 0))}
+      · TP3 ${escapeHtml(String(diag.cardData.cards_with_tp3 || 0))}
+      · target warnings ${escapeHtml(String(diag.cardData.target_ordering_warnings || 0))}
     </div>
     ${renderExpectedMoveLearningGroups(diag.groups)}
     ${renderExpectedMoveCompletedSamples(diag.completedSamples)}`;
@@ -7841,7 +7838,7 @@ function renderAnalytics() {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult','setup_id','option_type','strike_price','expiration_date','days_to_expiration_at_entry','premium_paid','breakeven_price','option_bid_at_entry','option_ask_at_entry','option_spread_at_entry','open_interest_at_entry','option_volume_at_entry','implied_volatility_at_entry','underlying_price_at_entry','potential_option_type','potential_strike','potential_expiration_min_dte','potential_expiration_max_dte','contract_guidance_source','potential_strike_increment','potential_strike_increment_source','setup_grade_snapshot','scanner_status_snapshot','confirmation_status','scanner_timeframe','signal_timestamp','signal_market_date','underlying_price_at_signal','entry_price_snapshot','stop_price_snapshot','target_price_snapshot','atr_at_signal','target_distance','target_distance_atr','trend_state','relative_volume_snapshot','atr_expansion_snapshot','tracking_status','trade_progress_status','tracking_started_at','tracking_completed_at','completion_reason','highest_price_reached','lowest_price_reached','first_entry_touch_at','first_target_touch_at','first_stop_touch_at','trading_days_elapsed','trading_days_to_entry','trading_days_to_target','trading_days_to_stop','bars_elapsed','last_tracking_bar_time','bars_to_entry','bars_to_target','bars_to_stop','final_trading_days','final_bar_count','maximum_favorable_excursion','maximum_adverse_excursion','maximum_favorable_excursion_percent','maximum_adverse_excursion_percent','maximum_favorable_excursion_atr','maximum_adverse_excursion_atr','maximum_favorable_excursion_r','maximum_adverse_excursion_r','reached_0_5r','reached_1r','reached_2r','time_to_0_5r','time_to_1r','time_to_2r'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult','setup_id','option_type','strike_price','expiration_date','days_to_expiration_at_entry','premium_paid','breakeven_price','option_bid_at_entry','option_ask_at_entry','option_spread_at_entry','open_interest_at_entry','option_volume_at_entry','implied_volatility_at_entry','underlying_price_at_entry','potential_option_type','potential_strike','potential_expiration_min_dte','potential_expiration_max_dte','contract_guidance_source','potential_strike_increment','potential_strike_increment_source','setup_grade_snapshot','scanner_status_snapshot','confirmation_status','scanner_timeframe','signal_timestamp','signal_market_date','underlying_price_at_signal','entry_price_snapshot','stop_price_snapshot','target_price_snapshot','atr_at_signal','target_distance','target_distance_atr','trend_state','relative_volume_snapshot','atr_expansion_snapshot','earnings_date','days_until_earnings','earnings_source','tracking_status','trade_progress_status','tracking_started_at','tracking_completed_at','completion_reason','highest_price_reached','lowest_price_reached','first_entry_touch_at','first_target_touch_at','first_stop_touch_at','trading_days_elapsed','trading_days_to_entry','trading_days_to_target','trading_days_to_stop','bars_elapsed','last_tracking_bar_time','bars_to_entry','bars_to_target','bars_to_stop','final_trading_days','final_bar_count','maximum_favorable_excursion','maximum_adverse_excursion','maximum_favorable_excursion_percent','maximum_adverse_excursion_percent','maximum_favorable_excursion_atr','maximum_adverse_excursion_atr','maximum_favorable_excursion_r','maximum_adverse_excursion_r','reached_0_5r','reached_1r','reached_2r','time_to_0_5r','time_to_1r','time_to_2r'];
   const rows = entries.map(e => [
     e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', `"${e.trend || ''}"`, `"${e.setupTf || ''}"`, `"${e.phase || ''}"`, `"${e.setupStatus || ''}"`, `"${e.entryStatus || ''}"`, e.setupGrade || '', `"${e.setupGradeReason || ''}"`, e.confirmationStarted ? 'Yes' : 'No', `"${e.confirmationReason || ''}"`, e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
@@ -7851,7 +7848,7 @@ function exportCSV() {
     checklistComplete(e) ? 'Yes' : 'No', e.beforeShot ? 'Yes' : 'No', e.afterShot ? 'Yes' : 'No',
     e.directionCorrect || 'Pending', e.entryQuality || 'Pending', e.reviewResult || 'Pending', `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
     e.setup_id || '', e.option_type || '', e.strike_price ?? '', e.expiration_date || '', e.days_to_expiration_at_entry ?? '', e.premium_paid ?? '', e.breakeven_price ?? '', e.option_bid_at_entry ?? '', e.option_ask_at_entry ?? '', e.option_spread_at_entry ?? '', e.open_interest_at_entry ?? '', e.option_volume_at_entry ?? '', e.implied_volatility_at_entry ?? '', e.underlying_price_at_entry ?? '', e.potential_option_type || '', e.potential_strike ?? '', e.potential_expiration_min_dte ?? '', e.potential_expiration_max_dte ?? '', e.contract_guidance_source || '', e.potential_strike_increment ?? '', e.potential_strike_increment_source || '',
-    e.setup_grade || '', e.scanner_status || '', e.confirmation_status || '', e.scanner_timeframe || '', e.signal_timestamp || '', e.signal_market_date || '', e.underlying_price_at_signal ?? '', e.entry_price ?? '', e.stop_price ?? '', e.target_price ?? '', e.atr_at_signal ?? '', e.target_distance ?? '', e.target_distance_atr ?? '', `"${e.trend_state || ''}"`, e.relative_volume ?? '', e.atr_expansion ?? '',
+    e.setup_grade || '', e.scanner_status || '', e.confirmation_status || '', e.scanner_timeframe || '', e.signal_timestamp || '', e.signal_market_date || '', e.underlying_price_at_signal ?? '', e.entry_price ?? '', e.stop_price ?? '', e.target_price ?? '', e.atr_at_signal ?? '', e.target_distance ?? '', e.target_distance_atr ?? '', `"${e.trend_state || ''}"`, e.relative_volume ?? '', e.atr_expansion ?? '', e.earnings_date || '', e.days_until_earnings ?? '', e.earnings_source || '',
     e.tracking_status || '', e.trade_progress_status || '', e.tracking_started_at || '', e.tracking_completed_at || '', e.completion_reason || '', e.highest_price_reached ?? '', e.lowest_price_reached ?? '', e.first_entry_touch_at || '', e.first_target_touch_at || '', e.first_stop_touch_at || '', e.trading_days_elapsed ?? '', e.trading_days_to_entry ?? '', e.trading_days_to_target ?? '', e.trading_days_to_stop ?? '', e.bars_elapsed ?? '', e.last_tracking_bar_time || '', e.bars_to_entry ?? '', e.bars_to_target ?? '', e.bars_to_stop ?? '', e.final_trading_days ?? '', e.final_bar_count ?? '', e.maximum_favorable_excursion ?? '', e.maximum_adverse_excursion ?? '', e.maximum_favorable_excursion_percent ?? '', e.maximum_adverse_excursion_percent ?? '', e.maximum_favorable_excursion_atr ?? '', e.maximum_adverse_excursion_atr ?? '', e.maximum_favorable_excursion_r ?? '', e.maximum_adverse_excursion_r ?? '', e.reached_0_5r ? 'Yes' : 'No', e.reached_1r ? 'Yes' : 'No', e.reached_2r ? 'Yes' : 'No', e.time_to_0_5r ?? '', e.time_to_1r ?? '', e.time_to_2r ?? '',
   ]);
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');

@@ -24,9 +24,9 @@ assert.strictEqual(rows.find(row => row.label === 'Planned Entry').value, 70);
 assert.notStrictEqual(guidance.currentPrice(setup()), guidance.plannedEntry(setup()));
 
 const multiTargetRows = guidance.executionPlanRows(setup({ tp1: 65, tp3: 60 }));
-assert.deepStrictEqual(multiTargetRows.map(row => row.label), ['Current Price', 'Planned Entry', 'Stop', 'TP1', 'Final Target']);
+assert.deepStrictEqual(multiTargetRows.map(row => row.label), ['Current Price', 'Planned Entry', 'Stop', 'TP1', 'TP3']);
 assert.strictEqual(multiTargetRows.find(row => row.label === 'TP1').value, 65);
-assert.strictEqual(multiTargetRows.find(row => row.label === 'Final Target').value, 60);
+assert.strictEqual(multiTargetRows.find(row => row.label === 'TP3').value, 60);
 
 // Almost Ready is not setup-confirmed; it waits for confirmation, not entry fill.
 const almostReady = guidance.nextStep(setup(), { bucket: 'ALMOST_READY' }, 'pending');

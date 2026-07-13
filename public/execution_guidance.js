@@ -237,13 +237,24 @@
 
   function executionPlanRows(setup = {}) {
     const tp1 = finiteNumber(setup.tp1 ?? setup.target ?? setup.target_price);
-    const finalTarget = finiteNumber(setup.final_target ?? setup.finalTarget ?? setup.tp3 ?? setup.tp2);
-    const targetRows = finalTarget !== null && tp1 !== null && finalTarget !== tp1
-      ? [
-          { label: 'TP1', value: tp1, key: 'tp1' },
-          { label: 'Final Target', value: finalTarget, key: 'final-target' },
-        ]
-      : [{ label: 'Target', value: tp1, key: 'target' }];
+    const tp2 = finiteNumber(setup.tp2 ?? setup.target2 ?? setup.target_2);
+    const tp3 = finiteNumber(setup.tp3 ?? setup.target3 ?? setup.target_3);
+    const finalTarget = finiteNumber(setup.final_target ?? setup.finalTarget ?? setup.finalTargetPrice);
+    const targetRows = [];
+    const pushDistinct = (label, value, key) => {
+      if (value === null) return;
+      if (targetRows.some(row => Math.abs(Number(row.value) - Number(value)) < 0.000001)) return;
+      targetRows.push({ label, value, key });
+    };
+    if (tp2 === null && tp3 === null && finalTarget === null) {
+      pushDistinct('Target', tp1, 'target');
+    } else {
+      pushDistinct('TP1', tp1, 'tp1');
+      pushDistinct('TP2', tp2, 'tp2');
+      pushDistinct('TP3', tp3, 'tp3');
+      if (tp2 === null && tp3 === null) pushDistinct('Final Target', finalTarget, 'final-target');
+      else pushDistinct('Final Target', finalTarget, 'final-target');
+    }
     return [
       { label: 'Current Price', value: currentPrice(setup), key: 'current-price' },
       { label: 'Planned Entry', value: plannedEntry(setup), key: 'planned-entry' },

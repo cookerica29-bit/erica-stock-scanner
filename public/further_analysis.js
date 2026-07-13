@@ -105,11 +105,14 @@
   }
 
   function keyLevels(setup = {}) {
+    const targetRows = typeof self !== 'undefined' && self.KairosCardData
+      ? self.KairosCardData.targetRows(setup)
+      : localTargetRows(setup);
     const levels = [
       ['Current Price', firstPresent(setup.price, setup.current_price, setup.underlying_price)],
       ['Entry', firstPresent(setup.entry, setup.entry_price)],
       ['Stop', firstPresent(setup.sl, setup.stop, setup.stop_price)],
-      ['Target', firstPresent(setup.tp1, setup.target, setup.target_price)],
+      ...targetRows.map(row => [row.label, row.value]),
       ['Risk/Reward', firstPresent(setup.rr, setup.riskReward, setup.reward_risk)],
       ['Nearest Resistance', firstPresent(setup.nearestResistance, setup.resistance, setup.supply)],
       ['Nearest Support', firstPresent(setup.nearestSupport, setup.support, setup.demand)],
@@ -119,6 +122,29 @@
     return levels
       .map(([label, value]) => ({ label, value }))
       .filter(row => row.value !== undefined && row.value !== null && row.value !== '' && row.value !== 0);
+  }
+
+  function localTargetRows(setup = {}) {
+    const rows = [];
+    const pushDistinct = (label, value) => {
+      const numeric = finiteNumber(value);
+      if (numeric === null) return;
+      if (rows.some(row => Math.abs(Number(row.value) - numeric) < 0.000001)) return;
+      rows.push({ label, value: numeric });
+    };
+    const tp1 = finiteNumber(firstPresent(setup.tp1, setup.target, setup.target_price));
+    const tp2 = finiteNumber(firstPresent(setup.tp2, setup.target2, setup.target_2));
+    const tp3 = finiteNumber(firstPresent(setup.tp3, setup.target3, setup.target_3));
+    const finalTarget = finiteNumber(firstPresent(setup.final_target, setup.finalTarget, setup.finalTargetPrice));
+    if (tp2 === null && tp3 === null && finalTarget === null) {
+      pushDistinct('Target', tp1);
+    } else {
+      pushDistinct('TP1', tp1);
+      pushDistinct('TP2', tp2);
+      pushDistinct('TP3', tp3);
+      pushDistinct('Final Target', finalTarget);
+    }
+    return rows;
   }
 
   function optionContract(setup = {}) {

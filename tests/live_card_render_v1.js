@@ -3,6 +3,7 @@ const fs = require('fs');
 const vm = require('vm');
 const executionGuidance = require('../public/execution_guidance.js');
 const contractGuidance = require('../public/contract_guidance.js');
+const cardData = require('../public/card_data.js');
 
 const html = fs.readFileSync('public/index.html', 'utf8');
 const inline = [...html.matchAll(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/gi)][0][1];
@@ -60,6 +61,7 @@ const context = {
 context.window = {
   KairosExecutionGuidance: executionGuidance,
   KairosContractGuidance: contractGuidance,
+  KairosCardData: cardData,
   open: () => {},
   addEventListener: () => {},
   removeEventListener: () => {},
@@ -130,5 +132,57 @@ const building = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIS
 assert.ok(building.includes('data-normalized-status="BUILDING"'));
 assert.ok(building.includes('execute-not-ready'));
 assert.ok(building.includes('Continue monitoring. The setup is still developing.'));
+
+const loadingEarnings = htmlFor(setup({ earnings: { status: 'loading', started_at: new Date().toISOString() } }));
+assert.ok(loadingEarnings.includes('Loading...'));
+const datedEarnings = htmlFor(setup({
+  earnings: { status: 'loaded', loaded: true, date: '2026-07-30', days_until: 17, source: 'cache' },
+}));
+assert.ok(datedEarnings.includes('Jul 30'));
+assert.ok(datedEarnings.includes('17 days away'));
+assert.ok(datedEarnings.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
+
+const topLevelEarnings = htmlFor(setup({ earningsDate: '2026-08-04', daysUntilEarnings: 22 }));
+assert.ok(topLevelEarnings.includes('Aug 4'));
+assert.ok(topLevelEarnings.includes('22 days away'));
+
+const unavailableEarnings = htmlFor(setup({ earnings: { status: 'unavailable', loaded: true, date: null } }));
+assert.ok(unavailableEarnings.includes('Earnings'));
+assert.ok(unavailableEarnings.includes('Unavailable'));
+assert.ok(!unavailableEarnings.includes('Loading...'));
+
+const failedEarnings = htmlFor(setup({ earnings: { status: 'failed', error: 'provider timeout' } }));
+assert.ok(failedEarnings.includes('Data unavailable'));
+assert.ok(!failedEarnings.includes('Loading...'));
+
+const singleTarget = htmlFor(setup({ tp1: 44, tp2: null, tp3: null, final_target: null }));
+assert.ok(singleTarget.includes('<span>Target</span><span>$44.00</span>'));
+assert.ok(!singleTarget.includes('<span>TP2</span>'));
+assert.ok(!singleTarget.includes('<span>TP3</span>'));
+
+const threeTargets = htmlFor(setup({ tp1: 45, tp2: 44, tp3: 43 }));
+assert.ok(threeTargets.includes('<span>TP1</span><span>$45.00</span>'));
+assert.ok(threeTargets.includes('<span>TP2</span><span>$44.00</span>'));
+assert.ok(threeTargets.includes('<span>TP3</span><span>$43.00</span>'));
+assert.ok(!threeTargets.includes('<span>Final Target</span><span>$43.00</span>'));
+
+const finalTarget = htmlFor(setup({ tp1: 45, tp2: null, tp3: null, final_target: 42 }));
+assert.ok(finalTarget.includes('<span>TP1</span><span>$45.00</span>'));
+assert.ok(finalTarget.includes('<span>Final Target</span><span>$42.00</span>'));
+
+const duplicateTargets = htmlFor(setup({ tp1: 44, tp2: 44, tp3: 43, final_target: 43 }));
+assert.strictEqual((duplicateTargets.match(/<span>TP2<\/span>/g) || []).length, 0);
+assert.strictEqual((duplicateTargets.match(/<span>Final Target<\/span>/g) || []).length, 0);
+assert.ok(duplicateTargets.includes('<span>TP3</span><span>$43.00</span>'));
+
+const snapshot = context.scannerSnapshotFromSetup(setup({
+  tp1: 45,
+  tp2: 44,
+  tp3: 43,
+  earnings: { loaded: true, date: '2026-07-30', days_until: 17, source: 'cache' },
+}), { trade_stage: 'A+ READY' });
+assert.strictEqual(snapshot.earnings_date, '2026-07-30');
+assert.strictEqual(snapshot.days_until_earnings, 17);
+assert.strictEqual(snapshot.earnings_source, 'cache');
 
 console.log('Live card render v1 tests passed');
