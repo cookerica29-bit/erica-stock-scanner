@@ -2583,6 +2583,7 @@
 <script src="/static/card_data.js?v=20260713-card-data"></script>
 <script src="/static/further_analysis.js?v=20260713-card-data"></script>
 <script src="/static/setup_funnel_diagnostics.js?v=20260713-card-data"></script>
+<script src="/static/stock_alerts.js?v=20260714-alerts"></script>
 <script src="/static/execution_guidance.js?v=20260713-card-data"></script>
 <script src="/static/contract_guidance.js?v=20260713-card-data"></script>
 <script>
@@ -2592,6 +2593,11 @@ const JOURNAL_DUPLICATE_PREVENTION_KEY = 'stock_scanner_journal_duplicate_preven
 const EXPECTED_MOVE_TRACKING_WINDOW_DAYS = 30;
 const VIDEO_PROJECTS_KEY = 'stock_scanner_video_projects';
 const STAGE_CACHE_KEY = 'scanner_stage_cache';
+const STOCK_ALERT_STATUS_KEY = 'kairos_stock_alert_status_v1';
+const STOCK_ALERT_SENT_KEY = 'kairos_stock_alert_sent_v1';
+const STOCK_ALERT_ENTER_NOW_KEY = 'kairos_stock_alert_enter_now_transition_v1';
+const STOCK_ALERT_ENTRY_TOUCH_KEY = 'kairos_stock_alert_entry_touch_v1';
+const STOCK_ALERT_DIAGNOSTICS_KEY = 'kairos_stock_alert_diagnostics_v1';
 const FURTHER_ANALYSIS_SELECTED_KEY = 'kairos_further_analysis_selected_setup';
 const ENTER_NOW_FUNNEL_HISTORY_LIMIT = 20;
 let scannerRows = [];
@@ -2629,6 +2635,24 @@ let previousTradeStages = (() => {
   } catch { return new Map(); }
 })();
 let aPlusReadyAlerts = new Set();
+let stockAlertStatuses = (() => {
+  try {
+    const saved = localStorage.getItem(STOCK_ALERT_STATUS_KEY);
+    return saved ? JSON.parse(saved) : {};
+  } catch { return {}; }
+})();
+let stockAlertEnterNowTransitions = (() => {
+  try {
+    const saved = localStorage.getItem(STOCK_ALERT_ENTER_NOW_KEY);
+    return saved ? JSON.parse(saved) : {};
+  } catch { return {}; }
+})();
+let stockAlertEntryTouches = (() => {
+  try {
+    const saved = localStorage.getItem(STOCK_ALERT_ENTRY_TOUCH_KEY);
+    return saved ? JSON.parse(saved) : {};
+  } catch { return {}; }
+})();
 let toastTimer = null;
 let contractRefreshTimer = null;
 let contractRefreshAttempts = 0;
@@ -2903,9 +2927,9 @@ async function runScan() {
 
     const nextRows = data.rows || [];
     const nextNearMiss = data.near_miss || [];
-    const alerts = detectAPlusReadyTransitions([...nextRows, ...nextNearMiss]);
-    aPlusReadyAlerts = new Set(alerts.map(a => a.ticker));
-    alerts.forEach(handleAPlusReadyAlert);
+    const stockAlerts = detectStockAlertEvents([...nextRows, ...nextNearMiss], scanMeta || {});
+    aPlusReadyAlerts = new Set(stockAlerts.filter(a => a.type === 'ENTER_NOW').map(a => a.setup?.ticker));
+    stockAlerts.forEach(deliverStockAlertEvent);
 
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
@@ -3083,6 +3107,113 @@ function detectAPlusReadyTransitions(setups) {
     localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify([...nextStages]));
   } catch {}
   return alerts;
+}
+
+function loadStockAlertSentKeys() {
+  try {
+    const saved = localStorage.getItem(STOCK_ALERT_SENT_KEY);
+    return new Set(saved ? JSON.parse(saved) : []);
+  } catch { return new Set(); }
+}
+
+function saveStockAlertSentKeys(keys) {
+  try {
+    localStorage.setItem(STOCK_ALERT_SENT_KEY, JSON.stringify([...keys].slice(-500)));
+  } catch {}
+}
+
+function stockAlertDiagnostics() {
+  const defaults = window.KairosStockAlerts?.defaultDiagnostics ? window.KairosStockAlerts.defaultDiagnostics() : {};
+  try {
+    return { ...defaults, ...(JSON.parse(localStorage.getItem(STOCK_ALERT_DIAGNOSTICS_KEY) || '{}')) };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveStockAlertDiagnostics(diag) {
+  try {
+    localStorage.setItem(STOCK_ALERT_DIAGNOSTICS_KEY, JSON.stringify(diag));
+  } catch {}
+}
+
+function bumpStockAlertDiagnostic(key, amount = 1) {
+  const diag = stockAlertDiagnostics();
+  diag[key] = (Number(diag[key]) || 0) + amount;
+  saveStockAlertDiagnostics(diag);
+  return diag;
+}
+
+function markStockAlertDeliveryFailure(error) {
+  const diag = bumpStockAlertDiagnostic('delivery_failures');
+  diag.last_delivery_error = String(error?.message || error || 'Unknown delivery failure').slice(0, 160);
+  saveStockAlertDiagnostics(diag);
+}
+
+function contractStateForAlert(setup) {
+  if (!window.KairosContractGuidance) return {};
+  return window.KairosContractGuidance.guidanceState(
+    setup,
+    contractLifecycleState(setup),
+    expectedMoveReadinessForSetup(setup)
+  );
+}
+
+function detectStockAlertEvents(setups = [], meta = {}) {
+  if (!window.KairosStockAlerts) return [];
+  const sent = loadStockAlertSentKeys();
+  const now = meta.generated_at || new Date().toISOString();
+  const { events, nextStatuses } = window.KairosStockAlerts.detectSetupEvents(setups, stockAlertStatuses, sent, {
+    now,
+    readinessResolver: setupProgressState,
+    executionStateResolver: setup => window.KairosExecutionGuidance?.executionState
+      ? window.KairosExecutionGuidance.executionState(setup, setupProgressState(setup))
+      : '',
+    contractStateResolver: contractStateForAlert,
+    entryReachedTimestampResolver: setup => {
+      const id = window.KairosStockAlerts.setupIdentity(setup);
+      if (!stockAlertEntryTouches[id]) {
+        stockAlertEntryTouches[id] = now;
+        try { localStorage.setItem(STOCK_ALERT_ENTRY_TOUCH_KEY, JSON.stringify(stockAlertEntryTouches)); } catch {}
+      }
+      return stockAlertEntryTouches[id];
+    },
+  });
+  stockAlertStatuses = nextStatuses;
+  try { localStorage.setItem(STOCK_ALERT_STATUS_KEY, JSON.stringify(stockAlertStatuses)); } catch {}
+  events.forEach(event => {
+    if (event.type === 'ENTER_NOW') {
+      const id = window.KairosStockAlerts.setupIdentity(event.setup);
+      stockAlertEnterNowTransitions[id] = stockAlertEnterNowTransitions[id] || now;
+      try { localStorage.setItem(STOCK_ALERT_ENTER_NOW_KEY, JSON.stringify(stockAlertEnterNowTransitions)); } catch {}
+      event.enter_now_transition_at = stockAlertEnterNowTransitions[id];
+      bumpStockAlertDiagnostic('enter_now_transitions_detected');
+    }
+  });
+  return events;
+}
+
+function deliverStockAlertEvent(event) {
+  if (!event || !window.KairosStockAlerts) return;
+  const sent = loadStockAlertSentKeys();
+  if (sent.has(event.key)) {
+    bumpStockAlertDiagnostic('duplicates_suppressed');
+    return;
+  }
+  try {
+    const ticker = event.setup?.ticker || 'UNKNOWN';
+    const alertType = event.type === 'TP1' ? 'TP1' : event.type === 'ENTRY_REACHED' ? 'ENTRY_REACHED' : 'ENTER_NOW';
+    playAlertSound(alertType === 'TP1' ? 'ENTER_NOW' : alertType);
+    showToast(event.message || `${ticker} alert`);
+    maybeSendBrowserNotification(ticker, event.message || `${ticker} alert`, alertType);
+    sent.add(event.key);
+    saveStockAlertSentKeys(sent);
+    if (event.type === 'ENTER_NOW') bumpStockAlertDiagnostic('enter_now_alerts_sent');
+    if (event.type === 'ENTRY_REACHED') bumpStockAlertDiagnostic('entry_reached_alerts_sent');
+    if (event.type === 'TP1') bumpStockAlertDiagnostic('tp1_alerts_sent');
+  } catch (error) {
+    markStockAlertDeliveryFailure(error);
+  }
 }
 
 function playAlertSound(type) {
@@ -3317,11 +3448,16 @@ async function loadCacheStatus() {
 function maybeSendBrowserNotification(ticker, message, alertType = 'ENTER_NOW') {
   if (!('Notification' in window)) return;
 
-  const isEnterNow = alertType === 'ENTER_NOW';
-  const title = isEnterNow ? `🟢 ${ticker} ENTER NOW` : `🟣 ${ticker} ALMOST READY`;
+  const titles = {
+    ENTER_NOW: `🟢 ${ticker} SETUP CONFIRMED`,
+    ENTRY_REACHED: `🎯 ${ticker} ENTRY REACHED`,
+    TP1: `💰 ${ticker} TP1 REACHED`,
+    ALMOST_READY: `🟣 ${ticker} ALMOST READY`,
+  };
+  const title = titles[alertType] || titles.ENTER_NOW;
   const show = () => new Notification(title, {
     body: message,
-    tag: `stage-alert-${ticker}`,
+    tag: `kairos-stock-alert-${alertType}-${ticker}`,
     renotify: true,
   });
 
@@ -4937,6 +5073,10 @@ function defaultTrackingFields(startedAt = null) {
     first_entry_touch_at: null,
     first_target_touch_at: null,
     first_stop_touch_at: null,
+    enter_now_transition_at: null,
+    entry_reached_at: null,
+    tp1_reached_at: null,
+    tp1_alert_sent_at: null,
     highest_price_reached: null,
     lowest_price_reached: null,
     trading_days_to_entry: null,
@@ -5448,6 +5588,7 @@ function updateTrackedSetupWithObservation(entry = {}, obs = {}) {
   updated.tracking_started_at = firstPresent(updated.tracking_started_at, updated.signal_timestamp, updated.createdAt, obsTime);
   if (!updated.first_entry_touch_at && hasEntryTouched(updated, obs)) {
     updated.first_entry_touch_at = obsTime;
+    updated.entry_reached_at = updated.entry_reached_at || obsTime;
   }
   mergeExcursionMeasurements(updated, obs);
   markRMilestone(updated, 0.5, 'reached_0_5r', 'time_to_0_5r', obsTime);
@@ -5459,7 +5600,10 @@ function updateTrackedSetupWithObservation(entry = {}, obs = {}) {
   const stop = coerceNumber(firstPresent(updated.stop_price, updated.plannedStop));
   if (updated.first_entry_touch_at && target != null) {
     const targetTouched = direction === 'SHORT' ? obs.low <= target : obs.high >= target;
-    if (targetTouched && !updated.first_target_touch_at) updated.first_target_touch_at = obsTime;
+    if (targetTouched && !updated.first_target_touch_at) {
+      updated.first_target_touch_at = obsTime;
+      updated.tp1_reached_at = updated.tp1_reached_at || obsTime;
+    }
   }
   if (updated.first_entry_touch_at && stop != null) {
     const stopTouched = direction === 'SHORT' ? obs.high >= stop : obs.low <= stop;
@@ -5495,9 +5639,31 @@ function refreshExpectedMoveTrackingFromRows(rows = []) {
       return entry;
     }
     const updated = updateTrackedSetupWithObservation(entry, obs);
+    if (!entry.first_target_touch_at && updated.first_target_touch_at && window.KairosStockAlerts) {
+      updated.tp1_reached_at = updated.tp1_reached_at || updated.first_target_touch_at;
+      const key = window.KairosStockAlerts.tp1Key(updated, updated.tp1_reached_at);
+      const sent = loadStockAlertSentKeys();
+      bumpStockAlertDiagnostic('tp1_touches_detected');
+      if (!sent.has(key)) {
+        const event = {
+          type: 'TP1',
+          key,
+          setup: updated,
+          message: window.KairosStockAlerts.tp1Message(updated, obs),
+        };
+        deliverStockAlertEvent(event);
+        updated.tp1_alert_sent_at = updated.tp1_alert_sent_at || new Date().toISOString();
+      } else {
+        bumpStockAlertDiagnostic('duplicates_suppressed');
+      }
+    }
     if (JSON.stringify(updated) !== JSON.stringify(entry)) updatedCount += 1;
     return updated;
   });
+  const activeWithoutTp1 = nextEntries.filter(entry => isActiveTrackedSetup(entry) && !entry.first_target_touch_at).length;
+  const diag = stockAlertDiagnostics();
+  diag.active_tracked_positions_without_tp1 = activeWithoutTp1;
+  saveStockAlertDiagnostics(diag);
   if (updatedCount > 0) {
     localStorage.setItem(JOURNAL_KEY, JSON.stringify(nextEntries));
     renderJournal();
@@ -7473,6 +7639,7 @@ function expectedMoveDiagnostics(entries = []) {
 
 function renderExpectedMoveDiagnostics(entries = []) {
   const diag = expectedMoveDiagnostics(entries);
+  const alertDiag = stockAlertDiagnostics();
   const cards = [
     ['Tracked Setups', diag.counts.totalTracked],
     ['Active', diag.counts.active],
@@ -7534,6 +7701,17 @@ function renderExpectedMoveDiagnostics(entries = []) {
       · TP2 ${escapeHtml(String(diag.cardData.cards_with_tp2 || 0))}
       · TP3 ${escapeHtml(String(diag.cardData.cards_with_tp3 || 0))}
       · target warnings ${escapeHtml(String(diag.cardData.target_ordering_warnings || 0))}
+    </div>
+    <div class="analytics-empty" style="margin:10px 0;text-align:left;">
+      Alert diagnostics · Enter Now transitions ${escapeHtml(String(alertDiag.enter_now_transitions_detected || 0))}
+      · Enter Now sent ${escapeHtml(String(alertDiag.enter_now_alerts_sent || 0))}
+      · Entry Reached sent ${escapeHtml(String(alertDiag.entry_reached_alerts_sent || 0))}
+      · TP1 touches ${escapeHtml(String(alertDiag.tp1_touches_detected || 0))}
+      · TP1 sent ${escapeHtml(String(alertDiag.tp1_alerts_sent || 0))}
+      · duplicates ${escapeHtml(String(alertDiag.duplicates_suppressed || 0))}
+      · failures ${escapeHtml(String(alertDiag.delivery_failures || 0))}
+      · active without TP1 ${escapeHtml(String(alertDiag.active_tracked_positions_without_tp1 || 0))}
+      ${alertDiag.last_delivery_error ? `· last error ${escapeHtml(alertDiag.last_delivery_error)}` : ''}
     </div>
     ${renderExpectedMoveLearningGroups(diag.groups)}
     ${renderExpectedMoveCompletedSamples(diag.completedSamples)}`;

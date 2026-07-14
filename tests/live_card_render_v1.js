@@ -188,4 +188,26 @@ assert.strictEqual(snapshot.earnings_date, '2026-07-30');
 assert.strictEqual(snapshot.days_until_earnings, 17);
 assert.strictEqual(snapshot.earnings_source, 'cache');
 
+const tracked = context.updateTrackedSetupWithObservation({
+  ticker: 'ATO',
+  direction: 'SHORT',
+  tracking_status: 'active',
+  tracking_started_at: '2026-07-14T13:30:00Z',
+  entry_price: 179.2,
+  stop_price: 181,
+  target_price: 176.15,
+  plannedTp1: 176.15,
+}, {
+  observed_at: '2026-07-14T18:30:00Z',
+  bar_time: '2026-07-14T18:30:00Z',
+  price: 176.08,
+  high: 179.25,
+  low: 176.08,
+});
+assert.strictEqual(tracked.first_entry_touch_at, '2026-07-14T18:30:00Z');
+assert.strictEqual(tracked.entry_reached_at, '2026-07-14T18:30:00Z');
+assert.strictEqual(tracked.first_target_touch_at, '2026-07-14T18:30:00Z');
+assert.strictEqual(tracked.tp1_reached_at, '2026-07-14T18:30:00Z');
+assert.strictEqual(tracked.completion_reason, 'target');
+
 console.log('Live card render v1 tests passed');
