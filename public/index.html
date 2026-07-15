@@ -1109,6 +1109,7 @@
     #terms-panel,
     #trends-panel,
     #analytics-panel,
+    #diagnostics-panel,
     #further-panel,
     #video-panel {
       max-width: 100%;
@@ -1262,6 +1263,7 @@
     #terms-panel,
     #trends-panel,
     #analytics-panel,
+    #diagnostics-panel,
     #further-panel,
     #video-panel {
       padding-left: 10px;
@@ -1601,6 +1603,7 @@
 
   /* ── Analytics panel ──────────────────────────────────────────────────── */
   #analytics-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  #diagnostics-panel { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
   .analytics-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -1638,6 +1641,58 @@
   }
   .analytics-table tr:last-child td { border-bottom: none; }
   .analytics-empty { color: var(--muted); padding: 32px 0; text-align: center; }
+  .analytics-collapse {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 16px;
+    overflow: hidden;
+  }
+  .analytics-collapse > summary {
+    align-items: center;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    font-size: 12px;
+    font-weight: 900;
+    justify-content: space-between;
+    letter-spacing: 0.06em;
+    list-style: none;
+    padding: 14px 16px;
+    text-transform: uppercase;
+    user-select: none;
+  }
+  .analytics-collapse > summary::-webkit-details-marker { display: none; }
+  .analytics-collapse > summary::after {
+    color: var(--muted);
+    content: '+';
+    font-size: 18px;
+    line-height: 1;
+  }
+  .analytics-collapse[open] > summary {
+    border-bottom: 1px solid var(--border);
+  }
+  .analytics-collapse[open] > summary::after { content: '−'; }
+  .analytics-collapse-body { padding: 14px 16px; overflow-x: auto; }
+  .analytics-subdetails {
+    border: 1px solid rgba(42,48,64,0.78);
+    border-radius: 8px;
+    margin: 10px 0;
+    overflow: hidden;
+  }
+  .analytics-subdetails > summary {
+    color: var(--text-soft);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 850;
+    list-style: none;
+    padding: 10px 12px;
+  }
+  .analytics-subdetails > summary::-webkit-details-marker { display: none; }
+  .analytics-subdetails > summary::after { content: ' ▾'; color: var(--muted); }
+  .analytics-subdetails[open] > summary::after { content: ' ▴'; }
+  .analytics-subdetails-body { padding: 0 12px 12px; overflow-x: auto; }
+  .analytics-summary-note { color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: -8px; padding: 0 0 12px; }
 
   /* ── Further Analysis panel ────────────────────────────────────────────── */
   #further-panel { padding: 20px 24px; max-width: 1320px; margin: 0 auto; }
@@ -1951,13 +2006,14 @@
 </header>
 
 <div class="tab-bar">
-  <button class="tab-btn active" onclick="switchTab('scanner')">Scanner</button>
-  <button class="tab-btn" onclick="switchTab('index')">Index Watchlist</button>
-  <button class="tab-btn" onclick="switchTab('execution')">Execution</button>
-  <button class="tab-btn" onclick="switchTab('further')">Further Analysis</button>
-  <button class="tab-btn" onclick="switchTab('journal')">Journal</button>
-  <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
-  <button class="tab-btn" onclick="switchTab('terms')">Terms</button>
+  <button class="tab-btn active" data-tab="scanner" onclick="switchTab('scanner')">Scanner</button>
+  <button class="tab-btn" data-tab="index" onclick="switchTab('index')">Index Watchlist</button>
+  <button class="tab-btn" data-tab="execution" onclick="switchTab('execution')">Execution</button>
+  <button class="tab-btn" data-tab="further" onclick="switchTab('further')">Further Analysis</button>
+  <button class="tab-btn" data-tab="journal" onclick="switchTab('journal')">Journal</button>
+  <button class="tab-btn" data-tab="analytics" onclick="switchTab('analytics')">Analytics</button>
+  <button class="tab-btn" data-tab="diagnostics" onclick="switchTab('diagnostics')">Diagnostics</button>
+  <button class="tab-btn" data-tab="terms" onclick="switchTab('terms')">Terms</button>
 </div>
 
 <!-- ── Scanner Tab ───────────────────────────────────────────────────────── -->
@@ -2152,6 +2208,8 @@
 <!-- ── Analytics Tab ─────────────────────────────────────────────────────── -->
 <div id="analytics-panel" class="tab-panel">
   <div class="journal-stats" id="analyticsStats"></div>
+  <div class="analytics-card" id="opportunityAnalyticsSummary"></div>
+  <div class="analytics-grid" id="analyticsTraderSummary"></div>
   <div class="analytics-grid">
     <div class="analytics-card">
       <h3>By Entry Status</h3>
@@ -2178,18 +2236,26 @@
       <div id="analyticsByPhase"></div>
     </div>
   </div>
-  <div class="analytics-card" style="margin-top:16px;">
-    <h3>Expected Move Data Diagnostics</h3>
-    <div id="expectedMoveDiagnostics"></div>
-  </div>
-  <div class="analytics-card" style="margin-top:16px;">
-    <h3>Opportunity Remaining Shadow Diagnostics</h3>
-    <div id="opportunityDiagnostics"></div>
-  </div>
-  <div class="analytics-card" style="margin-top:16px;">
-    <h3>Enter Now Funnel</h3>
-    <div id="enterNowFunnelDiagnostics"></div>
-  </div>
+</div>
+
+<!-- ── Diagnostics Tab ───────────────────────────────────────────────────── -->
+<div id="diagnostics-panel" class="tab-panel">
+  <details class="analytics-collapse">
+    <summary>Manage Opportunity History</summary>
+    <div class="analytics-collapse-body" id="opportunityHistoryImport"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Opportunity Remaining Shadow Diagnostics</summary>
+    <div class="analytics-collapse-body" id="opportunityDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Expected Move Data Diagnostics</summary>
+    <div class="analytics-collapse-body" id="expectedMoveDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Enter Now Funnel</summary>
+    <div class="analytics-collapse-body" id="enterNowFunnelDiagnostics"></div>
+  </details>
 </div>
 
 <!-- ── Video Studio Tab ──────────────────────────────────────────────────── -->
@@ -2584,6 +2650,7 @@
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="/static/expected_move_analytics.js?v=20260713-card-data"></script>
+<script src="/static/opportunity_history.js?v=20260715-history"></script>
 <script src="/static/opportunity_analytics.js?v=20260715-shadow"></script>
 <script src="/static/card_data.js?v=20260713-card-data"></script>
 <script src="/static/further_analysis.js?v=20260713-card-data"></script>
@@ -2594,6 +2661,7 @@
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
+const OPPORTUNITY_HISTORY_KEY = 'kairos_opportunity_history_v1';
 const JOURNAL_DUPLICATE_PREVENTION_KEY = 'stock_scanner_journal_duplicate_preventions';
 const EXPECTED_MOVE_TRACKING_WINDOW_DAYS = 30;
 const VIDEO_PROJECTS_KEY = 'stock_scanner_video_projects';
@@ -2833,24 +2901,29 @@ function toggleAutoScan() {
 // ── Tab switching ────────────────────────────────────────────────────────────
 
 function switchTab(tab) {
-  const tabs = ['scanner','index','execution','further','journal','analytics','terms'];
-  document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    b.classList.toggle('active', tabs[i] === tab);
+  document.querySelectorAll('.tab-btn').forEach(button => {
+    button.classList.toggle('active', button.dataset.tab === tab);
   });
-  document.getElementById('scanner-panel').classList.toggle('active', tab === 'scanner');
-  document.getElementById('index-panel').classList.toggle('active', tab === 'index');
-  document.getElementById('execution-panel').classList.toggle('active', tab === 'execution');
-  document.getElementById('further-panel').classList.toggle('active', tab === 'further');
+  const panels = {
+    scanner: 'scanner-panel',
+    index: 'index-panel',
+    execution: 'execution-panel',
+    further: 'further-panel',
+    journal: 'journal-panel',
+    analytics: 'analytics-panel',
+    diagnostics: 'diagnostics-panel',
+    terms: 'terms-panel',
+  };
+  Object.entries(panels).forEach(([name, id]) => {
+    document.getElementById(id)?.classList.toggle('active', name === tab);
+  });
   document.getElementById('trends-panel')?.classList.remove('active');
-  document.getElementById('journal-panel').classList.toggle('active', tab === 'journal');
-  document.getElementById('analytics-panel').classList.toggle('active', tab === 'analytics');
   document.getElementById('video-panel')?.classList.remove('active');
-  document.getElementById('terms-panel').classList.toggle('active', tab === 'terms');
   if (tab === 'index' && !indexWatchRows.length) loadIndexWatchlist();
   if (tab === 'execution') renderExecutionTab();
   if (tab === 'further') renderFurtherAnalysisTab();
   if (tab === 'journal') renderJournal();
-  if (tab === 'analytics') renderAnalytics();
+  if (tab === 'analytics' || tab === 'diagnostics') renderAnalytics();
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
@@ -7741,38 +7814,48 @@ function renderExpectedMoveDiagnostics(entries = []) {
     <div class="journal-stats" style="margin-bottom:12px;">
       ${cards.map(([label, value]) => `<div class="stat-card"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(String(value))}</div></div>`).join('')}
     </div>
-    <table class="analytics-table">
-      <thead>
-        <tr><th>Ticker</th><th>Direction</th><th>Grade</th><th>Signal Date</th><th>Entry Date</th><th>Completion</th><th>Days to Target/Stop</th><th>MFE R</th><th>MAE R</th><th>Target ATR</th></tr>
-      </thead>
-      <tbody>${sampleRows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No tracked setups yet.</td></tr>'}</tbody>
-    </table>
-    <div class="analytics-empty" style="margin:10px 0;text-align:left;">
-      Contract guidance diagnostics · strike increments: ${escapeHtml(Object.entries(diag.contractGuidance.estimated_strike_increment_used || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '—')}
-      · live failure reasons: ${escapeHtml(Object.entries(diag.contractGuidance.live_failure_reasons || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '—')}
-    </div>
-    <div class="analytics-empty" style="margin:10px 0;text-align:left;">
-      Card data diagnostics · earnings started ${escapeHtml(String(diag.cardData.earnings_requests_started || 0))}
-      · resolved ${escapeHtml(String(diag.cardData.earnings_requests_resolved || 0))}
-      · unavailable ${escapeHtml(String(diag.cardData.earnings_unavailable || 0))}
-      · failed ${escapeHtml(String(diag.cardData.earnings_failed || 0))}
-      · stuck ${escapeHtml(String(diag.cardData.earnings_stuck_beyond_timeout || 0))}
-      · TP1 ${escapeHtml(String(diag.cardData.cards_with_tp1 || 0))}
-      · TP2 ${escapeHtml(String(diag.cardData.cards_with_tp2 || 0))}
-      · TP3 ${escapeHtml(String(diag.cardData.cards_with_tp3 || 0))}
-      · target warnings ${escapeHtml(String(diag.cardData.target_ordering_warnings || 0))}
-    </div>
-    <div class="analytics-empty" style="margin:10px 0;text-align:left;">
-      Alert diagnostics · Enter Now transitions ${escapeHtml(String(alertDiag.enter_now_transitions_detected || 0))}
-      · Enter Now sent ${escapeHtml(String(alertDiag.enter_now_alerts_sent || 0))}
-      · Entry Reached sent ${escapeHtml(String(alertDiag.entry_reached_alerts_sent || 0))}
-      · TP1 touches ${escapeHtml(String(alertDiag.tp1_touches_detected || 0))}
-      · TP1 sent ${escapeHtml(String(alertDiag.tp1_alerts_sent || 0))}
-      · duplicates ${escapeHtml(String(alertDiag.duplicates_suppressed || 0))}
-      · failures ${escapeHtml(String(alertDiag.delivery_failures || 0))}
-      · active without TP1 ${escapeHtml(String(alertDiag.active_tracked_positions_without_tp1 || 0))}
-      ${alertDiag.last_delivery_error ? `· last error ${escapeHtml(alertDiag.last_delivery_error)}` : ''}
-    </div>
+    <details class="analytics-subdetails">
+      <summary>Sample tracked setups</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead>
+            <tr><th>Ticker</th><th>Direction</th><th>Grade</th><th>Signal Date</th><th>Entry Date</th><th>Completion</th><th>Days to Target/Stop</th><th>MFE R</th><th>MAE R</th><th>Target ATR</th></tr>
+          </thead>
+          <tbody>${sampleRows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No tracked setups yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>
+    <details class="analytics-subdetails">
+      <summary>Contract, card data, and alert diagnostics</summary>
+      <div class="analytics-subdetails-body">
+        <div class="analytics-empty" style="margin:10px 0;text-align:left;">
+          Contract guidance diagnostics · strike increments: ${escapeHtml(Object.entries(diag.contractGuidance.estimated_strike_increment_used || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '—')}
+          · live failure reasons: ${escapeHtml(Object.entries(diag.contractGuidance.live_failure_reasons || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '—')}
+        </div>
+        <div class="analytics-empty" style="margin:10px 0;text-align:left;">
+          Card data diagnostics · earnings started ${escapeHtml(String(diag.cardData.earnings_requests_started || 0))}
+          · resolved ${escapeHtml(String(diag.cardData.earnings_requests_resolved || 0))}
+          · unavailable ${escapeHtml(String(diag.cardData.earnings_unavailable || 0))}
+          · failed ${escapeHtml(String(diag.cardData.earnings_failed || 0))}
+          · stuck ${escapeHtml(String(diag.cardData.earnings_stuck_beyond_timeout || 0))}
+          · TP1 ${escapeHtml(String(diag.cardData.cards_with_tp1 || 0))}
+          · TP2 ${escapeHtml(String(diag.cardData.cards_with_tp2 || 0))}
+          · TP3 ${escapeHtml(String(diag.cardData.cards_with_tp3 || 0))}
+          · target warnings ${escapeHtml(String(diag.cardData.target_ordering_warnings || 0))}
+        </div>
+        <div class="analytics-empty" style="margin:10px 0;text-align:left;">
+          Alert diagnostics · Enter Now transitions ${escapeHtml(String(alertDiag.enter_now_transitions_detected || 0))}
+          · Enter Now sent ${escapeHtml(String(alertDiag.enter_now_alerts_sent || 0))}
+          · Entry Reached sent ${escapeHtml(String(alertDiag.entry_reached_alerts_sent || 0))}
+          · TP1 touches ${escapeHtml(String(alertDiag.tp1_touches_detected || 0))}
+          · TP1 sent ${escapeHtml(String(alertDiag.tp1_alerts_sent || 0))}
+          · duplicates ${escapeHtml(String(alertDiag.duplicates_suppressed || 0))}
+          · failures ${escapeHtml(String(alertDiag.delivery_failures || 0))}
+          · active without TP1 ${escapeHtml(String(alertDiag.active_tracked_positions_without_tp1 || 0))}
+          ${alertDiag.last_delivery_error ? `· last error ${escapeHtml(alertDiag.last_delivery_error)}` : ''}
+        </div>
+      </div>
+    </details>
     ${renderExpectedMoveLearningGroups(diag.groups)}
     ${renderExpectedMoveCompletedSamples(diag.completedSamples)}`;
 }
@@ -7799,12 +7882,24 @@ function renderOpportunityDiagnostics(entries = []) {
   if (!window.KairosOpportunityAnalytics) {
     return '<div class="analytics-empty">Opportunity analytics module unavailable.</div>';
   }
+  const historyRecords = loadOpportunityHistoryRecords();
+  const cohortSummaries = opportunityCohortSummaries();
+  const historyDiagnostics = window.KairosOpportunityHistory
+    ? window.KairosOpportunityHistory.diagnostics(historyRecords, cohortSummaries)
+    : { counts: {}, stability: [], sampleReplays: [] };
   const subjects = opportunityDiagnosticSubjects(entries);
   if (!subjects.length) {
-    return '<div class="analytics-empty">No scanner setups or active journal positions available for shadow diagnostics.</div>';
+    return `
+      ${renderOpportunityHistorySummary(historyDiagnostics)}
+      <div class="analytics-empty">No scanner setups or active journal positions available for shadow diagnostics.</div>`;
   }
   const rows = window.KairosOpportunityAnalytics
-    .diagnostics(subjects, entries, { now: new Date().toISOString(), expectedMoveModule: window.KairosExpectedMove })
+    .diagnostics(subjects, entries, {
+      now: new Date().toISOString(),
+      expectedMoveModule: window.KairosExpectedMove,
+      cohortSummaries,
+      opportunityHistoryModule: window.KairosOpportunityHistory,
+    })
     .slice(0, 80);
   const body = rows.map(row => `
     <tr>
@@ -7822,20 +7917,57 @@ function renderOpportunityDiagnostics(entries = []) {
       <td>${row.expectedTradingDaysRemaining.low == null || row.expectedTradingDaysRemaining.high == null ? '—' : `${row.expectedTradingDaysRemaining.low}–${row.expectedTradingDaysRemaining.high}`}</td>
       <td>${escapeHtml(String(row.sampleSize))}</td>
       <td>${escapeHtml(row.confidence)}</td>
+      <td>${escapeHtml(row.historicalSource || '—')}</td>
+      <td>${escapeHtml(row.cohortReadiness || '—')}</td>
+      <td>${row.fallbackUsed ? 'Yes' : 'No'}</td>
       <td>${row.contractDte == null ? '—' : escapeHtml(String(row.contractDte))}</td>
       <td>${escapeHtml(row.contractHealth)}</td>
       <td>${escapeHtml(row.blockers?.[0] || row.explanation || '—')}</td>
     </tr>`).join('');
   return `
+    ${renderOpportunityHistorySummary(historyDiagnostics)}
     <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
       Shadow mode only. These calculations do not affect scanner cards, qualification, alerts, journal rules, entries, stops, targets, or option selection.
     </div>
-    <table class="analytics-table">
-      <thead>
-        <tr><th>Ticker</th><th>Direction</th><th>State</th><th>Entry Triggered</th><th>Planned Entry</th><th>Current</th><th>TP1</th><th>Price Progress</th><th>Time Progress</th><th>Remaining</th><th>Expected Total</th><th>Expected Remaining</th><th>Samples</th><th>Confidence</th><th>DTE</th><th>Contract</th><th>Explanation / Blocker</th></tr>
-      </thead>
-      <tbody>${body}</tbody>
-    </table>`;
+    <details class="analytics-subdetails">
+      <summary>Setup and position shadow table</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead>
+            <tr><th>Ticker</th><th>Direction</th><th>State</th><th>Entry Triggered</th><th>Planned Entry</th><th>Current</th><th>TP1</th><th>Price Progress</th><th>Time Progress</th><th>Remaining</th><th>Expected Total</th><th>Expected Remaining</th><th>Samples</th><th>Confidence</th><th>History Source</th><th>Readiness</th><th>Fallback</th><th>DTE</th><th>Contract</th><th>Explanation / Blocker</th></tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
+function renderOpportunityHistorySummary(historyDiagnostics = {}) {
+  const counts = historyDiagnostics.counts || {};
+  const sampleReplay = (historyDiagnostics.sampleReplays || [])[0];
+  const replayRows = sampleReplay ? sampleReplay.snapshots.map(snapshot => `
+    <tr>
+      <td>${escapeHtml(snapshot.label)}</td>
+      <td>${snapshot.opportunityRemainingPct == null ? '—' : `${fmtNumber(snapshot.opportunityRemainingPct)}%`}</td>
+      <td>${escapeHtml(snapshot.lifecycleBand)}</td>
+      <td>${escapeHtml(snapshot.note || '—')}</td>
+    </tr>`).join('') : '';
+  return `
+    <div class="journal-stats" style="margin-bottom:12px;">
+      <div class="stat-card"><div class="stat-label">History Qualified</div><div class="stat-value">${counts.qualified || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Fallback-only</div><div class="stat-value">${counts.fallbackOnlyCohorts || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Insufficient</div><div class="stat-value">${counts.insufficientCohorts || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Unstable</div><div class="stat-value">${counts.unstableCalculations || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value">${counts.completed || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Invalidated/Stopped</div><div class="stat-value">${counts.invalidated || 0}</div></div>
+    </div>
+    <details style="margin-bottom:12px;">
+      <summary style="cursor:pointer;font-weight:700;">Lifecycle Replay Sample</summary>
+      <table class="analytics-table" style="margin-top:10px;">
+        <thead><tr><th>Snapshot</th><th>Opportunity Remaining</th><th>Band</th><th>Note</th></tr></thead>
+        <tbody>${replayRows || '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:18px;">Import qualified history to populate lifecycle replay samples.</td></tr>'}</tbody>
+      </table>
+    </details>`;
 }
 
 function formatRate(value) {
@@ -7925,12 +8057,17 @@ function renderExpectedMoveLearningGroups(groups = []) {
   return `
     <h3 style="margin-top:18px;">Expected Move Release Readiness</h3>
     <div class="analytics-empty" style="margin-bottom:10px;">Analytics-only validation. Fallback-derived results cannot become card ready.</div>
-    <table class="analytics-table">
-      <thead>
-        <tr><th>Group</th><th>Release Status</th><th>Card Ready</th><th>Target Samples</th><th>Required Samples</th><th>Expected Move</th><th>Suggested Expiration</th><th>Confidence</th><th>Target Rate</th><th>Exclusion Rate</th><th>Fallback</th><th>Primary Reason</th></tr>
-      </thead>
-      <tbody>${rows || '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:18px;">No completed setup groups yet.</td></tr>'}</tbody>
-    </table>
+    <details class="analytics-subdetails">
+      <summary>Release readiness table</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead>
+            <tr><th>Group</th><th>Release Status</th><th>Card Ready</th><th>Target Samples</th><th>Required Samples</th><th>Expected Move</th><th>Suggested Expiration</th><th>Confidence</th><th>Target Rate</th><th>Exclusion Rate</th><th>Fallback</th><th>Primary Reason</th></tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:18px;">No completed setup groups yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>
     <h3 style="margin-top:18px;">Expected Move Audit</h3>
     ${audits || '<div class="analytics-empty">No group audits yet.</div>'}`;
 }
@@ -7951,12 +8088,239 @@ function renderExpectedMoveCompletedSamples(samples = []) {
     </tr>`).join('');
   return `
     <h3 style="margin-top:18px;">Sample Completed Setups</h3>
-    <table class="analytics-table">
-      <thead>
-        <tr><th>Ticker</th><th>Grade</th><th>Direction</th><th>Completion</th><th>Trading Days</th><th>Bars</th><th>MFE R</th><th>MAE R</th><th>MFE ATR</th><th>MAE ATR</th></tr>
-      </thead>
-      <tbody>${rows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No completed samples yet.</td></tr>'}</tbody>
-    </table>`;
+    <details class="analytics-subdetails">
+      <summary>Completed setup samples</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead>
+            <tr><th>Ticker</th><th>Grade</th><th>Direction</th><th>Completion</th><th>Trading Days</th><th>Bars</th><th>MFE R</th><th>MAE R</th><th>MFE ATR</th><th>MAE ATR</th></tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px;">No completed samples yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
+function loadOpportunityHistoryRecords() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OPPORTUNITY_HISTORY_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveOpportunityHistoryRecords(records = []) {
+  localStorage.setItem(OPPORTUNITY_HISTORY_KEY, JSON.stringify(records));
+}
+
+function opportunityHistoryPreview() {
+  return window.KairosOpportunityHistory
+    ? window.KairosOpportunityHistory.previewJournalImport(loadJournal())
+    : { total: 0, qualified: 0, partial: 0, excluded: 0, records: [] };
+}
+
+function opportunityCohortSummaries() {
+  return window.KairosOpportunityHistory
+    ? window.KairosOpportunityHistory.buildCohortSummaries(loadOpportunityHistoryRecords())
+    : [];
+}
+
+function previewOpportunityHistoryImport() {
+  const el = document.getElementById('opportunityHistoryImport');
+  if (!el) return;
+  renderOpportunityHistoryImport(true);
+}
+
+function importQualifiedOpportunityHistory() {
+  if (!window.KairosOpportunityHistory) return;
+  const preview = opportunityHistoryPreview();
+  const existing = loadOpportunityHistoryRecords();
+  const incoming = preview.records.filter(record => record.dataQuality !== 'EXCLUDED');
+  const merged = window.KairosOpportunityHistory.mergeOpportunityRecords(existing, incoming);
+  saveOpportunityHistoryRecords(merged.records);
+  renderAnalytics();
+  renderOpportunityHistoryImport(false, merged);
+}
+
+function renderOpportunityHistorySourceReport(report = []) {
+  const rows = report.map(row => `
+    <tr>
+      <td>${escapeHtml(row.field)}</td>
+      <td>${escapeHtml(row.source)}</td>
+      <td>${escapeHtml(row.persistence)}</td>
+      <td>${escapeHtml(row.serverSide)}</td>
+      <td>${escapeHtml(row.browserSide)}</td>
+      <td>${escapeHtml(row.status)}</td>
+    </tr>`).join('');
+  return `
+    <details style="margin-top:12px;">
+      <summary style="cursor:pointer;font-weight:700;">Historical Source Report</summary>
+      <table class="analytics-table" style="margin-top:10px;">
+        <thead><tr><th>Field</th><th>Current Source</th><th>Persistence</th><th>Server-side?</th><th>Browser-side?</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>`;
+}
+
+function renderOpportunityHistoryImport(showPreview = false, lastImport = null) {
+  const el = document.getElementById('opportunityHistoryImport');
+  if (!el) return '';
+  if (!window.KairosOpportunityHistory) {
+    el.innerHTML = '<div class="analytics-empty">Opportunity history module unavailable.</div>';
+    return '';
+  }
+  const preview = opportunityHistoryPreview();
+  const stored = loadOpportunityHistoryRecords();
+  const summaries = window.KairosOpportunityHistory.buildCohortSummaries(stored);
+  const report = window.KairosOpportunityHistory.sourceFieldReport();
+  const previewRows = showPreview ? preview.records.slice(0, 12).map(record => `
+    <tr>
+      <td><strong>${escapeHtml(record.ticker || '—')}</strong></td>
+      <td>${escapeHtml(record.direction || '—')}</td>
+      <td>${escapeHtml(record.grade || '—')}</td>
+      <td>${escapeHtml(record.setupFamily || '—')}</td>
+      <td>${escapeHtml(record.dataQuality)}</td>
+      <td>${escapeHtml((record.exclusionReasons || []).join(', ') || '—')}</td>
+    </tr>`).join('') : '';
+  el.innerHTML = `
+    <div class="analytics-empty" style="padding:0 0 10px;text-align:left;">
+      Developer-only local import. This reads the browser-local journal, writes a separate local opportunity-history dataset, and does not upload or overwrite the journal.
+    </div>
+    <div class="journal-stats" style="margin-bottom:12px;">
+      <div class="stat-card"><div class="stat-label">Local Journal Records</div><div class="stat-value">${preview.total}</div></div>
+      <div class="stat-card"><div class="stat-label">Qualified Candidates</div><div class="stat-value">${preview.qualified}</div></div>
+      <div class="stat-card"><div class="stat-label">Partial Records</div><div class="stat-value">${preview.partial}</div></div>
+      <div class="stat-card"><div class="stat-label">Excluded Records</div><div class="stat-value">${preview.excluded}</div></div>
+      <div class="stat-card"><div class="stat-label">Stored History</div><div class="stat-value">${stored.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Qualified Cohorts</div><div class="stat-value">${summaries.filter(s => s.readiness === 'QUALIFIED').length}</div></div>
+    </div>
+    <div class="journal-controls" style="margin-bottom:10px;">
+      <button class="btn-secondary btn-sm" onclick="previewOpportunityHistoryImport()">Preview Import</button>
+      <button class="btn-primary btn-sm" onclick="importQualifiedOpportunityHistory()">Import Qualified History</button>
+    </div>
+    ${lastImport ? `<div class="analytics-empty" style="margin-bottom:10px;text-align:left;">Import result: ${lastImport.imported} imported/upgraded · ${lastImport.duplicates} duplicates · ${lastImport.skipped} skipped · ${lastImport.partial} partial · ${lastImport.invalid} invalid.</div>` : ''}
+    ${showPreview ? `
+      <table class="analytics-table">
+        <thead><tr><th>Ticker</th><th>Direction</th><th>Grade</th><th>Family</th><th>Quality</th><th>Reasons</th></tr></thead>
+        <tbody>${previewRows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px;">No preview records.</td></tr>'}</tbody>
+      </table>` : ''}
+    ${renderOpportunityHistorySourceReport(report)}
+  `;
+  return el.innerHTML;
+}
+
+function renderOpportunityAnalyticsSummary(entries = []) {
+  const el = document.getElementById('opportunityAnalyticsSummary');
+  if (!el) return;
+  const expected = expectedMoveDiagnostics(entries);
+  const historyRecords = loadOpportunityHistoryRecords();
+  const cohortSummaries = opportunityCohortSummaries();
+  const historyDiag = window.KairosOpportunityHistory
+    ? window.KairosOpportunityHistory.diagnostics(historyRecords, cohortSummaries)
+    : { counts: {} };
+  const counts = historyDiag.counts || {};
+  const subjects = opportunityDiagnosticSubjects(entries);
+  el.innerHTML = `
+    <h3>Opportunity Analytics Summary</h3>
+    <div class="analytics-summary-note">
+      Developer-only shadow diagnostics. This summary does not change scanner cards, strategy, alerts, journal rules, entries, stops, targets, contracts, or execution behavior.
+    </div>
+    <div class="journal-stats" style="margin-bottom:0;">
+      <div class="stat-card"><div class="stat-label">Shadow Subjects</div><div class="stat-value">${subjects.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Tracked Setups</div><div class="stat-value">${expected.counts.totalTracked}</div></div>
+      <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value">${expected.counts.completed}</div></div>
+      <div class="stat-card"><div class="stat-label">Stored History</div><div class="stat-value">${historyRecords.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Qualified History</div><div class="stat-value">${counts.qualified || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Qualified Cohorts</div><div class="stat-value">${counts.qualifiedCohorts || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Fallback-only Cohorts</div><div class="stat-value">${counts.fallbackOnlyCohorts || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Unstable</div><div class="stat-value">${counts.unstableCalculations || 0}</div></div>
+    </div>`;
+}
+
+function renderTraderAnalyticsSummary(entries = []) {
+  const el = document.getElementById('analyticsTraderSummary');
+  if (!el) return;
+  const expected = expectedMoveDiagnostics(entries);
+  const historyRecords = loadOpportunityHistoryRecords();
+  const cohortSummaries = opportunityCohortSummaries();
+  const historyDiag = window.KairosOpportunityHistory
+    ? window.KairosOpportunityHistory.diagnostics(historyRecords, cohortSummaries)
+    : { counts: {} };
+  const counts = historyDiag.counts || {};
+  const releaseGroups = expected.groups || [];
+  const readyGroups = releaseGroups.filter(group => {
+    const expiration = suggestedExpirationAnalytics(group.result);
+    const readiness = expectedMoveReleaseReadiness(group.result, expiration);
+    return readiness.card_ready === true;
+  }).length;
+  const targetRate = expected.counts.completed
+    ? expected.counts.completedByTarget / expected.counts.completed
+    : null;
+  const stopRate = expected.counts.completed
+    ? expected.counts.completedByStop / expected.counts.completed
+    : null;
+  const contractTotal = expected.counts.validatedLiveContracts + expected.counts.potentialContractFallbacks;
+  const validatedRate = contractTotal ? expected.counts.validatedLiveContracts / contractTotal : null;
+  const cards = [
+    {
+      title: 'Scanner Performance',
+      rows: [
+        ['Logged trades', entries.length],
+        ['Closed trades', expected.counts.completed],
+        ['Duplicates prevented', expected.counts.duplicatePreventionCount],
+      ],
+    },
+    {
+      title: 'Expected Move Analytics',
+      rows: [
+        ['Model status', expected.status],
+        ['Release-ready groups', readyGroups],
+        ['Learning groups', expected.counts.groupsStillLearning],
+      ],
+    },
+    {
+      title: 'Contract Health',
+      rows: [
+        ['Validated live contracts', expected.counts.validatedLiveContracts],
+        ['Potential fallbacks', expected.counts.potentialContractFallbacks],
+        ['Validated mix', validatedRate == null ? 'Learning' : `${fmtNumber(validatedRate * 100)}%`],
+      ],
+    },
+    {
+      title: 'Historical Outcomes',
+      rows: [
+        ['Target completions', expected.counts.completedByTarget],
+        ['Stop completions', expected.counts.completedByStop],
+        ['Target rate', targetRate == null ? 'Learning' : `${fmtNumber(targetRate * 100)}%`],
+      ],
+    },
+    {
+      title: 'Release-Ready Metrics',
+      rows: [
+        ['Qualified history', counts.qualified || 0],
+        ['Qualified cohorts', counts.qualifiedCohorts || 0],
+        ['Fallback-only cohorts', counts.fallbackOnlyCohorts || 0],
+      ],
+    },
+    {
+      title: 'Risk Signals',
+      rows: [
+        ['Expired windows', expected.counts.expired],
+        ['Manual closes', expected.counts.manuallyClosed],
+        ['Stop rate', stopRate == null ? 'Learning' : `${fmtNumber(stopRate * 100)}%`],
+      ],
+    },
+  ];
+  el.innerHTML = cards.map(card => `
+    <div class="analytics-card">
+      <h3>${escapeHtml(card.title)}</h3>
+      <table class="analytics-table">
+        <tbody>
+          ${card.rows.map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td><strong>${escapeHtml(String(value ?? '—'))}</strong></td></tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`).join('');
 }
 
 function formatFunnelReason(reason) {
@@ -7993,8 +8357,12 @@ function renderFunnelConversions(snapshot) {
     ['Overall Enter Now rate', r.overall_enter_now_rate],
   ].map(([label, value]) => `<tr><td>${escapeHtml(label)}</td><td>${formatFunnelRate(value)}</td></tr>`).join('');
   return `
-    <h3 style="margin-top:18px;">Conversion Rates</h3>
-    <table class="analytics-table"><tbody>${rows}</tbody></table>`;
+    <details class="analytics-subdetails">
+      <summary>Conversion rates</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table"><tbody>${rows}</tbody></table>
+      </div>
+    </details>`;
 }
 
 function renderFunnelReasonTable(title, counts = {}, total = 0) {
@@ -8003,11 +8371,15 @@ function renderFunnelReasonTable(title, counts = {}, total = 0) {
     .map(([reason, count]) => `<tr><td>${escapeHtml(formatFunnelReason(reason))}</td><td>${count}</td><td>${total ? fmtNumber(count / total * 100) : '—'}%</td></tr>`)
     .join('');
   return `
-    <h3 style="margin-top:18px;">${escapeHtml(title)}</h3>
-    <table class="analytics-table">
-      <thead><tr><th>Reason</th><th>Count</th><th>% of Non-Enter-Now</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:18px;">No blockers recorded.</td></tr>'}</tbody>
-    </table>`;
+    <details class="analytics-subdetails">
+      <summary>${escapeHtml(title)}</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead><tr><th>Reason</th><th>Count</th><th>% of Non-Enter-Now</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:18px;">No blockers recorded.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>`;
 }
 
 function renderFunnelLargestBottleneck(snapshot) {
@@ -8040,11 +8412,15 @@ function renderFunnelHistory(history = []) {
       <td>${escapeHtml(scan.diagnostic_classification || '—')}</td>
     </tr>`).join('');
   return `
-    <h3 style="margin-top:18px;">Recent Funnel History</h3>
-    <table class="analytics-table">
-      <thead><tr><th>Date/Time</th><th>Processed</th><th>Grade Eligible</th><th>Reaction Started</th><th>Enter Now</th><th>Enter Now Rate</th><th>Largest Blocker</th><th>Classification</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:18px;">No funnel history yet.</td></tr>'}</tbody>
-    </table>`;
+    <details class="analytics-subdetails">
+      <summary>Recent funnel history</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead><tr><th>Date/Time</th><th>Processed</th><th>Grade Eligible</th><th>Reaction Started</th><th>Enter Now</th><th>Enter Now Rate</th><th>Largest Blocker</th><th>Classification</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:18px;">No funnel history yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>`;
 }
 
 function renderFunnelDailyAggregation(history = []) {
@@ -8061,11 +8437,15 @@ function renderFunnelDailyAggregation(history = []) {
       <td>${escapeHtml(Object.entries(day.enter_now_by_timeframe || {}).map(([tf, count]) => `${tf}: ${count}`).join(' · ') || '—')}</td>
     </tr>`).join('');
   return `
-    <h3 style="margin-top:18px;">Daily Aggregation</h3>
-    <table class="analytics-table">
-      <thead><tr><th>Market Date</th><th>Unique Setups</th><th>Unique Enter Now</th><th>A+ Enter Now</th><th>B+ Enter Now</th><th>Long Enter Now</th><th>Short Enter Now</th><th>Enter Now by Timeframe</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:18px;">No daily funnel data yet.</td></tr>'}</tbody>
-    </table>`;
+    <details class="analytics-subdetails">
+      <summary>Daily aggregation</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead><tr><th>Market Date</th><th>Unique Setups</th><th>Unique Enter Now</th><th>A+ Enter Now</th><th>B+ Enter Now</th><th>Long Enter Now</th><th>Short Enter Now</th><th>Enter Now by Timeframe</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:18px;">No daily funnel data yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>`;
 }
 
 function renderEnterNowFunnelDiagnostics() {
@@ -8127,8 +8507,11 @@ function renderAnalytics() {
   document.getElementById('analyticsBySetupStatus').innerHTML = renderAnalyticsTable(setupStatusRows, 'Setup Status');
   document.getElementById('analyticsByMistake').innerHTML = renderAnalyticsTable(mistakeRows, 'Mistake');
   document.getElementById('analyticsByPhase').innerHTML = renderAnalyticsTable(phaseRows, 'Phase');
+  renderOpportunityAnalyticsSummary(all);
+  renderTraderAnalyticsSummary(all);
   const expectedMoveEl = document.getElementById('expectedMoveDiagnostics');
   if (expectedMoveEl) expectedMoveEl.innerHTML = renderExpectedMoveDiagnostics(all);
+  renderOpportunityHistoryImport(false);
   const opportunityEl = document.getElementById('opportunityDiagnostics');
   if (opportunityEl) opportunityEl.innerHTML = renderOpportunityDiagnostics(all);
   renderEnterNowFunnelDiagnostics();

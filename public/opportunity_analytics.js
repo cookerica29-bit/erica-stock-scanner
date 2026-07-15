@@ -160,7 +160,64 @@
       || text.includes('EXPIRED');
   }
 
-  function analyticsFromHistory(subject = {}, entries = [], expectedMove = expectedMoveModule) {
+  function confidenceFromSampleSize(samples, fallbackUsed = false) {
+    if (fallbackUsed) return samples >= CONFIG.minimumTargetSamples ? 'LOW' : 'INSUFFICIENT';
+    if (samples >= 300) return 'HIGH';
+    if (samples >= 100) return 'MODERATE';
+    if (samples >= CONFIG.minimumTargetSamples) return 'LOW';
+    return 'INSUFFICIENT';
+  }
+
+  function analyticsFromCohorts(subject = {}, options = {}) {
+    const historyModule = options.opportunityHistoryModule || (typeof self !== 'undefined' ? self.KairosOpportunityHistory : null);
+    const summaries = Array.isArray(options.cohortSummaries) ? options.cohortSummaries : [];
+    if (!historyModule || typeof historyModule.selectCohortForSetup !== 'function' || !summaries.length) return null;
+    const selected = historyModule.selectCohortForSetup(subject, summaries, { allowFallback: true });
+    const summary = selected?.summary;
+    if (!summary || summary.readiness !== 'QUALIFIED') {
+      return {
+        result: {
+          group_used: null,
+          fallback_used: false,
+          fallback_level: null,
+          cohort_key: selected?.requestedKey || null,
+          cohort_readiness: summary?.readiness || 'INSUFFICIENT',
+        },
+        readiness: null,
+        confidence: 'INSUFFICIENT',
+        sampleSize: summary?.winsToTp1 || 0,
+        blockers: [`${summary?.winsToTp1 || 0} of ${CONFIG.minimumTargetSamples} required TP1 completions`],
+      };
+    }
+    const confidence = confidenceFromSampleSize(summary.winsToTp1, selected.fallbackUsed);
+    return {
+      result: {
+        expected_move_min_days: summary.p25TradingDaysToTp1 !== null ? Math.max(1, Math.floor(summary.p25TradingDaysToTp1)) : null,
+        expected_move_max_days: summary.p75TradingDaysToTp1 !== null ? Math.max(1, Math.ceil(summary.p75TradingDaysToTp1)) : null,
+        median_days_to_target: summary.medianTradingDaysToTp1,
+        p25_days_to_target: summary.p25TradingDaysToTp1,
+        p75_days_to_target: summary.p75TradingDaysToTp1,
+        target_sample_count: summary.winsToTp1,
+        sample_count: summary.qualifiedSamples,
+        group_used: { cohortKey: summary.cohortKey, cohortLevel: summary.cohortLevelLabel },
+        fallback_used: selected.fallbackUsed,
+        fallback_level: selected.fallbackLevel,
+        cohort_key: summary.cohortKey,
+        cohort_level: summary.cohortLevel,
+        cohort_level_label: summary.cohortLevelLabel,
+        cohort_readiness: summary.readiness,
+      },
+      readiness: null,
+      confidence,
+      sampleSize: summary.qualifiedSamples,
+      blockers: selected.fallbackUsed ? ['Fallback cohort used; not a ticker-specific release claim.'] : [],
+    };
+  }
+
+  function analyticsFromHistory(subject = {}, entries = [], options = {}) {
+    const cohortHistory = analyticsFromCohorts(subject, options);
+    if (cohortHistory && cohortHistory.confidence !== 'INSUFFICIENT') return cohortHistory;
+    const expectedMove = options.expectedMoveModule || expectedMoveModule;
     if (!expectedMove || typeof expectedMove.expectedMoveAnalytics !== 'function') {
       return {
         result: null,
@@ -183,7 +240,7 @@
       readiness,
       confidence: cardReady ? confidence : 'INSUFFICIENT',
       sampleSize: result?.target_sample_count || 0,
-      blockers,
+      blockers: cohortHistory?.blockers?.length ? cohortHistory.blockers : blockers,
     };
   }
 
@@ -214,7 +271,7 @@
   function opportunityAnalytics(subject = {}, entries = [], options = {}) {
     const now = options.now || new Date().toISOString();
     const levels = priceLevels(subject);
-    const history = analyticsFromHistory(subject, entries, options.expectedMoveModule || expectedMoveModule);
+    const history = analyticsFromHistory(subject, entries, options);
     const durations = expectedDurations(history);
     const blockers = [...history.blockers];
     const triggered = hasEntryTriggered(subject, levels);
@@ -284,6 +341,9 @@
         used: history.result?.group_used || null,
         fallbackUsed: Boolean(history.result?.fallback_used),
         fallbackLevel: history.result?.fallback_level || null,
+        cohortKey: history.result?.cohort_key || null,
+        cohortLevel: history.result?.cohort_level || null,
+        cohortReadiness: history.result?.cohort_readiness || null,
       },
     };
   }
@@ -369,6 +429,11 @@
         contractHealth: contract.status,
         explanation: opportunity.explanation,
         blockers: opportunity.blockers,
+        historicalSource: opportunity.grouping?.used?.cohortLevel || opportunity.grouping?.used?.cohortLevelLabel || 'Expected Move journal group',
+        cohortKey: opportunity.grouping?.cohortKey || '—',
+        cohortLevel: opportunity.grouping?.cohortLevel || '—',
+        cohortReadiness: opportunity.grouping?.cohortReadiness || '—',
+        fallbackUsed: opportunity.grouping?.fallbackUsed || false,
         calculationVersion: opportunity.calculationVersion,
       };
     });
