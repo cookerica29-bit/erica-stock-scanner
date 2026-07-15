@@ -2183,6 +2183,10 @@
     <div id="expectedMoveDiagnostics"></div>
   </div>
   <div class="analytics-card" style="margin-top:16px;">
+    <h3>Opportunity Remaining Shadow Diagnostics</h3>
+    <div id="opportunityDiagnostics"></div>
+  </div>
+  <div class="analytics-card" style="margin-top:16px;">
     <h3>Enter Now Funnel</h3>
     <div id="enterNowFunnelDiagnostics"></div>
   </div>
@@ -2580,6 +2584,7 @@
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="/static/expected_move_analytics.js?v=20260713-card-data"></script>
+<script src="/static/opportunity_analytics.js?v=20260715-shadow"></script>
 <script src="/static/card_data.js?v=20260713-card-data"></script>
 <script src="/static/further_analysis.js?v=20260713-card-data"></script>
 <script src="/static/setup_funnel_diagnostics.js?v=20260713-card-data"></script>
@@ -5077,6 +5082,18 @@ function defaultTrackingFields(startedAt = null) {
     entry_reached_at: null,
     tp1_reached_at: null,
     tp1_alert_sent_at: null,
+    original_opportunity_remaining_pct: null,
+    current_opportunity_remaining_pct: null,
+    opportunity_status: null,
+    opportunity_calculation_version: null,
+    expected_trading_days_low: null,
+    expected_trading_days_high: null,
+    expected_trading_days_median: null,
+    expected_trading_days_remaining_low: null,
+    expected_trading_days_remaining_high: null,
+    contract_health_status: null,
+    contract_dte: null,
+    contract_time_buffer_trading_days: null,
     highest_price_reached: null,
     lowest_price_reached: null,
     trading_days_to_entry: null,
@@ -5105,6 +5122,28 @@ function defaultTrackingFields(startedAt = null) {
     trade_progress_status: 'WAITING',
     final_trading_days: null,
     final_bar_count: null,
+  };
+}
+
+function opportunitySnapshotFields(subject = {}, entries = loadJournal()) {
+  if (!window.KairosOpportunityAnalytics) return {};
+  const opportunity = window.KairosOpportunityAnalytics.opportunityAnalytics(subject, entries, {
+    now: new Date().toISOString(),
+    expectedMoveModule: window.KairosExpectedMove,
+  });
+  const contract = window.KairosOpportunityAnalytics.contractHealth(subject, opportunity, { now: new Date().toISOString() });
+  return {
+    current_opportunity_remaining_pct: opportunity.opportunityRemainingPct,
+    opportunity_status: opportunity.status,
+    opportunity_calculation_version: opportunity.calculationVersion,
+    expected_trading_days_low: opportunity.expectedTradingDaysTotal.low,
+    expected_trading_days_high: opportunity.expectedTradingDaysTotal.high,
+    expected_trading_days_median: opportunity.expectedTradingDaysTotal.median,
+    expected_trading_days_remaining_low: opportunity.expectedTradingDaysRemaining.low,
+    expected_trading_days_remaining_high: opportunity.expectedTradingDaysRemaining.high,
+    contract_health_status: contract.status,
+    contract_dte: contract.contractDte,
+    contract_time_buffer_trading_days: contract.timeBufferTradingDays,
   };
 }
 
@@ -5639,6 +5678,13 @@ function refreshExpectedMoveTrackingFromRows(rows = []) {
       return entry;
     }
     const updated = updateTrackedSetupWithObservation(entry, obs);
+    Object.assign(updated, opportunitySnapshotFields({
+      ...updated,
+      price: obs.price,
+      current_price: obs.price,
+      high: obs.high,
+      low: obs.low,
+    }, entries));
     if (!entry.first_target_touch_at && updated.first_target_touch_at && window.KairosStockAlerts) {
       updated.tp1_reached_at = updated.tp1_reached_at || updated.first_target_touch_at;
       const key = window.KairosStockAlerts.tp1Key(updated, updated.tp1_reached_at);
@@ -6117,7 +6163,9 @@ function saveJournalEntry() {
     const ev = _pendingSetup.trade_eval || {};
     const snapshot = scannerSnapshotFromSetup(_pendingSetup, ev);
     const selectedContract = selectedContractFromSetup(_pendingSetup);
-    Object.assign(updated, defaultTrackingFields(snapshot.signal_timestamp || new Date().toISOString()), snapshot, selectedContract, formContractFields);
+    const opportunitySnapshot = opportunitySnapshotFields(_pendingSetup);
+    Object.assign(updated, defaultTrackingFields(snapshot.signal_timestamp || new Date().toISOString()), snapshot, selectedContract, formContractFields, opportunitySnapshot);
+    updated.original_opportunity_remaining_pct = updated.original_opportunity_remaining_pct ?? opportunitySnapshot.current_opportunity_remaining_pct ?? null;
     if (formContractFields.strike_price != null || formContractFields.expiration_date || formContractFields.option_symbol) {
       updated.contract_guidance_source = 'manual';
       updated.potential_option_type = null;
@@ -6230,6 +6278,18 @@ function migrateJournalEntry(entry = {}) {
   migrated.earnings_date = firstPresent(migrated.earnings_date, migrated.earningsDate, '');
   migrated.days_until_earnings = migrated.days_until_earnings ?? migrated.daysUntilEarnings ?? null;
   migrated.earnings_source = firstPresent(migrated.earnings_source, migrated.earningsSource, '');
+  migrated.original_opportunity_remaining_pct = migrated.original_opportunity_remaining_pct ?? null;
+  migrated.current_opportunity_remaining_pct = migrated.current_opportunity_remaining_pct ?? null;
+  migrated.opportunity_status = migrated.opportunity_status ?? null;
+  migrated.opportunity_calculation_version = migrated.opportunity_calculation_version ?? null;
+  migrated.expected_trading_days_low = migrated.expected_trading_days_low ?? null;
+  migrated.expected_trading_days_high = migrated.expected_trading_days_high ?? null;
+  migrated.expected_trading_days_median = migrated.expected_trading_days_median ?? null;
+  migrated.expected_trading_days_remaining_low = migrated.expected_trading_days_remaining_low ?? null;
+  migrated.expected_trading_days_remaining_high = migrated.expected_trading_days_remaining_high ?? null;
+  migrated.contract_health_status = migrated.contract_health_status ?? null;
+  migrated.contract_dte = migrated.contract_dte ?? null;
+  migrated.contract_time_buffer_trading_days = migrated.contract_time_buffer_trading_days ?? null;
 
   const trackingDefaults = defaultTrackingFields(firstPresent(migrated.tracking_started_at, migrated.signal_timestamp, migrated.createdAt, null));
   Object.entries(trackingDefaults).forEach(([key, value]) => {
@@ -7717,6 +7777,67 @@ function renderExpectedMoveDiagnostics(entries = []) {
     ${renderExpectedMoveCompletedSamples(diag.completedSamples)}`;
 }
 
+function opportunityDiagnosticSubjects(entries = []) {
+  const activeEntries = entries
+    .filter(entry => entry.tracking_status !== 'completed')
+    .map(entry => ({
+      ...entry,
+      price: firstPresent(entry.current_price, entry.underlying_price_at_signal, entry.entry_price, entry.entry),
+      entry: firstPresent(entry.entry_price, entry.entry),
+      sl: firstPresent(entry.stop_price, entry.plannedStop),
+      tp1: firstPresent(entry.target_price, entry.plannedTp1),
+      tp2: entry.plannedTp2,
+      tp3: entry.plannedTp3,
+      scanner_timeframe: firstPresent(entry.scanner_timeframe, entry.timeframe, entry.setupTf),
+      setupGrade: firstPresent(entry.setup_grade, entry.setupGrade),
+      source: 'Open position',
+    }));
+  return [...scannerRows, ...scannerNearMiss].map(setup => ({ ...setup, source: 'Scanner setup' })).concat(activeEntries);
+}
+
+function renderOpportunityDiagnostics(entries = []) {
+  if (!window.KairosOpportunityAnalytics) {
+    return '<div class="analytics-empty">Opportunity analytics module unavailable.</div>';
+  }
+  const subjects = opportunityDiagnosticSubjects(entries);
+  if (!subjects.length) {
+    return '<div class="analytics-empty">No scanner setups or active journal positions available for shadow diagnostics.</div>';
+  }
+  const rows = window.KairosOpportunityAnalytics
+    .diagnostics(subjects, entries, { now: new Date().toISOString(), expectedMoveModule: window.KairosExpectedMove })
+    .slice(0, 80);
+  const body = rows.map(row => `
+    <tr>
+      <td><strong>${escapeHtml(row.ticker)}</strong></td>
+      <td class="direction-value ${directionClass(row.direction)}">${escapeHtml(row.direction)}</td>
+      <td>${escapeHtml(row.lifecycleState)}</td>
+      <td>${row.entryTriggered ? 'Yes' : 'No'}</td>
+      <td>${fmtMoney(row.plannedEntry)}</td>
+      <td>${fmtMoney(row.currentPrice)}</td>
+      <td>${fmtMoney(row.tp1)}</td>
+      <td>${row.priceProgressPct == null ? '—' : `${fmtNumber(row.priceProgressPct)}%`}</td>
+      <td>${row.timeProgressPct == null ? '—' : `${fmtNumber(row.timeProgressPct)}%`}</td>
+      <td>${row.opportunityRemainingPct == null ? '—' : `${fmtNumber(row.opportunityRemainingPct)}%`}</td>
+      <td>${row.expectedTradingDaysTotal.low == null || row.expectedTradingDaysTotal.high == null ? '—' : `${row.expectedTradingDaysTotal.low}–${row.expectedTradingDaysTotal.high}`}</td>
+      <td>${row.expectedTradingDaysRemaining.low == null || row.expectedTradingDaysRemaining.high == null ? '—' : `${row.expectedTradingDaysRemaining.low}–${row.expectedTradingDaysRemaining.high}`}</td>
+      <td>${escapeHtml(String(row.sampleSize))}</td>
+      <td>${escapeHtml(row.confidence)}</td>
+      <td>${row.contractDte == null ? '—' : escapeHtml(String(row.contractDte))}</td>
+      <td>${escapeHtml(row.contractHealth)}</td>
+      <td>${escapeHtml(row.blockers?.[0] || row.explanation || '—')}</td>
+    </tr>`).join('');
+  return `
+    <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+      Shadow mode only. These calculations do not affect scanner cards, qualification, alerts, journal rules, entries, stops, targets, or option selection.
+    </div>
+    <table class="analytics-table">
+      <thead>
+        <tr><th>Ticker</th><th>Direction</th><th>State</th><th>Entry Triggered</th><th>Planned Entry</th><th>Current</th><th>TP1</th><th>Price Progress</th><th>Time Progress</th><th>Remaining</th><th>Expected Total</th><th>Expected Remaining</th><th>Samples</th><th>Confidence</th><th>DTE</th><th>Contract</th><th>Explanation / Blocker</th></tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
 function formatRate(value) {
   const num = coerceNumber(value);
   return num == null ? '—' : `${fmtNumber(num * 100)}%`;
@@ -8008,6 +8129,8 @@ function renderAnalytics() {
   document.getElementById('analyticsByPhase').innerHTML = renderAnalyticsTable(phaseRows, 'Phase');
   const expectedMoveEl = document.getElementById('expectedMoveDiagnostics');
   if (expectedMoveEl) expectedMoveEl.innerHTML = renderExpectedMoveDiagnostics(all);
+  const opportunityEl = document.getElementById('opportunityDiagnostics');
+  if (opportunityEl) opportunityEl.innerHTML = renderOpportunityDiagnostics(all);
   renderEnterNowFunnelDiagnostics();
 }
 
