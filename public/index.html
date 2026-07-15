@@ -532,6 +532,14 @@
   .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; overflow-wrap:anywhere; }
   .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; overflow-wrap:anywhere; }
   .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
+  .opportunity-card-block {
+    background:rgba(30,41,59,0.24);
+    border:1px solid rgba(148,163,184,0.1);
+    border-radius:10px;
+    margin-top:11px;
+    padding:9px;
+  }
+  .opportunity-value { color:var(--text); font-size:22px; font-weight:1000; margin-top:4px; }
   .next-step-box {
     background: rgba(124,92,255,0.06);
     border: 1px solid rgba(124,92,255,0.18);
@@ -551,6 +559,25 @@
   .suggested-contract.low { border-color:rgba(249,115,22,0.28); background:rgba(249,115,22,0.06); }
   .suggested-contract.very-low { border-color:rgba(239,68,68,0.28); background:rgba(239,68,68,0.06); }
   .suggested-contract .index-contract-main { font-size:13px; }
+  .contract-tier-list { display:grid; gap:7px; margin-top:8px; }
+  .contract-tier-option {
+    background:rgba(15,23,42,0.2);
+    border:1px solid rgba(148,163,184,0.13);
+    border-radius:8px;
+    cursor:pointer;
+    padding:8px;
+    text-align:left;
+    width:100%;
+  }
+  .contract-tier-option.selected {
+    border-color:rgba(226,232,240,0.36);
+    background:rgba(226,232,240,0.06);
+  }
+  .contract-tier-name { color:var(--text); font-size:12px; font-weight:950; }
+  .contract-tier-desc { color:var(--muted); font-size:10.5px; font-weight:750; margin-top:2px; }
+  .contract-tier-cost { color:var(--text); font-size:16px; font-weight:1000; margin-top:5px; }
+  .contract-tier-meta { color:var(--muted); font-size:10.5px; margin-top:3px; overflow-wrap:anywhere; }
+  .contract-tier-heading { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:0.06em; margin-top:9px; text-transform:uppercase; }
   .contract-confidence { font-size:11px; font-weight:950; margin-top:8px; }
   .contract-confidence.high { color:var(--long); }
   .contract-confidence.moderate { color:#fbbf24; }
@@ -2256,6 +2283,14 @@
     <summary>Enter Now Funnel</summary>
     <div class="analytics-collapse-body" id="enterNowFunnelDiagnostics"></div>
   </details>
+  <details class="analytics-collapse">
+    <summary>Opportunity Price Mix</summary>
+    <div class="analytics-collapse-body" id="opportunityPriceMixDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Contract Candidate Audit</summary>
+    <div class="analytics-collapse-body" id="contractCandidateAuditDiagnostics"></div>
+  </details>
 </div>
 
 <!-- ── Video Studio Tab ──────────────────────────────────────────────────── -->
@@ -2652,6 +2687,8 @@
 <script src="/static/expected_move_analytics.js?v=20260713-card-data"></script>
 <script src="/static/opportunity_history.js?v=20260715-history"></script>
 <script src="/static/opportunity_analytics.js?v=20260715-shadow"></script>
+<script src="/static/opportunity_price_mix.js?v=20260715-price-mix"></script>
+<script src="/static/contract_candidate_audit.js?v=20260715-candidate-audit"></script>
 <script src="/static/card_data.js?v=20260713-card-data"></script>
 <script src="/static/further_analysis.js?v=20260713-card-data"></script>
 <script src="/static/setup_funnel_diagnostics.js?v=20260713-card-data"></script>
@@ -2672,10 +2709,18 @@ const STOCK_ALERT_ENTER_NOW_KEY = 'kairos_stock_alert_enter_now_transition_v1';
 const STOCK_ALERT_ENTRY_TOUCH_KEY = 'kairos_stock_alert_entry_touch_v1';
 const STOCK_ALERT_DIAGNOSTICS_KEY = 'kairos_stock_alert_diagnostics_v1';
 const FURTHER_ANALYSIS_SELECTED_KEY = 'kairos_further_analysis_selected_setup';
+const CONTRACT_TIER_SELECTION_KEY = 'kairos_contract_tier_selection_v1';
 const ENTER_NOW_FUNNEL_HISTORY_LIMIT = 20;
 let scannerRows = [];
 let scannerNearMiss = [];
 let indexWatchRows = [];
+let latestScannerMeta = null;
+let contractTierSelections = (() => {
+  try {
+    const saved = localStorage.getItem(CONTRACT_TIER_SELECTION_KEY);
+    return saved ? JSON.parse(saved) : {};
+  } catch { return {}; }
+})();
 let selectedFurtherAnalysisSetupId = localStorage.getItem(FURTHER_ANALYSIS_SELECTED_KEY) || '';
 let currentVideoProject = null;
 let videoProjectDirty = false;
@@ -3001,6 +3046,7 @@ async function runScan() {
     const res  = await fetchWithTimeout(`${API}/api/scan`, {}, 15000);
     const data = await res.json();
     scanMeta = data.meta || null;
+    latestScannerMeta = scanMeta;
     updateDataStatus(scanMeta || {});
 
     const nextRows = data.rows || [];
@@ -3465,6 +3511,7 @@ function scheduleContractRefreshPoll() {
       const data = await res.json();
       const nextRows = data.rows || [];
       const nextNearMiss = data.near_miss || [];
+      latestScannerMeta = data.meta || latestScannerMeta;
       scannerRows = nextRows;
       scannerNearMiss = nextNearMiss;
       refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
@@ -4189,6 +4236,27 @@ function contractEntryCost(setup) {
   return Number.isFinite(premium) ? premium * 100 : NaN;
 }
 
+function cardOpportunityRemaining(setup = {}) {
+  if (!window.KairosOpportunityAnalytics) return null;
+  const opportunity = window.KairosOpportunityAnalytics.opportunityAnalytics(setup, loadJournal(), {
+    opportunityHistoryModule: window.KairosOpportunityHistory,
+    cohortSummaries: opportunityCohortSummaries(),
+  });
+  const value = Number(opportunity?.opportunityRemainingPct);
+  if (!opportunity?.available || opportunity.confidence === 'INSUFFICIENT' || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function renderOpportunityRemainingBlock(setup = {}) {
+  const remaining = cardOpportunityRemaining(setup);
+  if (remaining === null) return '';
+  return `
+    <div class="opportunity-card-block">
+      <div class="index-simple-label">Opportunity Remaining</div>
+      <div class="opportunity-value">${escapeHtml(String(remaining))}%</div>
+    </div>`;
+}
+
 function expectedMoveReadinessForSetup(setup = {}) {
   const criteria = window.KairosFurtherAnalysis?.setupCriteria
     ? window.KairosFurtherAnalysis.setupCriteria(setup)
@@ -4426,34 +4494,151 @@ function renderContractDetails(display, setup) {
     </details>`;
 }
 
+function candidateContractIdentity(contract = {}) {
+  return [
+    contract.type,
+    contract.strike,
+    contract.expiration || contract.expiry,
+    contract.estimated_contract_cost,
+  ].map(value => String(value ?? '')).join('|');
+}
+
+function candidateContractCost(contract = {}) {
+  const explicit = Number(contract.estimated_contract_cost);
+  if (Number.isFinite(explicit)) return explicit;
+  const ask = Number(contract.ask);
+  if (Number.isFinite(ask)) return ask * 100;
+  const mid = Number(firstPresent(contract.mid, contract.mark));
+  return Number.isFinite(mid) ? mid * 100 : NaN;
+}
+
+function candidateContractLabel(contract = {}) {
+  const expiry = formatShortDate(firstPresent(contract.expiration, contract.expiry));
+  const strikeValue = Number(contract.strike);
+  const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
+  const type = contractTypePlainText(contract.type);
+  return `${expiry} · $${strike} ${type}`.trim();
+}
+
+function currentBestQualityCandidate(setup = {}) {
+  const best = setup.best_contract || {};
+  if (!best.available) return null;
+  const cost = contractEntryCost(setup);
+  return {
+    type: best.type,
+    strike: best.strike,
+    expiration: firstPresent(best.expiry, best.expiration),
+    expiry: firstPresent(best.expiry, best.expiration),
+    dte: best.dte,
+    bid: best.bid,
+    ask: best.ask,
+    mid: firstPresent(best.mid, best.mark),
+    mark: firstPresent(best.mark, best.mid),
+    estimated_contract_cost: Number.isFinite(cost) ? cost : null,
+    delta: best.delta,
+    open_interest: firstPresent(best.open_interest, best.openInterest),
+    volume: best.volume,
+    spread: best.spread,
+    spread_pct: best.spread_pct,
+    score: firstPresent(best.score, best.best_score),
+    symbol: best.symbol,
+  };
+}
+
+function contractTierOptions(setup = {}) {
+  const audit = setup.best_contract?.candidate_audit || {};
+  const bestQuality = audit.best_quality_contract || audit.current_selected_contract || currentBestQualityCandidate(setup);
+  const balanced = audit.best_balanced_contract || null;
+  const budget = audit.lowest_cost_acceptable_contract || null;
+  const tiers = [];
+  const seen = new Set();
+  const addTier = (key, name, description, contract) => {
+    if (!contract) return;
+    const cost = candidateContractCost(contract);
+    const strike = Number(contract.strike);
+    const expiry = firstPresent(contract.expiration, contract.expiry);
+    if (!Number.isFinite(cost) || !Number.isFinite(strike) || !expiry || !contract.type) return;
+    const identity = candidateContractIdentity({ ...contract, estimated_contract_cost: cost });
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    tiers.push({ key, name, description, contract: { ...contract, estimated_contract_cost: cost } });
+  };
+  addTier('best_quality', 'Best Quality', 'Highest quality contract', bestQuality);
+  addTier('balanced', 'Balanced', 'Lower cost with strong quality', balanced);
+  addTier('budget', 'Budget', 'Lowest-cost quality contract', budget);
+  return tiers;
+}
+
+function selectedContractTierKey(setup = {}) {
+  const id = setupIdFromSetup(setup);
+  const tiers = contractTierOptions(setup);
+  const saved = contractTierSelections[id];
+  return tiers.some(tier => tier.key === saved) ? saved : 'best_quality';
+}
+
+function selectedContractTier(setup = {}) {
+  const tiers = contractTierOptions(setup);
+  const selected = selectedContractTierKey(setup);
+  return tiers.find(tier => tier.key === selected) || tiers[0] || null;
+}
+
+function selectContractTier(setupId, tierKey) {
+  contractTierSelections[setupId] = tierKey;
+  localStorage.setItem(CONTRACT_TIER_SELECTION_KEY, JSON.stringify(contractTierSelections));
+  renderScannerResults();
+  renderExecutionTab();
+  renderFurtherAnalysisTab();
+}
+
+function contractSourceFromSelectedTier(setup = {}) {
+  const tier = selectedContractTier(setup);
+  if (!tier) return null;
+  const c = tier.contract || {};
+  return {
+    ...c,
+    type: c.type,
+    strike: c.strike,
+    expiry: firstPresent(c.expiry, c.expiration),
+    expiration: firstPresent(c.expiration, c.expiry),
+    ask: c.ask,
+    bid: c.bid,
+    mark: firstPresent(c.mark, c.mid),
+    mid: firstPresent(c.mid, c.mark),
+    spread: c.spread,
+    open_interest: firstPresent(c.open_interest, c.openInterest),
+    volume: c.volume,
+    symbol: c.symbol,
+    selected_tier: tier.key,
+    selected_tier_label: tier.name,
+  };
+}
+
 function renderBestContractBlock(setup) {
-  const contract = bestContractDisplay(setup);
-  const entryCost = Number.isFinite(contract.cost) ? `≈ ${fmtMoney(contract.cost)} per contract` : 'Unavailable';
-  if (contract.potential) {
-    return `
-      <div class="index-contract suggested-contract ${contract.className}">
-        <div class="index-simple-label">${contract.label}</div>
-        <div class="index-contract-main">${escapeHtml(contract.main)}</div>
-        <div class="index-contract-sub">${escapeHtml(contract.sub || '')}</div>
-        <div class="contract-cost">
-          <div class="contract-cost-label">Suggested Expiration</div>
-          <div class="contract-cost-value">${escapeHtml(contract.expirationLabel || 'Learning')}</div>
-        </div>
-        <div class="index-contract-sub">${escapeHtml(contract.disclaimer || 'Verify the live option chain before entering.')}</div>
-      </div>`;
-  }
+  const tiers = contractTierOptions(setup);
+  if (!tiers.length) return '';
+  const selectedKey = selectedContractTierKey(setup);
+  const setupId = setupIdFromSetup(setup);
+  const primary = tiers.find(tier => tier.key === selectedKey) || tiers[0];
+  const primaryLabel = candidateContractLabel(primary.contract);
+  const tierButton = tier => `
+    <button type="button" class="contract-tier-option ${tier.key === selectedKey ? 'selected' : ''}" onclick="selectContractTier('${escapeHtml(setupId)}', '${escapeHtml(tier.key)}')">
+      <div class="contract-tier-name">${escapeHtml(tier.name)}</div>
+      <div class="contract-tier-desc">${escapeHtml(tier.description)}</div>
+      <div class="contract-tier-cost">${escapeHtml(fmtMoney(candidateContractCost(tier.contract)))}</div>
+      <div class="contract-tier-meta">${escapeHtml(candidateContractLabel(tier.contract))}</div>
+    </button>`;
   return `
-    <div class="index-contract suggested-contract ${contract.className}">
-      <div class="index-simple-label">${contract.label}</div>
-      <div class="index-contract-main">${escapeHtml(contract.main)}</div>
-      ${contract.sub ? `<div class="index-contract-sub">${escapeHtml(contract.sub)}</div>` : ''}
-      ${renderContractReasons(contract)}
-      ${contract.confidence ? `
-        <div class="contract-cost">
-          <div class="contract-cost-label">Estimated Entry Cost</div>
-          <div class="contract-cost-value">${escapeHtml(entryCost)}</div>
+    <div class="index-contract suggested-contract">
+      <div class="index-simple-label">Suggested Contract</div>
+      <div class="index-contract-main">${escapeHtml(primaryLabel)}</div>
+      <div class="contract-tier-list">
+        ${tierButton(primary)}
+      </div>
+      ${tiers.length > 1 ? `
+        <div class="contract-tier-heading">Also Available</div>
+        <div class="contract-tier-list">
+          ${tiers.filter(tier => tier.key !== primary.key).map(tierButton).join('')}
         </div>
-        ${renderContractDetails(contract, setup)}
       ` : ''}
     </div>`;
 }
@@ -4470,6 +4655,27 @@ function bestContractCost(setup) {
 
 function executionContractInfo(setup) {
   const contract = setup.best_contract || {};
+  const selectedSource = contractSourceFromSelectedTier(setup);
+  if (selectedSource) {
+    const fullCost = candidateContractCost(selectedSource);
+    const premium = Number.isFinite(fullCost) ? fullCost / 100 : NaN;
+    const expiry = firstPresent(selectedSource.expiry, selectedSource.expiration) || '';
+    const strikeValue = Number(selectedSource.strike);
+    const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
+    return {
+      available: true,
+      source: 'validated_live',
+      tier: selectedSource.selected_tier || 'best_quality',
+      tierLabel: selectedSource.selected_tier_label || 'Best Quality',
+      expiry,
+      expiryText: formatShortDate(expiry),
+      strike,
+      type: contractTypePlainText(selectedSource.type),
+      cost: premium,
+      costText: Number.isFinite(fullCost) ? fmtMoney(fullCost) : 'Price unavailable',
+      label: candidateContractLabel(selectedSource),
+    };
+  }
   const display = bestContractDisplay(setup);
   const guidance = contractGuidanceState(setup);
   const type = contractTypePlainText(contract.type || (setup.direction === 'LONG' ? 'CALL' : setup.direction === 'SHORT' ? 'PUT' : ''));
@@ -4821,6 +5027,7 @@ function renderCard(s) {
         ${renderNextStepBlock(s)}
       </div>
       ${renderTradeReadinessTimeline(s)}
+      ${renderOpportunityRemainingBlock(s)}
       ${renderTradePlanBlock(s)}
       ${renderPositionManagement(s)}
       ${renderBestContractBlock(s)}
@@ -5030,12 +5237,13 @@ function selectedContractFromSetup(setup = {}) {
   const option = setup.option || {};
   const suggested = setup.suggested_contract || {};
   const contract = setup.contract || {};
+  const selectedTierSource = contractSourceFromSelectedTier(setup);
   const guidance = contractGuidanceState(setup);
-  const source = guidance.state === 'validated_live'
+  const source = selectedTierSource || (guidance.state === 'validated_live'
     ? [best, option, suggested, contract].find(item =>
     item && (firstPresent(item.strike, item.strike_price) || firstPresent(item.expiry, item.expiration, item.expiration_date) || item.type || item.option_type || item.symbol)
   ) || {}
-    : {};
+    : {});
   const emptyVerified = {
     option_symbol: '',
     option_type: 'N/A',
@@ -5053,7 +5261,8 @@ function selectedContractFromSetup(setup = {}) {
     implied_volatility_at_entry: null,
     underlying_price_at_entry: coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price, setup.entry)),
   };
-  const optionType = guidance.state === 'validated_live'
+  const isVerifiedSelection = Boolean(selectedTierSource) || guidance.state === 'validated_live';
+  const optionType = isVerifiedSelection
     ? normalizeOptionType(firstPresent(source.type, source.option_type, option.type, best.type), setup.direction)
     : 'N/A';
   const strike = coerceNumber(firstPresent(source.strike, source.strike_price));
@@ -5089,7 +5298,7 @@ function selectedContractFromSetup(setup = {}) {
     implied_volatility_at_entry: iv,
     underlying_price_at_entry: coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price, setup.entry)),
   };
-  if (guidance.state === 'potential' && guidance.potential) {
+  if (!selectedTierSource && guidance.state === 'potential' && guidance.potential) {
     return {
       ...emptyVerified,
       potential_option_type: guidance.potential.type,
@@ -5101,8 +5310,11 @@ function selectedContractFromSetup(setup = {}) {
       potential_strike_increment_source: guidance.potential.strike_increment_source,
     };
   }
-  if (guidance.state !== 'validated_live') return emptyVerified;
-  return verified;
+  if (!isVerifiedSelection) return emptyVerified;
+  return {
+    ...verified,
+    contract_guidance_source: selectedTierSource ? selectedTierSource.selected_tier : verified.contract_guidance_source,
+  };
 }
 
 function scannerSnapshotFromSetup(setup = {}, ev = {}) {
@@ -5310,9 +5522,9 @@ function recordEnterNowFunnelSnapshot(rows = [], nearMiss = [], meta = {}) {
     nearMiss: nearMiss.map(funnelEnrichedSetup),
     meta: {
       ...meta,
-      symbols_requested: meta.symbols_requested || meta.requested_count || rows.length + nearMiss.length,
-      symbols_processed: meta.symbols_processed || rows.length + nearMiss.length,
-      symbols_failed: meta.symbols_failed || 0,
+      symbols_requested: meta.symbols_requested || meta.requested_count || meta.configured_universe_count || rows.length + nearMiss.length,
+      symbols_processed: meta.symbols_processed || meta.symbols_successfully_processed || rows.length + nearMiss.length,
+      symbols_failed: meta.symbols_failed || meta.symbols_omitted_or_rejected || 0,
     },
     timestamp,
   });
@@ -8474,6 +8686,270 @@ function renderEnterNowFunnelDiagnostics() {
   `;
 }
 
+function renderPriceMixStageTable(matrix = {}) {
+  const bands = window.KairosOpportunityPriceMix?.BANDS || {};
+  const bandKeys = ['BUDGET', 'MID_RANGE', 'PREMIUM', 'UNAVAILABLE'];
+  const labels = {
+    universe: 'Universe / processed rows',
+    market_data_success: 'Market-data success',
+    technical_setup_found: 'Technical setup found',
+    grade_eligible: 'Grade eligible',
+    enter_now: 'Enter Now',
+    developing: 'Developing',
+    skip: 'Skip',
+    optionable: 'Optionable',
+    contract_data_available: 'Contract data available',
+    suggested_contract_found: 'Suggested contract found',
+    displayed: 'Final displayed section',
+  };
+  const rows = Object.entries(labels).map(([stage, label]) => `
+    <tr>
+      <td>${escapeHtml(label)}</td>
+      ${bandKeys.map(key => `<td>${escapeHtml(String(matrix[stage]?.[key] || 0))}</td>`).join('')}
+    </tr>
+  `).join('');
+  return `
+    <table class="analytics-table">
+      <thead>
+        <tr>
+          <th>Stage</th>
+          ${bandKeys.map(key => `<th>${escapeHtml(bands[key]?.label || key)}</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderPriceMixSectionSummary(bySection = {}) {
+  const bandKeys = ['BUDGET', 'MID_RANGE', 'PREMIUM', 'UNAVAILABLE'];
+  const sections = ['Enter Now', 'Developing', 'Skip', 'Other'];
+  const rows = sections.map(section => `
+    <tr>
+      <td>${escapeHtml(section)}</td>
+      ${bandKeys.map(key => `<td>${escapeHtml(String(bySection[section]?.[key] || 0))}</td>`).join('')}
+    </tr>
+  `).join('');
+  return `
+    <table class="analytics-table">
+      <thead><tr><th>Displayed Section</th><th>Budget</th><th>Mid-Range</th><th>Premium</th><th>Unavailable</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderPriceMixContractAudit(rows = []) {
+  const sorted = rows
+    .slice()
+    .sort((a, b) => {
+      const sectionRank = { 'Enter Now': 0, Developing: 1, Skip: 2, Other: 3 };
+      const bandRank = { BUDGET: 0, MID_RANGE: 1, PREMIUM: 2, UNAVAILABLE: 3 };
+      return (sectionRank[a.section] ?? 9) - (sectionRank[b.section] ?? 9)
+        || (bandRank[a.cost_band] ?? 9) - (bandRank[b.cost_band] ?? 9)
+        || String(a.ticker).localeCompare(String(b.ticker));
+    })
+    .slice(0, 40);
+  const body = sorted.map(row => `
+    <tr>
+      <td><strong>${escapeHtml(row.ticker || '—')}</strong></td>
+      <td class="direction-value ${directionClass(row.direction)}">${escapeHtml(row.direction || '—')}</td>
+      <td>${escapeHtml(row.grade || '—')}</td>
+      <td>${escapeHtml(row.lifecycle_state || '—')}</td>
+      <td>${escapeHtml(row.section || '—')}</td>
+      <td>${escapeHtml((window.KairosOpportunityPriceMix?.BANDS?.[row.cost_band]?.label) || row.cost_band || '—')}</td>
+      <td>${row.estimated_contract_cost == null ? '—' : fmtMoney(row.estimated_contract_cost)}</td>
+      <td>${escapeHtml(row.expiry || '—')}</td>
+      <td>${row.strike == null ? '—' : fmtMoney(row.strike)}</td>
+      <td>${row.ask == null ? '—' : fmtMoney(row.ask)}</td>
+      <td>${row.spread == null ? '—' : fmtMoney(row.spread)}</td>
+      <td>${row.open_interest == null ? '—' : escapeHtml(String(row.open_interest))}</td>
+      <td>${row.volume == null ? '—' : escapeHtml(String(row.volume))}</td>
+      <td>${escapeHtml(row.live_failure_reason || '—')}</td>
+    </tr>`).join('');
+  return `
+    <details class="analytics-subdetails">
+      <summary>Contract-selection audit rows</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead>
+            <tr><th>Ticker</th><th>Direction</th><th>Grade</th><th>Status</th><th>Section</th><th>Band</th><th>Cost</th><th>Expiry</th><th>Strike</th><th>Ask</th><th>Spread</th><th>OI</th><th>Volume</th><th>Reason</th></tr>
+          </thead>
+          <tbody>${body || '<tr><td colspan="14" style="text-align:center;color:var(--muted);padding:18px;">No scanner rows available yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
+function renderPriceMixProposals(proposals = []) {
+  const byBucket = proposals.reduce((acc, item) => {
+    acc[item.bucket] = acc[item.bucket] || [];
+    acc[item.bucket].push(item);
+    return acc;
+  }, {});
+  return Object.entries(byBucket).map(([bucket, items]) => `
+    <details class="analytics-subdetails">
+      <summary>${escapeHtml(bucket)} candidates (${items.length})</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead><tr><th>Ticker</th><th>Sector</th><th>Why review it</th></tr></thead>
+          <tbody>${items.map(item => `<tr><td><strong>${escapeHtml(item.ticker)}</strong></td><td>${escapeHtml(item.sector)}</td><td>${escapeHtml(item.rationale)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </details>
+  `).join('');
+}
+
+function renderOpportunityPriceMixDiagnostics() {
+  const el = document.getElementById('opportunityPriceMixDiagnostics');
+  if (!el) return;
+  if (!window.KairosOpportunityPriceMix) {
+    el.innerHTML = '<div class="analytics-empty">Opportunity price-mix diagnostics module unavailable.</div>';
+    return;
+  }
+  const rows = [...scannerRows, ...scannerNearMiss];
+  const diag = window.KairosOpportunityPriceMix.summarize(rows, { progressResolver: setupProgressState });
+  const meta = latestScannerMeta || {};
+  const configuredUniverse = meta.configured_universe_count ?? '—';
+  const attempted = meta.symbols_attempted ?? '—';
+  const processed = meta.symbols_successfully_processed ?? rows.length;
+  const omitted = meta.symbols_omitted_or_rejected ?? '—';
+  const tradeabilitySkipped = meta.tradeability_skipped ?? '—';
+  const noSetupOrFailed = meta.no_setup_or_failed_count ?? '—';
+  const enterNow = diag.by_section['Enter Now'] || {};
+  const developing = diag.by_section.Developing || {};
+  const failureText = Object.entries(diag.by_failure_reason || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join(' · ') || '—';
+  el.innerHTML = `
+    <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+      Developer-only diagnostic. Contract price bands are based on estimated one-contract cost from live premium data when available; rows without usable premium are counted as Unavailable. This does not change scanner strategy, universe, or contract selection.
+      <br>Universe accounting: configured universe ${escapeHtml(String(configuredUniverse))} · symbols attempted ${escapeHtml(String(attempted))} · successfully processed rows ${escapeHtml(String(processed))} · omitted/rejected ${escapeHtml(String(omitted))} · tradeability skipped ${escapeHtml(String(tradeabilitySkipped))} · no setup/failed ${escapeHtml(String(noSetupOrFailed))}.
+    </div>
+    <div class="journal-stats" style="margin-bottom:12px;">
+      <div class="stat-card"><div class="stat-label">Enter Now Budget</div><div class="stat-value">${escapeHtml(String(enterNow.BUDGET || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Enter Now Mid-Range</div><div class="stat-value">${escapeHtml(String(enterNow.MID_RANGE || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Enter Now Premium</div><div class="stat-value">${escapeHtml(String(enterNow.PREMIUM || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Enter Now Unavailable</div><div class="stat-value">${escapeHtml(String(enterNow.UNAVAILABLE || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Developing Budget</div><div class="stat-value">${escapeHtml(String(developing.BUDGET || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Developing Mid-Range</div><div class="stat-value">${escapeHtml(String(developing.MID_RANGE || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Developing Premium</div><div class="stat-value">${escapeHtml(String(developing.PREMIUM || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Developing Unavailable</div><div class="stat-value">${escapeHtml(String(developing.UNAVAILABLE || 0))}</div></div>
+    </div>
+    <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+      Primary sparse-range evidence: ${escapeHtml(diag.recommendation)}
+      <br>Unavailable / no-suggestion reasons: ${escapeHtml(failureText)}
+    </div>
+    ${renderPriceMixStageTable(diag.stage_matrix)}
+    ${renderPriceMixSectionSummary(diag.by_section)}
+    ${renderPriceMixContractAudit(diag.rows)}
+    <details class="analytics-subdetails">
+      <summary>Affordable-contract quality safeguards</summary>
+      <div class="analytics-subdetails-body">
+        <ul>${diag.safeguards.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+      </div>
+    </details>
+    ${renderPriceMixProposals(diag.proposals)}
+  `;
+}
+
+function auditContractSummaryText(contract) {
+  if (!contract) return 'Unavailable';
+  const cost = contract.estimated_contract_cost == null ? '—' : fmtMoney(contract.estimated_contract_cost);
+  const strike = contract.strike == null ? '—' : fmtMoney(contract.strike);
+  const type = contractTypePlainText(contract.type);
+  const expiry = contract.expiration || contract.expiry || '—';
+  return `${cost} · ${escapeHtml(expiry)} · ${strike} ${escapeHtml(type)}`;
+}
+
+function renderCandidateAuditRows(rows = []) {
+  const sorted = rows.slice().sort((a, b) => {
+    const statusRank = { ENTER_NOW: 0, ALMOST_READY: 1, WAITING: 2 };
+    return (statusRank[a.status] ?? 9) - (statusRank[b.status] ?? 9)
+      || String(a.ticker).localeCompare(String(b.ticker));
+  });
+  const body = sorted.map(row => `
+    <tr>
+      <td><strong>${escapeHtml(row.ticker || '—')}</strong></td>
+      <td class="direction-value ${directionClass(row.direction)}">${escapeHtml(row.direction || '—')}</td>
+      <td>${escapeHtml(row.grade || '—')}</td>
+      <td>${escapeHtml(row.status || '—')}</td>
+      <td>${escapeHtml(auditContractSummaryText(row.current))}</td>
+      <td>${escapeHtml(auditContractSummaryText(row.bestQuality))}</td>
+      <td>${escapeHtml(auditContractSummaryText(row.balanced))}</td>
+      <td>${escapeHtml(auditContractSummaryText(row.lowest))}</td>
+      <td>${row.potentialSavings == null ? '—' : fmtMoney(row.potentialSavings)}</td>
+      <td>No</td>
+      <td>${escapeHtml(String(row.candidateCount || 0))}</td>
+      <td>${escapeHtml(String(row.acceptableCandidateCount || 0))}</td>
+    </tr>
+  `).join('');
+  return `
+    <table class="analytics-table">
+      <thead>
+        <tr>
+          <th>Ticker</th><th>Direction</th><th>Grade</th><th>Status</th>
+          <th>Current Selection</th><th>Best Quality</th><th>Balanced</th><th>Lowest Acceptable</th>
+          <th>Potential Savings</th><th>Production Changed</th><th>Candidates</th><th>Acceptable</th>
+        </tr>
+      </thead>
+      <tbody>${body || '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:18px;">No Enter Now or Developing setups available.</td></tr>'}</tbody>
+    </table>`;
+}
+
+function renderRejectedCandidateDetails(rows = []) {
+  const rejected = rows.flatMap(row => (row.rejectedCandidates || []).map(candidate => ({ ...candidate, ticker: row.ticker }))).slice(0, 60);
+  const body = rejected.map(candidate => `
+    <tr>
+      <td><strong>${escapeHtml(candidate.ticker || '—')}</strong></td>
+      <td>${escapeHtml(contractTypePlainText(candidate.type))}</td>
+      <td>${candidate.strike == null ? '—' : fmtMoney(candidate.strike)}</td>
+      <td>${escapeHtml(candidate.expiration || candidate.expiry || '—')}</td>
+      <td>${escapeHtml(String(candidate.dte ?? '—'))}</td>
+      <td>${candidate.estimated_contract_cost == null ? '—' : fmtMoney(candidate.estimated_contract_cost)}</td>
+      <td>${candidate.spread_pct == null ? '—' : `${escapeHtml(String(candidate.spread_pct))}%`}</td>
+      <td>${escapeHtml(String(candidate.open_interest ?? '—'))}</td>
+      <td>${escapeHtml(String(candidate.volume ?? '—'))}</td>
+      <td>${escapeHtml(String(candidate.score ?? '—'))}</td>
+      <td>${escapeHtml((candidate.rejection_reasons || []).join(', ') || '—')}</td>
+    </tr>
+  `).join('');
+  return `
+    <details class="analytics-subdetails">
+      <summary>Rejected candidates and reasons</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead><tr><th>Ticker</th><th>Type</th><th>Strike</th><th>Expiration</th><th>DTE</th><th>Cost</th><th>Spread %</th><th>OI</th><th>Volume</th><th>Score</th><th>Reasons</th></tr></thead>
+          <tbody>${body || '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:18px;">No rejected candidates available yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
+function renderContractCandidateAuditDiagnostics() {
+  const el = document.getElementById('contractCandidateAuditDiagnostics');
+  if (!el) return;
+  if (!window.KairosContractCandidateAudit) {
+    el.innerHTML = '<div class="analytics-empty">Contract candidate audit module unavailable.</div>';
+    return;
+  }
+  const diag = window.KairosContractCandidateAudit.summarize([...scannerRows, ...scannerNearMiss], { progressResolver: setupProgressState });
+  const dist = diag.distribution_by_current_selection_band || {};
+  el.innerHTML = `
+    <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+      Developer-only audit of option candidates evaluated for Enter Now and Developing setups. Production selection changed: No. This does not alter scanner strategy, card rendering, alerts, execution, or contract-selection logic.
+    </div>
+    <div class="journal-stats" style="margin-bottom:12px;">
+      <div class="stat-card"><div class="stat-label">Setups Audited</div><div class="stat-value">${escapeHtml(String(diag.setups_audited || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Cheaper Acceptable Found</div><div class="stat-value">${escapeHtml(String(diag.cheaper_acceptable_candidate_found || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">No Cheaper Acceptable</div><div class="stat-value">${escapeHtml(String(diag.no_cheaper_acceptable_candidate || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Candidate Data Unavailable</div><div class="stat-value">${escapeHtml(String(diag.candidate_data_unavailable || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Average Savings</div><div class="stat-value">${diag.average_potential_savings == null ? '—' : fmtMoney(diag.average_potential_savings)}</div></div>
+      <div class="stat-card"><div class="stat-label">Budget / Mid / Premium</div><div class="stat-value">${escapeHtml(`${dist.BUDGET || 0}/${dist.MID_RANGE || 0}/${dist.PREMIUM || 0}`)}</div></div>
+    </div>
+    ${renderCandidateAuditRows(diag.rows)}
+    ${renderRejectedCandidateDetails(diag.rows)}
+  `;
+}
+
 function renderAnalytics() {
   const all = loadJournal();
   const closed = all.filter(e => e.result !== 'Open');
@@ -8515,6 +8991,8 @@ function renderAnalytics() {
   const opportunityEl = document.getElementById('opportunityDiagnostics');
   if (opportunityEl) opportunityEl.innerHTML = renderOpportunityDiagnostics(all);
   renderEnterNowFunnelDiagnostics();
+  renderOpportunityPriceMixDiagnostics();
+  renderContractCandidateAuditDiagnostics();
 }
 
 // ── CSV Export ───────────────────────────────────────────────────────────────

@@ -108,6 +108,12 @@ assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
 assert.ok(!enterWaiting.includes('Continue monitoring. The setup is still developing.'));
+assert.ok(enterWaiting.includes('Suggested Contract'));
+assert.ok(enterWaiting.includes('Best Quality'));
+assert.ok(enterWaiting.includes('Highest quality contract'));
+assert.ok(enterWaiting.includes('$120.00'));
+assert.ok(!enterWaiting.includes('Kairos Confidence'));
+assert.ok(!enterWaiting.includes('View contract details'));
 
 const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 }));
 assert.ok(reachedLive.includes('data-execution-state="SETUP_CONFIRMED_ENTRY_REACHED"'));
@@ -187,6 +193,66 @@ const snapshot = context.scannerSnapshotFromSetup(setup({
 assert.strictEqual(snapshot.earnings_date, '2026-07-30');
 assert.strictEqual(snapshot.days_until_earnings, 17);
 assert.strictEqual(snapshot.earnings_source, 'cache');
+
+// Opportunity Remaining is hidden until the existing analytics engine says confidence is sufficient.
+assert.ok(!htmlFor(setup()).includes('Opportunity Remaining'));
+context.window.KairosOpportunityAnalytics = {
+  opportunityAnalytics: () => ({
+    available: true,
+    confidence: 'MODERATE',
+    opportunityRemainingPct: 82.4,
+    status: 'ON_TIME',
+    calculationVersion: 'test',
+  }),
+};
+const opportunityCard = htmlFor(setup());
+assert.ok(opportunityCard.includes('Opportunity Remaining'));
+assert.ok(opportunityCard.includes('<div class="opportunity-value">82%</div>'));
+context.window.KairosOpportunityAnalytics = {
+  opportunityAnalytics: () => ({
+    available: false,
+    confidence: 'INSUFFICIENT',
+    opportunityRemainingPct: null,
+    status: 'INSUFFICIENT_DATA',
+  }),
+};
+assert.ok(!htmlFor(setup()).includes('Opportunity Remaining'));
+
+// Contract candidate tiers render compactly and update the journal snapshot selection.
+const tieredSetup = setup({
+  best_contract: {
+    available: true,
+    type: 'PUT',
+    strike: 45,
+    expiry: '2026-08-21',
+    bid: 7.9,
+    ask: 8,
+    mid: 7.95,
+    spread: 0.1,
+    candidate_audit: {
+      current_selected_contract: { type: 'PUT', strike: 45, expiration: '2026-08-21', bid: 7.9, ask: 8, mid: 7.95, estimated_contract_cost: 800, score: 95, rejection_reasons: [] },
+      best_quality_contract: { type: 'PUT', strike: 45, expiration: '2026-08-21', bid: 7.9, ask: 8, mid: 7.95, estimated_contract_cost: 800, score: 95, rejection_reasons: [] },
+      best_balanced_contract: { type: 'PUT', strike: 44, expiration: '2026-08-21', bid: 5.4, ask: 5.5, mid: 5.45, estimated_contract_cost: 550, score: 88, rejection_reasons: [] },
+      lowest_cost_acceptable_contract: { type: 'PUT', strike: 43, expiration: '2026-08-21', bid: 3.85, ask: 3.95, mid: 3.9, estimated_contract_cost: 395, score: 80, rejection_reasons: [] },
+    },
+  },
+});
+const tieredHtml = htmlFor(tieredSetup);
+assert.ok(tieredHtml.includes('Best Quality'));
+assert.ok(tieredHtml.includes('Balanced'));
+assert.ok(tieredHtml.includes('Budget'));
+assert.ok(tieredHtml.includes('$800.00'));
+assert.ok(tieredHtml.includes('$550.00'));
+assert.ok(tieredHtml.includes('$395.00'));
+assert.ok(tieredHtml.includes('Aug 21 · $45 Put'));
+const tieredId = context.setupIdFromSetup(tieredSetup);
+context.selectContractTier(tieredId, 'balanced');
+const balancedSnapshot = context.selectedContractFromSetup(tieredSetup);
+assert.strictEqual(balancedSnapshot.strike_price, 44);
+assert.strictEqual(balancedSnapshot.expiration_date, '2026-08-21');
+assert.strictEqual(balancedSnapshot.option_ask_at_entry, 5.5);
+assert.strictEqual(balancedSnapshot.premium_paid, 5.5);
+assert.strictEqual(balancedSnapshot.contract_guidance_source, 'balanced');
 
 const tracked = context.updateTrackedSetupWithObservation({
   ticker: 'ATO',

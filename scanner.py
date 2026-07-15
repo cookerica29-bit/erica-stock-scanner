@@ -19,27 +19,33 @@ STOCK_SCANNER_STRATEGY_BASELINE_COMMIT = "7441aac88d5cdf2bb479b85f0e73e4cec629ed
 
 WATCHLIST = [
     # ── Airlines ──────────────────────────────────────────────────────────────
-    "DAL", "UAL", "AAL", "JBLU",
-    # ── Cruise ────────────────────────────────────────────────────────────────
-    "CCL", "RCL", "NCLH",
+    "DAL", "UAL", "AAL", "JBLU", "LUV",
+    # ── Travel / Mobility ────────────────────────────────────────────────────
+    "CCL", "RCL", "NCLH", "ABNB", "MAR", "UBER",
     # ── Tech / Mega-cap ───────────────────────────────────────────────────────
     "NVDA", "AMD", "META", "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN",
+    # ── Software / Growth Tech ────────────────────────────────────────────────
+    "PLTR", "CRM", "ORCL", "SHOP", "SNOW", "NET", "DDOG", "ADBE", "ANET", "DELL",
     # ── Semiconductors ────────────────────────────────────────────────────────
     "MU", "INTC", "QCOM", "AVGO", "TSM", "ARM",
+    # ── Autos / EV ────────────────────────────────────────────────────────────
+    "F", "GM",
     # ── Energy Majors ─────────────────────────────────────────────────────────
-    "XOM", "CVX", "OXY",
+    "XOM", "CVX", "OXY", "COP", "EOG",
     # ── Energy Mid-cap / Services ─────────────────────────────────────────────
-    "DVN", "MRO", "HAL", "SLB", "FANG",
+    "DVN", "MRO", "HAL", "SLB", "FANG", "KMI", "ENPH", "PBR", "ET",
     # ── Big Banks ─────────────────────────────────────────────────────────────
-    "JPM", "BAC", "GS", "MS", "WFC",
-    # ── Payments / Fintech ────────────────────────────────────────────────────
-    "V", "MA", "AXP", "PYPL", "SQ",
+    "JPM", "BAC", "GS", "MS", "WFC", "C", "TFC", "PGR",
+    # ── Payments / Fintech / Crypto ───────────────────────────────────────────
+    "V", "MA", "AXP", "PYPL", "SQ", "SOFI", "HOOD", "AFRM", "SCHW",
     # ── Retail / Consumer Discretionary ──────────────────────────────────────
-    "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE",
+    "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE", "LULU", "DKNG", "ROST",
+    # ── Communication Services / Media ────────────────────────────────────────
+    "DIS", "NFLX", "CMCSA", "T", "PINS", "WBD",
     # ── Consumer Staples ──────────────────────────────────────────────────────
     "PG", "KO", "PEP", "CL", "MO",
     # ── Healthcare / Pharma ───────────────────────────────────────────────────
-    "UNH", "JNJ", "ABBV", "LLY", "PFE", "MRK", "CVS",
+    "UNH", "JNJ", "ABBV", "LLY", "PFE", "MRK", "CVS", "BMY", "MDT", "AMGN", "TMO", "ISRG",
     # ── Biotech ───────────────────────────────────────────────────────────────
     "GILD", "REGN", "MRNA", "BIIB",
     # ── Utilities ─────────────────────────────────────────────────────────────
@@ -47,13 +53,13 @@ WATCHLIST = [
     # ── Industrials / Defense ─────────────────────────────────────────────────
     "CAT", "DE", "HON", "BA", "GE", "LMT", "RTX",
     # ── Materials / Commodities ───────────────────────────────────────────────
-    "FCX", "NEM", "AA", "CLF",
+    "FCX", "NEM", "AA", "CLF", "VALE",
     # ── Broad ETFs ────────────────────────────────────────────────────────────
     "SPY", "QQQ", "IWM", "DIA",
     # ── Sector ETFs ───────────────────────────────────────────────────────────
     "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
     # ── Commodity ETFs ────────────────────────────────────────────────────────
-    "GLD", "SLV", "USO", "UNG",
+    "GLD", "SLV", "USO", "UNG", "GDX",
 ]
 
 TRENDING_UNIVERSE = [
@@ -63,7 +69,7 @@ TRENDING_UNIVERSE = [
 
 NO_EARNINGS_SYMBOLS = {
     "SPY", "QQQ", "IWM", "DIA",
-    "GLD", "SLV", "USO", "UNG",
+    "GLD", "SLV", "USO", "UNG", "GDX",
     "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
 }
 
@@ -74,7 +80,7 @@ STOCK_TRADEABILITY_FILTER = {
     "min_option_expirations": 1,
     "exclude_non_major_etfs": False,
     "allowlist": {
-        "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
+        "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "GDX",
         "XLE", "XLF", "XLK", "XLV", "XLU", "XLI", "XLB",
         "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL",
     },
@@ -84,7 +90,7 @@ STOCK_TRADEABILITY_FILTER = {
 STOCK_UNIVERSE_FILTER = STOCK_TRADEABILITY_FILTER
 
 MAJOR_LIQUID_ETFS = {
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "GDX",
     "XLE", "XLF", "XLK", "XLV", "XLU", "XLI", "XLB",
 }
 
@@ -269,6 +275,9 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
     if generated_at:
         age_seconds = max(0, (datetime.utcnow() - generated_at).total_seconds())
     refresh_snapshot = _analysis_refresh_snapshot(key)
+    scan_meta = cached.get("scan_meta") or {}
+    rows = cached.get("rows") or []
+    near_miss = cached.get("near_miss") or []
     return {
         "cache": "hit",
         "generated_at": generated_at.isoformat() + "Z" if generated_at else None,
@@ -278,6 +287,15 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "cache_key": "default" if key == ("default",) else "custom",
         "strategy_version": STOCK_SCANNER_STRATEGY_VERSION,
         "strategy_baseline": STOCK_SCANNER_STRATEGY_BASELINE_COMMIT,
+        "configured_universe_count": scan_meta.get("configured_universe_count"),
+        "symbols_attempted": scan_meta.get("symbols_attempted"),
+        "symbols_successfully_processed": scan_meta.get("symbols_successfully_processed", len(rows) + len(near_miss)),
+        "symbols_omitted_or_rejected": scan_meta.get("symbols_omitted_or_rejected"),
+        "tradeability_skipped": scan_meta.get("tradeability_skipped"),
+        "tradeability_skip_reasons": scan_meta.get("tradeability_skip_reasons", {}),
+        "processed_rows": len(rows) + len(near_miss),
+        "qualified_rows": len(rows),
+        "near_miss_rows": len(near_miss),
         **refresh_snapshot,
     }
 
@@ -307,11 +325,12 @@ def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
     }
 
 
-def _store_analysis_cache(key: tuple, rows: list, near_miss: list) -> dict:
+def _store_analysis_cache(key: tuple, rows: list, near_miss: list, scan_meta: Optional[dict] = None) -> dict:
     cached = {
         "rows": rows,
         "near_miss": near_miss,
         "generated_at": datetime.utcnow(),
+        "scan_meta": scan_meta or {},
     }
     with _cache_lock:
         _analysis_cache[key] = cached
@@ -347,8 +366,8 @@ def _refresh_analysis_cache(key: tuple, watchlist: Optional[list], job_id: Optio
     started = time.perf_counter()
     try:
         logger.info("[analysis refresh] start key=%s job=%s", _analysis_state_key(key), job_id)
-        rows, near_miss = scan_all(watchlist)
-        _store_analysis_cache(key, rows, near_miss)
+        rows, near_miss, scan_meta = scan_all(watchlist)
+        _store_analysis_cache(key, rows, near_miss, scan_meta)
         _mark_analysis_refresh_finished(key, started)
         logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", _analysis_state_key(key), job_id, len(rows), len(near_miss))
     except Exception as exc:
@@ -1048,6 +1067,144 @@ def _score_contract_row(row: pd.Series, strike: float, entry: float, dte: int) -
     return score, metrics, diagnostics
 
 
+def _contract_candidate_cost(candidate: dict) -> Optional[float]:
+    premium = _safe_float(candidate.get("ask"))
+    if premium is None:
+        premium = _safe_float(candidate.get("mark"))
+    if premium is None:
+        premium = _safe_float(candidate.get("mid"))
+    if premium is None:
+        premium = _safe_float(candidate.get("last"))
+    return round(premium * 100, 2) if premium is not None and premium > 0 else None
+
+
+def _contract_candidate_rejection_reasons(candidate: dict) -> list:
+    diagnostics = candidate.get("diagnostics") or {}
+    reasons = []
+    spread_pct = _safe_float(candidate.get("spread_pct"))
+    if spread_pct is None:
+        spread_pct = _safe_float(diagnostics.get("spread_pct"))
+    distance_pct = _safe_float(diagnostics.get("distance_pct"))
+    score = _safe_float(candidate.get("score"))
+    dte = _safe_int(candidate.get("dte"))
+    delta = _safe_float(candidate.get("delta"))
+    open_interest = _safe_int(candidate.get("open_interest")) or 0
+    volume = _safe_int(candidate.get("volume")) or 0
+    cost = _contract_candidate_cost(candidate)
+
+    if cost is None:
+        reasons.append("missing quote")
+    if spread_pct is None:
+        reasons.append("missing spread")
+    elif spread_pct > 35:
+        reasons.append("spread above 35%")
+    if open_interest < 25 and volume < 1:
+        reasons.append("thin open interest and volume")
+    if distance_pct is None:
+        reasons.append("missing strike-distance diagnostic")
+    elif distance_pct > 10:
+        reasons.append("strike more than 10% from planned entry")
+    if dte is None:
+        reasons.append("missing DTE")
+    elif dte < 14 or dte > 60:
+        reasons.append("DTE outside 14-60 day safeguard")
+    if delta is not None and not (0.20 <= abs(delta) <= 0.75):
+        reasons.append("delta outside broad audit range")
+    if score is None:
+        reasons.append("missing contract score")
+    elif score < 55:
+        reasons.append("score below Fair threshold")
+    return reasons
+
+
+def _contract_quality_classification(candidate: dict) -> str:
+    reasons = _contract_candidate_rejection_reasons(candidate)
+    score = _safe_float(candidate.get("score")) or 0
+    if reasons:
+        return "Rejected"
+    if score >= 75:
+        return "Excellent"
+    return "Acceptable"
+
+
+def _contract_candidate_audit_row(candidate: dict, selected_identity: tuple) -> dict:
+    diagnostics = candidate.get("diagnostics") or {}
+    identity = _contract_identity(candidate)
+    reasons = _contract_candidate_rejection_reasons(candidate)
+    spread_pct = _safe_float(candidate.get("spread_pct"))
+    if spread_pct is None:
+        spread_pct = _safe_float(diagnostics.get("spread_pct"))
+    return {
+        "symbol": candidate.get("symbol"),
+        "type": candidate.get("type"),
+        "strike": candidate.get("strike"),
+        "expiration": candidate.get("expiry"),
+        "expiry": candidate.get("expiry"),
+        "dte": candidate.get("dte"),
+        "bid": candidate.get("bid"),
+        "ask": candidate.get("ask"),
+        "mid": candidate.get("mid", candidate.get("mark")),
+        "mark": candidate.get("mark", candidate.get("mid")),
+        "estimated_contract_cost": _contract_candidate_cost(candidate),
+        "delta": candidate.get("delta"),
+        "open_interest": candidate.get("open_interest"),
+        "volume": candidate.get("volume"),
+        "spread": candidate.get("spread"),
+        "spread_pct": spread_pct,
+        "distance_from_planned_entry_pct": diagnostics.get("distance_pct"),
+        "score": candidate.get("score"),
+        "quality_classification": _contract_quality_classification(candidate),
+        "selected_status": "current_selected" if identity == selected_identity else "not_selected",
+        "rejection_reasons": reasons,
+    }
+
+
+def _contract_candidate_audit(ticker: str, candidates: list, selected: dict) -> dict:
+    selected_identity = _contract_identity(selected)
+    rows = [_contract_candidate_audit_row(candidate, selected_identity) for candidate in candidates]
+    acceptable = [
+        row for row in rows
+        if not row.get("rejection_reasons")
+        and _safe_float(row.get("estimated_contract_cost")) is not None
+    ]
+    current = next((row for row in rows if row.get("selected_status") == "current_selected"), None)
+    current_cost = _safe_float((current or {}).get("estimated_contract_cost"))
+    best_quality = max(acceptable, key=lambda row: (_safe_float(row.get("score")) or 0, -(_safe_float(row.get("estimated_contract_cost")) or 10**9)), default=current)
+    cheaper = [
+        row for row in acceptable
+        if current_cost is not None
+        and (_safe_float(row.get("estimated_contract_cost")) or 10**9) <= current_cost * 0.85
+    ]
+    balanced = max(cheaper, key=lambda row: (_safe_float(row.get("score")) or 0, -(_safe_float(row.get("estimated_contract_cost")) or 10**9)), default=None)
+    lowest = min(acceptable, key=lambda row: _safe_float(row.get("estimated_contract_cost")) or 10**9, default=None)
+    potential_savings = None
+    if current_cost is not None and lowest:
+        lowest_cost = _safe_float(lowest.get("estimated_contract_cost"))
+        if lowest_cost is not None and lowest_cost < current_cost:
+            potential_savings = round(current_cost - lowest_cost, 2)
+    return {
+        "ticker": ticker,
+        "production_selection_changed": False,
+        "candidate_count": len(rows),
+        "acceptable_candidate_count": len(acceptable),
+        "current_selected_contract": current,
+        "best_quality_contract": best_quality,
+        "best_balanced_contract": balanced,
+        "lowest_cost_acceptable_contract": lowest,
+        "potential_savings": potential_savings,
+        "rejected_candidates": [row for row in rows if row.get("rejection_reasons")],
+        "candidates": rows,
+        "minimum_quality_safeguards": [
+            "score >= 55",
+            "bid/ask spread <= 35%",
+            "open interest >= 25 or volume >= 1",
+            "strike within 10% of planned entry",
+            "DTE between 14 and 60 days",
+            "delta between 0.20 and 0.75 when available",
+        ],
+    }
+
+
 def _refresh_best_contract(ticker: str, direction: str, entry: float) -> None:
     _best_contract(ticker, direction, entry, allow_stale=False, force_refresh=True)
 
@@ -1122,6 +1279,7 @@ def _best_contract(
         return _store_best_contract(cache_key, result, now)
 
     best = max(candidates, key=lambda item: item["score"])
+    candidate_audit = _contract_candidate_audit(ticker, candidates, best)
     diagnostics = best.get("diagnostics", {})
     spread_pct = diagnostics.get("spread_pct")
     distance_pct = diagnostics.get("distance_pct")
@@ -1130,6 +1288,7 @@ def _best_contract(
             **_unclean_contract("Closest contract strike is too far from the ideal strike", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
+            "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
     if spread_pct is None or spread_pct > 35:
@@ -1137,6 +1296,7 @@ def _best_contract(
             **_unclean_contract("Best contract spread is too wide or unavailable", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
+            "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
     if (best.get("open_interest") or 0) < 25 and (best.get("volume") or 0) < 1:
@@ -1144,6 +1304,7 @@ def _best_contract(
             **_unclean_contract("Best contract liquidity is too thin", "option_chain"),
             "best_score": best["score"],
             "diagnostics": diagnostics,
+            "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
 
@@ -1154,6 +1315,7 @@ def _best_contract(
             "reason": "Spread, liquidity, DTE, or strike distance did not meet minimum quality",
             "best_score": best["score"],
             "diagnostics": best.get("diagnostics", {}),
+            "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
 
@@ -1162,6 +1324,7 @@ def _best_contract(
         "execution": execution,
         "source": "option_chain",
         "cache": "miss",
+        "candidate_audit": candidate_audit,
     })
     return _store_best_contract(cache_key, best, now)
 
@@ -3396,7 +3559,18 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
             cache_stats,
             ", ".join(slow_contracts) if slow_contracts else "none",
         )
-        return rows, near_miss
+        scan_meta = {
+            "configured_universe_count": original_count,
+            "symbols_attempted": len(filtered_watchlist),
+            "symbols_successfully_processed": len(all_results),
+            "symbols_omitted_or_rejected": max(0, original_count - len(all_results)),
+            "tradeability_skipped": len(skipped_symbols),
+            "tradeability_skip_reasons": skip_counts,
+            "no_setup_or_failed_count": max(0, len(filtered_watchlist) - len(all_results)),
+            "contract_evaluated": evaluated_contracts,
+            "contract_evaluation_pool": len(all_results),
+        }
+        return rows, near_miss, scan_meta
     finally:
         _scan_activity_finished()
 
