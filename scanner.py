@@ -19,33 +19,27 @@ STOCK_SCANNER_STRATEGY_BASELINE_COMMIT = "7441aac88d5cdf2bb479b85f0e73e4cec629ed
 
 WATCHLIST = [
     # ── Airlines ──────────────────────────────────────────────────────────────
-    "DAL", "UAL", "AAL", "JBLU", "LUV",
-    # ── Travel / Mobility ────────────────────────────────────────────────────
-    "CCL", "RCL", "NCLH", "ABNB", "MAR", "UBER",
+    "DAL", "UAL", "AAL", "JBLU",
+    # ── Cruise ────────────────────────────────────────────────────────────────
+    "CCL", "RCL", "NCLH",
     # ── Tech / Mega-cap ───────────────────────────────────────────────────────
     "NVDA", "AMD", "META", "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN",
-    # ── Software / Growth Tech ────────────────────────────────────────────────
-    "PLTR", "CRM", "ORCL", "SHOP", "SNOW", "NET", "DDOG", "ADBE", "ANET", "DELL",
     # ── Semiconductors ────────────────────────────────────────────────────────
     "MU", "INTC", "QCOM", "AVGO", "TSM", "ARM",
-    # ── Autos / EV ────────────────────────────────────────────────────────────
-    "F", "GM",
     # ── Energy Majors ─────────────────────────────────────────────────────────
-    "XOM", "CVX", "OXY", "COP", "EOG",
+    "XOM", "CVX", "OXY",
     # ── Energy Mid-cap / Services ─────────────────────────────────────────────
-    "DVN", "MRO", "HAL", "SLB", "FANG", "KMI", "ENPH", "PBR", "ET",
+    "DVN", "MRO", "HAL", "SLB", "FANG",
     # ── Big Banks ─────────────────────────────────────────────────────────────
-    "JPM", "BAC", "GS", "MS", "WFC", "C", "TFC", "PGR",
-    # ── Payments / Fintech / Crypto ───────────────────────────────────────────
-    "V", "MA", "AXP", "PYPL", "SQ", "SOFI", "HOOD", "AFRM", "SCHW",
+    "JPM", "BAC", "GS", "MS", "WFC",
+    # ── Payments / Fintech ────────────────────────────────────────────────────
+    "V", "MA", "AXP", "PYPL", "SQ",
     # ── Retail / Consumer Discretionary ──────────────────────────────────────
-    "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE", "LULU", "DKNG", "ROST",
-    # ── Communication Services / Media ────────────────────────────────────────
-    "DIS", "NFLX", "CMCSA", "T", "PINS", "WBD",
+    "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE",
     # ── Consumer Staples ──────────────────────────────────────────────────────
     "PG", "KO", "PEP", "CL", "MO",
     # ── Healthcare / Pharma ───────────────────────────────────────────────────
-    "UNH", "JNJ", "ABBV", "LLY", "PFE", "MRK", "CVS", "BMY", "MDT", "AMGN", "TMO", "ISRG",
+    "UNH", "JNJ", "ABBV", "LLY", "PFE", "MRK", "CVS",
     # ── Biotech ───────────────────────────────────────────────────────────────
     "GILD", "REGN", "MRNA", "BIIB",
     # ── Utilities ─────────────────────────────────────────────────────────────
@@ -53,13 +47,13 @@ WATCHLIST = [
     # ── Industrials / Defense ─────────────────────────────────────────────────
     "CAT", "DE", "HON", "BA", "GE", "LMT", "RTX",
     # ── Materials / Commodities ───────────────────────────────────────────────
-    "FCX", "NEM", "AA", "CLF", "VALE",
+    "FCX", "NEM", "AA", "CLF",
     # ── Broad ETFs ────────────────────────────────────────────────────────────
     "SPY", "QQQ", "IWM", "DIA",
     # ── Sector ETFs ───────────────────────────────────────────────────────────
     "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
     # ── Commodity ETFs ────────────────────────────────────────────────────────
-    "GLD", "SLV", "USO", "UNG", "GDX",
+    "GLD", "SLV", "USO", "UNG",
 ]
 
 TRENDING_UNIVERSE = [
@@ -69,7 +63,7 @@ TRENDING_UNIVERSE = [
 
 NO_EARNINGS_SYMBOLS = {
     "SPY", "QQQ", "IWM", "DIA",
-    "GLD", "SLV", "USO", "UNG", "GDX",
+    "GLD", "SLV", "USO", "UNG",
     "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
 }
 
@@ -80,7 +74,7 @@ STOCK_TRADEABILITY_FILTER = {
     "min_option_expirations": 1,
     "exclude_non_major_etfs": False,
     "allowlist": {
-        "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "GDX",
+        "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
         "XLE", "XLF", "XLK", "XLV", "XLU", "XLI", "XLB",
         "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "META", "AMZN", "GOOGL",
     },
@@ -90,7 +84,7 @@ STOCK_TRADEABILITY_FILTER = {
 STOCK_UNIVERSE_FILTER = STOCK_TRADEABILITY_FILTER
 
 MAJOR_LIQUID_ETFS = {
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "GDX",
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV",
     "XLE", "XLF", "XLK", "XLV", "XLU", "XLI", "XLB",
 }
 
