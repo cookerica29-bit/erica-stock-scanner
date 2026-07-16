@@ -220,6 +220,7 @@ assert.ok(!htmlFor(setup()).includes('Opportunity Remaining'));
 
 // Contract candidate tiers render compactly and update the journal snapshot selection.
 const tieredSetup = setup({
+  setupGrade: 'A',
   best_contract: {
     available: true,
     type: 'PUT',
@@ -253,6 +254,55 @@ assert.strictEqual(balancedSnapshot.expiration_date, '2026-08-21');
 assert.strictEqual(balancedSnapshot.option_ask_at_entry, 5.5);
 assert.strictEqual(balancedSnapshot.premium_paid, 5.5);
 assert.strictEqual(balancedSnapshot.contract_guidance_source, 'balanced');
+assert.strictEqual(balancedSnapshot.contract_selection_source, 'balanced');
+assert.strictEqual(balancedSnapshot.contract_tier, 'balanced');
+assert.strictEqual(balancedSnapshot.contract_tier_label, 'Balanced');
+assert.strictEqual(balancedSnapshot.estimated_contract_cost_at_entry, 550);
+
+context.selectContractTier(tieredId, 'best_quality');
+const bestQualitySnapshot = context.selectedContractFromSetup(tieredSetup);
+assert.strictEqual(bestQualitySnapshot.contract_tier, 'best_quality');
+assert.strictEqual(bestQualitySnapshot.contract_tier_label, 'Best Quality');
+assert.strictEqual(bestQualitySnapshot.strike_price, 45);
+assert.strictEqual(bestQualitySnapshot.estimated_contract_cost_at_entry, 800);
+
+context.selectContractTier(tieredId, 'budget');
+const budgetSnapshot = context.selectedContractFromSetup(tieredSetup);
+assert.strictEqual(budgetSnapshot.contract_tier, 'budget');
+assert.strictEqual(budgetSnapshot.contract_tier_label, 'Budget');
+assert.strictEqual(budgetSnapshot.strike_price, 43);
+assert.strictEqual(budgetSnapshot.estimated_contract_cost_at_entry, 395);
+
+const multiContractSnapshot = context.selectedContractFromSetup({ ...tieredSetup, contracts: 2 });
+assert.strictEqual(multiContractSnapshot.contract_tier, 'budget');
+assert.strictEqual(multiContractSnapshot.contracts, 2);
+assert.strictEqual(multiContractSnapshot.premium_paid, 3.95);
+assert.strictEqual(multiContractSnapshot.estimated_contract_cost_at_entry, 790);
+
+const scannerStatusSnapshot = context.scannerSnapshotFromSetup(tieredSetup, { trade_stage: 'B+ TRADEABLE', trigger_confirmed: true });
+assert.strictEqual(scannerStatusSnapshot.journal_snapshot_version, 'options-v2');
+assert.ok(scannerStatusSnapshot.snapshot_timestamp);
+assert.strictEqual(scannerStatusSnapshot.scanner_status_raw, 'B+ TRADEABLE');
+assert.strictEqual(scannerStatusSnapshot.scanner_status_normalized, 'WATCH');
+assert.strictEqual(scannerStatusSnapshot.scanner_status, 'WATCH');
+assert.strictEqual(scannerStatusSnapshot.trade_stage, 'ENTER_NOW');
+assert.strictEqual(scannerStatusSnapshot.entry_trigger_state, 'TRIGGER_CONFIRMED');
+assert.ok(scannerStatusSnapshot.entry_timing_state);
+
+const migratedOld = context.migrateJournalEntry({
+  ticker: 'OLD',
+  optionType: 'PUT',
+  strike: 55,
+  expiry: '2026-08-21',
+  askAtSelection: 2.5,
+  contracts: 3,
+  scannerStatus: 'WATCH',
+});
+assert.strictEqual(migratedOld.strike_price, 55);
+assert.strictEqual(migratedOld.expiration_date, '2026-08-21');
+assert.strictEqual(migratedOld.estimated_contract_cost_at_entry, 750);
+assert.strictEqual(migratedOld.contract_tier_label, '');
+assert.strictEqual(migratedOld.scanner_status_normalized, 'WATCH');
 
 const tracked = context.updateTrackedSetupWithObservation({
   ticker: 'ATO',
