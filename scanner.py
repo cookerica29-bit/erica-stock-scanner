@@ -2,11 +2,12 @@
 import pandas as pd
 import numpy as np
 import logging
+import os
 import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from market_data import MarketDataFacade
@@ -111,8 +112,63 @@ _active_scan_count = 0
 _analysis_cache = {}
 ANALYSIS_CACHE_STALE_SECONDS = 180
 ANALYSIS_REFRESH_TIMEOUT_SECONDS = 300
-BACKGROUND_ANALYSIS_SCAN_WORKERS = 4
+
+
+def _parse_background_analysis_scan_workers(value: Optional[str], default: int = 4) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+    return max(1, parsed)
+
+
+BACKGROUND_ANALYSIS_SCAN_WORKERS = _parse_background_analysis_scan_workers(
+    os.getenv("BACKGROUND_ANALYSIS_SCAN_WORKERS"),
+    default=4,
+)
 _analysis_refresh_state = {}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _coerce_utc_datetime(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_utc_timestamp(value) -> Optional[str]:
+    dt = _coerce_utc_datetime(value)
+    if dt is None:
+        return None
+    # TODO: /api/trends still emits a legacy naive UTC timestamp string; migrate it to these shared helpers in a separate route cleanup.
+    return dt.replace(tzinfo=None).isoformat() + "Z"
+
+
+def _age_seconds(value, *, now: Optional[datetime] = None) -> Optional[float]:
+    dt = _coerce_utc_datetime(value)
+    if dt is None:
+        return None
+    current = _coerce_utc_datetime(now) or _utc_now()
+    return max(0, (current - dt).total_seconds())
 
 
 def _cache_record(name: str, outcome: str) -> None:
@@ -129,7 +185,7 @@ def _cache_snapshot(reset: bool = True) -> dict:
     return snapshot
 
 
-def _submit_background_job(key: tuple, fn, *args, **kwargs) -> None:
+def _submit_background_job(key: tuple, fn, *args, **kwargs) -> bool:
     with _background_jobs_lock:
         if key in _background_jobs:
             return False
@@ -202,12 +258,12 @@ def _analysis_state_key(key: tuple) -> str:
 
 def _analysis_refresh_snapshot(key: tuple) -> dict:
     state_key = _analysis_state_key(key)
-    now = datetime.utcnow()
+    now = _utc_now()
     with _background_jobs_lock:
         refresh_key = _analysis_refresh_key(key)
         active = refresh_key in _background_jobs
         state = dict(_analysis_refresh_state.get(state_key, {}))
-        started_at = state.get("refresh_started_at")
+        started_at = _coerce_utc_datetime(state.get("refresh_started_at"))
         if active and started_at:
             duration = (now - started_at).total_seconds()
             if duration > ANALYSIS_REFRESH_TIMEOUT_SECONDS:
@@ -218,7 +274,7 @@ def _analysis_refresh_snapshot(key: tuple) -> dict:
                 state["refresh_timed_out_at"] = now
                 _analysis_refresh_state[state_key] = state
 
-    started_at = state.get("refresh_started_at")
+    started_at = _coerce_utc_datetime(state.get("refresh_started_at"))
     active_duration = None
     if active and started_at:
         active_duration = round((now - started_at).total_seconds(), 1)
@@ -226,9 +282,9 @@ def _analysis_refresh_snapshot(key: tuple) -> dict:
     return {
         "refreshing": active,
         "refresh_job_id": state.get("refresh_job_id"),
-        "refresh_started_at": started_at.isoformat() + "Z" if active and started_at else None,
+        "refresh_started_at": _format_utc_timestamp(started_at) if active and started_at else None,
         "refresh_duration": active_duration,
-        "last_refresh_success_at": state.get("last_refresh_success_at").isoformat() + "Z" if state.get("last_refresh_success_at") else None,
+        "last_refresh_success_at": _format_utc_timestamp(state.get("last_refresh_success_at")),
         "last_refresh_error": state.get("last_refresh_error"),
         "last_refresh_duration": state.get("last_refresh_duration"),
     }
@@ -240,7 +296,7 @@ def _mark_analysis_refresh_started(key: tuple, job_id: str) -> None:
         _analysis_refresh_state[_analysis_state_key(key)] = {
             **prior,
             "refresh_job_id": job_id,
-            "refresh_started_at": datetime.utcnow(),
+            "refresh_started_at": _utc_now(),
             "last_refresh_error": None,
             "last_refresh_duration": None,
         }
@@ -252,13 +308,18 @@ def _mark_analysis_refresh_finished(key: tuple, started: float, error: Optional[
         state = _analysis_refresh_state.setdefault(_analysis_state_key(key), {})
         state["last_refresh_duration"] = duration
         if error is None:
-            state["last_refresh_success_at"] = datetime.utcnow()
+            state["last_refresh_success_at"] = _utc_now()
             state["last_refresh_error"] = None
         else:
             state["last_refresh_error"] = str(error)
 
 
 def _submit_analysis_refresh(key: tuple, watchlist: Optional[list], reason: str = "background") -> bool:
+    """Submit an analysis refresh job.
+
+    Returns True only when a new job was accepted by the background executor.
+    Returns False when the refresh is already active or executor submission fails.
+    """
     refresh_key = _analysis_refresh_key(key)
     snapshot = _analysis_refresh_snapshot(key)
     if snapshot.get("refreshing"):
@@ -272,16 +333,14 @@ def _submit_analysis_refresh(key: tuple, watchlist: Optional[list], reason: str 
 
 def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
     generated_at = cached.get("generated_at")
-    age_seconds = None
-    if generated_at:
-        age_seconds = max(0, (datetime.utcnow() - generated_at).total_seconds())
+    age_seconds = _age_seconds(generated_at)
     refresh_snapshot = _analysis_refresh_snapshot(key)
     scan_meta = cached.get("scan_meta") or {}
     rows = cached.get("rows") or []
     near_miss = cached.get("near_miss") or []
     return {
         "cache": "hit",
-        "generated_at": generated_at.isoformat() + "Z" if generated_at else None,
+        "generated_at": _format_utc_timestamp(generated_at),
         "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
         "stale": age_seconds is not None and age_seconds > ANALYSIS_CACHE_STALE_SECONDS,
         "refreshing": bool(refreshing and refresh_snapshot.get("refreshing")),
@@ -330,7 +389,7 @@ def _store_analysis_cache(key: tuple, rows: list, near_miss: list, scan_meta: Op
     cached = {
         "rows": rows,
         "near_miss": near_miss,
-        "generated_at": datetime.utcnow(),
+        "generated_at": _utc_now(),
         "scan_meta": scan_meta or {},
     }
     with _cache_lock:
@@ -3583,7 +3642,7 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
 
     if cached:
         generated_at = cached.get("generated_at")
-        age_seconds = (datetime.utcnow() - generated_at).total_seconds() if generated_at else None
+        age_seconds = _age_seconds(generated_at)
         should_refresh = bool(force_refresh) or age_seconds is None or age_seconds > ANALYSIS_CACHE_STALE_SECONDS
         if should_refresh:
             _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
