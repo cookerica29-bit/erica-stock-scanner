@@ -218,6 +218,7 @@
   }
 
   function stageFlags(setup = {}) {
+    const isEnterNow = enterNow(setup);
     return {
       directional_setup_found: hasDirectionalBias(setup),
       bias_aligned: biasAligned(setup),
@@ -225,10 +226,10 @@
       grade_eligible: gradeEligible(setup),
       area_reached: areaReached(setup),
       reaction_started: reactionStarted(setup),
-      enter_now: enterNow(setup),
+      enter_now: isEnterNow,
       tradeable: tradeable(setup),
       watchlist: watchlist(setup),
-      no_trade: noTrade(setup),
+      no_trade: isEnterNow ? false : noTrade(setup),
     };
   }
 
@@ -350,9 +351,9 @@
         allReasonCounts[reason] = (allReasonCounts[reason] || 0) + 1;
       });
     });
-    const symbolsRequested = finiteNumber(meta.symbols_requested) || finiteNumber(meta.requested_count) || allRows.length;
-    const symbolsProcessed = finiteNumber(meta.symbols_processed) || unique.size;
-    const symbolsFailed = finiteNumber(meta.symbols_failed) || Math.max(0, symbolsRequested - symbolsProcessed);
+    const symbolsRequested = finiteNumber(meta.symbols_requested) ?? finiteNumber(meta.requested_count) ?? allRows.length;
+    const symbolsProcessed = finiteNumber(meta.symbols_processed) ?? unique.size;
+    const symbolsFailed = finiteNumber(meta.symbols_failed) ?? Math.max(0, symbolsRequested - symbolsProcessed);
     const largest = largestEntry(primaryCounts);
     return {
       scan_id: scanId || `scan_${timestamp}_${stableHash(allRows.map(setupIdentity).join('|'))}`,

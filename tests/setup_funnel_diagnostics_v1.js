@@ -121,4 +121,85 @@ const bottleneckRows = Array.from({ length: 30 }, (_, i) => setup({
 }));
 assert.strictEqual(snapshot(bottleneckRows).diagnostic_classification, 'POSSIBLE_FINAL_GATE_BOTTLENECK');
 
+// Regression coverage: zero-processed / zero-requested counts.
+// symbols_processed: 0 must not silently fall back to unique.size via `||`.
+const emptySnap = funnel.createScanSnapshot({
+  rows: [],
+  meta: { symbols_requested: 0, symbols_processed: 0, symbols_failed: 0, market_date: '2026-07-13' },
+  timestamp: '2026-07-13T15:00:00Z',
+  scanId: 'scan-empty',
+});
+assert.strictEqual(emptySnap.symbols_processed, 0, 'symbols_processed of 0 should not fall back to unique.size');
+assert.strictEqual(emptySnap.diagnostic_classification, 'INSUFFICIENT_DATA');
+
+// A non-empty scan that explicitly reports 0 processed (e.g. upstream failure)
+// should still report 0, not the row count.
+const zeroProcessedSnap = funnel.createScanSnapshot({
+  rows: [setup({ ticker: 'ZZZ' })],
+  meta: { symbols_requested: 5, symbols_processed: 0, symbols_failed: 5, market_date: '2026-07-13' },
+  timestamp: '2026-07-13T15:00:00Z',
+  scanId: 'scan-zero-processed',
+});
+assert.strictEqual(zeroProcessedSnap.symbols_processed, 0, 'explicit symbols_processed: 0 must be respected, not overridden by unique.size');
+
+// Regression coverage: non-monotonic stage flags.
+// A setup whose bucket says ENTER_NOW (flipping later-stage flags true)
+// while grade fields say C (an earlier gate) should retain that contradiction
+// visibly in earlier-stage diagnostics without also becoming no_trade.
+const nonMonotonic = setup({
+  progress_bucket: 'ENTER_NOW',
+  entryStatus: 'Tradeable',
+  confirmationStarted: true,
+  setupGrade: 'C',
+  grade_value: 'C',
+  trade_eval: { trigger_confirmed: true },
+});
+const nonMonoDiag = funnel.setupDiagnostic(nonMonotonic);
+assert.strictEqual(nonMonoDiag.stage_flags.grade_eligible, false, 'C grade should not be grade_eligible');
+assert.strictEqual(nonMonoDiag.stage_flags.enter_now, true, 'bucket-driven enter_now is independent of grade today');
+assert.ok(
+  nonMonoDiag.enter_now_eligible === true,
+  'enter_now_eligible flips true from bucket alone, even though grade_eligible is false — flagging for review'
+);
+
+// Regression coverage: enter_now and no_trade contradiction.
+// A setup should not be simultaneously "enter now" and "no trade".
+const contradictionFlags = funnel.stageFlags(nonMonotonic);
+assert.strictEqual(
+  contradictionFlags.enter_now && contradictionFlags.no_trade,
+  false,
+  'a setup should not be enter_now and no_trade simultaneously'
+);
+
+// Regression coverage: setup identity stability without signal_timestamp.
+// If signal_timestamp/candleTime are both missing, identity falls back to
+// scannedAt/updated_at. If that fallback value changes scan-to-scan for what
+// is really the same setup, dedup breaks silently.
+const noTimestampBase = setup({ ticker: 'NTS', signal_timestamp: undefined, candleTime: undefined });
+delete noTimestampBase.signal_timestamp;
+delete noTimestampBase.candleTime;
+
+const scanA = funnel.createScanSnapshot({
+  rows: [{ ...noTimestampBase, scannedAt: '2026-07-13T15:00:00Z' }],
+  meta: { symbols_requested: 1, symbols_processed: 1, symbols_failed: 0, market_date: '2026-07-13' },
+  timestamp: '2026-07-13T15:00:00Z',
+  scanId: 'scan-no-ts-a',
+});
+const scanB = funnel.createScanSnapshot({
+  rows: [{ ...noTimestampBase, scannedAt: '2026-07-13T15:15:00Z' }],
+  meta: { symbols_requested: 1, symbols_processed: 1, symbols_failed: 0, market_date: '2026-07-13' },
+  timestamp: '2026-07-13T15:15:00Z',
+  scanId: 'scan-no-ts-b',
+});
+const noTsDaily = funnel.dailyAggregation([scanA, scanB]);
+// Documents current behavior: without signal_timestamp/candleTime, a fallback
+// to scannedAt means the same real-world setup gets a new identity every
+// scan cycle, inflating unique_setups_seen. If scanner.py guarantees
+// signal_timestamp is always present, this test should be revisited/relaxed.
+assert.strictEqual(
+  noTsDaily[0].unique_setups_seen,
+  2,
+  'identity is NOT stable across scans when signal_timestamp/candleTime are missing — verify scanner.py always sends signal_timestamp'
+);
+
 console.log('Setup funnel diagnostics v1 tests passed');
