@@ -111,6 +111,7 @@ _active_scan_count = 0
 _analysis_cache = {}
 ANALYSIS_CACHE_STALE_SECONDS = 180
 ANALYSIS_REFRESH_TIMEOUT_SECONDS = 300
+BACKGROUND_ANALYSIS_SCAN_WORKERS = 4
 _analysis_refresh_state = {}
 
 
@@ -145,7 +146,13 @@ def _submit_background_job(key: tuple, fn, *args, **kwargs) -> None:
             with _background_jobs_lock:
                 _background_jobs.discard(key)
 
-    _background_executor.submit(_run)
+    try:
+        _background_executor.submit(_run)
+    except RuntimeError as exc:
+        with _background_jobs_lock:
+            _background_jobs.discard(key)
+        logger.warning("[background] could not submit refresh for %s: %s", key, exc)
+        return False
     return True
 
 
@@ -360,7 +367,7 @@ def _refresh_analysis_cache(key: tuple, watchlist: Optional[list], job_id: Optio
     started = time.perf_counter()
     try:
         logger.info("[analysis refresh] start key=%s job=%s", _analysis_state_key(key), job_id)
-        rows, near_miss, scan_meta = scan_all(watchlist)
+        rows, near_miss, scan_meta = scan_all(watchlist, max_workers=BACKGROUND_ANALYSIS_SCAN_WORKERS)
         _store_analysis_cache(key, rows, near_miss, scan_meta)
         _mark_analysis_refresh_finished(key, started)
         logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", _analysis_state_key(key), job_id, len(rows), len(near_miss))
@@ -3575,7 +3582,11 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         cached = _analysis_cache.get(key)
 
     if cached:
-        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
+        generated_at = cached.get("generated_at")
+        age_seconds = (datetime.utcnow() - generated_at).total_seconds() if generated_at else None
+        should_refresh = bool(force_refresh) or age_seconds is None or age_seconds > ANALYSIS_CACHE_STALE_SECONDS
+        if should_refresh:
+            _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
         return {
             "rows": _hydrate_best_contracts_from_cache(list(cached.get("rows", []))),
             "near_miss": _hydrate_best_contracts_from_cache(list(cached.get("near_miss", []))),
