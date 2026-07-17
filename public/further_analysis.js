@@ -23,6 +23,10 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  function isExplicitCGradeSetup(setup = {}) {
+    return upper(firstPresent(setup.setupGrade, setup.setup_grade, setup.quality?.grade)) === 'C';
+  }
+
   function setupIdentity(setup = {}) {
     const explicit = firstPresent(setup.setup_id, setup.setupId, setup.id);
     if (explicit) return String(explicit);
@@ -222,16 +226,17 @@
   function helpsHurts(setup = {}, readiness = {}, contract = optionContract(setup)) {
     const helps = [];
     const hurts = [];
+    const isCGrade = isExplicitCGradeSetup(setup);
     const direction = upper(setup.direction);
     const location = upper(firstPresent(setup.stockLocation, setup.location, setup.trade_eval?.location));
-    const confirmationStarted = Boolean(setup.confirmationStarted || setup.trade_eval?.trigger_confirmed || setup.trade_eval?.rejection_confirmed);
+    const confirmationStarted = !isCGrade && Boolean(setup.confirmationStarted || setup.trade_eval?.trigger_confirmed || setup.trade_eval?.rejection_confirmed);
     const htf = upper(firstPresent(setup.higherTimeframeAlignment, setup.htfAlignment, setup.setupTimeframeDirection));
     const entryStatus = normalizeText(firstPresent(setup.entryStatus, setup.entry_status));
 
     if (htf.includes('ALIGN') || htf.includes('BULLISH') || htf.includes('BEARISH')) helps.push('Higher-timeframe context is defined.');
     if ((direction === 'LONG' && location.includes('DISCOUNT')) || (direction === 'SHORT' && location.includes('PREMIUM'))) helps.push(`Price is in ${location.toLowerCase()} for the setup direction.`);
     if (confirmationStarted) helps.push('Confirmation has started.');
-    if (entryStatus === 'Tradeable') helps.push('Entry conditions are marked tradeable.');
+    if (!isCGrade && entryStatus === 'Tradeable') helps.push('Entry conditions are marked tradeable.');
     if (contract.type && contract.strike && contract.expiration) helps.push('A contract is selected for review.');
     if (readiness.card_ready) helps.push('Expected Move is release-ready for this exact group.');
 
@@ -248,6 +253,7 @@
   }
 
   function currentSetupStatus(setup = {}) {
+    if (isExplicitCGradeSetup(setup)) return 'SKIP';
     return firstPresent(
       setup.trade_progress_status,
       setup.stockSetupStatus,

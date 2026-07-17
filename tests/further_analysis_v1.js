@@ -107,4 +107,23 @@ assert.ok(model.thesis.every(line => !/guarantee|probability|buy now|sell now/i.
 // Expiration comparison never claims enough time while Expected Move is learning.
 assert.strictEqual(model.expiration_comparison.enoughTime, 'Learning');
 
+// C-grade setups must not surface ready/confirmed wording from independent trade_eval fields.
+const cGradeReadyLooking = setup({
+  setupGrade: 'C',
+  entryStatus: 'Tradeable',
+  confirmationStarted: true,
+  trade_eval: {
+    trade_stage: 'A+ READY',
+    trigger_confirmed: true,
+    rejection_confirmed: true,
+  },
+});
+const cGradeModel = further.buildAnalysisModel(cGradeReadyLooking, learningReadiness, learning.stats);
+assert.strictEqual(cGradeModel.status, 'SKIP');
+assert.ok(!cGradeModel.helps_hurts.helps.some(line => line.includes('Confirmation has started')));
+assert.ok(!cGradeModel.helps_hurts.helps.some(line => line.includes('tradeable')));
+assert.ok(cGradeModel.helps_hurts.hurts.some(line => line.includes('awaiting confirmation')));
+assert.ok(!cGradeModel.bottom_line.some(line => line.includes('A+ READY')));
+assert.ok(cGradeModel.bottom_line.some(line => line.includes('SKIP')));
+
 console.log('Further Analysis v1 tests passed');
