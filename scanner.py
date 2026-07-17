@@ -1398,10 +1398,10 @@ def _has_valid_trade_plan(result: dict) -> bool:
 
 def _should_enrich_best_contract(result: dict, setup_grade: str, entry_status: str) -> bool:
     trade_stage = str((result.get("trade_eval") or {}).get("trade_stage") or "").upper()
-    if trade_stage in {"A+ READY", "B+ TRADEABLE"}:
-        return _has_valid_trade_plan(result)
     if setup_grade not in {"A", "B"}:
         return False
+    if trade_stage in {"A+ READY", "B+ TRADEABLE"}:
+        return _has_valid_trade_plan(result)
     if entry_status not in {"Tradeable", "Near Entry"}:
         return False
     return _has_valid_trade_plan(result)
