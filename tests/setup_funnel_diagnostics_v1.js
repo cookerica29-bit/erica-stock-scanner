@@ -142,10 +142,10 @@ const zeroProcessedSnap = funnel.createScanSnapshot({
 });
 assert.strictEqual(zeroProcessedSnap.symbols_processed, 0, 'explicit symbols_processed: 0 must be respected, not overridden by unique.size');
 
-// Regression coverage: non-monotonic stage flags.
-// A setup whose bucket says ENTER_NOW (flipping later-stage flags true)
-// while grade fields say C (an earlier gate) should retain that contradiction
-// visibly in earlier-stage diagnostics without also becoming no_trade.
+// Regression coverage: grade gates enter_now.
+// A setup whose bucket/trade_eval says ENTER_NOW-equivalent but whose grade
+// is C must not report enter_now: true. This mirrors the main scanner's
+// simpleStatus(), which already forces SKIP for C-grade setups.
 const nonMonotonic = setup({
   progress_bucket: 'ENTER_NOW',
   entryStatus: 'Tradeable',
@@ -156,11 +156,8 @@ const nonMonotonic = setup({
 });
 const nonMonoDiag = funnel.setupDiagnostic(nonMonotonic);
 assert.strictEqual(nonMonoDiag.stage_flags.grade_eligible, false, 'C grade should not be grade_eligible');
-assert.strictEqual(nonMonoDiag.stage_flags.enter_now, true, 'bucket-driven enter_now is independent of grade today');
-assert.ok(
-  nonMonoDiag.enter_now_eligible === true,
-  'enter_now_eligible flips true from bucket alone, even though grade_eligible is false — flagging for review'
-);
+assert.strictEqual(nonMonoDiag.stage_flags.enter_now, false, 'C grade must block enter_now regardless of bucket/trade_eval, matching simpleStatus() behavior on the main scanner cards');
+assert.strictEqual(nonMonoDiag.enter_now_eligible, false, 'enter_now_eligible must be false when grade is C');
 
 // Regression coverage: enter_now and no_trade contradiction.
 // A setup should not be simultaneously "enter now" and "no trade".

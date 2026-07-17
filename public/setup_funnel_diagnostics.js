@@ -179,6 +179,7 @@
   }
 
   function enterNow(setup = {}) {
+    if (gradeValue(setup) === 'C') return false;
     return stageBucket(setup) === 'ENTER_NOW'
       || setup.trade_eval?.a_plus_ready === true
       || (setup.trade_eval?.trigger_confirmed === true && normalizeText(setup.entryStatus) === 'Tradeable');
