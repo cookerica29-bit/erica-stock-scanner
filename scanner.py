@@ -68,6 +68,32 @@ NO_EARNINGS_SYMBOLS = {
     "XLF", "XLE", "XLV", "XLU", "XLK", "XLI", "XLB",
 }
 
+STOCK_SECTOR_MAP = {
+    "DAL": "Industrials", "UAL": "Industrials", "AAL": "Industrials", "JBLU": "Industrials",
+    "CCL": "Consumer Discretionary", "RCL": "Consumer Discretionary", "NCLH": "Consumer Discretionary",
+    "NVDA": "Technology", "AMD": "Technology", "META": "Communication Services", "TSLA": "Consumer Discretionary",
+    "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Communication Services", "AMZN": "Consumer Discretionary",
+    "MU": "Technology", "INTC": "Technology", "QCOM": "Technology", "AVGO": "Technology", "TSM": "Technology", "ARM": "Technology",
+    "XOM": "Energy", "CVX": "Energy", "OXY": "Energy", "DVN": "Energy", "MRO": "Energy", "HAL": "Energy", "SLB": "Energy", "FANG": "Energy",
+    "JPM": "Financials", "BAC": "Financials", "GS": "Financials", "MS": "Financials", "WFC": "Financials",
+    "V": "Financials", "MA": "Financials", "AXP": "Financials", "PYPL": "Financials", "SQ": "Financials",
+    "WMT": "Consumer Staples", "TGT": "Consumer Discretionary", "COST": "Consumer Staples", "HD": "Consumer Discretionary",
+    "LOW": "Consumer Discretionary", "MCD": "Consumer Discretionary", "SBUX": "Consumer Discretionary", "NKE": "Consumer Discretionary",
+    "PG": "Consumer Staples", "KO": "Consumer Staples", "PEP": "Consumer Staples", "CL": "Consumer Staples", "MO": "Consumer Staples",
+    "UNH": "Healthcare", "JNJ": "Healthcare", "ABBV": "Healthcare", "LLY": "Healthcare", "PFE": "Healthcare", "MRK": "Healthcare", "CVS": "Healthcare",
+    "GILD": "Healthcare", "REGN": "Healthcare", "MRNA": "Healthcare", "BIIB": "Healthcare",
+    "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities", "XEL": "Utilities",
+    "CAT": "Industrials", "DE": "Industrials", "HON": "Industrials", "BA": "Industrials", "GE": "Industrials", "LMT": "Industrials", "RTX": "Industrials",
+    "FCX": "Materials", "NEM": "Materials", "AA": "Materials", "CLF": "Materials",
+    "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "DIA": "ETF",
+    "XLF": "ETF", "XLE": "ETF", "XLV": "ETF", "XLU": "ETF", "XLK": "ETF", "XLI": "ETF", "XLB": "ETF",
+    "GLD": "ETF", "SLV": "ETF", "USO": "ETF", "UNG": "ETF",
+}
+
+
+def _sector_for_ticker(ticker: str) -> Optional[str]:
+    return STOCK_SECTOR_MAP.get(str(ticker or "").strip().upper())
+
 STOCK_TRADEABILITY_FILTER = {
     "enabled": True,
     "min_avg_volume": 0,
@@ -3506,6 +3532,7 @@ def _enrich_stock_scout_fields(
         "trendDirection": daily_direction,
         "dailyTrendDirection": daily_direction,
         "h4TrendDirection": h4_direction,
+        "sector": _sector_for_ticker(result.get("ticker") or ""),
         "setupTimeframeDirection": setup_direction,
         "stockPhase": _stock_phase(daily_direction, h4_direction),
         "phase": _stock_phase(daily_direction, h4_direction),

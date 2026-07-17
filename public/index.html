@@ -5457,6 +5457,7 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
     setup_id: setupIdFromSetup(setup),
     snapshot_timestamp: new Date().toISOString(),
     ticker: String(setup.ticker || '').toUpperCase(),
+    sector: firstPresent(setup.sector, setup.industry) ?? null,
     direction: setup.direction || 'N/A',
     setup_grade: firstPresent(setup.setupGrade, setup.setup_grade, setup.quality?.grade, null),
     scanner_status: normalizedStatus,

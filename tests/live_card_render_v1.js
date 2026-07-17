@@ -282,6 +282,7 @@ assert.strictEqual(multiContractSnapshot.estimated_contract_cost_at_entry, 790);
 const scannerStatusSnapshot = context.scannerSnapshotFromSetup(tieredSetup, { trade_stage: 'B+ TRADEABLE', trigger_confirmed: true });
 assert.strictEqual(scannerStatusSnapshot.journal_snapshot_version, 'options-v2');
 assert.ok(scannerStatusSnapshot.snapshot_timestamp);
+assert.strictEqual(scannerStatusSnapshot.sector, null);
 assert.strictEqual(scannerStatusSnapshot.scanner_status_raw, 'B+ TRADEABLE');
 assert.strictEqual(scannerStatusSnapshot.scanner_status_normalized, 'WATCH');
 assert.strictEqual(scannerStatusSnapshot.scanner_status, 'WATCH');
@@ -296,6 +297,12 @@ const cGradeReadySnapshot = context.scannerSnapshotFromSetup(
 assert.strictEqual(cGradeReadySnapshot.scanner_status_normalized, 'SKIP');
 assert.strictEqual(cGradeReadySnapshot.scanner_status, 'SKIP');
 assert.strictEqual(cGradeReadySnapshot.scanner_status_raw, 'A+ READY');
+
+const sectorSnapshot = context.scannerSnapshotFromSetup(
+  { ...tieredSetup, sector: 'Technology' },
+  { trade_stage: 'B+ TRADEABLE', trigger_confirmed: true }
+);
+assert.strictEqual(sectorSnapshot.sector, 'Technology');
 
 const staleContract = {
   available: true,
