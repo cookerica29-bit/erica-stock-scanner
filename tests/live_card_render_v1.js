@@ -289,6 +289,14 @@ assert.strictEqual(scannerStatusSnapshot.trade_stage, 'ENTER_NOW');
 assert.strictEqual(scannerStatusSnapshot.entry_trigger_state, 'TRIGGER_CONFIRMED');
 assert.ok(scannerStatusSnapshot.entry_timing_state);
 
+const cGradeReadySnapshot = context.scannerSnapshotFromSetup(
+  { ...tieredSetup, setupGrade: 'C' },
+  { trade_stage: 'A+ READY', trigger_confirmed: true }
+);
+assert.strictEqual(cGradeReadySnapshot.scanner_status_normalized, 'SKIP');
+assert.strictEqual(cGradeReadySnapshot.scanner_status, 'SKIP');
+assert.strictEqual(cGradeReadySnapshot.scanner_status_raw, 'A+ READY');
+
 const migratedOld = context.migrateJournalEntry({
   ticker: 'OLD',
   optionType: 'PUT',

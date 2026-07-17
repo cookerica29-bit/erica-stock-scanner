@@ -5347,7 +5347,7 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
     ? window.KairosCardData.normalizeEarnings(setup)
     : { date: firstPresent(setup.earnings_date, setup.earningsDate), days_until: firstPresent(setup.days_until_earnings, setup.daysUntilEarnings), source: firstPresent(setup.earnings_source, setup.earningsSource) };
   const rawStage = firstPresent(setup.scanner_status_raw, ev.trade_stage, setup.trade_stage, setup.scanner_status, setup.scannerStatus, null);
-  const normalizedStatus = firstPresent(setup.scanner_status_normalized, setup.scannerStatus, scannerStatusFromStage(ev.trade_stage), null);
+  const normalizedStatus = firstPresent(setup.scanner_status_normalized, setup.scannerStatus, scannerStatusFromStage(ev.trade_stage, firstPresent(setup.setupGrade, setup.setup_grade, setup.quality?.grade)), null);
   const snapshotSetup = { ...setup, trade_eval: { ...(setup.trade_eval || {}), ...ev } };
   const progress = typeof setupProgressState === 'function' ? setupProgressState(snapshotSetup) : {};
   const executionState = window.KairosExecutionGuidance?.executionState
@@ -6080,7 +6080,9 @@ function readShotFile(input, target) {
   reader.readAsDataURL(file);
 }
 
-function scannerStatusFromStage(stage = '') {
+function scannerStatusFromStage(stage = '', grade = null) {
+  const normalizedGrade = grade != null ? String(grade).trim().toUpperCase() : null;
+  if (normalizedGrade === 'C') return 'SKIP';
   if (stage === 'A+ READY') return 'READY';
   if (stage === 'RANGE / NO TRADE') return 'NO TRADE';
   return 'WATCH';
@@ -6110,7 +6112,7 @@ function openLogModal(setupJson) {
   setValue('f_direction', s.direction || 'LONG');
   setValue('f_timeframe', s.timeframe || 'N/A');
   setValue('f_option', selectedContract.option_symbol || '');
-  setValue('f_scannerStatus', scannerStatusFromStage(ev.trade_stage));
+  setValue('f_scannerStatus', scannerStatusFromStage(ev.trade_stage, firstPresent(s.setupGrade, s.setup_grade, s.quality?.grade)));
   setValue('f_trendScore', trendReview.trend_score ?? s.quality?.score ?? '');
   setValue('f_trendState', trendReview.status || [s.stockTrend || s.trendDirection, s.stockPhase || s.phase, s.stockSetupStatus || s.setupStatus].filter(Boolean).join(' · ') || s.structureLabel || s.trend || '');
   setValue('f_entryType', trendReview.clean_pullback === 'Yes' ? 'Pullback' : 'N/A');
@@ -6508,7 +6510,7 @@ function saveJournalEntry() {
     updated.distanceFromEntryPercent = _pendingSetup.distanceFromEntryPercent ?? null;
     updated.nearestSupportDemand = _pendingSetup.nearestSupportDemand ?? null;
     updated.nearestResistanceSupply = _pendingSetup.nearestResistanceSupply ?? null;
-    updated.scannerStatus = scannerStatusFromStage(ev.trade_stage);
+    updated.scannerStatus = scannerStatusFromStage(ev.trade_stage, firstPresent(_pendingSetup.setupGrade, _pendingSetup.setup_grade, _pendingSetup.quality?.grade));
     updated.setupGrade = _pendingSetup.setupGrade || _pendingSetup.quality?.grade || null;
     updated.setupGradeReason = _pendingSetup.setupGradeReason || '';
     updated.confirmationStarted = Boolean(_pendingSetup.confirmationStarted);
