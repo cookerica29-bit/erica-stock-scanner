@@ -693,6 +693,22 @@
   .index-why-list { color:var(--muted); line-height:1.45; margin:7px 0 0; padding-left:16px; }
   .index-why-list li { margin:2px 0; }
   #terms-panel { padding:20px 24px; max-width:1100px; margin:0 auto; }
+  .terms-back-btn {
+    align-items:center;
+    background:rgba(148,163,184,0.08);
+    border:1px solid rgba(148,163,184,0.18);
+    border-radius:8px;
+    color:var(--muted);
+    cursor:pointer;
+    display:inline-flex;
+    font-size:12px;
+    font-weight:850;
+    gap:6px;
+    margin-bottom:12px;
+    padding:7px 10px;
+  }
+  .terms-back-btn:hover,
+  .terms-back-btn:focus-visible { color:var(--text); border-color:rgba(124,92,255,0.45); outline:none; }
   .terms-grid {
     display:grid;
     gap:10px;
@@ -2419,6 +2435,7 @@
 
 <!-- ── Terms Tab ─────────────────────────────────────────────────────────── -->
 <div id="terms-panel" class="tab-panel">
+  <button type="button" class="terms-back-btn" onclick="returnFromTerms()">← Back</button>
   <div class="trend-head">
     <div class="trend-title">Trading Terms</div>
     <div class="trend-note">Short definitions for reading scanner cards.</div>
@@ -2971,6 +2988,8 @@ function toggleAutoScan() {
 
 // ── Tab switching ────────────────────────────────────────────────────────────
 
+let _previousTabBeforeTerms = null;
+
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(button => {
     button.classList.toggle('active', button.dataset.tab === tab);
@@ -2998,10 +3017,18 @@ function switchTab(tab) {
 }
 
 function openTerms(termId) {
+  const activeTab = document.querySelector('.tab-btn.active')?.dataset?.tab || null;
+  if (activeTab && activeTab !== 'terms') _previousTabBeforeTerms = activeTab;
   switchTab('terms');
   requestAnimationFrame(() => {
     document.getElementById(termId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
+}
+
+function returnFromTerms() {
+  const target = _previousTabBeforeTerms || 'scanner';
+  _previousTabBeforeTerms = null;
+  switchTab(target);
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
