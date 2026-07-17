@@ -297,6 +297,29 @@ assert.strictEqual(cGradeReadySnapshot.scanner_status_normalized, 'SKIP');
 assert.strictEqual(cGradeReadySnapshot.scanner_status, 'SKIP');
 assert.strictEqual(cGradeReadySnapshot.scanner_status_raw, 'A+ READY');
 
+const staleContract = {
+  available: true,
+  source: 'option_chain',
+  strike: 45,
+  type: 'PUT',
+  expiry: '2026-08-21',
+  score: 82,
+};
+const normalizedCGradeRows = context.normalizeScanRowsForClient([
+  { ticker: 'CGD', setupGrade: 'C', best_contract: staleContract },
+]);
+assert.strictEqual(normalizedCGradeRows[0].best_contract.available, false);
+assert.strictEqual(normalizedCGradeRows[0].best_contract.source, 'not_evaluated');
+
+const aGradeRow = { ticker: 'AGD', setupGrade: 'A', best_contract: staleContract };
+const bGradeRow = { ticker: 'BGD', setupGrade: 'B', best_contract: staleContract };
+const missingGradeRow = { ticker: 'MGD', best_contract: staleContract };
+const normalizedEligibleRows = context.normalizeScanRowsForClient([aGradeRow, bGradeRow, missingGradeRow]);
+assert.strictEqual(normalizedEligibleRows[0], aGradeRow);
+assert.strictEqual(normalizedEligibleRows[1], bGradeRow);
+assert.strictEqual(normalizedEligibleRows[2], missingGradeRow);
+assert.strictEqual(normalizedEligibleRows[2].best_contract.available, true);
+
 const migratedOld = context.migrateJournalEntry({
   ticker: 'OLD',
   optionType: 'PUT',

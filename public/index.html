@@ -3027,6 +3027,27 @@ async function runTrendScan() {
 
 // ── Scanner ──────────────────────────────────────────────────────────────────
 
+function isExplicitCGradeSetup(setup = {}) {
+  const grade = firstPresent(setup.setupGrade, setup.setup_grade, setup.quality?.grade);
+  return String(grade || '').trim().toUpperCase() === 'C';
+}
+
+function stripContractDataForIneligibleGrade(row = {}) {
+  if (!isExplicitCGradeSetup(row)) return row;
+  return {
+    ...row,
+    best_contract: {
+      available: false,
+      source: 'not_evaluated',
+      reason: 'Contract guidance not evaluated for C-grade setup',
+    },
+  };
+}
+
+function normalizeScanRowsForClient(rows = []) {
+  return (Array.isArray(rows) ? rows : []).map(stripContractDataForIneligibleGrade);
+}
+
 async function runScan() {
   const btn     = document.getElementById('scanBtn');
   const status  = document.getElementById('status');
@@ -3049,8 +3070,8 @@ async function runScan() {
     latestScannerMeta = scanMeta;
     updateDataStatus(scanMeta || {});
 
-    const nextRows = data.rows || [];
-    const nextNearMiss = data.near_miss || [];
+    const nextRows = normalizeScanRowsForClient(data.rows || []);
+    const nextNearMiss = normalizeScanRowsForClient(data.near_miss || []);
     const stockAlerts = detectStockAlertEvents([...nextRows, ...nextNearMiss], scanMeta || {});
     aPlusReadyAlerts = new Set(stockAlerts.filter(a => a.type === 'ENTER_NOW').map(a => a.setup?.ticker));
     stockAlerts.forEach(deliverStockAlertEvent);
@@ -3128,7 +3149,7 @@ async function loadIndexWatchlist(options = {}) {
     if (!res.ok) throw new Error(`Index scan failed with HTTP ${res.status}`);
     const data = await res.json();
     indexMeta = data.meta || null;
-    indexWatchRows = [...(data.rows || []), ...(data.near_miss || [])];
+    indexWatchRows = normalizeScanRowsForClient([...(data.rows || []), ...(data.near_miss || [])]);
     refreshExpectedMoveTrackingFromRows(indexWatchRows);
     console.info('[Index Watchlist] rows received', indexWatchRows.length, indexWatchRows.map(r => r.ticker));
   } catch (e) {
@@ -3509,8 +3530,8 @@ function scheduleContractRefreshPoll() {
       const res = await fetchWithTimeout(`${API}/api/scan`, {}, 15000);
       if (!res.ok) throw new Error(`Scan refresh failed with HTTP ${res.status}`);
       const data = await res.json();
-      const nextRows = data.rows || [];
-      const nextNearMiss = data.near_miss || [];
+      const nextRows = normalizeScanRowsForClient(data.rows || []);
+      const nextNearMiss = normalizeScanRowsForClient(data.near_miss || []);
       latestScannerMeta = data.meta || latestScannerMeta;
       scannerRows = nextRows;
       scannerNearMiss = nextNearMiss;
