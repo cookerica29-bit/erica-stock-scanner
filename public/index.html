@@ -578,6 +578,28 @@
   .contract-tier-cost { color:var(--text); font-size:16px; font-weight:1000; margin-top:5px; }
   .contract-tier-meta { color:var(--muted); font-size:10.5px; margin-top:3px; overflow-wrap:anywhere; }
   .contract-tier-heading { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:0.06em; margin-top:9px; text-transform:uppercase; }
+  .term-help-btn {
+    align-items:center;
+    background:rgba(148,163,184,0.08);
+    border:1px solid rgba(148,163,184,0.32);
+    border-radius:999px;
+    color:var(--muted);
+    cursor:pointer;
+    display:inline-flex;
+    flex:0 0 auto;
+    font-size:11px;
+    font-weight:900;
+    height:17px;
+    justify-content:center;
+    line-height:1;
+    width:17px;
+  }
+  .term-help-btn:hover,
+  .term-help-btn:focus-visible { color:var(--text); border-color:rgba(124,92,255,0.55); outline:none; }
+  .index-label-with-help,
+  .contract-tier-name-row,
+  .contract-cost-with-help { display:flex; align-items:center; gap:6px; }
+  .contract-tier-name-row { justify-content:space-between; }
   .contract-confidence { font-size:11px; font-weight:950; margin-top:8px; }
   .contract-confidence.high { color:var(--long); }
   .contract-confidence.moderate { color:#fbbf24; }
@@ -2406,11 +2428,15 @@
     <div class="term-card"><div class="term-title">Stop</div><div class="term-copy">The price where the trade idea is wrong.</div></div>
     <div class="term-card"><div class="term-title">Target</div><div class="term-copy">The first planned profit area.</div></div>
     <div class="term-card"><div class="term-title">R:R</div><div class="term-copy">Reward compared with risk. 2.0 means aiming for twice the risk.</div></div>
-    <div class="term-card"><div class="term-title">Call</div><div class="term-copy">An option that can gain when price rises.</div></div>
-    <div class="term-card"><div class="term-title">Put</div><div class="term-copy">An option that can gain when price falls.</div></div>
-    <div class="term-card"><div class="term-title">Contract</div><div class="term-copy">The option being traded.</div></div>
-    <div class="term-card"><div class="term-title">Strike</div><div class="term-copy">The option's selected price level.</div></div>
-    <div class="term-card"><div class="term-title">Expiration</div><div class="term-copy">The date the option expires.</div></div>
+    <div class="term-card" id="term-call"><div class="term-title">Call</div><div class="term-copy">An option that can gain when price rises.</div></div>
+    <div class="term-card" id="term-put"><div class="term-title">Put</div><div class="term-copy">An option that can gain when price falls.</div></div>
+    <div class="term-card" id="term-contract"><div class="term-title">Contract</div><div class="term-copy">The option being traded.</div></div>
+    <div class="term-card" id="term-strike"><div class="term-title">Strike</div><div class="term-copy">The option's selected price level.</div></div>
+    <div class="term-card" id="term-expiration"><div class="term-title">Expiration</div><div class="term-copy">The date the option expires.</div></div>
+    <div class="term-card" id="term-contract-cost"><div class="term-title">Contract Cost</div><div class="term-copy">The estimated total cost to buy one option contract — one contract usually represents 100 shares, so this is the full price, not a per-share price.</div></div>
+    <div class="term-card" id="term-best-quality"><div class="term-title">Best Quality</div><div class="term-copy">Kairos' top contract choice because it should be the easiest and most reliable to trade.</div></div>
+    <div class="term-card" id="term-balanced"><div class="term-title">Balanced</div><div class="term-copy">A lower-cost choice that still keeps solid trade quality.</div></div>
+    <div class="term-card" id="term-budget"><div class="term-title">Budget</div><div class="term-copy">The lowest-cost choice that still meets Kairos' minimum quality bar, but it may be less ideal than the other choices.</div></div>
     <div class="term-card"><div class="term-title">Breakeven</div><div class="term-copy">A stop moved to entry so the trade risk is reduced.</div></div>
     <div class="term-card"><div class="term-title">Watchlist</div><div class="term-copy">A short list of tickers to keep checking.</div></div>
     <div class="term-card"><div class="term-title">Position</div><div class="term-copy">A trade that is currently open.</div></div>
@@ -2969,6 +2995,13 @@ function switchTab(tab) {
   if (tab === 'further') renderFurtherAnalysisTab();
   if (tab === 'journal') renderJournal();
   if (tab === 'analytics' || tab === 'diagnostics') renderAnalytics();
+}
+
+function openTerms(termId) {
+  switchTab('terms');
+  requestAnimationFrame(() => {
+    document.getElementById(termId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
@@ -4584,9 +4617,9 @@ function contractTierOptions(setup = {}) {
     seen.add(identity);
     tiers.push({ key, name, description, contract: { ...contract, estimated_contract_cost: cost } });
   };
-  addTier('best_quality', 'Best Quality', 'Highest quality contract', bestQuality);
-  addTier('balanced', 'Balanced', 'Lower cost with strong quality', balanced);
-  addTier('budget', 'Budget', 'Lowest-cost quality contract', budget);
+  addTier('best_quality', 'Best Quality', "Kairos' top pick — should be easiest and most reliable to trade", bestQuality);
+  addTier('balanced', 'Balanced', 'Lower cost, still solid quality', balanced);
+  addTier('budget', 'Budget', "Lowest cost that still meets Kairos' minimum quality bar", budget);
   return tiers;
 }
 
@@ -4650,16 +4683,34 @@ function renderBestContractBlock(setup) {
   const setupId = setupIdFromSetup(setup);
   const primary = tiers.find(tier => tier.key === selectedKey) || tiers[0];
   const primaryLabel = candidateContractLabel(primary.contract);
+  const termIds = {
+    best_quality: 'term-best-quality',
+    balanced: 'term-balanced',
+    budget: 'term-budget',
+  };
+  const helpButton = (termId, label = 'Open term definition') => `
+    <button type="button" class="term-help-btn" aria-label="${escapeHtml(label)}" onclick="event.stopPropagation(); openTerms('${escapeHtml(termId)}')" onkeydown="event.stopPropagation();">?</button>`;
   const tierButton = tier => `
-    <button type="button" class="contract-tier-option ${tier.key === selectedKey ? 'selected' : ''}" onclick="selectContractTier('${escapeHtml(setupId)}', '${escapeHtml(tier.key)}')">
-      <div class="contract-tier-name">${escapeHtml(tier.name)}</div>
+    <div role="button" tabindex="0" class="contract-tier-option ${tier.key === selectedKey ? 'selected' : ''}"
+      onclick="selectContractTier('${escapeHtml(setupId)}', '${escapeHtml(tier.key)}')"
+      onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectContractTier('${escapeHtml(setupId)}', '${escapeHtml(tier.key)}'); }">
+      <div class="contract-tier-name-row">
+        <div class="contract-tier-name">${escapeHtml(tier.name)}</div>
+        ${helpButton(termIds[tier.key] || 'term-contract', `Open ${tier.name} definition`)}
+      </div>
       <div class="contract-tier-desc">${escapeHtml(tier.description)}</div>
-      <div class="contract-tier-cost">${escapeHtml(fmtMoney(candidateContractCost(tier.contract)))}</div>
+      <div class="contract-cost-with-help">
+        <span class="contract-tier-cost">${escapeHtml(fmtMoney(candidateContractCost(tier.contract)))}</span>
+        ${tier.key === primary.key ? helpButton('term-contract-cost', 'Open contract cost definition') : ''}
+      </div>
       <div class="contract-tier-meta">${escapeHtml(candidateContractLabel(tier.contract))}</div>
-    </button>`;
+    </div>`;
   return `
     <div class="index-contract suggested-contract">
-      <div class="index-simple-label">Suggested Contract</div>
+      <div class="index-label-with-help">
+        <div class="index-simple-label">Suggested Contract</div>
+        ${helpButton('term-contract', 'Open contract definition')}
+      </div>
       <div class="index-contract-main">${escapeHtml(primaryLabel)}</div>
       <div class="contract-tier-list">
         ${tierButton(primary)}

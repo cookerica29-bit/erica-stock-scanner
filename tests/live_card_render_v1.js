@@ -110,7 +110,7 @@ assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
 assert.ok(!enterWaiting.includes('Continue monitoring. The setup is still developing.'));
 assert.ok(enterWaiting.includes('Suggested Contract'));
 assert.ok(enterWaiting.includes('Best Quality'));
-assert.ok(enterWaiting.includes('Highest quality contract'));
+assert.ok(enterWaiting.includes('top pick'));
 assert.ok(enterWaiting.includes('$120.00'));
 assert.ok(!enterWaiting.includes('Kairos Confidence'));
 assert.ok(!enterWaiting.includes('View contract details'));
