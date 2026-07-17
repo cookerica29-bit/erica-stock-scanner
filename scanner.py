@@ -2978,6 +2978,7 @@ def analyze_ticker(
                 "wk52High":       wk52_high,
                 "pctFromHigh":    pct_from_52w,
                 "setup_status":   "DEVELOPING" if trend != "NEUTRAL" else "SKIPPED",
+                "signal_timestamp": df.index[-1].tz_convert("UTC").isoformat().replace("+00:00", "Z") if df.index[-1].tzinfo is not None else df.index[-1].isoformat() + "Z",
                 "scannedAt":      datetime.utcnow().isoformat() + "Z",
             }
 
@@ -3076,6 +3077,7 @@ def analyze_ticker(
                 "wk52High":       wk52_high,
                 "pctFromHigh":    pct_from_52w,
                 "setup_status":   "DEVELOPING",
+                "signal_timestamp": df.index[-1].tz_convert("UTC").isoformat().replace("+00:00", "Z") if df.index[-1].tzinfo is not None else df.index[-1].isoformat() + "Z",
                 "scannedAt":      datetime.utcnow().isoformat() + "Z",
             }
 
@@ -3113,6 +3115,7 @@ def analyze_ticker(
             "wk52High":       wk52_high,
             "pctFromHigh":    pct_from_52w,
             "setup_status":   "QUALIFIED",
+            "signal_timestamp": df.index[-1].tz_convert("UTC").isoformat().replace("+00:00", "Z") if df.index[-1].tzinfo is not None else df.index[-1].isoformat() + "Z",
             "scannedAt":      datetime.utcnow().isoformat() + "Z",
         }
 
