@@ -157,7 +157,19 @@ const nonMonotonic = setup({
 const nonMonoDiag = funnel.setupDiagnostic(nonMonotonic);
 assert.strictEqual(nonMonoDiag.stage_flags.grade_eligible, false, 'C grade should not be grade_eligible');
 assert.strictEqual(nonMonoDiag.stage_flags.enter_now, false, 'C grade must block enter_now regardless of bucket/trade_eval, matching simpleStatus() behavior on the main scanner cards');
+assert.strictEqual(nonMonoDiag.stage_flags.tradeable, false, 'C grade must block tradeable regardless of entryStatus/trade_eval fallback');
 assert.strictEqual(nonMonoDiag.enter_now_eligible, false, 'enter_now_eligible must be false when grade is C');
+
+const cGradeTradeStageFallback = setup({
+  progress_bucket: 'ALMOST_READY',
+  entryStatus: 'Waiting',
+  setupGrade: 'C',
+  grade_value: 'C',
+  trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true },
+});
+const cGradeFallbackFlags = funnel.stageFlags(cGradeTradeStageFallback);
+assert.strictEqual(cGradeFallbackFlags.grade_eligible, false, 'C grade must block gradeEligible even when trade_stage says B+ TRADEABLE');
+assert.strictEqual(cGradeFallbackFlags.tradeable, false, 'C grade must block tradeable even when b_plus_tradeable is true');
 
 // Regression coverage: enter_now and no_trade contradiction.
 // A setup should not be simultaneously "enter now" and "no trade".

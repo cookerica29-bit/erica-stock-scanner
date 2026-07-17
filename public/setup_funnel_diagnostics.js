@@ -154,6 +154,7 @@
 
   function gradeEligible(setup = {}) {
     const grade = gradeValue(setup);
+    if (grade === 'C') return false;
     const tradeStage = upper(setup.trade_eval?.trade_stage);
     return grade === 'A' || grade === 'B' || tradeStage.includes('A+ READY') || tradeStage.includes('B+ TRADEABLE');
   }
@@ -186,6 +187,7 @@
   }
 
   function tradeable(setup = {}) {
+    if (gradeValue(setup) === 'C') return false;
     return enterNow(setup) || normalizeText(setup.entryStatus) === 'Tradeable' || setup.trade_eval?.b_plus_tradeable === true;
   }
 
