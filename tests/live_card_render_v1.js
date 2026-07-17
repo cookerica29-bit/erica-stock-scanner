@@ -83,7 +83,7 @@ function setup(overrides = {}) {
     timeframe: '4H',
     entryStatus: 'Near Entry',
     distanceFromEntryAtr: 0.5,
-    setupGrade: 'A+ READY',
+    setupGrade: 'A',
     stockTrend: 'Bearish',
     stockPhase: 'Pullback',
     stockSetupStatus: 'Pullback Active',

@@ -9,6 +9,7 @@ function setup(overrides = {}) {
     entry: 70,
     sl: 72,
     tp1: 65,
+    setupGrade: 'B',
     entryStatus: 'Near Entry',
     trade_eval: { trade_stage: 'BUILDING / WATCHLIST' },
     ...overrides,

@@ -9,6 +9,11 @@
     return String(value || '').trim().toUpperCase();
   }
 
+  function setupGradeValue(setup = {}) {
+    const grade = upper(setup.setupGrade);
+    return ['A', 'B', 'C'].includes(grade) ? grade : 'C';
+  }
+
   function finiteNumber(value) {
     if (value === null || value === undefined || value === '') return null;
     const parsed = Number(value);
@@ -41,6 +46,7 @@
   }
 
   function isConfirmedSetup(setup = {}, readiness = {}) {
+    if (setupGradeValue(setup) === 'C') return false;
     const values = normalizedStatusValues(setup, readiness);
     if (values.some(value => ['ENTER_NOW', 'ENTER NOW', 'A+ READY', 'READY'].includes(value))) return true;
     const tradeStage = upper(setup.trade_eval && setup.trade_eval.trade_stage);

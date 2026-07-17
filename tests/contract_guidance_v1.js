@@ -8,6 +8,7 @@ function setup(overrides = {}) {
     direction: 'SHORT',
     price: 320.12,
     entry: 314.54,
+    setupGrade: 'B',
     best_contract: {
       available: false,
       source: 'unavailable',
