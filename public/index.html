@@ -512,6 +512,82 @@
     margin-top:11px;
     padding:11px 12px;
   }
+  .execution-plan-head {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+  }
+  .risk-reward-visual {
+    display: grid;
+    gap: 7px;
+  }
+  .risk-reward-svg {
+    display: block;
+    height: 76px;
+    overflow: visible;
+    width: 100%;
+  }
+  .rr-track-bg {
+    stroke: rgba(148,163,184,0.24);
+    stroke-linecap: round;
+    stroke-width: 10;
+  }
+  .rr-track-risk {
+    stroke: rgba(248,113,113,0.78);
+    stroke-linecap: round;
+    stroke-width: 10;
+  }
+  .rr-track-reward {
+    stroke: rgba(34,197,94,0.78);
+    stroke-linecap: round;
+    stroke-width: 10;
+  }
+  .rr-marker-line {
+    stroke: rgba(226,232,240,0.85);
+    stroke-width: 1.5;
+  }
+  .rr-marker-stop { fill: #f87171; }
+  .rr-marker-entry { fill: #ddd6fe; stroke: rgba(255,255,255,0.72); stroke-width: 1.5; }
+  .rr-marker-now { fill: #67e8f9; stroke: rgba(255,255,255,0.78); stroke-width: 1.5; }
+  .rr-marker-target { fill: #86efac; }
+  .rr-axis-label {
+    fill: rgba(203,213,225,0.72);
+    font-size: 7px;
+    font-weight: 800;
+  }
+  .rr-point-label {
+    fill: #e5e7eb;
+    font-size: 7px;
+    font-weight: 900;
+  }
+  .plan-help-btn {
+    border-radius: 999px;
+    font-size: 10px;
+    height: 18px;
+    min-height: 18px;
+    min-width: 18px;
+    padding: 0;
+    width: 18px;
+  }
+  .rr-value-row {
+    display: grid;
+    gap: 5px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .rr-value-item {
+    min-width: 0;
+  }
+  .rr-value-label {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 800;
+  }
+  .rr-value-price {
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 900;
+  }
   .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
   .index-plan-row span:first-child { color:var(--muted); font-size:11px; }
   .index-plan-row span:last-child { color:var(--text); font-weight:900; }
@@ -1379,6 +1455,12 @@
       align-items: flex-start;
       flex-direction: column;
       gap: 2px;
+    }
+    .risk-reward-svg {
+      height: 78px;
+    }
+    .rr-value-row {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
     .context-grid,
     .readiness-grid,
@@ -2452,10 +2534,10 @@
     <div class="trend-note">Short definitions for reading scanner cards.</div>
   </div>
   <div class="terms-grid">
-    <div class="term-card"><div class="term-title">Entry</div><div class="term-copy">The planned price where the trade starts.</div></div>
-    <div class="term-card"><div class="term-title">Stop</div><div class="term-copy">The price where the trade idea is wrong.</div></div>
-    <div class="term-card"><div class="term-title">Target</div><div class="term-copy">The first planned profit area.</div></div>
-    <div class="term-card"><div class="term-title">R:R</div><div class="term-copy">Reward compared with risk. 2.0 means aiming for twice the risk.</div></div>
+    <div class="term-card" id="term-planned-entry"><div class="term-title">Planned Entry</div><div class="term-copy">The planned price where the trade starts.</div></div>
+    <div class="term-card" id="term-stop"><div class="term-title">Stop</div><div class="term-copy">The price where the trade idea is wrong.</div></div>
+    <div class="term-card" id="term-target"><div class="term-title">Target</div><div class="term-copy">The first planned profit area.</div></div>
+    <div class="term-card" id="term-risk-reward"><div class="term-title">Risk/Reward</div><div class="term-copy">A simple comparison of what could be lost versus what the setup is aiming to make.</div></div>
     <div class="term-card" id="term-call"><div class="term-title">Call</div><div class="term-copy">An option that can gain when price rises.</div></div>
     <div class="term-card" id="term-put"><div class="term-title">Put</div><div class="term-copy">An option that can gain when price falls.</div></div>
     <div class="term-card" id="term-contract"><div class="term-title">Contract</div><div class="term-copy">The option being traded.</div></div>
@@ -4267,6 +4349,199 @@ function rewardRiskText(setup) {
   return `${(reward / risk).toFixed(1)}`;
 }
 
+function planNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clampPercent(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function clampTrackX(value) {
+  if (!Number.isFinite(value)) return RR_TRACK_START;
+  return Math.max(RR_TRACK_START, Math.min(RR_TRACK_END, value));
+}
+
+const RR_BAR_WIDTH = 300;
+const RR_TRACK_START = 24;
+const RR_TRACK_END = 276;
+const RR_TRACK_SPAN = RR_TRACK_END - RR_TRACK_START;
+const RR_CLOSE_MARKER_THRESHOLD = 28;
+const RR_MARKER_MIN_GAP = 15;
+
+function normalizePlanDirection(setup) {
+  const raw = String(firstPresent(setup.direction, setup.trend, setup.tradeDirection) || '').toUpperCase();
+  if (raw.includes('SHORT') || raw.includes('BEAR')) return 'SHORT';
+  if (raw.includes('LONG') || raw.includes('BULL')) return 'LONG';
+  return null;
+}
+
+function adjustedMarkerPositions(rawPositions, minGap = RR_MARKER_MIN_GAP) {
+  const markers = Object.entries(rawPositions)
+    .filter(([, value]) => value !== null && Number.isFinite(value))
+    .map(([key, value], index) => ({ key, x: Number(value), order: index }))
+    .sort((a, b) => (a.x - b.x) || (a.order - b.order));
+  if (markers.length < 2) return { ...rawPositions };
+
+  for (let pass = 0; pass < markers.length * 3; pass += 1) {
+    for (let i = 1; i < markers.length; i += 1) {
+      const left = markers[i - 1];
+      const right = markers[i];
+      const gap = right.x - left.x;
+      if (gap >= minGap) continue;
+      const push = (minGap - gap) / 2;
+      left.x -= push;
+      right.x += push;
+    }
+
+    const leftOverflow = RR_TRACK_START - markers[0].x;
+    if (leftOverflow > 0) markers.forEach(marker => { marker.x += leftOverflow; });
+    const rightOverflow = markers[markers.length - 1].x - RR_TRACK_END;
+    if (rightOverflow > 0) markers.forEach(marker => { marker.x -= rightOverflow; });
+  }
+
+  for (let i = 1; i < markers.length; i += 1) {
+    markers[i].x = Math.max(markers[i].x, markers[i - 1].x + minGap);
+  }
+  const rightOverflow = markers[markers.length - 1].x - RR_TRACK_END;
+  if (rightOverflow > 0) markers.forEach(marker => { marker.x -= rightOverflow; });
+  for (let i = markers.length - 2; i >= 0; i -= 1) {
+    markers[i].x = Math.min(markers[i].x, markers[i + 1].x - minGap);
+  }
+  const leftOverflow = RR_TRACK_START - markers[0].x;
+  if (leftOverflow > 0) markers.forEach(marker => { marker.x += leftOverflow; });
+
+  return markers.reduce((acc, marker) => {
+    acc[marker.key] = clampTrackX(marker.x);
+    return acc;
+  }, { ...rawPositions });
+}
+
+function riskRewardBarData(setup) {
+  const direction = normalizePlanDirection(setup);
+  const current = planNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price));
+  const entry = planNumber(firstPresent(setup.entry, setup.entry_price));
+  const stop = planNumber(firstPresent(setup.sl, setup.stop, setup.stop_price));
+  const tp1 = planNumber(firstPresent(setup.tp1, setup.target, setup.target_price));
+  const tp2 = planNumber(firstPresent(setup.tp2, setup.target2, setup.target_2));
+  const tp3 = planNumber(firstPresent(setup.tp3, setup.target3, setup.target_3));
+  const finalTarget = planNumber(firstPresent(setup.final_target, setup.finalTarget, setup.finalTargetPrice));
+  if (!direction || current === null || entry === null || stop === null || tp1 === null) return null;
+  const sign = direction === 'SHORT' ? -1 : 1;
+  const unit = value => sign * (value - entry);
+  const stopUnit = unit(stop);
+  const tp1Unit = unit(tp1);
+  if (!(stopUnit < 0) || !(tp1Unit > 0)) return null;
+  const targetUnits = [tp1, tp2, tp3, finalTarget]
+    .map(value => value === null ? null : unit(value))
+    .filter(value => value !== null && value > 0);
+  const maxTargetUnit = Math.max(...targetUnits);
+  const domain = maxTargetUnit - stopUnit;
+  if (!(domain > 0)) return null;
+  const pct = value => clampPercent(((unit(value) - stopUnit) / domain) * 100);
+  const positionFor = value => pct(value);
+  const xFor = value => RR_TRACK_START + (positionFor(value) / 100) * RR_TRACK_SPAN;
+  const rawXPositions = {
+    stop: xFor(stop),
+    entry: xFor(entry),
+    current: xFor(current),
+    tp1: xFor(tp1),
+    tp2: tp2 === null ? null : xFor(tp2),
+    tp3: tp3 === null ? null : xFor(tp3),
+    finalTarget: finalTarget === null ? null : xFor(finalTarget),
+  };
+  return {
+    direction,
+    current,
+    entry,
+    stop,
+    tp1,
+    tp2,
+    tp3,
+    finalTarget,
+    positions: {
+      stop: positionFor(stop),
+      entry: positionFor(entry),
+      current: positionFor(current),
+      tp1: positionFor(tp1),
+      tp2: tp2 === null ? null : positionFor(tp2),
+      tp3: tp3 === null ? null : positionFor(tp3),
+      finalTarget: finalTarget === null ? null : positionFor(finalTarget),
+    },
+    rawXPositions,
+    xPositions: adjustedMarkerPositions(rawXPositions),
+  };
+}
+
+function renderExecutionPlanHelp() {
+  return `<button type="button" class="term-help-btn plan-help-btn" aria-label="Open risk and reward definition" onclick="event.stopPropagation(); openTerms('term-risk-reward')" onkeydown="event.stopPropagation();">?</button>`;
+}
+
+function renderRiskRewardBar(setup) {
+  const data = riskRewardBarData(setup);
+  if (!data) return '';
+  const x = key => data.xPositions[key].toFixed(2);
+  const pct = key => data.positions[key].toFixed(2);
+  const entryNowClose = Math.abs(data.xPositions.entry - data.xPositions.current) < RR_CLOSE_MARKER_THRESHOLD;
+  const entryLabelY = entryNowClose ? 14 : 22;
+  const nowLabelY = entryNowClose ? 80 : 68;
+  const optionalTargetMarkers = [
+    data.positions.tp2 !== null ? `<line class="rr-marker-line" x1="${x('tp2')}" x2="${x('tp2')}" y1="33" y2="49"></line><circle class="rr-marker-target" cx="${x('tp2')}" cy="41" r="3.5"></circle>` : '',
+    data.positions.tp3 !== null ? `<line class="rr-marker-line" x1="${x('tp3')}" x2="${x('tp3')}" y1="33" y2="49"></line><circle class="rr-marker-target" cx="${x('tp3')}" cy="41" r="3.5"></circle>` : '',
+    data.positions.finalTarget !== null ? `<line class="rr-marker-line" x1="${x('finalTarget')}" x2="${x('finalTarget')}" y1="33" y2="49"></line><circle class="rr-marker-target" cx="${x('finalTarget')}" cy="41" r="3.5"></circle>` : '',
+  ].join('');
+  const valueItems = [];
+  const pushValueItem = (label, value) => {
+    if (value === null) return;
+    if (valueItems.some(item => Math.abs(Number(item[1]) - Number(value)) < 0.000001)) return;
+    valueItems.push([label, value]);
+  };
+  pushValueItem('Stop', data.stop);
+  pushValueItem('Entry', data.entry);
+  pushValueItem('Now', data.current);
+  pushValueItem('TP1', data.tp1);
+  pushValueItem('TP2', data.tp2);
+  pushValueItem('TP3', data.tp3);
+  pushValueItem('Final Target', data.finalTarget);
+  return `
+    <div class="risk-reward-visual" data-plan-visual="risk-reward"
+      data-stop-pct="${pct('stop')}"
+      data-entry-pct="${pct('entry')}"
+      data-current-pct="${pct('current')}"
+      data-target-pct="${pct('tp1')}">
+      <svg class="risk-reward-svg" viewBox="0 0 ${RR_BAR_WIDTH} 86" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Risk and reward plan">
+        <text class="rr-axis-label" x="${RR_TRACK_START}" y="12">Risk</text>
+        <text class="rr-axis-label" x="${RR_TRACK_END}" y="12" text-anchor="end">Reward</text>
+        <line class="rr-track-bg" x1="${RR_TRACK_START}" y1="41" x2="${RR_TRACK_END}" y2="41"></line>
+        <line class="rr-track-risk" x1="${RR_TRACK_START}" y1="41" x2="${x('entry')}" y2="41"></line>
+        <line class="rr-track-reward" x1="${x('entry')}" y1="41" x2="${RR_TRACK_END}" y2="41"></line>
+        <line class="rr-marker-line" x1="${x('stop')}" x2="${x('stop')}" y1="30" y2="52"></line>
+        <circle class="rr-marker-stop" cx="${x('stop')}" cy="41" r="3.5"></circle>
+        <line class="rr-marker-line" x1="${x('entry')}" x2="${x('entry')}" y1="25" y2="57"></line>
+        <circle class="rr-marker-entry" cx="${x('entry')}" cy="41" r="4.4"></circle>
+        <line class="rr-marker-line" x1="${x('current')}" x2="${x('current')}" y1="20" y2="62"></line>
+        <circle class="rr-marker-now" cx="${x('current')}" cy="41" r="4.4"></circle>
+        <line class="rr-marker-line" x1="${x('tp1')}" x2="${x('tp1')}" y1="30" y2="52"></line>
+        <circle class="rr-marker-target" cx="${x('tp1')}" cy="41" r="3.5"></circle>
+        ${optionalTargetMarkers}
+        <text class="rr-point-label" x="${x('stop')}" y="75" text-anchor="middle">Stop</text>
+        <text class="rr-point-label" x="${x('entry')}" y="${entryLabelY}" text-anchor="middle">Entry</text>
+        <text class="rr-point-label" x="${x('current')}" y="${nowLabelY}" text-anchor="middle">Now</text>
+        <text class="rr-point-label" x="${x('tp1')}" y="75" text-anchor="middle">Target</text>
+      </svg>
+      <div class="rr-value-row">
+        ${valueItems.map(([label, value]) => `
+          <div class="rr-value-item">
+            <div class="rr-value-label">${escapeHtml(label)}</div>
+            <div class="rr-value-price">${fmtMoney(value)}</div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
 function renderNextStepBlock(setup) {
   const readiness = setupProgressState(setup);
   const lifecycle = contractGuidanceLifecycleForNextStep(setup);
@@ -4294,10 +4569,14 @@ function renderTradePlanBlock(setup) {
       { label: 'Stop', value: setup.sl },
       { label: 'Target', value: setup.tp1 },
     ];
+  const bar = renderRiskRewardBar(setup);
   return `
     <div class="index-plan">
-      <div class="index-simple-label">Execution Plan</div>
-      ${rows.map(row => `<div class="index-plan-row ${escapeHtml(row.key || '')}"><span>${escapeHtml(row.label)}</span><span>${fmtMoney(row.value)}</span></div>`).join('')}
+      <div class="execution-plan-head">
+        <div class="index-simple-label">Execution Plan</div>
+        ${renderExecutionPlanHelp()}
+      </div>
+      ${bar || rows.map(row => `<div class="index-plan-row ${escapeHtml(row.key || '')}"><span>${escapeHtml(row.label)}</span><span>${fmtMoney(row.value)}</span></div>`).join('')}
       <div class="index-plan-row risk-reward"><span>Risk/Reward</span><span>${rewardRiskText(setup)}</span></div>
     </div>`;
 }

@@ -114,6 +114,71 @@ assert.ok(enterWaiting.includes('top pick'));
 assert.ok(enterWaiting.includes('$120.00'));
 assert.ok(!enterWaiting.includes('Kairos Confidence'));
 assert.ok(!enterWaiting.includes('View contract details'));
+assert.ok(enterWaiting.includes('data-plan-visual="risk-reward"'));
+assert.ok(enterWaiting.includes('>Now</text>'));
+assert.ok(enterWaiting.includes('>Target</text>'));
+assert.ok(enterWaiting.includes("openTerms('term-risk-reward')"));
+
+const longBar = context.riskRewardBarData({
+  direction: 'LONG',
+  price: 103,
+  entry: 100,
+  sl: 95,
+  tp1: 110,
+});
+assert.strictEqual(longBar.positions.stop, 0);
+assert.ok(Math.abs(longBar.positions.entry - 33.3333) < 0.01);
+assert.ok(Math.abs(longBar.positions.current - 53.3333) < 0.01);
+assert.strictEqual(longBar.positions.tp1, 100);
+assert.ok(longBar.rawXPositions);
+assert.ok(longBar.xPositions);
+
+const shortBar = context.riskRewardBarData({
+  direction: 'SHORT',
+  price: 97,
+  entry: 100,
+  sl: 105,
+  tp1: 90,
+});
+assert.strictEqual(shortBar.positions.stop, 0);
+assert.ok(Math.abs(shortBar.positions.entry - 33.3333) < 0.01);
+assert.ok(Math.abs(shortBar.positions.current - 53.3333) < 0.01);
+assert.strictEqual(shortBar.positions.tp1, 100);
+
+const closeEntryNowBar = context.riskRewardBarData({
+  direction: 'SHORT',
+  price: 170.06,
+  entry: 169.05,
+  sl: 172.15,
+  tp1: 162.85,
+});
+assert.ok(Math.abs(closeEntryNowBar.positions.entry - 33.3333) < 0.01);
+assert.ok(closeEntryNowBar.positions.current < closeEntryNowBar.positions.entry);
+assert.ok(Math.abs(closeEntryNowBar.rawXPositions.current - closeEntryNowBar.rawXPositions.entry) < 28);
+assert.ok(Math.abs(closeEntryNowBar.xPositions.current - closeEntryNowBar.xPositions.entry) >= 15);
+
+const screenshotExampleBar = context.riskRewardBarData({
+  direction: 'LONG',
+  price: 495.76,
+  entry: 505.27,
+  sl: 472.15,
+  tp1: 571.51,
+  tp2: 604.63,
+  tp3: 637.75,
+});
+assert.ok(Math.abs(screenshotExampleBar.rawXPositions.current - screenshotExampleBar.rawXPositions.entry) < 15);
+assert.ok(Math.abs(screenshotExampleBar.xPositions.current - screenshotExampleBar.xPositions.entry) >= 15);
+assert.ok(screenshotExampleBar.xPositions.current < screenshotExampleBar.xPositions.entry);
+const closeEntryNowHtml = htmlFor(setup({ price: 170.06, entry: 169.05, sl: 172.15, tp1: 162.85 }));
+assert.ok(closeEntryNowHtml.includes('viewBox="0 0 300 86"'));
+assert.ok(closeEntryNowHtml.includes('x="24" y="12">Risk</text>'));
+assert.ok(closeEntryNowHtml.includes('x="276" y="12" text-anchor="end">Reward</text>'));
+assert.ok(closeEntryNowHtml.includes('y="14" text-anchor="middle">Entry</text>'));
+assert.ok(closeEntryNowHtml.includes('y="80" text-anchor="middle">Now</text>'));
+
+const missingPlanFallback = htmlFor(setup({ entry: null, sl: null, tp1: null }));
+assert.ok(!missingPlanFallback.includes('data-plan-visual="risk-reward"'));
+assert.ok(missingPlanFallback.includes('<div class="index-plan-row current-price"><span>Current Price</span>'));
 
 // A setup with only b_plus_tradeable (no true trigger confirmation) must
 // NOT be labeled ENTER NOW. It gets its own lower-confirmation Early Entry
@@ -274,24 +339,31 @@ assert.strictEqual(notPreservedForDifferentSetup[0].earnings.date, null);
 assert.strictEqual(notPreservedForDifferentSetup[0].earnings.source, 'background_refresh');
 
 const singleTarget = htmlFor(setup({ tp1: 44, tp2: null, tp3: null, final_target: null }));
-assert.ok(singleTarget.includes('<span>Target</span><span>$44.00</span>'));
-assert.ok(!singleTarget.includes('<span>TP2</span>'));
-assert.ok(!singleTarget.includes('<span>TP3</span>'));
+assert.ok(singleTarget.includes('<div class="rr-value-label">TP1</div>'));
+assert.ok(singleTarget.includes('<div class="rr-value-price">$44.00</div>'));
+assert.ok(!singleTarget.includes('<div class="rr-value-label">TP2</div>'));
+assert.ok(!singleTarget.includes('<div class="rr-value-label">TP3</div>'));
 
 const threeTargets = htmlFor(setup({ tp1: 45, tp2: 44, tp3: 43 }));
-assert.ok(threeTargets.includes('<span>TP1</span><span>$45.00</span>'));
-assert.ok(threeTargets.includes('<span>TP2</span><span>$44.00</span>'));
-assert.ok(threeTargets.includes('<span>TP3</span><span>$43.00</span>'));
-assert.ok(!threeTargets.includes('<span>Final Target</span><span>$43.00</span>'));
+assert.ok(threeTargets.includes('<div class="rr-value-label">TP1</div>'));
+assert.ok(threeTargets.includes('<div class="rr-value-price">$45.00</div>'));
+assert.ok(threeTargets.includes('<div class="rr-value-label">TP2</div>'));
+assert.ok(threeTargets.includes('<div class="rr-value-price">$44.00</div>'));
+assert.ok(threeTargets.includes('<div class="rr-value-label">TP3</div>'));
+assert.ok(threeTargets.includes('<div class="rr-value-price">$43.00</div>'));
+assert.ok(!threeTargets.includes('<div class="rr-value-label">Final Target</div>'));
 
 const finalTarget = htmlFor(setup({ tp1: 45, tp2: null, tp3: null, final_target: 42 }));
-assert.ok(finalTarget.includes('<span>TP1</span><span>$45.00</span>'));
-assert.ok(finalTarget.includes('<span>Final Target</span><span>$42.00</span>'));
+assert.ok(finalTarget.includes('<div class="rr-value-label">TP1</div>'));
+assert.ok(finalTarget.includes('<div class="rr-value-price">$45.00</div>'));
+assert.ok(finalTarget.includes('<div class="rr-value-label">Final Target</div>'));
+assert.ok(finalTarget.includes('<div class="rr-value-price">$42.00</div>'));
 
 const duplicateTargets = htmlFor(setup({ tp1: 44, tp2: 44, tp3: 43, final_target: 43 }));
-assert.strictEqual((duplicateTargets.match(/<span>TP2<\/span>/g) || []).length, 0);
-assert.strictEqual((duplicateTargets.match(/<span>Final Target<\/span>/g) || []).length, 0);
-assert.ok(duplicateTargets.includes('<span>TP3</span><span>$43.00</span>'));
+assert.strictEqual((duplicateTargets.match(/<div class="rr-value-label">TP2<\/div>/g) || []).length, 0);
+assert.strictEqual((duplicateTargets.match(/<div class="rr-value-label">Final Target<\/div>/g) || []).length, 0);
+assert.ok(duplicateTargets.includes('<div class="rr-value-label">TP3</div>'));
+assert.ok(duplicateTargets.includes('<div class="rr-value-price">$43.00</div>'));
 
 const snapshot = context.scannerSnapshotFromSetup(setup({
   tp1: 45,
