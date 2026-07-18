@@ -35,7 +35,7 @@ WATCHLIST = [
     # ── Energy Majors ─────────────────────────────────────────────────────────
     "XOM", "CVX", "OXY",
     # ── Energy Mid-cap / Services ─────────────────────────────────────────────
-    "DVN", "MRO", "HAL", "SLB", "FANG",
+    "DVN", "HAL", "SLB", "FANG",
     # ── Big Banks ─────────────────────────────────────────────────────────────
     "JPM", "BAC", "GS", "MS", "WFC",
     # ── Asset Managers / Brokers ──────────────────────────────────────────────
@@ -96,7 +96,7 @@ STOCK_SECTOR_MAP = {
     "NFLX": "Communication Services", "DIS": "Communication Services", "CMCSA": "Communication Services",
     "T": "Communication Services", "VZ": "Communication Services", "WBD": "Communication Services",
     "MU": "Technology", "INTC": "Technology", "QCOM": "Technology", "AVGO": "Technology", "TSM": "Technology", "ARM": "Technology",
-    "XOM": "Energy", "CVX": "Energy", "OXY": "Energy", "DVN": "Energy", "MRO": "Energy", "HAL": "Energy", "SLB": "Energy", "FANG": "Energy",
+    "XOM": "Energy", "CVX": "Energy", "OXY": "Energy", "DVN": "Energy", "HAL": "Energy", "SLB": "Energy", "FANG": "Energy",
     "JPM": "Financials", "BAC": "Financials", "GS": "Financials", "MS": "Financials", "WFC": "Financials",
     "SCHW": "Financials", "BLK": "Financials",
     "V": "Financials", "MA": "Financials", "AXP": "Financials", "PYPL": "Financials", "SQ": "Financials",
