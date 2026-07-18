@@ -517,7 +517,16 @@ def get_finviz_watchlist() -> list:
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        ohlcv = {"open", "high", "low", "close", "adj close", "volume"}
+        best_level = 0
+        best_score = -1
+        for level in range(df.columns.nlevels):
+            values = [str(value).strip().lower() for value in df.columns.get_level_values(level)]
+            score = sum(1 for value in values if value in ohlcv)
+            if score > best_score:
+                best_score = score
+                best_level = level
+        df.columns = df.columns.get_level_values(best_level)
     return df
 
 
@@ -2434,12 +2443,10 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str) -> dict
     for t in tickers:
         try:
             if single:
-                df = raw.copy()
-                if isinstance(df.columns, pd.MultiIndex):
-                    # (PriceType, Ticker) layout — drop the ticker level
-                    df.columns = df.columns.get_level_values(0)
+                df = _flatten_columns(raw.copy())
             else:
                 df = raw[t].copy()  # group_by='ticker' gives (Ticker, PriceType)
+                df = _flatten_columns(df)
             df = df.dropna(how="all")
             if len(df) >= 10:
                 result[t] = df
