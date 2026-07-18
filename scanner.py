@@ -291,8 +291,10 @@ def _scan_is_active() -> bool:
         return _active_scan_count > 0
 
 
-def _analysis_cache_key(watchlist: Optional[list]) -> tuple:
+def _analysis_cache_key(watchlist: Optional[list], discover: bool = False) -> tuple:
     if watchlist is None:
+        if discover:
+            return ("discover",)
         return ("default",)
     symbols = tuple(sorted(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()])))
     return ("custom", symbols)
@@ -305,6 +307,8 @@ def _analysis_refresh_key(key: tuple) -> tuple:
 def _analysis_state_key(key: tuple) -> str:
     if key == ("default",):
         return "default"
+    if key == ("discover",):
+        return "discover"
     return repr(key)
 
 
@@ -366,7 +370,12 @@ def _mark_analysis_refresh_finished(key: tuple, started: float, error: Optional[
             state["last_refresh_error"] = str(error)
 
 
-def _submit_analysis_refresh(key: tuple, watchlist: Optional[list], reason: str = "background") -> bool:
+def _submit_analysis_refresh(
+    key: tuple,
+    watchlist: Optional[list],
+    reason: str = "background",
+    discover: bool = False,
+) -> bool:
     """Submit an analysis refresh job.
 
     Returns True only when a new job was accepted by the background executor.
@@ -377,7 +386,7 @@ def _submit_analysis_refresh(key: tuple, watchlist: Optional[list], reason: str 
     if snapshot.get("refreshing"):
         return False
     job_id = f"{_analysis_state_key(key)}:{int(time.time())}:{reason}"
-    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id)
+    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id, discover)
     if submitted:
         _mark_analysis_refresh_started(key, job_id)
     return submitted
@@ -502,11 +511,20 @@ def _hydrate_scan_rows_from_cache(rows: list) -> list:
     return _hydrate_earnings_from_cache(_hydrate_best_contracts_from_cache(rows))
 
 
-def _refresh_analysis_cache(key: tuple, watchlist: Optional[list], job_id: Optional[str] = None) -> None:
+def _refresh_analysis_cache(
+    key: tuple,
+    watchlist: Optional[list],
+    job_id: Optional[str] = None,
+    discover: bool = False,
+) -> None:
     started = time.perf_counter()
     try:
         logger.info("[analysis refresh] start key=%s job=%s", _analysis_state_key(key), job_id)
-        rows, near_miss, scan_meta = scan_all(watchlist, max_workers=BACKGROUND_ANALYSIS_SCAN_WORKERS)
+        rows, near_miss, scan_meta = scan_all(
+            watchlist,
+            max_workers=BACKGROUND_ANALYSIS_SCAN_WORKERS,
+            discover=discover,
+        )
         _store_analysis_cache(key, rows, near_miss, scan_meta)
         _mark_analysis_refresh_finished(key, started)
         logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", _analysis_state_key(key), job_id, len(rows), len(near_miss))
@@ -3862,14 +3880,16 @@ def _enrich_stock_scout_fields(
     return result
 
 
-def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
+def scan_all(watchlist: Optional[list] = None, max_workers: int = 12, discover: bool = False) -> tuple:
     scan_start = time.perf_counter()
     _scan_activity_started()
     try:
         logger.info("Stock Scanner Strategy: %s", STOCK_SCANNER_STRATEGY_VERSION)
         _ensure_background_refresh_started()
-        if watchlist is None:
+        if watchlist is None and discover:
             watchlist = get_finviz_watchlist()
+        elif watchlist is None:
+            watchlist = list(WATCHLIST)
         else:
             watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))[:200]
 
@@ -3970,8 +3990,8 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12) -> tuple:
         _scan_activity_finished()
 
 
-def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False) -> dict:
-    key = _analysis_cache_key(watchlist)
+def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False, discover: bool = False) -> dict:
+    key = _analysis_cache_key(watchlist, discover=discover)
     with _cache_lock:
         cached = _analysis_cache.get(key)
 
@@ -3980,7 +4000,7 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         age_seconds = _age_seconds(generated_at)
         should_refresh = bool(force_refresh) or age_seconds is None or age_seconds > ANALYSIS_CACHE_STALE_SECONDS
         if should_refresh:
-            _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
+            _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover)
         return {
             "rows": _hydrate_scan_rows_from_cache(list(cached.get("rows", []))),
             "near_miss": _hydrate_scan_rows_from_cache(list(cached.get("near_miss", []))),
@@ -3991,7 +4011,7 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         }
 
     if not cached:
-        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
+        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover)
         return {
             "rows": [],
             "near_miss": [],

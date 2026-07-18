@@ -40,13 +40,17 @@ def index():
 
 
 @app.get("/api/scan")
-def api_scan(tickers: str = Query(default=""), refresh: bool = Query(default=False)):
+def api_scan(
+    tickers: str = Query(default=""),
+    refresh: bool = Query(default=False),
+    discover: bool = Query(default=False),
+):
     """Scan the full watchlist or a custom comma-separated list of tickers."""
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
         result = scan_cached(watchlist, force_refresh=refresh)
     else:
-        result = scan_cached(force_refresh=refresh)
+        result = scan_cached(force_refresh=refresh, discover=discover)
     return result
 
 
