@@ -1520,17 +1520,55 @@ def _should_enrich_best_contract(result: dict, setup_grade: str, entry_status: s
 
 # ── Price Action Functions ────────────────────────────────────────────────────
 
-def _find_swings(df: pd.DataFrame, margin: int = 4) -> list:
+SWING_DAILY_PRICE_TOLERANCE = 0.006
+
+
+def _price_level_tolerance(tolerance: Optional[float] = None) -> float:
+    try:
+        value = float(tolerance or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value) or value <= 0:
+        return 0.0
+    return value
+
+
+def _swing_tolerance_for_pair(left: dict, right: dict) -> float:
+    left_tol = left.get("tolerance")
+    right_tol = right.get("tolerance")
+    if left_tol is not None or right_tol is not None:
+        return max(_price_level_tolerance(left_tol), _price_level_tolerance(right_tol))
+    return 0.0
+
+
+def _meaningfully_greater(left: float, right: float, tolerance: float) -> bool:
+    return float(left) > float(right) + float(tolerance)
+
+
+def _meaningfully_less(left: float, right: float, tolerance: float) -> bool:
+    return float(left) < float(right) - float(tolerance)
+
+
+def _find_swings(df: pd.DataFrame, margin: int = 4, tolerance: Optional[float] = None) -> list:
     highs = df["High"].values
     lows  = df["Low"].values
+    price_tolerance = _price_level_tolerance(tolerance)
     swings = []
     for i in range(margin, len(df) - margin):
+        high = float(highs[i])
+        low = float(lows[i])
         window_h = highs[i - margin : i + margin + 1]
         window_l = lows[i  - margin : i + margin + 1]
-        if highs[i] == window_h.max():
-            swings.append({"index": i, "price": float(highs[i]), "type": "high"})
-        elif lows[i] == window_l.min():
-            swings.append({"index": i, "price": float(lows[i]),  "type": "low"})
+        if high >= float(window_h.max()) - price_tolerance:
+            swing = {"index": i, "price": high, "type": "high"}
+            if price_tolerance:
+                swing["tolerance"] = price_tolerance
+            swings.append(swing)
+        elif low <= float(window_l.min()) + price_tolerance:
+            swing = {"index": i, "price": low, "type": "low"}
+            if price_tolerance:
+                swing["tolerance"] = price_tolerance
+            swings.append(swing)
     return swings
 
 
@@ -1539,10 +1577,12 @@ def _get_trend(swings: list) -> str:
     lows  = [s for s in swings if s["type"] == "low"]
     if len(highs) < 2 or len(lows) < 2:
         return "NEUTRAL"
-    hh = highs[-1]["price"] > highs[-2]["price"]
-    hl = lows[-1]["price"]  > lows[-2]["price"]
-    lh = highs[-1]["price"] < highs[-2]["price"]
-    ll = lows[-1]["price"]  < lows[-2]["price"]
+    high_tolerance = _swing_tolerance_for_pair(highs[-1], highs[-2])
+    low_tolerance = _swing_tolerance_for_pair(lows[-1], lows[-2])
+    hh = _meaningfully_greater(highs[-1]["price"], highs[-2]["price"], high_tolerance)
+    hl = _meaningfully_greater(lows[-1]["price"], lows[-2]["price"], low_tolerance)
+    lh = _meaningfully_less(highs[-1]["price"], highs[-2]["price"], high_tolerance)
+    ll = _meaningfully_less(lows[-1]["price"], lows[-2]["price"], low_tolerance)
     if hh and hl:
         return "LONG"
     if lh and ll:
@@ -3029,7 +3069,8 @@ def analyze_ticker(
         ema50 = round(float(close.ewm(span=50, adjust=False).mean().iloc[-1]), 2)
 
         # Price action
-        swings        = _find_swings(df)
+        swing_tolerance = SWING_DAILY_PRICE_TOLERANCE if timeframe == "1D" else 0.0
+        swings        = _find_swings(df, tolerance=swing_tolerance)
         trend         = _get_trend(swings)
         market_regime = _market_regime_for_df(df, df if timeframe == "1D" else _daily_df)
         bos_confirmed = False
@@ -3409,7 +3450,7 @@ def debug_ticker(ticker: str) -> dict:
         out["atr"]   = round(atr, 2)
 
         # Trend
-        swings = _find_swings(df)
+        swings = _find_swings(df, tolerance=SWING_DAILY_PRICE_TOLERANCE)
         trend  = _get_trend(swings)
         out["trend"] = trend
         out["filters"].append({"step": "trend", "result": "OK", "reason": trend})
