@@ -413,6 +413,21 @@ const sectorSnapshot = context.scannerSnapshotFromSetup(
 );
 assert.strictEqual(sectorSnapshot.sector, 'Technology');
 
+const regimeSnapshot = context.scannerSnapshotFromSetup(
+  {
+    ...tieredSetup,
+    marketRegime: 'TRENDING',
+    dailyMarketRegime: 'RANGING',
+    h4MarketRegime: 'TRENDING',
+    marketRegimeScore: 82,
+  },
+  { trade_stage: 'B+ TRADEABLE', trigger_confirmed: true }
+);
+assert.strictEqual(regimeSnapshot.market_regime, 'TRENDING');
+assert.strictEqual(regimeSnapshot.daily_market_regime, 'RANGING');
+assert.strictEqual(regimeSnapshot.h4_market_regime, 'TRENDING');
+assert.strictEqual(regimeSnapshot.market_regime_score, 82);
+
 const staleContract = {
   available: true,
   source: 'option_chain',
