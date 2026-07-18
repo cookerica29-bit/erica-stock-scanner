@@ -115,6 +115,34 @@ assert.ok(enterWaiting.includes('$120.00'));
 assert.ok(!enterWaiting.includes('Kairos Confidence'));
 assert.ok(!enterWaiting.includes('View contract details'));
 
+// A setup with only b_plus_tradeable (no true trigger confirmation) must
+// NOT be labeled ENTER NOW. Regression test for removing the B+ fallback
+// from simpleStatus().
+const bPlusOnlySetup = {
+  direction: 'SHORT',
+  setupGrade: 'A',
+  entryStatus: 'Tradeable',
+  entry: 50,
+  sl: 52,
+  tp1: 45,
+  trade_eval: {
+    trigger_confirmed: false,
+    a_plus_ready: false,
+    b_plus_tradeable: true,
+    trade_stage: 'B+ TRADEABLE',
+  },
+};
+const bPlusStatus = context.simpleStatus(bPlusOnlySetup);
+assert.strictEqual(bPlusStatus.label, 'ALMOST READY', 'B+-only setups (no trigger_confirmed) must not show ENTER NOW');
+
+// True trigger confirmation still correctly produces ENTER NOW.
+const aPlusSetup = {
+  ...bPlusOnlySetup,
+  trade_eval: { ...bPlusOnlySetup.trade_eval, trigger_confirmed: true, a_plus_ready: true },
+};
+const aPlusStatus = context.simpleStatus(aPlusSetup);
+assert.strictEqual(aPlusStatus.label, 'ENTER NOW', 'true trigger-confirmed setups must still show ENTER NOW');
+
 const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 }));
 assert.ok(reachedLive.includes('data-execution-state="SETUP_CONFIRMED_ENTRY_REACHED"'));
 assert.ok(reachedLive.includes('data-execute-visual-state="ready"'));

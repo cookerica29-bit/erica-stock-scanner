@@ -3996,7 +3996,7 @@ function simpleStatus(setup) {
     return { label: 'SKIP', className: 'skip' };
   }
   if (entryStatus === 'Too Far') return { label: 'TOO LATE', className: 'too-late' };
-  if (hasPlan && (triggerConfirmed || (bPlusTradeable && entryStatus === 'Tradeable'))) {
+  if (hasPlan && triggerConfirmed) {
     return { label: 'ENTER NOW', className: 'enter-now' };
   }
   if (hasPlan && (entryStatus === 'Tradeable' || entryStatus === 'Near Entry')) return { label: 'ALMOST READY', className: 'almost-ready' };
