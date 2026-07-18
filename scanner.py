@@ -1839,8 +1839,17 @@ def _market_structure(
     bearish_score = 0
     bullish_score = 0
 
-    highs = [s["price"] for s in swings if s["type"] == "high"]
-    lows  = [s["price"] for s in swings if s["type"] == "low"]
+    highs = [s for s in swings if s["type"] == "high"]
+    lows  = [s for s in swings if s["type"] == "low"]
+
+    def swing_price(swing: dict) -> float:
+        return float(swing["price"])
+
+    def swing_less(left: dict, right: dict) -> bool:
+        return _meaningfully_less(swing_price(left), swing_price(right), _swing_tolerance_for_pair(left, right))
+
+    def swing_greater(left: dict, right: dict) -> bool:
+        return _meaningfully_greater(swing_price(left), swing_price(right), _swing_tolerance_for_pair(left, right))
 
     # ── Macro bias override (weight 4) ───────────────────────────────────────
     if macro_bias == "Macro Bearish":
@@ -1872,29 +1881,29 @@ def _market_structure(
 
     # ── Recent swing high comparison (weight 2) ───────────────────────────────
     if len(highs) >= 2:
-        if highs[-1] < highs[-2]:
+        if swing_less(highs[-1], highs[-2]):
             bearish_score += 2
-            reasons.append(f"LH: {highs[-1]:.2f} < {highs[-2]:.2f} [bearish +2]")
+            reasons.append(f"LH: {swing_price(highs[-1]):.2f} < {swing_price(highs[-2]):.2f} [bearish +2]")
         else:
             bullish_score += 2
-            reasons.append(f"HH: {highs[-1]:.2f} >= {highs[-2]:.2f} [bullish +2]")
+            reasons.append(f"HH: {swing_price(highs[-1]):.2f} >= {swing_price(highs[-2]):.2f} [bullish +2]")
 
     # ── Recent swing low comparison (weight 2) ────────────────────────────────
     if len(lows) >= 2:
-        if lows[-1] < lows[-2]:
+        if swing_less(lows[-1], lows[-2]):
             bearish_score += 2
-            reasons.append(f"LL: {lows[-1]:.2f} < {lows[-2]:.2f} [bearish +2]")
+            reasons.append(f"LL: {swing_price(lows[-1]):.2f} < {swing_price(lows[-2]):.2f} [bearish +2]")
         else:
             bullish_score += 2
-            reasons.append(f"HL: {lows[-1]:.2f} >= {lows[-2]:.2f} [bullish +2]")
+            reasons.append(f"HL: {swing_price(lows[-1]):.2f} >= {swing_price(lows[-2]):.2f} [bullish +2]")
 
     # ── 3-swing sequence (weight 2) ───────────────────────────────────────────
-    if (len(highs) >= 3 and highs[-3] > highs[-2] > highs[-1]
-            and len(lows) >= 2 and lows[-2] > lows[-1]):
+    if (len(highs) >= 3 and swing_greater(highs[-3], highs[-2]) and swing_greater(highs[-2], highs[-1])
+            and len(lows) >= 2 and swing_greater(lows[-2], lows[-1])):
         bearish_score += 2
         reasons.append("3-swing LH/LL sequence confirmed [bearish +2]")
-    elif (len(lows) >= 3 and lows[-3] < lows[-2] < lows[-1]
-            and len(highs) >= 2 and highs[-2] < highs[-1]):
+    elif (len(lows) >= 3 and swing_less(lows[-3], lows[-2]) and swing_less(lows[-2], lows[-1])
+            and len(highs) >= 2 and swing_less(highs[-2], highs[-1])):
         bullish_score += 2
         reasons.append("3-swing HH/HL sequence confirmed [bullish +2]")
 
@@ -3183,7 +3192,8 @@ def analyze_ticker(
             # Informational only — structure/CHoCH labels show on cards but do NOT block signals.
             # Primary entry gate = BOS confirmed + price at/near OB.
             htf_df     = df.tail(200).reset_index(drop=True)
-            htf_swings = _find_swings(htf_df, margin=5)
+            htf_swing_tolerance = SWING_DAILY_PRICE_TOLERANCE if timeframe == "1D" else 0.0
+            htf_swings = _find_swings(htf_df, margin=5, tolerance=htf_swing_tolerance)
             structure, struct_reasons = _market_structure(
                 htf_swings, price, df, macro_bias=macro_bias, window_high=window_high
             )
@@ -3567,7 +3577,7 @@ def debug_ticker(ticker: str) -> dict:
 
         # Local structure + CHoCH
         htf_df     = df.tail(200).reset_index(drop=True)
-        htf_swings = _find_swings(htf_df, margin=5)
+        htf_swings = _find_swings(htf_df, margin=5, tolerance=SWING_DAILY_PRICE_TOLERANCE)
         structure, struct_reasons = _market_structure(
             htf_swings, price, df, macro_bias=macro_bias, window_high=window_high
         )

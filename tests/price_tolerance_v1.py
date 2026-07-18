@@ -124,6 +124,66 @@ def daily_find_swings_marks_provider_noise_consistently():
     )
 
 
+def market_structure_honors_daily_swing_tolerance_for_aal_style_lows():
+    tolerance = scanner.SWING_DAILY_PRICE_TOLERANCE
+    df = pd.DataFrame({
+        "Open": [13.40] * 199 + [14.90],
+        "High": [13.60] * 199 + [15.10],
+        "Low": [13.20] * 199 + [14.70],
+        "Close": [13.50] * 199 + [14.98],
+        "Volume": [1000000] * 200,
+    })
+    price = float(df["Close"].iloc[-1])
+    yahoo_like_swings = [
+        {"index": 1, "price": 15.40, "type": "high", "tolerance": tolerance},
+        {"index": 2, "price": 11.97, "type": "low", "tolerance": tolerance},
+        {"index": 3, "price": 13.180000305175781, "type": "low", "tolerance": tolerance},
+        {"index": 4, "price": 13.180000305175781, "type": "low", "tolerance": tolerance},
+        {"index": 5, "price": 18.79, "type": "high", "tolerance": tolerance},
+    ]
+    alpaca_like_swings = [
+        {"index": 1, "price": 15.40, "type": "high", "tolerance": tolerance},
+        {"index": 2, "price": 11.965, "type": "low", "tolerance": tolerance},
+        {"index": 3, "price": 13.18, "type": "low", "tolerance": tolerance},
+        {"index": 4, "price": 13.175, "type": "low", "tolerance": tolerance},
+        {"index": 5, "price": 18.79, "type": "high", "tolerance": tolerance},
+    ]
+
+    yahoo_structure, _ = scanner._market_structure(
+        yahoo_like_swings, price, df, macro_bias="Macro Bearish", window_high=18.15
+    )
+    alpaca_structure, _ = scanner._market_structure(
+        alpaca_like_swings, price, df, macro_bias="Macro Bearish", window_high=18.15
+    )
+
+    assert_equal("Yahoo-style tied lows should classify HTF structure as ranging", yahoo_structure, "ranging")
+    assert_equal("Alpaca half-cent lower low should converge to the same HTF structure", alpaca_structure, "ranging")
+
+
+def market_structure_boundary_stress_preserves_real_lower_low():
+    tolerance = scanner.SWING_DAILY_PRICE_TOLERANCE
+    df = pd.DataFrame({
+        "Open": [13.40] * 199 + [14.90],
+        "High": [13.60] * 199 + [15.10],
+        "Low": [13.20] * 199 + [14.70],
+        "Close": [13.50] * 199 + [14.98],
+        "Volume": [1000000] * 200,
+    })
+    price = float(df["Close"].iloc[-1])
+    real_lower_low_swings = [
+        {"index": 1, "price": 15.40, "type": "high", "tolerance": tolerance},
+        {"index": 2, "price": 11.97, "type": "low", "tolerance": tolerance},
+        {"index": 3, "price": 13.18, "type": "low", "tolerance": tolerance},
+        {"index": 4, "price": 13.18 - tolerance - 0.0001, "type": "low", "tolerance": tolerance},
+        {"index": 5, "price": 18.79, "type": "high", "tolerance": tolerance},
+    ]
+
+    structure, _ = scanner._market_structure(
+        real_lower_low_swings, price, df, macro_bias="Macro Bearish", window_high=18.15
+    )
+    assert_equal("real lower low beyond tolerance should still shift HTF vote bearish", structure, "bearish")
+
+
 def default_find_swings_remains_exact_for_non_daily_callers():
     rows = [
         (12.20, 11.90), (12.10, 11.80), (12.00, 11.70), (11.90, 11.60),
@@ -149,5 +209,7 @@ if __name__ == "__main__":
     boundary_stress_just_beyond_tolerance_registers_trend_change()
     bac_gs_mcd_boundaries_are_not_swallowed_by_daily_tolerance()
     daily_find_swings_marks_provider_noise_consistently()
+    market_structure_honors_daily_swing_tolerance_for_aal_style_lows()
+    market_structure_boundary_stress_preserves_real_lower_low()
     default_find_swings_remains_exact_for_non_daily_callers()
     print("Swing price tolerance v1 tests passed")
