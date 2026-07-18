@@ -38,6 +38,7 @@ SCANNER_TIMEFRAMES = [
 ]
 PROVIDER_PROFILE_PRODUCTION_YAHOO = "production_yahoo"
 PROVIDER_PROFILE_PROPOSED_HYBRID = "proposed_hybrid_alpaca_1d_1w_yahoo_4h"
+DEFAULT_DATA_PROVIDER_PROFILE = PROVIDER_PROFILE_PRODUCTION_YAHOO
 TIMEFRAME_PROVIDER_PROFILES = {
     PROVIDER_PROFILE_PRODUCTION_YAHOO: {
         "1D": YAHOO_PROVIDER_NAME,
@@ -376,6 +377,28 @@ def _empty_multi_symbol_frame(symbols: list[str]) -> pd.DataFrame:
 
 def configured_provider_name() -> str:
     return (os.getenv("STOCK_DATA_PROVIDER") or DEFAULT_DATA_PROVIDER).strip().lower() or DEFAULT_DATA_PROVIDER
+
+
+def configured_provider_profile_name() -> str:
+    profile = (os.getenv("STOCK_DATA_PROVIDER_PROFILE") or DEFAULT_DATA_PROVIDER_PROFILE).strip().lower()
+    if profile not in TIMEFRAME_PROVIDER_PROFILES:
+        logger.warning(
+            "[market-data] unknown provider profile %s; falling back to %s",
+            profile,
+            DEFAULT_DATA_PROVIDER_PROFILE,
+        )
+        return DEFAULT_DATA_PROVIDER_PROFILE
+    return profile
+
+
+def configured_timeframe_provider_profile() -> dict:
+    return timeframe_provider_profile(configured_provider_profile_name())
+
+
+def provider_name_for_timeframe(label: str, profile: Optional[dict] = None) -> str:
+    timeframe = str(label or "").strip().upper()
+    active_profile = profile or configured_timeframe_provider_profile()
+    return active_profile.get(timeframe, YAHOO_PROVIDER_NAME)
 
 
 def alpaca_credentials_configured() -> bool:

@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from market_data import MarketDataFacade
+from market_data import MarketDataFacade, build_market_data_provider, provider_name_for_timeframe
 
 logger = logging.getLogger(__name__)
 yf = MarketDataFacade()
@@ -2656,16 +2656,33 @@ def _build_chart_coach(
 
 # ── Batch data helpers ────────────────────────────────────────────────────────
 
-def _download_price_batch_raw(tickers: list, period: str, interval: str) -> dict:
+def _timeframe_label_for_interval(interval: str) -> str:
+    normalized = str(interval or "").strip().lower()
+    if normalized == "1d":
+        return "1D"
+    if normalized == "1wk":
+        return "1W"
+    if normalized == "4h":
+        return "4H"
+    return normalized.upper()
+
+
+def _price_provider_for_interval(interval: str):
+    provider_name = provider_name_for_timeframe(_timeframe_label_for_interval(interval))
+    return build_market_data_provider(provider_name)
+
+
+def _download_price_batch_raw(tickers: list, period: str, interval: str, provider=None) -> dict:
     """
-    Download OHLCV data for multiple tickers in a single yfinance call.
+    Download OHLCV data for multiple tickers through the configured provider.
     Returns {ticker: DataFrame}.  Falls back gracefully on any per-ticker error.
     """
     if not tickers:
         return {}
+    active_provider = provider or _price_provider_for_interval(interval)
     try:
         _cache_record("api_prices", "call")
-        raw = yf.download(
+        raw = active_provider.download(
             tickers, period=period, interval=interval,
             progress=False, auto_adjust=True, group_by="ticker",
         )
@@ -2692,29 +2709,39 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str) -> dict
     return result
 
 
-def _price_cache_key(ticker: str, period: str, interval: str) -> tuple:
-    return (str(ticker or "").upper(), period, interval)
+def _price_cache_key(ticker: str, period: str, interval: str, provider_name: str) -> tuple:
+    return (str(ticker or "").upper(), period, interval, provider_name)
 
 
-def _refresh_price_cache(tickers: list, period: str, interval: str) -> None:
+def _refresh_price_cache(tickers: list, period: str, interval: str, provider_name: str) -> None:
     symbols = list(dict.fromkeys([str(t).strip().upper() for t in tickers if str(t).strip()]))
     if not symbols:
         return
-    fetched = _download_price_batch_raw(symbols, period, interval)
+    provider = build_market_data_provider(provider_name)
+    fetched = _download_price_batch_raw(symbols, period, interval, provider=provider)
     now = datetime.utcnow()
     with _cache_lock:
         for ticker, df in fetched.items():
-            _price_cache[_price_cache_key(ticker, period, interval)] = {
+            _price_cache[_price_cache_key(ticker, period, interval, provider.name)] = {
                 "fetched_at": now,
                 "data": df,
             }
-    logger.info("[cache] refreshed prices period=%s interval=%s tickers=%s/%s", period, interval, len(fetched), len(symbols))
+    logger.info(
+        "[cache] refreshed prices provider=%s period=%s interval=%s tickers=%s/%s",
+        provider.name,
+        period,
+        interval,
+        len(fetched),
+        len(symbols),
+    )
 
 
 def _batch_download(tickers: list, period: str, interval: str) -> dict:
     if not tickers:
         return {}
     symbols = list(dict.fromkeys([str(t).strip().upper() for t in tickers if str(t).strip()]))
+    provider = _price_provider_for_interval(interval)
+    provider_name = provider.name
     now = datetime.utcnow()
     result = {}
     missing = []
@@ -2722,7 +2749,7 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
 
     with _cache_lock:
         for ticker in symbols:
-            key = _price_cache_key(ticker, period, interval)
+            key = _price_cache_key(ticker, period, interval, provider_name)
             cached = _price_cache.get(key)
             if not cached:
                 missing.append(ticker)
@@ -2742,14 +2769,14 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
                 _cache_record("prices", "stale")
 
     if stale:
-        _submit_background_job(("prices", period, interval, tuple(stale)), _refresh_price_cache, stale, period, interval)
+        _submit_background_job(("prices", provider_name, period, interval, tuple(stale)), _refresh_price_cache, stale, period, interval, provider_name)
 
     if missing:
-        fetched = _download_price_batch_raw(missing, period, interval)
+        fetched = _download_price_batch_raw(missing, period, interval, provider=provider)
         fetched_at = datetime.utcnow()
         with _cache_lock:
             for ticker, df in fetched.items():
-                _price_cache[_price_cache_key(ticker, period, interval)] = {
+                _price_cache[_price_cache_key(ticker, period, interval, provider_name)] = {
                     "fetched_at": fetched_at,
                     "data": df,
                 }
@@ -2778,12 +2805,15 @@ def _background_refresh_loop() -> None:
                 time.sleep(5)
                 continue
             symbols = list(dict.fromkeys(WATCHLIST))
+            daily_provider = provider_name_for_timeframe("1D")
+            weekly_provider = provider_name_for_timeframe("1W")
+            h4_provider = provider_name_for_timeframe("4H")
             if _periodic_refresh_due("prices_1d", 180):
-                _submit_background_job(("prices_periodic", "1y", "1d"), _refresh_price_cache, symbols, "1y", "1d")
+                _submit_background_job(("prices_periodic", daily_provider, "1y", "1d"), _refresh_price_cache, symbols, "1y", "1d", daily_provider)
             if _periodic_refresh_due("prices_1wk", 300):
-                _submit_background_job(("prices_periodic", "2y", "1wk"), _refresh_price_cache, symbols, "2y", "1wk")
+                _submit_background_job(("prices_periodic", weekly_provider, "2y", "1wk"), _refresh_price_cache, symbols, "2y", "1wk", weekly_provider)
             if _periodic_refresh_due("prices_4h", 300):
-                _submit_background_job(("prices_periodic", "60d", "4h"), _refresh_price_cache, symbols, "60d", "4h")
+                _submit_background_job(("prices_periodic", h4_provider, "60d", "4h"), _refresh_price_cache, symbols, "60d", "4h", h4_provider)
 
             if _periodic_refresh_due("option_expirations", 600):
                 for ticker in list(STOCK_UNIVERSE_FILTER.get("allowlist", []))[:24]:
@@ -2930,7 +2960,7 @@ def _validate_trend_direction_notes(ticker: str, direction: str, notes: list) ->
 def analyze_trend_ticker(ticker: str, h4_df: Optional[pd.DataFrame] = None, daily_df: Optional[pd.DataFrame] = None) -> Optional[dict]:
     try:
         if h4_df is None:
-            h4_df = yf.download(ticker, period="60d", interval="4h", progress=False, auto_adjust=True)
+            h4_df = _batch_download([ticker], period="60d", interval="4h").get(ticker, pd.DataFrame())
         df = _flatten_columns(h4_df.copy()).dropna().astype(float)
         if len(df) < 55:
             return None
@@ -3043,7 +3073,7 @@ def analyze_ticker(
         if _daily_df is not None:
             df = _flatten_columns(_daily_df.copy())
         else:
-            raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+            raw = _batch_download([ticker], period="1y", interval="1d").get(ticker, pd.DataFrame())
             df  = _flatten_columns(raw)
 
         if len(df) < 50:
@@ -3120,7 +3150,7 @@ def analyze_ticker(
             if _weekly_df is not None:
                 weekly = _flatten_columns(_weekly_df.copy()).astype(float)
             else:
-                w_raw = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
+                w_raw = _batch_download([ticker], period="2y", interval="1wk").get(ticker, pd.DataFrame())
                 weekly = _flatten_columns(w_raw).astype(float)
             if len(weekly) >= 50:
                 w_close = weekly["Close"]
@@ -3425,7 +3455,7 @@ def debug_ticker(ticker: str) -> dict:
     """
     out: dict = {"ticker": ticker.upper(), "filters": [], "passed": False}
     try:
-        raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+        raw = _batch_download([ticker], period="1y", interval="1d").get(ticker, pd.DataFrame())
         df  = _flatten_columns(raw)
         if len(df) < 50:
             out["filters"].append({"step": "data", "result": "FAIL", "reason": "< 50 bars"})
@@ -3498,7 +3528,7 @@ def debug_ticker(ticker: str) -> dict:
             return out
 
         # Weekly EMA
-        w_raw  = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=True)
+        w_raw  = _batch_download([ticker], period="2y", interval="1wk").get(ticker, pd.DataFrame())
         weekly = _flatten_columns(w_raw).astype(float)
         w_e20 = w_e50 = None
         if len(weekly) >= 50:
@@ -3988,7 +4018,7 @@ def scan_ticker(
     if _h4_df is not None:
         h4_source = _h4_df
     else:
-        h4_source = yf.download(ticker, period="60d", interval="4h", progress=False, auto_adjust=True)
+        h4_source = _batch_download([ticker], period="60d", interval="4h").get(ticker, pd.DataFrame())
 
     h4_result = analyze_ticker(
         ticker,

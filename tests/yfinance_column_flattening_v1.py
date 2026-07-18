@@ -36,15 +36,16 @@ def main() -> int:
     assert list(flattened.columns) == FIELDS
     assert "Close" in flattened.columns
 
-    original_download = scanner.yf.download
-    try:
-        scanner.yf.download = lambda *args, **kwargs: ticker_first.copy()
-        result = scanner._download_price_batch_raw(["SCHW"], period="1y", interval="1d")
-        assert "SCHW" in result
-        assert list(result["SCHW"].columns) == FIELDS
-        assert "Close" in result["SCHW"].columns
-    finally:
-        scanner.yf.download = original_download
+    class FakeProvider:
+        name = "yahoo"
+
+        def download(self, *args, **kwargs):
+            return ticker_first.copy()
+
+    result = scanner._download_price_batch_raw(["SCHW"], period="1y", interval="1d", provider=FakeProvider())
+    assert "SCHW" in result
+    assert list(result["SCHW"].columns) == FIELDS
+    assert "Close" in result["SCHW"].columns
 
     print("Yfinance column flattening v1 tests passed")
     return 0

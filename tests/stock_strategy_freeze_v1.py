@@ -25,8 +25,8 @@ EXPECTED_BASELINE = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
 
 CORE_FUNCTION_HASHES = {
     "_build_trade_stage_eval": "8754add5cb2820fafbde5dd213a3c1e8776ccb35cd28857a7a3227430530cd96",
-    # Updated 2026-07-18: added daily-only swing/trend price tolerance for Yahoo/Alpaca precision noise.
-    "analyze_ticker": "a482ac09d2393c484a232064a2312a8062a19779ba1c3a0d10fb0d69ff2d0415",
+    # Updated 2026-07-18: routed fallback candle fetches through timeframe provider profile (non-strategy).
+    "analyze_ticker": "629a490ceda231cfc4a0959e0404702784cd16396b13d50d156d26ff033b68c9",
     "_build_chart_coach": "7642863ce83136bacf46e441b8a5965e7552d067435b1dec2800ee79e39561f0",
     "_stock_setup_grade": "9cab2e9632eb1a179a6cb27910dfa3fbec1a4ae8249b23261fe95ba8bb0761de",
     "_stock_entry_status": "9dd1abeeac4f42f27dbfbbf906b0fb6728f4148146b9e10f649d9044d6b09f6f",

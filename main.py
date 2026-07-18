@@ -4,7 +4,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from scanner import analysis_cache_status, scan_cached, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
-from market_data import alpaca_credentials_configured, comparison_diagnostics, configured_provider_name, hybrid_strategy_diagnostics, validate_watchlist_candles
+from market_data import (
+    alpaca_credentials_configured,
+    comparison_diagnostics,
+    configured_provider_name,
+    configured_provider_profile_name,
+    configured_timeframe_provider_profile,
+    hybrid_strategy_diagnostics,
+    validate_watchlist_candles,
+)
 
 app = FastAPI(title="Stock Options Scanner")
 
@@ -70,9 +78,11 @@ def api_cache_status():
 def api_data_provider_status():
     return {
         "stock_data_provider": configured_provider_name(),
+        "stock_data_provider_profile": configured_provider_profile_name(),
+        "timeframe_provider_profile": configured_timeframe_provider_profile(),
         "default_provider": "yahoo",
         "alpaca_configured": alpaca_credentials_configured(),
-        "note": "Yahoo remains the default scanner provider. Alpaca is available only for backend comparison diagnostics.",
+        "note": "Scanner candle routing is controlled by STOCK_DATA_PROVIDER_PROFILE. Options and earnings remain Yahoo-backed.",
     }
 
 
