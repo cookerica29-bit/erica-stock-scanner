@@ -57,6 +57,23 @@ const earlyStages = guidance.readinessStages(earlyEntrySetup, { bucket: 'EARLY_E
 assert.deepStrictEqual(earlyStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Early', 'Execute:Caution']);
 assert.deepStrictEqual(guidance.nextStep(earlyEntrySetup, { bucket: 'EARLY_ENTRY' }, 'available').lines, ["Structure has broken, but full confirmation hasn't happened yet.", 'Consider smaller size given lower confirmation.']);
 
+// Canonical readiness bucket wins over stale/raw trade_eval readiness fields.
+const staleConfirmedRawFields = setup({
+  setupGrade: 'A',
+  entryStatus: 'Tradeable',
+  trade_eval: {
+    trade_stage: 'A+ READY',
+    trigger_confirmed: true,
+    a_plus_ready: true,
+    b_plus_tradeable: true,
+  },
+});
+assert.strictEqual(guidance.isConfirmedSetup(staleConfirmedRawFields, { bucket: 'SKIP' }), false);
+assert.strictEqual(guidance.isEarlyEntrySetup(staleConfirmedRawFields, { bucket: 'SKIP' }), false);
+assert.strictEqual(guidance.executionState(staleConfirmedRawFields, { bucket: 'SKIP' }), 'SETUP_NOT_CONFIRMED');
+assert.deepStrictEqual(guidance.cardStatus(staleConfirmedRawFields, { bucket: 'SKIP' }), { label: 'NO TRADE', className: 'skip' });
+assert.deepStrictEqual(guidance.nextStep(staleConfirmedRawFields, { bucket: 'SKIP' }, 'available').lines, ['No entry. The setup is not currently valid.']);
+
 // Enter Now can remain confirmed while current price differs from Planned Entry.
 const confirmedWaiting = setup({ price: 75, entry: 70, entryStatus: 'Near Entry', distanceFromEntryAtr: 0.5 });
 assert.strictEqual(guidance.executionState(confirmedWaiting, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_WAITING_FOR_ENTRY');

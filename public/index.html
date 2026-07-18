@@ -3323,58 +3323,6 @@ function clearResults() {
   if (tickerSearch) tickerSearch.value = '';
 }
 
-function getTradeStage(setup) {
-  return setup?.trade_eval?.trade_stage || 'RANGE / NO TRADE';
-}
-
-function getStageKey(setup) {
-  return String(setup?.ticker || '').trim().toUpperCase();
-}
-
-function detectAPlusReadyTransitions(setups) {
-  const nextStages = new Map();
-  const alerts = [];
-
-  setups.forEach(setup => {
-    const ticker = getStageKey(setup);
-    if (!ticker) return;
-
-    const currentStage = getTradeStage(setup);
-    const previousStage = previousTradeStages.get(ticker);
-    nextStages.set(ticker, currentStage);
-
-    // Fire on any upgrade TO A+ READY (from any previous stage including B+)
-    if (
-      previousStage !== undefined &&
-      previousStage !== 'A+ READY' &&
-      currentStage === 'A+ READY'
-    ) {
-      const readiness = setupProgressState(setup);
-      if (['ENTER_NOW', 'ALMOST_READY'].includes(readiness.bucket)) {
-        alerts.push({ ticker, setup, previousStage, currentStage, type: readiness.bucket });
-      }
-    }
-    // Also fire on B+ TRADEABLE upgrades from non-tradeable stages
-    else if (
-      previousStage !== undefined &&
-      previousStage !== 'A+ READY' &&
-      previousStage !== 'B+ TRADEABLE' &&
-      currentStage === 'B+ TRADEABLE'
-    ) {
-      const readiness = setupProgressState(setup);
-      if (['ENTER_NOW', 'ALMOST_READY'].includes(readiness.bucket)) {
-        alerts.push({ ticker, setup, previousStage, currentStage, type: readiness.bucket });
-      }
-    }
-  });
-
-  previousTradeStages = nextStages;
-  try {
-    localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify([...nextStages]));
-  } catch {}
-  return alerts;
-}
-
 function loadStockAlertSentKeys() {
   try {
     const saved = localStorage.getItem(STOCK_ALERT_SENT_KEY);

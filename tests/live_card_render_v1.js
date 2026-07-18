@@ -173,12 +173,12 @@ assert.ok(reachedPotential.includes('execute-entry-ready'));
 assert.ok(reachedPotential.includes('Price is at the planned entry.'));
 assert.ok(reachedPotential.includes('Verify and select the live option contract before executing.'));
 
-const almostReady = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B+ TRADEABLE', entryStatus: 'Near Entry', confirmationStarted: false }));
+const almostReady = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B', entryStatus: 'Near Entry', confirmationStarted: false }));
 assert.ok(almostReady.includes('data-normalized-status="ALMOST_READY"'));
 assert.ok(almostReady.includes('execute-not-ready'));
 assert.ok(almostReady.includes('Setup is still developing. Wait for full confirmation.'));
 
-const building = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B+ TRADEABLE', entryStatus: 'Waiting', confirmationStarted: false, direction: 'LONG' }));
+const building = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B', entryStatus: 'Waiting', confirmationStarted: false, direction: 'LONG' }));
 assert.ok(building.includes('data-normalized-status="BUILDING"'));
 assert.ok(building.includes('execute-not-ready'));
 assert.ok(building.includes('Continue monitoring. The setup is still developing.'));

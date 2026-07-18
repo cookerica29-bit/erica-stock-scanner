@@ -47,6 +47,8 @@
 
   function isConfirmedSetup(setup = {}, readiness = {}) {
     if (setupGradeValue(setup) === 'C') return false;
+    const bucket = upper(readiness.bucket);
+    if (bucket) return bucket === 'ENTER_NOW';
     const values = normalizedStatusValues(setup, readiness);
     if (values.some(value => ['ENTER_NOW', 'ENTER NOW', 'A+ READY', 'READY'].includes(value))) return true;
     return false;
@@ -55,7 +57,7 @@
   function isEarlyEntrySetup(setup = {}, readiness = {}) {
     if (setupGradeValue(setup) === 'C') return false;
     const bucket = upper(readiness.bucket);
-    if (bucket === 'EARLY_ENTRY' || bucket === 'EARLY ENTRY') return true;
+    if (bucket) return bucket === 'EARLY_ENTRY' || bucket === 'EARLY ENTRY';
     const tradeEval = setup.trade_eval || {};
     return tradeEval.b_plus_tradeable === true
       && upper(setup.entryStatus) === 'TRADEABLE'
@@ -65,6 +67,7 @@
 
   function isNoTrade(setup = {}, readiness = {}) {
     const bucket = upper(readiness.bucket);
+    if (bucket === 'SKIP') return true;
     const tradeStage = upper(setup.trade_eval && setup.trade_eval.trade_stage);
     const setupStatus = upper(setup.setupStatus || setup.stockSetupStatus);
     if (tradeStage.includes('NO TRADE')
