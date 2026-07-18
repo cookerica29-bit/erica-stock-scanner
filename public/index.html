@@ -3119,6 +3119,52 @@ function normalizeScanRowsForClient(rows = []) {
   return (Array.isArray(rows) ? rows : []).map(stripContractDataForIneligibleGrade);
 }
 
+function setupHasDatedEarnings(setup = {}) {
+  const normalized = window.KairosCardData?.normalizeEarnings
+    ? window.KairosCardData.normalizeEarnings(setup)
+    : null;
+  return normalized?.state === 'date' && !!normalized.date;
+}
+
+function preservedEarningsPayload(setup = {}) {
+  if (setup.earnings && typeof setup.earnings === 'object') return { ...setup.earnings };
+  const date = firstPresent(setup.earnings_date, setup.earningsDate, setup.next_earnings_date, setup.nextEarningsDate);
+  if (!date) return null;
+  return {
+    loaded: true,
+    date,
+    days_until: firstPresent(
+      setup.days_until_earnings,
+      setup.daysUntilEarnings,
+      setup.earnings_days_until,
+      setup.earningsDaysUntil,
+      null
+    ),
+    source: firstPresent(setup.earnings_source, setup.earningsSource, 'preserved'),
+  };
+}
+
+function earningsMergeKey(setup = {}) {
+  const explicit = firstPresent(setup.setup_id, setup.setupId, null);
+  if (explicit) return String(explicit);
+  if (typeof setupIdFromSetup === 'function') return setupIdFromSetup(setup);
+  return '';
+}
+
+function preservePriorEarningsRows(nextRows = [], previousRows = []) {
+  const previousByKey = new Map();
+  (Array.isArray(previousRows) ? previousRows : []).forEach(row => {
+    const key = earningsMergeKey(row);
+    if (key && setupHasDatedEarnings(row)) previousByKey.set(key, row);
+  });
+  return (Array.isArray(nextRows) ? nextRows : []).map(row => {
+    if (setupHasDatedEarnings(row)) return row;
+    const previous = previousByKey.get(earningsMergeKey(row));
+    const earnings = previous ? preservedEarningsPayload(previous) : null;
+    return earnings ? { ...row, earnings } : row;
+  });
+}
+
 async function runScan() {
   const btn     = document.getElementById('scanBtn');
   const status  = document.getElementById('status');
@@ -3141,8 +3187,9 @@ async function runScan() {
     latestScannerMeta = scanMeta;
     updateDataStatus(scanMeta || {});
 
-    const nextRows = normalizeScanRowsForClient(data.rows || []);
-    const nextNearMiss = normalizeScanRowsForClient(data.near_miss || []);
+    const previousRows = [...scannerRows, ...scannerNearMiss];
+    const nextRows = preservePriorEarningsRows(normalizeScanRowsForClient(data.rows || []), previousRows);
+    const nextNearMiss = preservePriorEarningsRows(normalizeScanRowsForClient(data.near_miss || []), previousRows);
     const stockAlerts = detectStockAlertEvents([...nextRows, ...nextNearMiss], scanMeta || {});
     aPlusReadyAlerts = new Set(stockAlerts.filter(a => a.type === 'ENTER_NOW').map(a => a.setup?.ticker));
     stockAlerts.forEach(deliverStockAlertEvent);
@@ -3220,7 +3267,10 @@ async function loadIndexWatchlist(options = {}) {
     if (!res.ok) throw new Error(`Index scan failed with HTTP ${res.status}`);
     const data = await res.json();
     indexMeta = data.meta || null;
-    indexWatchRows = normalizeScanRowsForClient([...(data.rows || []), ...(data.near_miss || [])]);
+    indexWatchRows = preservePriorEarningsRows(
+      normalizeScanRowsForClient([...(data.rows || []), ...(data.near_miss || [])]),
+      indexWatchRows
+    );
     refreshExpectedMoveTrackingFromRows(indexWatchRows);
     console.info('[Index Watchlist] rows received', indexWatchRows.length, indexWatchRows.map(r => r.ticker));
   } catch (e) {
@@ -3601,8 +3651,9 @@ function scheduleContractRefreshPoll() {
       const res = await fetchWithTimeout(`${API}/api/scan`, {}, 15000);
       if (!res.ok) throw new Error(`Scan refresh failed with HTTP ${res.status}`);
       const data = await res.json();
-      const nextRows = normalizeScanRowsForClient(data.rows || []);
-      const nextNearMiss = normalizeScanRowsForClient(data.near_miss || []);
+      const previousRows = [...scannerRows, ...scannerNearMiss];
+      const nextRows = preservePriorEarningsRows(normalizeScanRowsForClient(data.rows || []), previousRows);
+      const nextNearMiss = preservePriorEarningsRows(normalizeScanRowsForClient(data.near_miss || []), previousRows);
       latestScannerMeta = data.meta || latestScannerMeta;
       scannerRows = nextRows;
       scannerNearMiss = nextNearMiss;

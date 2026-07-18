@@ -140,7 +140,8 @@ BEST_CONTRACT_CACHE_TTL = timedelta(minutes=8)
 _option_chain_fetch_semaphore = threading.BoundedSemaphore(4)
 _earnings_cache = {}
 EARNINGS_CACHE_TTL = timedelta(hours=12)
-EARNINGS_UNAVAILABLE_CACHE_TTL = timedelta(hours=24)
+EARNINGS_UNAVAILABLE_CACHE_TTL = timedelta(hours=1)
+EARNINGS_FAILURE_PRESERVE_TTL = timedelta(days=1)
 _cache_lock = threading.RLock()
 _cache_stats = Counter()
 _background_executor = ThreadPoolExecutor(max_workers=3)
@@ -460,6 +461,34 @@ def _hydrate_best_contracts_from_cache(rows: list) -> list:
                 item["best_contract"] = dict(cached_contract)
         hydrated.append(item)
     return hydrated
+
+
+def _hydrate_earnings_from_cache(rows: list) -> list:
+    hydrated = []
+    with _cache_lock:
+        earnings_cache = dict(_earnings_cache)
+    for row in rows or []:
+        if not isinstance(row, dict):
+            hydrated.append(row)
+            continue
+        item = dict(row)
+        earnings = item.get("earnings") if isinstance(item.get("earnings"), dict) else {}
+        is_unresolved = (
+            not earnings
+            or _earnings_is_loading(earnings)
+            or not _earnings_has_date(earnings)
+        )
+        if is_unresolved:
+            ticker = str(item.get("ticker") or "").upper()
+            cached_earnings = (earnings_cache.get(ticker) or {}).get("data")
+            if cached_earnings and not _earnings_is_loading(cached_earnings):
+                item["earnings"] = dict(cached_earnings)
+        hydrated.append(item)
+    return hydrated
+
+
+def _hydrate_scan_rows_from_cache(rows: list) -> list:
+    return _hydrate_earnings_from_cache(_hydrate_best_contracts_from_cache(rows))
 
 
 def _refresh_analysis_cache(key: tuple, watchlist: Optional[list], job_id: Optional[str] = None) -> None:
@@ -870,6 +899,18 @@ def _earnings_loading_result() -> dict:
     }
 
 
+def _earnings_has_date(data: Optional[dict]) -> bool:
+    return bool(isinstance(data, dict) and data.get("loaded") and data.get("date"))
+
+
+def _earnings_is_loading(data: Optional[dict]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    status = str(data.get("status") or "").lower()
+    source = str(data.get("source") or "").lower()
+    return bool(data.get("loading")) or status in {"loading", "pending", "refreshing"} or source == "background_refresh"
+
+
 def _earnings_for_ticker(ticker: str, *, allow_fetch: bool = True) -> dict:
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
@@ -934,6 +975,16 @@ def _fetch_earnings_for_ticker(ticker: str) -> dict:
         logger.warning(f"[earnings] fetch failed for {ticker}: {e}")
 
     with _cache_lock:
+        existing = _earnings_cache.get(ticker) or {}
+        existing_data = existing.get("data") or {}
+        existing_age = now - existing.get("fetched_at", now)
+        if (
+            not _earnings_has_date(data)
+            and _earnings_has_date(existing_data)
+            and existing_age < EARNINGS_FAILURE_PRESERVE_TTL
+        ):
+            _cache_record("earnings", "preserve")
+            return dict(existing_data)
         _earnings_cache[ticker] = {"fetched_at": now, "data": data}
     return dict(data)
 
@@ -3698,8 +3749,8 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         if should_refresh:
             _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache")
         return {
-            "rows": _hydrate_best_contracts_from_cache(list(cached.get("rows", []))),
-            "near_miss": _hydrate_best_contracts_from_cache(list(cached.get("near_miss", []))),
+            "rows": _hydrate_scan_rows_from_cache(list(cached.get("rows", []))),
+            "near_miss": _hydrate_scan_rows_from_cache(list(cached.get("near_miss", []))),
             "meta": {
                 **_analysis_cache_meta(key, cached, True),
                 "refresh_requested": bool(force_refresh),

@@ -208,6 +208,71 @@ const failedEarnings = htmlFor(setup({ earnings: { status: 'failed', error: 'pro
 assert.ok(failedEarnings.includes('Data unavailable'));
 assert.ok(!failedEarnings.includes('Loading...'));
 
+const priorDatedEarnings = setup({
+  ticker: 'AAPL',
+  direction: 'LONG',
+  timeframe: '1D',
+  signal_timestamp: '2026-07-17T00:00:00Z',
+  entry: 100,
+  sl: 96,
+  tp1: 108,
+  earnings: {
+    loaded: true,
+    date: '2026-07-30',
+    days_until: 13,
+    source: 'yfinance',
+  },
+});
+
+const nextLoadingSameSetup = setup({
+  ...priorDatedEarnings,
+  earnings: {
+    loaded: false,
+    loading: true,
+    status: 'loading',
+    date: null,
+    days_until: null,
+    source: 'background_refresh',
+  },
+});
+
+const preservedRows = context.preservePriorEarningsRows([nextLoadingSameSetup], [priorDatedEarnings]);
+assert.strictEqual(preservedRows[0].earnings.date, '2026-07-30');
+assert.strictEqual(preservedRows[0].earnings.days_until, 13);
+assert.strictEqual(preservedRows[0].earnings.source, 'yfinance');
+
+const nextUnavailableSameSetup = setup({
+  ...priorDatedEarnings,
+  earnings: {
+    loaded: false,
+    date: null,
+    days_until: null,
+    source: 'unavailable',
+  },
+});
+const preservedUnavailable = context.preservePriorEarningsRows([nextUnavailableSameSetup], [priorDatedEarnings]);
+assert.strictEqual(preservedUnavailable[0].earnings.date, '2026-07-30');
+
+const nextDatedWins = setup({
+  ...priorDatedEarnings,
+  earnings: {
+    loaded: true,
+    date: '2026-08-04',
+    days_until: 18,
+    source: 'yfinance',
+  },
+});
+const noOverride = context.preservePriorEarningsRows([nextDatedWins], [priorDatedEarnings]);
+assert.strictEqual(noOverride[0].earnings.date, '2026-08-04');
+
+const differentSignalSameTicker = setup({
+  ...nextLoadingSameSetup,
+  signal_timestamp: '2026-07-18T00:00:00Z',
+});
+const notPreservedForDifferentSetup = context.preservePriorEarningsRows([differentSignalSameTicker], [priorDatedEarnings]);
+assert.strictEqual(notPreservedForDifferentSetup[0].earnings.date, null);
+assert.strictEqual(notPreservedForDifferentSetup[0].earnings.source, 'background_refresh');
+
 const singleTarget = htmlFor(setup({ tp1: 44, tp2: null, tp3: null, final_target: null }));
 assert.ok(singleTarget.includes('<span>Target</span><span>$44.00</span>'));
 assert.ok(!singleTarget.includes('<span>TP2</span>'));
