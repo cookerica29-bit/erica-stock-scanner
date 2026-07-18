@@ -25,6 +25,10 @@ WATCHLIST = [
     "CCL", "RCL", "NCLH",
     # ── Tech / Mega-cap ───────────────────────────────────────────────────────
     "NVDA", "AMD", "META", "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN",
+    # ── Enterprise Software ──────────────────────────────────────────────────
+    "ORCL", "CRM", "ADBE",
+    # ── Communication Services ────────────────────────────────────────────────
+    "NFLX", "DIS", "CMCSA", "T", "VZ", "WBD",
     # ── Semiconductors ────────────────────────────────────────────────────────
     "MU", "INTC", "QCOM", "AVGO", "TSM", "ARM",
     # ── Energy Majors ─────────────────────────────────────────────────────────
@@ -33,22 +37,26 @@ WATCHLIST = [
     "DVN", "MRO", "HAL", "SLB", "FANG",
     # ── Big Banks ─────────────────────────────────────────────────────────────
     "JPM", "BAC", "GS", "MS", "WFC",
+    # ── Asset Managers / Brokers ──────────────────────────────────────────────
+    "SCHW", "BLK",
     # ── Payments / Fintech ────────────────────────────────────────────────────
     "V", "MA", "AXP", "PYPL", "SQ",
     # ── Retail / Consumer Discretionary ──────────────────────────────────────
-    "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE",
+    "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE", "F",
     # ── Consumer Staples ──────────────────────────────────────────────────────
-    "PG", "KO", "PEP", "CL", "MO",
+    "PG", "KO", "PEP", "CL", "MO", "KHC",
     # ── Healthcare / Pharma ───────────────────────────────────────────────────
     "UNH", "JNJ", "ABBV", "LLY", "PFE", "MRK", "CVS",
     # ── Biotech ───────────────────────────────────────────────────────────────
     "GILD", "REGN", "MRNA", "BIIB",
     # ── Utilities ─────────────────────────────────────────────────────────────
-    "NEE", "DUK", "SO", "XEL",
+    "NEE", "DUK", "SO", "XEL", "D", "AEP",
+    # ── Real Estate ───────────────────────────────────────────────────────────
+    "PLD", "AMT", "O", "SPG",
     # ── Industrials / Defense ─────────────────────────────────────────────────
     "CAT", "DE", "HON", "BA", "GE", "LMT", "RTX",
     # ── Materials / Commodities ───────────────────────────────────────────────
-    "FCX", "NEM", "AA", "CLF",
+    "FCX", "NEM", "AA", "CLF", "LIN", "DOW",
     # ── Broad ETFs ────────────────────────────────────────────────────────────
     "SPY", "QQQ", "IWM", "DIA",
     # ── Sector ETFs ───────────────────────────────────────────────────────────
@@ -73,18 +81,24 @@ STOCK_SECTOR_MAP = {
     "CCL": "Consumer Discretionary", "RCL": "Consumer Discretionary", "NCLH": "Consumer Discretionary",
     "NVDA": "Technology", "AMD": "Technology", "META": "Communication Services", "TSLA": "Consumer Discretionary",
     "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Communication Services", "AMZN": "Consumer Discretionary",
+    "ORCL": "Technology", "CRM": "Technology", "ADBE": "Technology",
+    "NFLX": "Communication Services", "DIS": "Communication Services", "CMCSA": "Communication Services",
+    "T": "Communication Services", "VZ": "Communication Services", "WBD": "Communication Services",
     "MU": "Technology", "INTC": "Technology", "QCOM": "Technology", "AVGO": "Technology", "TSM": "Technology", "ARM": "Technology",
     "XOM": "Energy", "CVX": "Energy", "OXY": "Energy", "DVN": "Energy", "MRO": "Energy", "HAL": "Energy", "SLB": "Energy", "FANG": "Energy",
     "JPM": "Financials", "BAC": "Financials", "GS": "Financials", "MS": "Financials", "WFC": "Financials",
+    "SCHW": "Financials", "BLK": "Financials",
     "V": "Financials", "MA": "Financials", "AXP": "Financials", "PYPL": "Financials", "SQ": "Financials",
     "WMT": "Consumer Staples", "TGT": "Consumer Discretionary", "COST": "Consumer Staples", "HD": "Consumer Discretionary",
     "LOW": "Consumer Discretionary", "MCD": "Consumer Discretionary", "SBUX": "Consumer Discretionary", "NKE": "Consumer Discretionary",
-    "PG": "Consumer Staples", "KO": "Consumer Staples", "PEP": "Consumer Staples", "CL": "Consumer Staples", "MO": "Consumer Staples",
+    "F": "Consumer Discretionary",
+    "PG": "Consumer Staples", "KO": "Consumer Staples", "PEP": "Consumer Staples", "CL": "Consumer Staples", "MO": "Consumer Staples", "KHC": "Consumer Staples",
     "UNH": "Healthcare", "JNJ": "Healthcare", "ABBV": "Healthcare", "LLY": "Healthcare", "PFE": "Healthcare", "MRK": "Healthcare", "CVS": "Healthcare",
     "GILD": "Healthcare", "REGN": "Healthcare", "MRNA": "Healthcare", "BIIB": "Healthcare",
-    "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities", "XEL": "Utilities",
+    "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities", "XEL": "Utilities", "D": "Utilities", "AEP": "Utilities",
+    "PLD": "Real Estate", "AMT": "Real Estate", "O": "Real Estate", "SPG": "Real Estate",
     "CAT": "Industrials", "DE": "Industrials", "HON": "Industrials", "BA": "Industrials", "GE": "Industrials", "LMT": "Industrials", "RTX": "Industrials",
-    "FCX": "Materials", "NEM": "Materials", "AA": "Materials", "CLF": "Materials",
+    "FCX": "Materials", "NEM": "Materials", "AA": "Materials", "CLF": "Materials", "LIN": "Materials", "DOW": "Materials",
     "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "DIA": "ETF",
     "XLF": "ETF", "XLE": "ETF", "XLV": "ETF", "XLU": "ETF", "XLK": "ETF", "XLI": "ETF", "XLB": "ETF",
     "GLD": "ETF", "SLV": "ETF", "USO": "ETF", "UNG": "ETF",
