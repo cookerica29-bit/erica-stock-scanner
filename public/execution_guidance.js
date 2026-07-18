@@ -49,8 +49,18 @@
     if (setupGradeValue(setup) === 'C') return false;
     const values = normalizedStatusValues(setup, readiness);
     if (values.some(value => ['ENTER_NOW', 'ENTER NOW', 'A+ READY', 'READY'].includes(value))) return true;
-    const tradeStage = upper(setup.trade_eval && setup.trade_eval.trade_stage);
-    return tradeStage === 'B+ TRADEABLE' && upper(setup.entryStatus) === 'TRADEABLE';
+    return false;
+  }
+
+  function isEarlyEntrySetup(setup = {}, readiness = {}) {
+    if (setupGradeValue(setup) === 'C') return false;
+    const bucket = upper(readiness.bucket);
+    if (bucket === 'EARLY_ENTRY' || bucket === 'EARLY ENTRY') return true;
+    const tradeEval = setup.trade_eval || {};
+    return tradeEval.b_plus_tradeable === true
+      && upper(setup.entryStatus) === 'TRADEABLE'
+      && tradeEval.trigger_confirmed !== true
+      && tradeEval.a_plus_ready !== true;
   }
 
   function isNoTrade(setup = {}, readiness = {}) {
@@ -91,6 +101,7 @@
   }
 
   function executionState(setup = {}, readiness = {}) {
+    if (isEarlyEntrySetup(setup, readiness)) return 'SETUP_EARLY_ENTRY';
     if (!isConfirmedSetup(setup, readiness)) return 'SETUP_NOT_CONFIRMED';
     const entryStatus = upper(setup.entryStatus);
     const tradeStage = upper(setup.trade_eval && setup.trade_eval.trade_stage);
@@ -120,12 +131,14 @@
   function executeVisualState(executionStateValue) {
     if (executionStateValue === 'SETUP_CONFIRMED_ENTRY_REACHED') return 'ready';
     if (executionStateValue === 'SETUP_CONFIRMED_WAITING_FOR_ENTRY') return 'waiting';
+    if (executionStateValue === 'SETUP_EARLY_ENTRY') return 'early-entry';
     if (executionStateValue === 'SETUP_CONFIRMED_ENTRY_PASSED') return 'passed';
     return 'not-ready';
   }
 
   function cardStatus(setup = {}, readiness = {}) {
     if (isNoTrade(setup, readiness)) return { label: 'NO TRADE', className: 'skip' };
+    if (isEarlyEntrySetup(setup, readiness)) return { label: 'EARLY ENTRY', className: 'early-entry' };
     if (isConfirmedSetup(setup, readiness)) return { label: 'ENTER NOW', className: 'enter-now' };
     const bucket = upper(readiness.bucket);
     if (bucket === 'ALMOST_READY' || upper(setup.entryStatus) === 'NEAR ENTRY') return { label: 'ALMOST READY', className: 'almost-ready' };
@@ -153,6 +166,14 @@
         { label: 'Zone', state: 'complete', status: 'Complete' },
         { label: 'Confirm', state: 'complete', status: 'Complete' },
         { label: 'Execute', ...executeState },
+      ];
+    }
+    if (isEarlyEntrySetup(setup, readiness)) {
+      return [
+        { label: 'Trend', state: 'complete', status: 'Complete' },
+        { label: 'Zone', state: 'complete', status: 'Complete' },
+        { label: 'Confirm', state: 'current', status: 'Early' },
+        { label: 'Execute', state: 'current execute-early-entry', status: 'Caution' },
       ];
     }
     const bucket = upper(readiness.bucket);
@@ -211,6 +232,16 @@
       return {
         label: 'Next Step',
         lines: [`Setup confirmed. Wait for price to reach the planned entry at ${entryText}.`, entry !== null ? `Set an alert at ${entryText}.` : null].filter(Boolean),
+      };
+    }
+
+    if (isEarlyEntrySetup(setup, readiness)) {
+      return {
+        label: 'Next Step',
+        lines: [
+          "Structure has broken, but full confirmation hasn't happened yet.",
+          'Consider smaller size given lower confirmation.',
+        ],
       };
     }
 
@@ -276,6 +307,7 @@
     executionState,
     executeVisualState,
     isConfirmedSetup,
+    isEarlyEntrySetup,
     cardStatus,
     readinessStages,
     executionPlanRows,

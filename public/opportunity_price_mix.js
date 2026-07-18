@@ -18,6 +18,7 @@
     'technical_setup_found',
     'grade_eligible',
     'enter_now',
+    'early_entry',
     'developing',
     'skip',
     'optionable',
@@ -159,7 +160,8 @@
       technical_setup_found: hasTechnicalSetup(setup),
       grade_eligible: gradeEligible(setup),
       enter_now: bucket === 'ENTER_NOW',
-      developing: bucket === 'ALMOST_READY' || bucket === 'WAITING',
+      early_entry: bucket === 'EARLY_ENTRY',
+      developing: bucket === 'EARLY_ENTRY' || bucket === 'ALMOST_READY' || bucket === 'WAITING',
       skip: bucket === 'SKIP',
       optionable: isOptionable(setup),
       contract_data_available: contractDataAvailable(setup),
@@ -180,6 +182,7 @@
   function displaySection(setup = {}, progressResolver = null) {
     const bucket = setupBucket(setup, progressResolver);
     if (bucket === 'ENTER_NOW') return 'Enter Now';
+    if (bucket === 'EARLY_ENTRY') return 'Early Entry';
     if (bucket === 'ALMOST_READY' || bucket === 'WAITING') return 'Developing';
     if (bucket === 'SKIP') return 'Skip';
     return 'Other';

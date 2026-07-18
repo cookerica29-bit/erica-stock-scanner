@@ -116,8 +116,8 @@ assert.ok(!enterWaiting.includes('Kairos Confidence'));
 assert.ok(!enterWaiting.includes('View contract details'));
 
 // A setup with only b_plus_tradeable (no true trigger confirmation) must
-// NOT be labeled ENTER NOW. Regression test for removing the B+ fallback
-// from simpleStatus().
+// NOT be labeled ENTER NOW. It gets its own lower-confirmation Early Entry
+// tier instead of falling through to the fully confirmed workflow.
 const bPlusOnlySetup = {
   direction: 'SHORT',
   setupGrade: 'A',
@@ -133,7 +133,11 @@ const bPlusOnlySetup = {
   },
 };
 const bPlusStatus = context.simpleStatus(bPlusOnlySetup);
-assert.strictEqual(bPlusStatus.label, 'ALMOST READY', 'B+-only setups (no trigger_confirmed) must not show ENTER NOW');
+const bPlusProgress = context.setupProgressState(bPlusOnlySetup);
+assert.strictEqual(bPlusStatus.label, 'EARLY ENTRY', 'B+-only setups must show Early Entry, not Enter Now');
+assert.strictEqual(bPlusProgress.bucket, 'EARLY_ENTRY');
+assert.notStrictEqual(bPlusProgress.bucket, 'ENTER_NOW');
+assert.notStrictEqual(bPlusProgress.bucket, 'ALMOST_READY');
 
 // True trigger confirmation still correctly produces ENTER NOW.
 const aPlusSetup = {
@@ -142,6 +146,18 @@ const aPlusSetup = {
 };
 const aPlusStatus = context.simpleStatus(aPlusSetup);
 assert.strictEqual(aPlusStatus.label, 'ENTER NOW', 'true trigger-confirmed setups must still show ENTER NOW');
+
+const earlyEntryCard = htmlFor(bPlusOnlySetup);
+assert.ok(earlyEntryCard.includes('data-normalized-status="EARLY_ENTRY"'));
+assert.ok(earlyEntryCard.includes('data-execution-state="SETUP_EARLY_ENTRY"'));
+assert.ok(earlyEntryCard.includes('data-execute-visual-state="early-entry"'));
+assert.ok(earlyEntryCard.includes('execute-early-entry'));
+assert.ok(earlyEntryCard.includes('EARLY ENTRY'));
+assert.ok(earlyEntryCard.includes("Structure has broken, but full confirmation hasn&#39;t happened yet."));
+assert.ok(earlyEntryCard.includes('Consider smaller size given lower confirmation.'));
+assert.ok(!earlyEntryCard.includes('Price is at the planned entry. You can execute this trade.'));
+assert.ok(context.passesFrameworkFilters(bPlusOnlySetup, { status: 'EARLY_ENTRY', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
+assert.ok(!context.passesFrameworkFilters(bPlusOnlySetup, { status: 'ENTER_NOW', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
 
 const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 }));
 assert.ok(reachedLive.includes('data-execution-state="SETUP_CONFIRMED_ENTRY_REACHED"'));

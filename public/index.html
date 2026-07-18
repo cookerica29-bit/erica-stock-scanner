@@ -378,6 +378,7 @@
     text-align: center;
   }
   .grade-badge.enter-now { background:rgba(34,197,94,0.15); border-color:rgba(34,197,94,0.38); color:#86efac; }
+  .grade-badge.early-entry { background:rgba(202,138,4,0.16); border-color:rgba(234,179,8,0.44); color:#fde68a; }
   .grade-badge.wait { background:rgba(245,158,11,0.14); border-color:rgba(245,158,11,0.36); color:#fcd34d; }
   .grade-badge.almost-ready { background:var(--accent-soft); border-color:rgba(139,92,246,0.44); color:#ddd6fe; }
   .grade-badge.skip { background:rgba(148,163,184,0.1); border-color:rgba(148,163,184,0.2); color:#cbd5e1; }
@@ -486,6 +487,7 @@
   .index-simple-label { color:var(--muted); font-size:9px; font-weight:850; letter-spacing:0.09em; text-transform:uppercase; }
   .index-simple-status { font-size:20px; font-weight:950; letter-spacing:0.01em; margin-top:3px; }
   .index-simple-status.enter-now { color:var(--long); }
+  .index-simple-status.early-entry { color:#fde68a; }
   .index-simple-status.wait { color:#fbbf24; }
   .index-simple-status.almost-ready { color:#ddd6fe; }
   .index-simple-status.skip { color:#94a3b8; }
@@ -898,6 +900,14 @@
   }
   .timeline-step.execute-entry-ready .timeline-label,
   .timeline-step.execute-entry-ready .timeline-state { color:#bbf7d0; }
+  .timeline-step.execute-early-entry .timeline-dot {
+    background: rgba(202,138,4,0.16);
+    border: 2px solid rgba(234,179,8,0.74);
+    box-shadow: 0 0 0 4px rgba(234,179,8,0.1);
+    color:#fde68a;
+  }
+  .timeline-step.execute-early-entry .timeline-label,
+  .timeline-step.execute-early-entry .timeline-state { color:#fde68a; }
   .timeline-step.execute-entry-passed .timeline-dot {
     background: rgba(245,158,11,0.12);
     border-color: rgba(245,158,11,0.58);
@@ -2093,6 +2103,7 @@
       <option value="all">All Statuses</option>
       <option value="ACTIONABLE" selected>Opportunities</option>
       <option value="ENTER_NOW">Enter Now</option>
+      <option value="EARLY_ENTRY">Early Entry</option>
       <option value="DEVELOPING">Developing Setups</option>
       <option value="ALMOST_READY">Almost Ready</option>
       <option value="WAITING">Waiting</option>
@@ -3766,8 +3777,8 @@ function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
   if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
   const statusBucket = setupProgressState(s).bucket;
-  if (filters.status === 'ACTIONABLE' && !['ENTER_NOW', 'ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
-  if (filters.status === 'DEVELOPING' && !['ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
+  if (filters.status === 'ACTIONABLE' && !['ENTER_NOW', 'EARLY_ENTRY', 'ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
+  if (filters.status === 'DEVELOPING' && !['EARLY_ENTRY', 'ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
   if (filters.status !== 'all' && filters.status !== 'ACTIONABLE' && filters.status !== 'DEVELOPING' && statusBucket !== filters.status) return false;
   if (filters.direction !== 'all' && String(s?.direction || '').toUpperCase() !== filters.direction) return false;
   if (filters.quality !== 'all' && setupGradeValue(s) !== filters.quality) return false;
@@ -3799,7 +3810,7 @@ function simpleStatusSummary(rows) {
     acc[status] = (acc[status] || 0) + 1;
     return acc;
   }, {});
-  return `Skip: ${counts.SKIP || 0} | Waiting: ${counts.WAITING || 0} | Almost Ready: ${counts.ALMOST_READY || 0} | Enter Now: ${counts.ENTER_NOW || 0}`;
+  return `Skip: ${counts.SKIP || 0} | Waiting: ${counts.WAITING || 0} | Almost Ready: ${counts.ALMOST_READY || 0} | Early Entry: ${counts.EARLY_ENTRY || 0} | Enter Now: ${counts.ENTER_NOW || 0}`;
 }
 
 function countBy(rows, labels, resolver) {
@@ -3819,7 +3830,7 @@ function renderMarketSnapshot(rows) {
   const el = document.getElementById('marketSnapshot');
   if (!el) return;
   const gradeCounts = countBy(rows, ['A', 'B', 'C'], setupGradeValue);
-  const progressLabels = ['SKIP', 'WAITING', 'ALMOST_READY', 'ENTER_NOW'];
+  const progressLabels = ['SKIP', 'WAITING', 'ALMOST_READY', 'EARLY_ENTRY', 'ENTER_NOW'];
   const progressCounts = countBy(rows, progressLabels, row => setupProgressState(row).bucket);
   const directionCounts = countBy(rows, ['LONG', 'SHORT'], row => String(row.direction || '').toUpperCase());
   const contractCounts = countBy(rows, ['CALL', 'PUT'], contractTypeValue);
@@ -3842,6 +3853,7 @@ function renderMarketSnapshot(rows) {
             ${renderSnapshotBadge('Skip', progressCounts.SKIP || 0, 'timing-not-ready')}
             ${renderSnapshotBadge('Waiting', progressCounts.WAITING || 0, 'timing-reaction')}
             ${renderSnapshotBadge('Almost Ready', progressCounts.ALMOST_READY || 0, 'timing-area')}
+            ${renderSnapshotBadge('Early Entry', progressCounts.EARLY_ENTRY || 0, 'timing-area')}
             ${renderSnapshotBadge('Enter Now', progressCounts.ENTER_NOW || 0, 'timing-entry')}
           </div>
         </div>
@@ -3999,6 +4011,9 @@ function simpleStatus(setup) {
   if (hasPlan && triggerConfirmed) {
     return { label: 'ENTER NOW', className: 'enter-now' };
   }
+  if (hasPlan && bPlusTradeable && entryStatus === 'Tradeable') {
+    return { label: 'EARLY ENTRY', className: 'early-entry' };
+  }
   if (hasPlan && (entryStatus === 'Tradeable' || entryStatus === 'Near Entry')) return { label: 'ALMOST READY', className: 'almost-ready' };
   if (building || entryStatus === 'Waiting' || hasDirection) return { label: 'WAIT', className: 'wait' };
   return { label: 'WAIT', className: 'wait' };
@@ -4024,6 +4039,9 @@ function setupProgressState(setup) {
 
   if (status.label === 'ENTER NOW') {
     return { stage: 5, label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', percent: 100 };
+  }
+  if (status.label === 'EARLY ENTRY') {
+    return { stage: 4.5, label: 'Early Entry', bucket: 'EARLY_ENTRY', className: 'early-entry', percent: 97 };
   }
   if (status.label === 'SKIP' || status.label === 'TOO LATE') {
     return { stage: 0, label: 'SKIP', bucket: 'SKIP', className: 'skip', percent: 0 };
@@ -4076,6 +4094,14 @@ function tradeReadinessStages(setup) {
   }
   if (bucket === 'ENTER_NOW') {
     return stages.map((label, idx) => ({ label, state: idx === 3 ? 'current' : 'complete' }));
+  }
+  if (bucket === 'EARLY_ENTRY') {
+    return [
+      { label: 'Trend', state: 'complete' },
+      { label: 'Zone', state: 'complete' },
+      { label: 'Confirm', state: 'current', status: 'Early' },
+      { label: 'Execute', state: 'current execute-early-entry', status: 'Caution' },
+    ];
   }
   if (bucket === 'ALMOST_READY') {
     return [

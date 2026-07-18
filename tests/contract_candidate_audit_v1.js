@@ -71,15 +71,24 @@ const rows = [
     rejected_candidates: [],
     candidates: [],
   } } }),
+  setup({ ticker: 'BKR', status: 'EARLY_ENTRY', best_contract: { candidate_audit: {
+    candidate_count: 2,
+    acceptable_candidate_count: 1,
+    current_selected_contract: { estimated_contract_cost: 245, score: 72 },
+    best_quality_contract: { estimated_contract_cost: 245, score: 72 },
+    lowest_cost_acceptable_contract: { estimated_contract_cost: 245, score: 72 },
+    rejected_candidates: [],
+    candidates: [],
+  } } }),
   setup({ ticker: 'AAPL', status: 'WAITING', best_contract: {} }),
   setup({ ticker: 'SKIP', status: 'SKIP', best_contract: {} }),
 ];
 
 const summary = audit.summarize(rows, { progressResolver: row => ({ bucket: row.status }) });
-assert.strictEqual(summary.setup_count, 3);
-assert.strictEqual(summary.setups_audited, 2);
+assert.strictEqual(summary.setup_count, 4);
+assert.strictEqual(summary.setups_audited, 3);
 assert.strictEqual(summary.cheaper_acceptable_candidate_found, 1);
-assert.strictEqual(summary.no_cheaper_acceptable_candidate, 1);
+assert.strictEqual(summary.no_cheaper_acceptable_candidate, 2);
 assert.strictEqual(summary.candidate_data_unavailable, 1);
 assert.strictEqual(summary.average_potential_savings, 495);
 assert.strictEqual(summary.distribution_by_current_selection_band.PREMIUM, 1);

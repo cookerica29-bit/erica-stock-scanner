@@ -186,9 +186,19 @@
       || (setup.trade_eval?.trigger_confirmed === true && normalizeText(setup.entryStatus) === 'Tradeable');
   }
 
+  function earlyEntry(setup = {}) {
+    if (gradeValue(setup) === 'C') return false;
+    const tradeEval = setup.trade_eval || {};
+    return stageBucket(setup) === 'EARLY_ENTRY'
+      || (tradeEval.b_plus_tradeable === true
+        && normalizeText(setup.entryStatus) === 'Tradeable'
+        && tradeEval.trigger_confirmed !== true
+        && tradeEval.a_plus_ready !== true);
+  }
+
   function tradeable(setup = {}) {
     if (gradeValue(setup) === 'C') return false;
-    return enterNow(setup) || normalizeText(setup.entryStatus) === 'Tradeable' || setup.trade_eval?.b_plus_tradeable === true;
+    return enterNow(setup) || earlyEntry(setup) || normalizeText(setup.entryStatus) === 'Tradeable';
   }
 
   function watchlist(setup = {}) {

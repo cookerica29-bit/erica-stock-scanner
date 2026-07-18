@@ -67,6 +67,17 @@ assert.ok(!cautionOnly.all_blocking_reasons.includes('EARNINGS_CAUTION'));
 const cautionBlocking = funnel.setupDiagnostic(setup({ earnings_blocks_entry: true }));
 assert.strictEqual(cautionBlocking.reason_types.EARNINGS_CAUTION, funnel.REASON_TYPES.CAUTION);
 
+const earlyEntry = setup({
+  progress_bucket: 'EARLY_ENTRY',
+  entryStatus: 'Tradeable',
+  confirmationStarted: true,
+  trade_eval: { b_plus_tradeable: true, trigger_confirmed: false, a_plus_ready: false, trade_stage: 'B+ TRADEABLE' },
+});
+const earlyEntryDiag = funnel.setupDiagnostic(earlyEntry);
+assert.strictEqual(earlyEntryDiag.stage_flags.tradeable, true);
+assert.strictEqual(earlyEntryDiag.stage_flags.enter_now, false);
+assert.strictEqual(earlyEntryDiag.enter_now_eligible, false);
+
 // Latest scan funnel counts and conversion rates are accurate.
 const rows = [
   enter,

@@ -39,6 +39,24 @@ const almostStages = guidance.readinessStages(setup(), { bucket: 'ALMOST_READY' 
 assert.ok(almostStages.some(stage => stage.label === 'Confirm' && stage.status === 'Waiting'));
 assert.ok(almostStages.some(stage => stage.label === 'Execute' && stage.status === 'Not Ready'));
 
+const earlyEntrySetup = setup({
+  setupGrade: 'B',
+  entryStatus: 'Tradeable',
+  trade_eval: {
+    trade_stage: 'B+ TRADEABLE',
+    b_plus_tradeable: true,
+    trigger_confirmed: false,
+    a_plus_ready: false,
+  },
+});
+assert.strictEqual(guidance.isConfirmedSetup(earlyEntrySetup, { bucket: 'EARLY_ENTRY' }), false);
+assert.strictEqual(guidance.isEarlyEntrySetup(earlyEntrySetup, { bucket: 'EARLY_ENTRY' }), true);
+assert.strictEqual(guidance.executionState(earlyEntrySetup, { bucket: 'EARLY_ENTRY' }), 'SETUP_EARLY_ENTRY');
+assert.deepStrictEqual(guidance.cardStatus(earlyEntrySetup, { bucket: 'EARLY_ENTRY' }), { label: 'EARLY ENTRY', className: 'early-entry' });
+const earlyStages = guidance.readinessStages(earlyEntrySetup, { bucket: 'EARLY_ENTRY' });
+assert.deepStrictEqual(earlyStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Early', 'Execute:Caution']);
+assert.deepStrictEqual(guidance.nextStep(earlyEntrySetup, { bucket: 'EARLY_ENTRY' }, 'available').lines, ["Structure has broken, but full confirmation hasn't happened yet.", 'Consider smaller size given lower confirmation.']);
+
 // Enter Now can remain confirmed while current price differs from Planned Entry.
 const confirmedWaiting = setup({ price: 75, entry: 70, entryStatus: 'Near Entry', distanceFromEntryAtr: 0.5 });
 assert.strictEqual(guidance.executionState(confirmedWaiting, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_WAITING_FOR_ENTRY');

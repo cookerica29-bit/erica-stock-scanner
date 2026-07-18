@@ -77,7 +77,7 @@
   function summarize(rows = [], options = {}) {
     const relevant = rows.filter(setup => {
       const bucket = setupBucket(setup, options.progressResolver);
-      return bucket === 'ENTER_NOW' || bucket === 'ALMOST_READY' || bucket === 'WAITING';
+      return bucket === 'ENTER_NOW' || bucket === 'EARLY_ENTRY' || bucket === 'ALMOST_READY' || bucket === 'WAITING';
     });
     const audits = relevant.map(setup => auditForSetup(setup, options));
     const audited = audits.filter(row => row.audited);
