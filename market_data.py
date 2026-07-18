@@ -28,6 +28,7 @@ YAHOO_PROVIDER_NAME = "yahoo"
 ALPACA_PROVIDER_NAME = "alpaca"
 DEFAULT_DATA_PROVIDER = YAHOO_PROVIDER_NAME
 DEFAULT_ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
+DEFAULT_ALPACA_MAX_PAGES = 25
 EASTERN_TZ = ZoneInfo("America/New_York")
 SCANNER_TIMEFRAMES = [
     {"label": "1D", "period": "1y", "interval": "1d", "minimum_candles": 50},
@@ -160,6 +161,14 @@ def _normalize_alpaca_base_url(base_url: str) -> str:
     return normalized
 
 
+def _parse_positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(1, value)
+
+
 class YahooMarketDataProvider(MarketDataProvider):
     name = YAHOO_PROVIDER_NAME
 
@@ -208,6 +217,73 @@ class AlpacaMarketDataProvider(MarketDataProvider):
     def normalize_symbol(self, symbol: str) -> str:
         return str(symbol or "").strip().upper().replace("-", ".")
 
+    def _request_bars_page(self, params: dict[str, Any]) -> dict:
+        url = f"{self.base_url}/v2/stocks/bars?{urlencode(params)}"
+        req = Request(url, headers=self._headers())
+        with urlopen(req, timeout=int(os.getenv("ALPACA_DATA_TIMEOUT", "20"))) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _request_bars_pages(self, params: dict[str, Any], symbols: list[str]) -> dict[str, list[dict[str, Any]]]:
+        max_pages = _parse_positive_int_env("ALPACA_MAX_PAGES", DEFAULT_ALPACA_MAX_PAGES)
+        reverse_symbol_map = {self.normalize_symbol(symbol): symbol for symbol in symbols}
+        bars_by_symbol = {symbol: [] for symbol in symbols}
+        page_token = None
+        seen_tokens = set()
+        page_count = 0
+
+        while True:
+            if page_count >= max_pages:
+                logger.warning(
+                    "[alpaca] candle pagination failed pages_completed=%s symbols=%s timeframe=%s error=max_pages_exceeded",
+                    page_count,
+                    len(symbols),
+                    params.get("timeframe"),
+                )
+                raise RuntimeError("Alpaca pagination exceeded max pages")
+
+            page_params = dict(params)
+            if page_token:
+                if page_token in seen_tokens:
+                    logger.warning(
+                        "[alpaca] candle pagination failed pages_completed=%s symbols=%s timeframe=%s error=repeated_page_token",
+                        page_count,
+                        len(symbols),
+                        params.get("timeframe"),
+                    )
+                    raise RuntimeError("Alpaca pagination repeated page token")
+                seen_tokens.add(page_token)
+                page_params["page_token"] = page_token
+
+            try:
+                payload = self._request_bars_page(page_params)
+            except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
+                logger.warning(
+                    "[alpaca] candle pagination failed pages_completed=%s symbols=%s timeframe=%s error=%s",
+                    page_count,
+                    len(symbols),
+                    params.get("timeframe"),
+                    _classify_error(exc),
+                )
+                raise
+
+            page_count += 1
+            page_bars = payload.get("bars") or {}
+            for provider_symbol, bars in page_bars.items():
+                original_symbol = reverse_symbol_map.get(str(provider_symbol or "").strip().upper())
+                if not original_symbol or not isinstance(bars, list):
+                    continue
+                bars_by_symbol.setdefault(original_symbol, []).extend(bars)
+
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                logger.info(
+                    "[alpaca] candle pagination completed pages=%s symbols=%s timeframe=%s",
+                    page_count,
+                    len(symbols),
+                    params.get("timeframe"),
+                )
+                return bars_by_symbol
+
     def download(
         self,
         tickers,
@@ -230,20 +306,15 @@ class AlpacaMarketDataProvider(MarketDataProvider):
             "limit": 10000,
             "adjustment": "all" if auto_adjust else "raw",
         }
-        url = f"{self.base_url}/v2/stocks/bars?{urlencode(params)}"
         try:
-            req = Request(url, headers=self._headers())
-            with urlopen(req, timeout=int(os.getenv("ALPACA_DATA_TIMEOUT", "20"))) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            bars_by_symbol = self._request_bars_pages(params, symbols)
         except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
             logger.warning("[alpaca] candle request failed symbols=%s interval=%s error=%s", symbols, interval, _classify_error(exc))
             return pd.DataFrame() if len(symbols) == 1 else _empty_multi_symbol_frame(symbols)
 
-        bars_by_symbol = payload.get("bars") or {}
         frames = {}
         for symbol in symbols:
-            alpaca_symbol = self.normalize_symbol(symbol)
-            bars = bars_by_symbol.get(alpaca_symbol) or bars_by_symbol.get(symbol) or []
+            bars = bars_by_symbol.get(symbol) or []
             frames[symbol] = _bars_to_frame(bars)
 
         if len(symbols) == 1:
