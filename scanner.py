@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 import logging
+import math
 import os
 import threading
 import time
@@ -64,6 +65,16 @@ WATCHLIST = [
     # ── Commodity ETFs ────────────────────────────────────────────────────────
     "GLD", "SLV", "USO", "UNG",
 ]
+
+REGIME_RANGE_ATR_TOLERANCE = 1.25
+REGIME_RECENT_SWING_POINTS = 5
+REGIME_WEIGHTS = {
+    "ema": 35,
+    "swings": 35,
+    "htf": 12,
+    "volume": 8,
+    "atr": 10,
+}
 
 TRENDING_UNIVERSE = [
     "IWM", "XLF", "XLE", "SOFI", "PLTR", "HOOD", "AFRM", "RIVN", "AAL",
@@ -1539,6 +1550,140 @@ def _get_trend(swings: list) -> str:
     return "NEUTRAL"
 
 
+def _regime_direction_label(structure_trend: str) -> str:
+    if structure_trend == "LONG":
+        return "Bullish"
+    if structure_trend == "SHORT":
+        return "Bearish"
+    return "Neutral"
+
+
+def _regime_trend_matches(ema_direction: str, structure_trend: str) -> bool:
+    return (
+        (ema_direction == "Bullish" and structure_trend == "LONG")
+        or (ema_direction == "Bearish" and structure_trend == "SHORT")
+    )
+
+
+def _last_swings(swings: list, swing_type: str, count: int) -> list:
+    return [s for s in swings if s.get("type") == swing_type][-count:]
+
+
+def _market_regime_range_context(df: pd.DataFrame, swings: list) -> Optional[dict]:
+    highs = _last_swings(swings, "high", REGIME_RECENT_SWING_POINTS)
+    lows = _last_swings(swings, "low", REGIME_RECENT_SWING_POINTS)
+    if len(highs) < 2 or len(lows) < 2:
+        return None
+
+    range_high = max(float(s["price"]) for s in highs)
+    range_low = min(float(s["price"]) for s in lows)
+    atr = _compute_atr(df)
+    price = float(df["Close"].iloc[-1])
+    if not math.isfinite(atr) or atr <= 0:
+        return None
+
+    tolerance = REGIME_RANGE_ATR_TOLERANCE * atr
+    inside_tolerance = (range_low - tolerance) <= price <= (range_high + tolerance)
+    return {
+        "range_low": round(range_low, 2),
+        "range_high": round(range_high, 2),
+        "price": round(price, 2),
+        "atr": round(atr, 2),
+        "atr_tolerance": REGIME_RANGE_ATR_TOLERANCE,
+        "inside_tolerance": inside_tolerance,
+        "distance_above_high_atr": round((price - range_high) / atr, 2),
+        "distance_below_low_atr": round((range_low - price) / atr, 2),
+    }
+
+
+def _classify_market_regime_from_components(
+    ema_direction: str,
+    structure_trend: str,
+    daily_aligned: bool,
+    relative_volume: float,
+    atr_expansion: float,
+    range_context: Optional[dict],
+) -> dict:
+    trend_matches = _regime_trend_matches(ema_direction, structure_trend)
+    ema_score = REGIME_WEIGHTS["ema"] if ema_direction != "Neutral" else 0
+    swing_score = (
+        REGIME_WEIGHTS["swings"]
+        if trend_matches
+        else 10 if structure_trend != "NEUTRAL"
+        else 0
+    )
+    htf_score = REGIME_WEIGHTS["htf"] if daily_aligned else 6 if ema_direction != "Neutral" else 0
+    volume_score = (
+        min(REGIME_WEIGHTS["volume"], max(0, int((relative_volume - 0.8) / 0.7 * REGIME_WEIGHTS["volume"])))
+        if relative_volume
+        else 0
+    )
+    atr_score = (
+        min(REGIME_WEIGHTS["atr"], max(0, int((atr_expansion - 0.9) / 0.5 * REGIME_WEIGHTS["atr"])))
+        if atr_expansion
+        else 0
+    )
+    score = max(0, min(100, ema_score + swing_score + htf_score + volume_score + atr_score))
+
+    directional_conflict = ema_direction != "Neutral" and structure_trend != "NEUTRAL" and not trend_matches
+    one_side_neutral = (ema_direction == "Neutral") != (structure_trend == "NEUTRAL")
+    range_override = bool(
+        range_context
+        and range_context.get("inside_tolerance")
+        and not trend_matches
+        and (directional_conflict or one_side_neutral)
+    )
+
+    if ema_direction != "Neutral" and trend_matches and score >= 70:
+        regime = "TRENDING"
+    elif range_override:
+        regime = "RANGING"
+    elif score < 40 or (ema_direction == "Neutral" and structure_trend == "NEUTRAL"):
+        regime = "RANGING"
+    else:
+        regime = "MIXED"
+
+    return {
+        "regime": regime,
+        "score": score,
+        "ema_direction": ema_direction,
+        "swing_direction": _regime_direction_label(structure_trend),
+        "structure_trend": structure_trend,
+        "daily_aligned": daily_aligned,
+        "relative_volume": relative_volume,
+        "atr_expansion": atr_expansion,
+        "range_override": range_override,
+        "range_context": range_context,
+        "components": {
+            "ema": ema_score,
+            "swings": swing_score,
+            "htf": htf_score,
+            "volume": volume_score,
+            "atr": atr_score,
+        },
+    }
+
+
+def _market_regime_for_df(df: pd.DataFrame, daily_df: Optional[pd.DataFrame] = None) -> dict:
+    clean_df = _flatten_columns(df.copy()).dropna().astype(float)
+    swings = _find_swings(clean_df, margin=4)
+    structure_trend = _get_trend(swings)
+    ema = _ema_trend_alignment(clean_df)
+    ema_direction = ema["direction"]
+    relative_volume = _relative_volume(clean_df)
+    atr_expansion = _atr_expansion(clean_df)
+    daily_aligned = _daily_aligns(daily_df, ema_direction) if daily_df is not None else False
+    range_context = _market_regime_range_context(clean_df, swings)
+    return _classify_market_regime_from_components(
+        ema_direction=ema_direction,
+        structure_trend=structure_trend,
+        daily_aligned=daily_aligned,
+        relative_volume=relative_volume,
+        atr_expansion=atr_expansion,
+        range_context=range_context,
+    )
+
+
 def _detect_bos(df: pd.DataFrame, swings: list, direction: str, lookback: int = 40):
     n        = len(df)
     opens    = df["Open"].values
@@ -2886,6 +3031,7 @@ def analyze_ticker(
         # Price action
         swings        = _find_swings(df)
         trend         = _get_trend(swings)
+        market_regime = _market_regime_for_df(df, df if timeframe == "1D" else _daily_df)
         bos_confirmed = False
         bos_level     = 0.0
         ob            = None
@@ -3076,6 +3222,9 @@ def analyze_ticker(
                 "wk52High":       wk52_high,
                 "pctFromHigh":    pct_from_52w,
                 "setup_status":   "DEVELOPING" if trend != "NEUTRAL" else "SKIPPED",
+                "market_regime":  market_regime.get("regime"),
+                "market_regime_score": market_regime.get("score"),
+                "market_regime_details": market_regime,
                 "signal_timestamp": df.index[-1].tz_convert("UTC").isoformat().replace("+00:00", "Z") if df.index[-1].tzinfo is not None else df.index[-1].isoformat() + "Z",
                 "scannedAt":      datetime.utcnow().isoformat() + "Z",
             }
@@ -3175,6 +3324,9 @@ def analyze_ticker(
                 "wk52High":       wk52_high,
                 "pctFromHigh":    pct_from_52w,
                 "setup_status":   "DEVELOPING",
+                "market_regime":  market_regime.get("regime"),
+                "market_regime_score": market_regime.get("score"),
+                "market_regime_details": market_regime,
                 "signal_timestamp": df.index[-1].tz_convert("UTC").isoformat().replace("+00:00", "Z") if df.index[-1].tzinfo is not None else df.index[-1].isoformat() + "Z",
                 "scannedAt":      datetime.utcnow().isoformat() + "Z",
             }
@@ -3213,6 +3365,9 @@ def analyze_ticker(
             "wk52High":       wk52_high,
             "pctFromHigh":    pct_from_52w,
             "setup_status":   "QUALIFIED",
+            "market_regime":  market_regime.get("regime"),
+            "market_regime_score": market_regime.get("score"),
+            "market_regime_details": market_regime,
             "signal_timestamp": df.index[-1].tz_convert("UTC").isoformat().replace("+00:00", "Z") if df.index[-1].tzinfo is not None else df.index[-1].isoformat() + "Z",
             "scannedAt":      datetime.utcnow().isoformat() + "Z",
         }
@@ -3605,6 +3760,13 @@ def _enrich_stock_scout_fields(
         "dailyTrendDirection": daily_direction,
         "h4TrendDirection": h4_direction,
         "sector": _sector_for_ticker(result.get("ticker") or ""),
+        "marketRegime": result.get("market_regime"),
+        "marketRegimeScore": result.get("market_regime_score"),
+        "marketRegimeDetails": result.get("market_regime_details"),
+        "dailyMarketRegime": (daily_result or {}).get("market_regime"),
+        "dailyMarketRegimeScore": (daily_result or {}).get("market_regime_score"),
+        "h4MarketRegime": (h4_result or {}).get("market_regime"),
+        "h4MarketRegimeScore": (h4_result or {}).get("market_regime_score"),
         "setupTimeframeDirection": setup_direction,
         "stockPhase": _stock_phase(daily_direction, h4_direction),
         "phase": _stock_phase(daily_direction, h4_direction),
