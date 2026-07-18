@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
@@ -35,6 +36,20 @@ SCANNER_TIMEFRAMES = [
     {"label": "1W", "period": "2y", "interval": "1wk", "minimum_candles": 50},
     {"label": "4H", "period": "60d", "interval": "4h", "minimum_candles": 55},
 ]
+PROVIDER_PROFILE_PRODUCTION_YAHOO = "production_yahoo"
+PROVIDER_PROFILE_PROPOSED_HYBRID = "proposed_hybrid_alpaca_1d_1w_yahoo_4h"
+TIMEFRAME_PROVIDER_PROFILES = {
+    PROVIDER_PROFILE_PRODUCTION_YAHOO: {
+        "1D": YAHOO_PROVIDER_NAME,
+        "1W": YAHOO_PROVIDER_NAME,
+        "4H": YAHOO_PROVIDER_NAME,
+    },
+    PROVIDER_PROFILE_PROPOSED_HYBRID: {
+        "1D": ALPACA_PROVIDER_NAME,
+        "1W": ALPACA_PROVIDER_NAME,
+        "4H": YAHOO_PROVIDER_NAME,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -512,6 +527,232 @@ def validate_watchlist_candles(tickers: list[str]) -> dict:
     }
 
 
+def timeframe_provider_profile(profile: str) -> dict:
+    profile_key = str(profile or PROVIDER_PROFILE_PRODUCTION_YAHOO).strip().lower()
+    return dict(TIMEFRAME_PROVIDER_PROFILES.get(profile_key, TIMEFRAME_PROVIDER_PROFILES[PROVIDER_PROFILE_PRODUCTION_YAHOO]))
+
+
+def hybrid_strategy_diagnostics(tickers: list[str]) -> dict:
+    """Compare frozen scanner outputs for Yahoo-only versus proposed hybrid data.
+
+    This is backend diagnostics only. It does not alter configured production
+    provider selection and does not introduce fallback behavior.
+    """
+    symbols = [str(t or "").strip().upper() for t in (tickers or []) if str(t or "").strip()]
+    started = validation_timing_context()
+    yahoo_provider = YahooMarketDataProvider()
+    alpaca_provider = AlpacaMarketDataProvider()
+    production_profile = timeframe_provider_profile(PROVIDER_PROFILE_PRODUCTION_YAHOO)
+    hybrid_profile = timeframe_provider_profile(PROVIDER_PROFILE_PROPOSED_HYBRID)
+    rows = []
+
+    for symbol in symbols:
+        production, production_errors = _scanner_output_for_profile(
+            symbol=symbol,
+            profile=production_profile,
+            yahoo_provider=yahoo_provider,
+            alpaca_provider=alpaca_provider,
+        )
+        hybrid, hybrid_errors = _scanner_output_for_profile(
+            symbol=symbol,
+            profile=hybrid_profile,
+            yahoo_provider=yahoo_provider,
+            alpaca_provider=alpaca_provider,
+        )
+        comparison = _compare_strategy_outputs(production, hybrid)
+        if production_errors or hybrid_errors:
+            classification = "unresolved"
+        elif comparison["material_differences"]:
+            classification = "material difference"
+        elif comparison["differences"]:
+            classification = "minor explainable difference"
+        else:
+            classification = "exact strategy-output match"
+        rows.append({
+            "ticker": symbol,
+            "production_profile": production_profile,
+            "hybrid_profile": hybrid_profile,
+            "production_errors": production_errors,
+            "hybrid_errors": hybrid_errors,
+            "production_output": production,
+            "hybrid_output": hybrid,
+            "comparison": comparison,
+            "classification": classification,
+        })
+
+    ended = validation_timing_context()
+    counts = {}
+    for row in rows:
+        counts[row["classification"]] = counts.get(row["classification"], 0) + 1
+    return {
+        "success": not any(row["classification"] in {"material difference", "unresolved"} for row in rows),
+        "started": started,
+        "ended": ended,
+        "active_production_provider": configured_provider_name(),
+        "production_profile": production_profile,
+        "proposed_hybrid_profile": hybrid_profile,
+        "alpaca_configured": alpaca_credentials_configured(),
+        "ticker_count": len(symbols),
+        "classification_counts": counts,
+        "rows": rows,
+        "note": "Comparison-only diagnostics. Production scanner output remains configured separately and is unchanged.",
+    }
+
+
+def _scanner_output_for_profile(
+    symbol: str,
+    profile: dict,
+    yahoo_provider: YahooMarketDataProvider,
+    alpaca_provider: AlpacaMarketDataProvider,
+) -> tuple[Optional[dict], list[dict]]:
+    from scanner import scan_ticker
+
+    errors = []
+    frames = {}
+    requests = {
+        "1D": ("1y", "1d"),
+        "1W": ("2y", "1wk"),
+        "4H": ("60d", "4h"),
+    }
+    for label, (period, interval) in requests.items():
+        provider_name = profile.get(label)
+        provider = alpaca_provider if provider_name == ALPACA_PROVIDER_NAME else yahoo_provider
+        df, error = _safe_provider_download(provider, symbol, period, interval)
+        if error:
+            errors.append({
+                "timeframe": label,
+                "provider": provider.name,
+                "error_classification": error,
+                "sanitized_error_message": _sanitized_error_message(error),
+            })
+        elif df is None or df.empty:
+            errors.append({
+                "timeframe": label,
+                "provider": provider.name,
+                "error_classification": "empty_result",
+                "sanitized_error_message": _sanitized_error_message("empty_result"),
+            })
+        frames[label] = df
+
+    if errors:
+        return None, errors
+
+    result = scan_ticker(
+        symbol,
+        _daily_df=frames["1D"],
+        _weekly_df=frames["1W"],
+        _h4_df=frames["4H"],
+    )
+    return _strategy_output_snapshot(result), []
+
+
+def _strategy_output_snapshot(result: Optional[dict]) -> Optional[dict]:
+    if not result:
+        return None
+    trade_eval = result.get("trade_eval") or {}
+    quality = result.get("quality") or {}
+    return {
+        "ticker": result.get("ticker"),
+        "selected_timeframe": result.get("timeframe"),
+        "setup_status": result.get("setup_status"),
+        "trend": result.get("trend"),
+        "direction": result.get("direction"),
+        "setup_grade": result.get("setupGrade"),
+        "quality_grade": quality.get("grade"),
+        "quality_score": quality.get("score"),
+        "confirmation_started": result.get("confirmationStarted"),
+        "confirmation_reason": result.get("confirmationReason"),
+        "entry_status": result.get("entryStatus"),
+        "entry": result.get("entry"),
+        "stop": result.get("sl"),
+        "target_1": result.get("tp1"),
+        "target_2": result.get("tp2"),
+        "target_3": result.get("tp3"),
+        "risk": result.get("risk"),
+        "trade_stage": trade_eval.get("trade_stage"),
+        "a_plus_ready": trade_eval.get("a_plus_ready"),
+        "b_plus_tradeable": trade_eval.get("b_plus_tradeable"),
+        "trigger_confirmed": trade_eval.get("trigger_confirmed"),
+        "no_trade_reasons": trade_eval.get("no_trade_reasons"),
+        "setup_status_reason": result.get("setupStatusReason"),
+        "grade_reason": result.get("setupGradeReason"),
+    }
+
+
+def _compare_strategy_outputs(production: Optional[dict], hybrid: Optional[dict]) -> dict:
+    fields = [
+        "selected_timeframe",
+        "setup_status",
+        "trend",
+        "direction",
+        "setup_grade",
+        "quality_grade",
+        "quality_score",
+        "confirmation_started",
+        "entry_status",
+        "entry",
+        "stop",
+        "target_1",
+        "target_2",
+        "target_3",
+        "risk",
+        "trade_stage",
+        "a_plus_ready",
+        "b_plus_tradeable",
+        "trigger_confirmed",
+    ]
+    if production is None or hybrid is None:
+        return {
+            "differences": ["missing scanner output"],
+            "material_differences": ["missing scanner output"],
+        }
+    differences = []
+    material = []
+    for field in fields:
+        left = production.get(field)
+        right = hybrid.get(field)
+        if _values_equivalent(left, right):
+            continue
+        differences.append({
+            "field": field,
+            "production": left,
+            "hybrid": right,
+        })
+        if field in {
+            "selected_timeframe",
+            "setup_status",
+            "trend",
+            "direction",
+            "setup_grade",
+            "quality_grade",
+            "confirmation_started",
+            "entry_status",
+            "entry",
+            "stop",
+            "target_1",
+            "target_2",
+            "target_3",
+            "risk",
+            "trade_stage",
+            "a_plus_ready",
+            "b_plus_tradeable",
+            "trigger_confirmed",
+        }:
+            material.append(field)
+    return {
+        "differences": differences,
+        "material_differences": sorted(set(material)),
+    }
+
+
+def _values_equivalent(left, right) -> bool:
+    if left == right:
+        return True
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(float(left), float(right), rel_tol=0, abs_tol=0.010000001)
+    return False
+
+
 def validation_timing_context(now: Optional[datetime] = None) -> dict:
     now_et = (now or datetime.now(timezone.utc)).astimezone(EASTERN_TZ)
     session = market_session(now_et)
@@ -626,6 +867,7 @@ def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, i
             "missing_in_alpaca_count": 0,
             "missing_in_yahoo_count": 0,
             "matched_latest_completed": None,
+            "top_ohlc_differences": [],
         }
     yahoo_lookup = {_canonical_timestamp_key(i, interval): i for i in getattr(yahoo_df, "index", [])}
     alpaca_lookup = {_canonical_timestamp_key(i, interval): i for i in getattr(alpaca_df, "index", [])}
@@ -660,6 +902,7 @@ def _compare_completed_frames(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, i
         "missing_in_yahoo": _sample_timestamps(missing_in_yahoo),
         "missing_in_alpaca_count": len(missing_in_alpaca),
         "missing_in_yahoo_count": len(missing_in_yahoo),
+        "top_ohlc_differences": _top_ohlc_differences(yahoo_df, alpaca_df, yahoo_lookup, alpaca_lookup, common),
     }
 
 
@@ -762,6 +1005,53 @@ def _comparison_stats(yahoo_df: pd.DataFrame, alpaca_df: pd.DataFrame, yahoo_loo
         "max_volume_percent_difference": _max_or_none(volume_pcts),
         "median_volume_percent_difference": _median_or_none(volume_pcts),
     }
+
+
+def _top_ohlc_differences(
+    yahoo_df: pd.DataFrame,
+    alpaca_df: pd.DataFrame,
+    yahoo_lookup: dict,
+    alpaca_lookup: dict,
+    common: list[str],
+    limit: int = 8,
+) -> list[dict]:
+    differences = []
+    for key in common:
+        y = yahoo_df.loc[yahoo_lookup[key]]
+        a = alpaca_df.loc[alpaca_lookup[key]]
+        if isinstance(y, pd.DataFrame):
+            y = y.iloc[-1]
+        if isinstance(a, pd.DataFrame):
+            a = a.iloc[-1]
+        column_diffs = {}
+        max_pct = 0.0
+        max_column = None
+        for column in ["Open", "High", "Low", "Close"]:
+            yv = _safe_float(y.get(column))
+            av = _safe_float(a.get(column))
+            if yv is None or av is None or yv == 0:
+                continue
+            pct = abs((av - yv) / yv * 100)
+            column_diffs[column.lower()] = {
+                "yahoo": yv,
+                "alpaca": av,
+                "absolute": av - yv,
+                "percent": pct,
+            }
+            if pct > max_pct:
+                max_pct = pct
+                max_column = column.lower()
+        if max_column is None:
+            continue
+        differences.append({
+            "timestamp": key,
+            "max_field": max_column,
+            "max_ohlc_percent_difference": max_pct,
+            "yahoo_ohlcv": _ohlcv_dict(y),
+            "alpaca_ohlcv": _ohlcv_dict(a),
+            "ohlc_differences": column_diffs,
+        })
+    return sorted(differences, key=lambda row: row["max_ohlc_percent_difference"], reverse=True)[:limit]
 
 
 def _max_or_none(values: list[float]) -> Optional[float]:
