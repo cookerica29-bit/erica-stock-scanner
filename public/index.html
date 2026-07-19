@@ -591,21 +591,25 @@
   }
   .rr-value-row {
     display: grid;
-    gap: 5px;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
   }
   .rr-value-item {
+    align-items: baseline;
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
     min-width: 0;
   }
   .rr-value-label {
     color: var(--muted);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 800;
   }
   .rr-value-price {
     color: var(--text);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 900;
+    text-align: right;
   }
   .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
   .index-plan-row span:first-child { color:var(--muted); font-size:11px; }
@@ -1493,9 +1497,6 @@
     }
     .risk-reward-svg {
       height: 78px;
-    }
-    .rr-value-row {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
     .context-grid,
     .readiness-grid,
