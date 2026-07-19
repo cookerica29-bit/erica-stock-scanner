@@ -109,6 +109,9 @@ assert.ok(!enterWaiting.includes('class="price-meta"'), 'Scanner cards should no
 assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
+assert.ok(enterWaiting.includes('<div class="index-simple-label">Why</div>'));
+assert.ok(enterWaiting.includes('Short setup with bearish trend; entry area is active.'));
+assert.ok(!enterWaiting.includes('Short setup with bearish trend; Setup confirmed. Wait'), 'Why summary should not duplicate Next Step wording verbatim');
 assert.ok(!enterWaiting.includes('Continue monitoring. The setup is still developing.'));
 assert.ok(enterWaiting.includes('Suggested Contract'));
 assert.ok(enterWaiting.includes('Best Quality'));
@@ -222,6 +225,7 @@ assert.ok(earlyEntryCard.includes('execute-early-entry'));
 assert.ok(earlyEntryCard.includes('EARLY ENTRY'));
 assert.ok(earlyEntryCard.includes("Structure has broken, but full confirmation hasn&#39;t happened yet."));
 assert.ok(earlyEntryCard.includes('Consider smaller size given lower confirmation.'));
+assert.ok(earlyEntryCard.includes('Short setup with mixed trend; structure has started, but full confirmation is not complete.'));
 assert.ok(!earlyEntryCard.includes('Price is at the planned entry. You can execute this trade.'));
 assert.ok(context.passesFrameworkFilters(bPlusOnlySetup, { status: 'EARLY_ENTRY', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
 assert.ok(!context.passesFrameworkFilters(bPlusOnlySetup, { status: 'ENTER_NOW', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
@@ -244,11 +248,19 @@ const almostReady = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCH
 assert.ok(almostReady.includes('data-normalized-status="ALMOST_READY"'));
 assert.ok(almostReady.includes('execute-not-ready'));
 assert.ok(almostReady.includes('Setup is still developing. Wait for full confirmation.'));
+assert.ok(almostReady.includes('Short setup with bearish trend; near the entry area and waiting on final confirmation.'));
 
 const building = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B', entryStatus: 'Waiting', confirmationStarted: false, direction: 'LONG' }));
 assert.ok(building.includes('data-normalized-status="BUILDING"'));
 assert.ok(building.includes('execute-not-ready'));
 assert.ok(building.includes('Continue monitoring. The setup is still developing.'));
+assert.ok(building.includes('Long setup with bearish trend; forming, but not ready yet.'));
+
+const skipCard = htmlFor(setup({
+  setupGrade: 'C',
+  trade_eval: { trade_stage: 'RANGE / NO TRADE' },
+}));
+assert.ok(skipCard.includes('Short setup with bearish trend; not valid right now.'));
 
 const loadingEarnings = htmlFor(setup({ earnings: { status: 'loading', started_at: new Date().toISOString() } }));
 assert.ok(loadingEarnings.includes('Loading...'));

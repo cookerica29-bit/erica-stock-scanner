@@ -770,6 +770,16 @@
   .index-why summary { color:#93c5fd; cursor:pointer; font-size:11px; font-weight:850; }
   .index-why-list { color:var(--muted); line-height:1.45; margin:7px 0 0; padding-left:16px; }
   .index-why-list li { margin:2px 0; }
+  .why-summary {
+    border-top: 1px solid rgba(148,163,184,0.12);
+    margin-top: 10px;
+    padding-top: 9px;
+  }
+  .why-summary-line {
+    color: #cbd5e1;
+    font-size: 11px;
+    line-height: 1.4;
+  }
   #terms-panel { padding:20px 24px; max-width:1100px; margin:0 auto; }
   .terms-back-btn {
     align-items:center;
@@ -4287,6 +4297,48 @@ function simpleDirection(direction) {
   return 'No clear direction';
 }
 
+function trendSummaryText(trend) {
+  const raw = String(trend || '').toUpperCase();
+  if (raw.includes('BULL') || raw.includes('LONG')) return 'bullish trend';
+  if (raw.includes('BEAR') || raw.includes('SHORT')) return 'bearish trend';
+  return 'mixed trend';
+}
+
+function setupSummaryText(setup) {
+  const direction = simpleDirection(setup.direction);
+  if (direction === 'Long') return 'Long setup';
+  if (direction === 'Short') return 'Short setup';
+  return 'Setup';
+}
+
+function simpleWhySummary(setup, status, trend) {
+  const normalizedStatus = String(status || '').trim().toUpperCase();
+  const prefix = `${setupSummaryText(setup)} with ${trendSummaryText(trend)}`;
+
+  if (normalizedStatus === 'ENTER NOW') {
+    return `${prefix}; entry area is active.`;
+  }
+  if (normalizedStatus === 'EARLY ENTRY') {
+    return `${prefix}; structure has started, but full confirmation is not complete.`;
+  }
+  if (normalizedStatus === 'ALMOST READY') {
+    return `${prefix}; near the entry area and waiting on final confirmation.`;
+  }
+  if (normalizedStatus === 'SETUP BUILDING' || normalizedStatus === 'BUILDING') {
+    return `${prefix}; forming, but not ready yet.`;
+  }
+  if (normalizedStatus === 'TREND FOUND') {
+    return `${prefix}; direction exists, but price is not close yet.`;
+  }
+  if (normalizedStatus === 'PULLBACK STARTED') {
+    return `${prefix}; pullback has started, but the setup is still developing.`;
+  }
+  if (normalizedStatus === 'SKIP' || normalizedStatus === 'NO TRADE') {
+    return `${prefix}; not valid right now.`;
+  }
+  return `${prefix}; continue monitoring until the next step is clear.`;
+}
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
     '&': '&amp;',
@@ -4554,6 +4606,15 @@ function renderNextStepBlock(setup) {
     <div class="next-step-box">
       <div class="index-simple-label">${escapeHtml(guidance.label)}</div>
       ${(guidance.lines || []).map(line => `<div class="next-step-line">${escapeHtml(line)}</div>`).join('')}
+    </div>`;
+}
+
+function renderWhySummaryBlock(setup, status, trend) {
+  const summary = simpleWhySummary(setup, status, trend);
+  return `
+    <div class="why-summary">
+      <div class="index-simple-label">Why</div>
+      <div class="why-summary-line">${escapeHtml(summary)}</div>
     </div>`;
 }
 
@@ -5435,6 +5496,7 @@ function renderCard(s) {
         <div class="index-simple-label" style="margin-top:8px;">Direction</div>
         <div class="index-simple-direction ${directionClass(directionLabel)}">${renderDirectionText(directionLabel)}</div>
         ${renderNextStepBlock(s)}
+        ${renderWhySummaryBlock(s, state.label, trend)}
       </div>
       ${renderTradeReadinessTimeline(s)}
       ${renderOpportunityRemainingBlock(s)}
