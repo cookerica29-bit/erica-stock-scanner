@@ -600,6 +600,13 @@
     justify-content: space-between;
     min-width: 0;
   }
+  .rr-value-item.entry {
+    background: rgba(124,92,255,0.08);
+    border: 1px solid rgba(124,92,255,0.18);
+    border-radius: 8px;
+    margin: 1px -4px;
+    padding: 6px 7px;
+  }
   .rr-value-label {
     color: var(--muted);
     font-size: 11px;
@@ -610,6 +617,15 @@
     font-size: 12px;
     font-weight: 900;
     text-align: right;
+  }
+  .rr-value-item.entry .rr-value-label {
+    color: #ddd6fe;
+    font-weight: 900;
+  }
+  .rr-value-item.entry .rr-value-price {
+    color: #fff;
+    font-size: 15px;
+    font-weight: 1000;
   }
   .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
   .index-plan-row span:first-child { color:var(--muted); font-size:11px; }
@@ -4593,9 +4609,8 @@ function renderRiskRewardBar(setup) {
     if (valueItems.some(item => Math.abs(Number(item[1]) - Number(value)) < 0.000001)) return;
     valueItems.push([label, value]);
   };
-  pushValueItem('Stop', data.stop);
   pushValueItem('Entry', data.entry);
-  pushValueItem('Now', data.current);
+  pushValueItem('Stop', data.stop);
   pushValueItem('TP1', data.tp1);
   pushValueItem('TP2', data.tp2);
   pushValueItem('TP3', data.tp3);
@@ -4628,7 +4643,7 @@ function renderRiskRewardBar(setup) {
       </svg>
       <div class="rr-value-row">
         ${valueItems.map(([label, value]) => `
-          <div class="rr-value-item">
+          <div class="rr-value-item${label === 'Entry' ? ' entry' : ''}">
             <div class="rr-value-label">${escapeHtml(label)}</div>
             <div class="rr-value-price">${fmtMoney(value)}</div>
           </div>`).join('')}

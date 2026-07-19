@@ -485,7 +485,14 @@ assert.ok(singleTarget.includes('<div class="rr-value-price">$44.00</div>'));
 assert.ok(!singleTarget.includes('<div class="rr-value-label">TP2</div>'));
 assert.ok(!singleTarget.includes('<div class="rr-value-label">TP3</div>'));
 
+const planValueLabels = [...singleTarget.matchAll(/<div class="rr-value-label">([^<]+)<\/div>/g)].map(match => match[1]);
+assert.deepStrictEqual(planValueLabels, ['Entry', 'Stop', 'TP1']);
+assert.ok(singleTarget.includes('<div class="rr-value-item entry">'));
+assert.ok(!singleTarget.includes('<div class="rr-value-label">Now</div>'));
+
 const threeTargets = htmlFor(setup({ tp1: 45, tp2: 44, tp3: 43 }));
+const threeTargetLabels = [...threeTargets.matchAll(/<div class="rr-value-label">([^<]+)<\/div>/g)].map(match => match[1]);
+assert.deepStrictEqual(threeTargetLabels, ['Entry', 'Stop', 'TP1', 'TP2', 'TP3']);
 assert.ok(threeTargets.includes('<div class="rr-value-label">TP1</div>'));
 assert.ok(threeTargets.includes('<div class="rr-value-price">$45.00</div>'));
 assert.ok(threeTargets.includes('<div class="rr-value-label">TP2</div>'));
