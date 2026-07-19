@@ -105,6 +105,7 @@ assert.ok(enterWaiting.includes('data-normalized-status="ENTER_NOW"'));
 assert.ok(enterWaiting.includes('data-execution-state="SETUP_CONFIRMED_WAITING_FOR_ENTRY"'));
 assert.ok(enterWaiting.includes('data-execute-visual-state="waiting"'));
 assert.ok(!/[★☆]/.test(enterWaiting), 'Scanner cards should not render redundant readiness stars');
+assert.ok(!enterWaiting.includes('class="price-meta"'), 'Scanner cards should not repeat status beside the price');
 assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
