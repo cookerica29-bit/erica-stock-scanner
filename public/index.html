@@ -166,6 +166,7 @@
   .action-stack button { padding: 4px 7px; font-size: 10px; }
 
   #status { color: var(--muted); font-size: 11px; margin-left: auto; }
+  #status:empty { display: none; }
   .data-status-card {
     align-items: center;
     background: rgba(53,66,88,0.74);
@@ -3601,15 +3602,11 @@ function formatScanAge(seconds) {
 }
 
 function scanStatusText(meta) {
-  if (!meta) return 'Done';
-  const age = formatScanAge(meta.age_seconds);
-  const suffix = age ? ` · Last updated ${age}` : '';
-  if (meta.last_refresh_error && !meta.refreshing) return `Showing cached results${suffix} · Refresh failed`;
-  if (meta.refreshing) return `Showing cached results${suffix} · Data refreshing...`;
-  if (meta.cache === 'hit') return `Done${suffix}`;
-  if (meta.cache === 'refresh') return `Refreshed${suffix}`;
+  if (!meta) return '';
+  if (meta.last_refresh_error && !meta.refreshing) return 'Refresh failed';
+  if (meta.refreshing) return 'Refreshing cached data...';
   if (meta.cache === 'miss' && meta.refreshing) return 'Kairos is warming data...';
-  return 'Done';
+  return '';
 }
 
 function contractPendingKey(setup) {
