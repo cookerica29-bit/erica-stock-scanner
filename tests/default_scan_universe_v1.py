@@ -62,6 +62,9 @@ def main() -> int:
 
     assert scanner._analysis_cache_key(None) == ("default",)
     assert scanner._analysis_cache_key(None, discover=True) == ("discover",)
+    discovered_key = scanner._analysis_cache_key(["AAPL", "MSFT"], universe="discovered")
+    assert discovered_key == ("universe", "discovered", ("AAPL", "MSFT"))
+    assert discovered_key != scanner._analysis_cache_key(["AAPL", "MSFT"])
 
     print("Default scan universe v1 tests passed")
     return 0

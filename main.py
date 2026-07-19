@@ -205,18 +205,57 @@ def index():
     )
 
 
+def _discovery_symbols_ready():
+    status = _discovery_status_snapshot()
+    if not status.get("has_cache") or status.get("stale") or status.get("running"):
+        return False, [], status
+    with _discovery_universe_lock:
+        symbols = list(_discovery_universe_cache.get("symbols") or [])
+    return bool(symbols), symbols, status
+
+
+def _discovery_scan_not_ready_response(status: dict) -> dict:
+    return {
+        "rows": [],
+        "near_miss": [],
+        "meta": {
+            "cache": "miss",
+            "cache_key": "discovered",
+            "status": "warming",
+            "stale": True,
+            "refreshing": bool(status.get("running")),
+            "has_cache": bool(status.get("has_cache")),
+            "universe": "discovered",
+            "configured_universe_count": status.get("selected_count") or 0,
+            "symbols_attempted": 0,
+            "symbols_successfully_processed": 0,
+            "qualified_rows": 0,
+            "near_miss_rows": 0,
+            "message": "Discovery universe is not ready; trigger /api/discovery/run and wait for /api/discovery/status to become ready.",
+            "discovery_status": status,
+        },
+    }
+
+
 @app.get("/api/scan")
 def api_scan(
     tickers: str = Query(default=""),
     refresh: bool = Query(default=False),
     discover: bool = Query(default=False),
+    universe: str = Query(default="default"),
 ):
     """Scan the full watchlist or a custom comma-separated list of tickers."""
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
         result = scan_cached(watchlist, force_refresh=refresh)
+    elif str(universe or "").strip().lower() == "discovered":
+        ready, symbols, status = _discovery_symbols_ready()
+        if not ready:
+            return _discovery_scan_not_ready_response(status)
+        result = scan_cached(symbols, force_refresh=refresh, universe="discovered")
     else:
-        result = scan_cached(force_refresh=refresh, discover=discover)
+        use_finviz = bool(discover) or str(universe or "").strip().lower() == "finviz"
+        result = scan_cached(force_refresh=refresh, discover=use_finviz)
     return result
 
 

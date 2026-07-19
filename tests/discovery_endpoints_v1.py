@@ -165,11 +165,88 @@ def test_discovery_run_populates_cache_with_valid_token():
             os.environ["DISCOVERY_ADMIN_TOKEN"] = previous_token
 
 
+def test_scan_discovered_universe_returns_warming_when_cache_missing():
+    reset_discovery_cache()
+    client = TestClient(main.app)
+    response = client.get("/api/scan?universe=discovered")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rows"] == []
+    assert payload["near_miss"] == []
+    assert payload["meta"]["status"] == "warming"
+    assert payload["meta"]["universe"] == "discovered"
+    assert payload["meta"]["cache_key"] == "discovered"
+    assert "Discovery universe is not ready" in payload["meta"]["message"]
+
+
+def test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz():
+    original_scan_cached = main.scan_cached
+    calls = []
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            "symbols": ["AAPL", "F", "KMI"],
+            "generated_at": __import__("datetime").datetime.utcnow(),
+            "expires_at": __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=1),
+            "running": False,
+            "last_error": None,
+        })
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        return {
+            "rows": [],
+            "near_miss": [],
+            "meta": {
+                "cache_key": kwargs.get("universe") or "default",
+                "configured_universe_count": len(watchlist or []),
+            },
+        }
+
+    main.scan_cached = fake_scan_cached
+    try:
+        client = TestClient(main.app)
+        response = client.get("/api/scan?universe=discovered")
+        assert response.status_code == 200
+        assert calls == [(["AAPL", "F", "KMI"], {"force_refresh": False, "universe": "discovered"})]
+        assert response.json()["meta"]["cache_key"] == "discovered"
+    finally:
+        main.scan_cached = original_scan_cached
+        reset_discovery_cache()
+
+
+def test_scan_default_and_finviz_modes_remain_unchanged():
+    original_scan_cached = main.scan_cached
+    calls = []
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        return {"rows": [], "near_miss": [], "meta": {}}
+
+    main.scan_cached = fake_scan_cached
+    try:
+        client = TestClient(main.app)
+        client.get("/api/scan")
+        client.get("/api/scan?universe=default")
+        client.get("/api/scan?discover=true")
+        client.get("/api/scan?universe=finviz")
+        assert calls == [
+            (None, {"force_refresh": False, "discover": False}),
+            (None, {"force_refresh": False, "discover": False}),
+            (None, {"force_refresh": False, "discover": True}),
+            (None, {"force_refresh": False, "discover": True}),
+        ]
+    finally:
+        main.scan_cached = original_scan_cached
+
+
 def main_test() -> int:
     test_discovery_status_warming_without_cache()
     test_discovery_run_disabled_when_token_unset()
     test_discovery_run_rejects_wrong_token()
     test_discovery_run_populates_cache_with_valid_token()
+    test_scan_discovered_universe_returns_warming_when_cache_missing()
+    test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz()
+    test_scan_default_and_finviz_modes_remain_unchanged()
     print("Discovery endpoints v1 tests passed")
     return 0
 

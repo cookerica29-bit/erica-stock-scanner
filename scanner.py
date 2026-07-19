@@ -291,13 +291,26 @@ def _scan_is_active() -> bool:
         return _active_scan_count > 0
 
 
-def _analysis_cache_key(watchlist: Optional[list], discover: bool = False) -> tuple:
+def _analysis_cache_key(watchlist: Optional[list], discover: bool = False, universe: str = "default") -> tuple:
+    universe = str(universe or "default").strip().lower()
     if watchlist is None:
         if discover:
             return ("discover",)
         return ("default",)
     symbols = tuple(sorted(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()])))
+    if universe == "discovered":
+        return ("universe", "discovered", symbols)
     return ("custom", symbols)
+
+
+def _analysis_cache_label(key: tuple) -> str:
+    if key == ("default",):
+        return "default"
+    if key == ("discover",):
+        return "discover"
+    if len(key) >= 2 and key[0] == "universe":
+        return str(key[1])
+    return "custom"
 
 
 def _analysis_refresh_key(key: tuple) -> tuple:
@@ -309,6 +322,8 @@ def _analysis_state_key(key: tuple) -> str:
         return "default"
     if key == ("discover",):
         return "discover"
+    if len(key) >= 2 and key[0] == "universe":
+        return ":".join(str(part) for part in key[:2])
     return repr(key)
 
 
@@ -405,7 +420,7 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
         "stale": age_seconds is not None and age_seconds > ANALYSIS_CACHE_STALE_SECONDS,
         "refreshing": bool(refreshing and refresh_snapshot.get("refreshing")),
-        "cache_key": "default" if key == ("default",) else "custom",
+        "cache_key": _analysis_cache_label(key),
         "strategy_version": STOCK_SCANNER_STRATEGY_VERSION,
         "strategy_baseline": STOCK_SCANNER_STRATEGY_BASELINE_COMMIT,
         "configured_universe_count": scan_meta.get("configured_universe_count"),
@@ -421,8 +436,8 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
     }
 
 
-def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
-    key = _analysis_cache_key(watchlist)
+def analysis_cache_status(watchlist: Optional[list] = None, *, discover: bool = False, universe: str = "default") -> dict:
+    key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
     with _cache_lock:
         cached = _analysis_cache.get(key)
     refresh_snapshot = _analysis_refresh_snapshot(key)
@@ -437,7 +452,7 @@ def analysis_cache_status(watchlist: Optional[list] = None) -> dict:
         "age_seconds": None,
         "stale": True,
         "refreshing": refreshing,
-        "cache_key": "default" if key == ("default",) else "custom",
+        "cache_key": _analysis_cache_label(key),
         "status": "warming",
         "has_cache": False,
         "strategy_version": STOCK_SCANNER_STRATEGY_VERSION,
@@ -4030,8 +4045,8 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12, discover: 
         _scan_activity_finished()
 
 
-def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False, discover: bool = False) -> dict:
-    key = _analysis_cache_key(watchlist, discover=discover)
+def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False, discover: bool = False, universe: str = "default") -> dict:
+    key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
     with _cache_lock:
         cached = _analysis_cache.get(key)
 
@@ -4055,7 +4070,7 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         return {
             "rows": [],
             "near_miss": [],
-            "meta": analysis_cache_status(watchlist),
+            "meta": analysis_cache_status(watchlist, discover=discover, universe=universe),
         }
 
 
