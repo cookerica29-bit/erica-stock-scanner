@@ -24,15 +24,18 @@ EXPECTED_VERSION = "v1.0"
 EXPECTED_BASELINE = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
 
 CORE_FUNCTION_HASHES = {
-    "_build_trade_stage_eval": "8754add5cb2820fafbde5dd213a3c1e8776ccb35cd28857a7a3227430530cd96",
+    # Updated 2026-07-19: corrected RR disqualifier wording to match the existing 1.5R threshold.
+    "_build_trade_stage_eval": "3e3fa41e9f15b258511ebb161dfd939f67ec12ce67edf1125203cad0a61646a7",
     # Updated 2026-07-18: added daily-only HTF swing tolerance for provider precision stability (non-strategy).
     "analyze_ticker": "6b526f843e5dfc1a78101d2eb5424b6f3d1d2bf9a638d71d038104f696dd7284",
     "_build_chart_coach": "7642863ce83136bacf46e441b8a5965e7552d067435b1dec2800ee79e39561f0",
-    "_stock_setup_grade": "9cab2e9632eb1a179a6cb27910dfa3fbec1a4ae8249b23261fe95ba8bb0761de",
+    # Updated 2026-07-19: split A/B grading so A requires strength plus no no-trade reasons.
+    "_stock_setup_grade": "895ae1de0d2d910dfe6bc2473939aa736c502af337fbde4a1843c27f495b3c9c",
     "_stock_entry_status": "9dd1abeeac4f42f27dbfbbf906b0fb6728f4148146b9e10f649d9044d6b09f6f",
     "_stock_setup_status": "30daf790f61a2dad531c5890aae3a4be2d85f2b5b16c3f9146edac9bd8ba0983",
     "_nearest_target": "c5ecc64b2333725ee75ace358a3930d976bc5effd69a48948df505d27c0544e4",
-    "_room_to_target": "a6377c2e0cd1d8ea7192090d5902e81d2b2f31a01723fd479102a29ede31c3c4",
+    # Updated 2026-07-19: corrected RR room label to match the existing 1.5R threshold.
+    "_room_to_target": "2129bf616075452c8b0ec6b6b0c8160a8d3114e221b51694a69d444a82c9cab1",
     "_best_timeframe_result": "e2d86006018118abf256b435216a43e8692e778d55ca14192811e604984ad308",
 }
 

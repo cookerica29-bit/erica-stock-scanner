@@ -2301,7 +2301,7 @@ def _room_to_target(
         "estimated_rr": round(estimated_rr, 2) if estimated_rr is not None else None,
         "blocked": blocked,
         "clear": distance > 0 and not blocked,
-        "label": "Blocked: RR < 1:2" if blocked else "Clear path to target",
+        "label": "Blocked: RR < 1.5:1" if blocked else "Clear path to target",
     }
 
 
@@ -2413,7 +2413,7 @@ def _build_trade_stage_eval(
     if structure_quality == "CHOPPY / INTERNAL ONLY":
         no_trade_reasons.append("Choppy/internal structure")
     if room.get("blocked"):
-        no_trade_reasons.append("RR < 1:2")
+        no_trade_reasons.append("RR < 1.5:1")
     if macro_conflict or context_conflict:
         no_trade_reasons.append("Macro/context conflict")
     if setup_type == "NONE" and not structure_event_forming:
@@ -3796,10 +3796,20 @@ def _stock_confirmation(result: dict, setup_direction: str, setup_status: str) -
 
 
 def _stock_setup_grade(result: dict, daily_direction: str, setup_direction: str, location: str, setup_status: str) -> tuple:
+    ev = result.get("trade_eval") or {}
     trade_direction = _stock_trade_direction(result)
     confirmation_started, confirmation_reason = _stock_confirmation(result, setup_direction, setup_status)
     loc = str(location or "").lower()
     in_zone = bool(result.get("in_ob") or result.get("near_ob"))
+    no_trade_reasons = ev.get("no_trade_reasons") or []
+    has_no_trade_reasons = bool(no_trade_reasons)
+    rejection_confirmed_at_zone = bool(ev.get("rejection_confirmed") and in_zone)
+    confirmation_strength = bool(
+        ev.get("trigger_confirmed")
+        or ev.get("a_plus_ready")
+        or rejection_confirmed_at_zone
+        or ev.get("b_plus_tradeable")
+    )
 
     long_idea = trade_direction == "LONG"
     short_idea = trade_direction == "SHORT"
@@ -3819,8 +3829,10 @@ def _stock_setup_grade(result: dict, daily_direction: str, setup_direction: str,
         return "C", "C Setup — Caution: location conflicts with direction", confirmation_started, confirmation_reason
     if not location_aligned:
         return "C", "C Setup — Caution: weak or unclear location context", confirmation_started, confirmation_reason
-    if confirmation_started:
+    if confirmation_strength and not has_no_trade_reasons:
         return "A", f"A Setup — Confirmation Started: {confirmation_reason}", confirmation_started, confirmation_reason
+    if confirmation_started:
+        return "B", f"B Setup — Promising but needs review: {confirmation_reason}", confirmation_started, confirmation_reason
     return "B", "B Setup — Wait: trend and location aligned, confirmation not started", confirmation_started, confirmation_reason
 
 
