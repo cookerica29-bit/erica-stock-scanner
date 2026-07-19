@@ -785,6 +785,95 @@ def _sample_ranked_candidate(candidate: RankedDiscoveryCandidate) -> dict[str, A
     }
 
 
+def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None) -> dict[str, Any]:
+    """Run the full discovery pipeline and return a cache-ready universe report.
+
+    This is intentionally opt-in and expensive. Callers should run it from a
+    background/manual job, never synchronously from a user-facing scan request.
+    """
+    started = time.perf_counter()
+    client = AlpacaAssetDiscoveryClient()
+    assets = client.fetch_assets()
+    stage1 = stage1_optionable_assets(assets)
+    stage2 = stage2_hygiene_assets(stage1)
+
+    stage3_started = time.perf_counter()
+    dollar_metrics, stage3_failures = stage3_dollar_volume_filter(stage2)
+    stage3_elapsed = round(time.perf_counter() - stage3_started, 2)
+    stage3_passed = [metric for metric in dollar_metrics if metric.passed]
+    stage3_failed = [metric for metric in dollar_metrics if not metric.passed]
+
+    stage4_started = time.perf_counter()
+    options_metrics = stage4_options_liquidity_filter(dollar_metrics)
+    stage4_elapsed = round(time.perf_counter() - stage4_started, 2)
+    stage4_passed = [metric for metric in options_metrics if metric.passed]
+    stage4_failed = [metric for metric in options_metrics if not metric.passed]
+
+    ranked = rank_discovery_candidates(dollar_metrics, options_metrics)
+    selected = [candidate for candidate in ranked if candidate.selected]
+    selected_symbols = [candidate.symbol for candidate in selected]
+    selected_symbol_set = set(selected_symbols)
+    watchlist = {str(symbol or "").strip().upper() for symbol in (static_watchlist or []) if str(symbol or "").strip()}
+    watchlist_overlap = {
+        "watchlist_count": len(watchlist),
+        "overlap": len(watchlist & selected_symbol_set),
+        "missing": sorted(watchlist - selected_symbol_set),
+    }
+
+    stage3_failure_reasons = {
+        reason: sum(1 for metric in stage3_failed if metric.rejection_reason == reason)
+        for reason in {metric.rejection_reason for metric in stage3_failed}
+    }
+    stage4_failure_reasons = {
+        reason: sum(1 for metric in stage4_failed if metric.rejection_reason == reason)
+        for reason in {metric.rejection_reason for metric in stage4_failed}
+    }
+    return {
+        "symbols": selected_symbols,
+        "pipeline_counts": {
+            "raw_assets": len(assets),
+            "tradable_optionable": len(stage1),
+            "hygiene_passed": len(stage2),
+            "dollar_volume_passed": len(stage3_passed),
+            "options_liquidity_passed": len(stage4_passed),
+            "ranked": len(ranked),
+            "selected": len(selected),
+        },
+        "thresholds": {
+            "average_daily_dollar_volume_floor": DISCOVERY_MIN_AVG_DOLLAR_VOLUME,
+            "minimum_valid_daily_bars": DISCOVERY_MIN_VALID_DAILY_BARS,
+            "flat_price_floor": None,
+            "minimum_dte": DISCOVERY_OPTIONS_MIN_DTE,
+            "maximum_dte": DISCOVERY_OPTIONS_MAX_DTE,
+            "near_atm_strike_band_pct": DISCOVERY_OPTIONS_STRIKE_BAND_PCT,
+            "minimum_call_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+            "minimum_put_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+            "target_universe_size": DISCOVERY_TARGET_UNIVERSE_SIZE,
+        },
+        "formula": {
+            "combined_liquidity_score": (
+                f"{DISCOVERY_RANK_DOLLAR_VOLUME_WEIGHT:.2f} * dollar_volume_percentile"
+                f" + {DISCOVERY_RANK_CALL_OI_WEIGHT:.2f} * call_open_interest_percentile"
+                f" + {DISCOVERY_RANK_PUT_OI_WEIGHT:.2f} * put_open_interest_percentile"
+            ),
+        },
+        "stage3": {
+            "elapsed_seconds": stage3_elapsed,
+            "fetch_failures": len(stage3_failures),
+            "failure_reasons": dict(sorted(stage3_failure_reasons.items())),
+        },
+        "stage4": {
+            "elapsed_seconds": stage4_elapsed,
+            "failure_reasons": dict(sorted(stage4_failure_reasons.items())),
+            "total_pages_fetched": sum(metric.pages_fetched for metric in options_metrics),
+        },
+        "top_20": [_sample_ranked_candidate(candidate) for candidate in ranked[:20]],
+        "bottom_20_selected": [_sample_ranked_candidate(candidate) for candidate in selected[-20:]],
+        "watchlist_overlap": watchlist_overlap,
+        "elapsed_seconds": round(time.perf_counter() - started, 2),
+    }
+
+
 def _sample_asset(asset: dict[str, Any]) -> dict[str, Any]:
     return {
         "symbol": asset.get("symbol"),
