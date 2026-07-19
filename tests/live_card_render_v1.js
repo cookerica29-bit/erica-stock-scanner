@@ -262,6 +262,7 @@ snapshotElements.qualityFilter.value = 'all';
 snapshotElements.directionFilter.value = 'all';
 snapshotElements.contractTypeFilter.value = 'all';
 const originalGetElementById = context.document.getElementById;
+const originalRenderScannerResults = context.renderScannerResults;
 let snapshotRenderCount = 0;
 context.document.getElementById = id => snapshotElements[id] || elementStub();
 context.renderScannerResults = () => { snapshotRenderCount += 1; };
@@ -291,6 +292,69 @@ assert.strictEqual(snapshotElements.directionFilter.value, 'SHORT');
 assert.strictEqual(snapshotElements.contractTypeFilter.value, 'PUT');
 assert.strictEqual(snapshotElements.qualityFilter.dataset.userTouched, undefined);
 
+context.document.getElementById = originalGetElementById;
+context.renderScannerResults = originalRenderScannerResults;
+
+const scannerRenderElements = {
+  results: elementStub(),
+  summary: elementStub(),
+  marketSnapshot: elementStub(),
+  statusFilter: elementStub(),
+  qualityFilter: elementStub(),
+  directionFilter: elementStub(),
+  contractTypeFilter: elementStub(),
+  tickerInput: elementStub(),
+  'near-miss-section': elementStub(),
+  'near-miss-results': elementStub(),
+  'near-miss-header': elementStub(),
+};
+scannerRenderElements.statusFilter.value = 'all';
+scannerRenderElements.statusFilter.selectedOptions = [{ textContent: 'All Statuses' }];
+scannerRenderElements.qualityFilter.value = 'B';
+scannerRenderElements.qualityFilter.selectedOptions = [{ textContent: 'Strong Setup' }];
+scannerRenderElements.directionFilter.value = 'all';
+scannerRenderElements.directionFilter.selectedOptions = [{ textContent: 'All Directions' }];
+scannerRenderElements.contractTypeFilter.value = 'all';
+scannerRenderElements.contractTypeFilter.selectedOptions = [{ textContent: 'All Contracts' }];
+scannerRenderElements.tickerInput.value = '';
+context.document.getElementById = id => scannerRenderElements[id] || elementStub();
+
+const snapshotFullA = setup({
+  ticker: 'TOP',
+  setupGrade: 'A',
+  direction: 'LONG',
+  entryStatus: 'Near Entry',
+  option: { type: 'CALL' },
+  trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true, no_trade_reasons: [] },
+});
+const snapshotFullB = setup({
+  ticker: 'STRONG',
+  setupGrade: 'B',
+  direction: 'SHORT',
+  entryStatus: 'Near Entry',
+  option: { type: 'PUT' },
+  trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true, no_trade_reasons: ['RR < 1.5:1'] },
+});
+context.__scannerRenderRows = [snapshotFullA, snapshotFullB];
+vm.runInContext('scannerRows = __scannerRenderRows; scannerNearMiss = [];', context);
+context.renderScannerResults();
+
+assert.ok(scannerRenderElements.results.innerHTML.includes('STRONG'));
+assert.ok(!scannerRenderElements.results.innerHTML.includes('TOP'));
+assert.ok(scannerRenderElements.summary.innerHTML.includes('1 qualified setup'));
+assert.ok(scannerRenderElements.summary.innerHTML.includes('Showing 1 of 2 setups'));
+assert.ok(
+  scannerRenderElements.marketSnapshot.innerHTML.includes(
+    '<span class="label">Top Setup</span><span class="count">1</span>'
+  ),
+  'Market Snapshot should keep full-universe Top Setup count while quality filter is active'
+);
+assert.ok(
+  scannerRenderElements.marketSnapshot.innerHTML.includes(
+    '<span class="label">Strong Setup</span><span class="count">1</span>'
+  ),
+  'Market Snapshot should keep full-universe Strong Setup count while quality filter is active'
+);
 context.document.getElementById = originalGetElementById;
 
 const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 }));

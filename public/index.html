@@ -4030,8 +4030,9 @@ function renderScannerResults() {
   const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, filters)));
   const totalVisible = rows.length + nearMiss.length;
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
+  const snapshotSetups = [...allRows, ...allNearMiss];
   const visibleSetups = [...rows, ...nearMiss];
-  renderMarketSnapshot(visibleSetups);
+  renderMarketSnapshot(snapshotSetups);
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
