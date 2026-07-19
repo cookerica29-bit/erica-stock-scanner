@@ -6,6 +6,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -135,6 +137,73 @@ def test_discovery_stage_counts():
     assert counts.hygiene_passed == 1
 
 
+def bars(closes, volumes):
+    return pd.DataFrame({
+        "Close": closes,
+        "Volume": volumes,
+    }, index=pd.date_range("2026-06-01", periods=len(closes), freq="B"))
+
+
+def test_dollar_volume_metrics_pass_without_flat_price_floor():
+    df = bars([2.0] * 30, [60_000_000] * 30)
+    metrics = discovery.dollar_volume_metrics_for_frame("LOWP", df)
+    assert metrics.passed is True
+    assert metrics.latest_close == 2.0
+    assert metrics.average_daily_volume == 60_000_000
+    assert metrics.average_daily_dollar_volume == 120_000_000
+    assert metrics.valid_daily_bars == 30
+    assert metrics.rejection_reason is None
+
+
+def test_dollar_volume_metrics_reject_low_dollar_volume_and_insufficient_bars():
+    low_volume = discovery.dollar_volume_metrics_for_frame("THIN", bars([20.0] * 30, [1_000_000] * 30))
+    assert low_volume.passed is False
+    assert low_volume.rejection_reason == "low dollar volume"
+
+    insufficient = discovery.dollar_volume_metrics_for_frame("SHORT", bars([100.0] * 24, [2_000_000] * 24))
+    assert insufficient.passed is False
+    assert insufficient.rejection_reason == "insufficient valid daily bars"
+    assert insufficient.average_daily_dollar_volume == 200_000_000
+
+
+def test_apply_dollar_volume_filter_tracks_unverifiable_fetch_failures():
+    metrics = discovery.apply_dollar_volume_filter(
+        ["GOOD", "MISS"],
+        {"GOOD": bars([100.0] * 30, [2_000_000] * 30)},
+        {"MISS": "no price data"},
+    )
+    by_symbol = {metric.symbol: metric for metric in metrics}
+    assert by_symbol["GOOD"].passed is True
+    assert by_symbol["MISS"].passed is False
+    assert by_symbol["MISS"].rejection_reason == "no price data"
+
+
+class FakeBarsProvider:
+    def __init__(self):
+        self.calls = []
+
+    def download(self, tickers, **kwargs):
+        symbols = list(tickers)
+        self.calls.append((symbols, dict(kwargs)))
+        frames = {
+            symbol: bars([10.0] * 30, [20_000_000] * 30)
+            for symbol in symbols
+        }
+        return pd.concat(frames, axis=1)
+
+
+def test_fetch_discovery_daily_bars_batches_through_provider():
+    provider = FakeBarsProvider()
+    frames, failures = discovery.fetch_discovery_daily_bars(
+        ["AAA", "BBB", "CCC"],
+        provider=provider,
+        batch_size=2,
+    )
+    assert [call[0] for call in provider.calls] == [["AAA", "BBB"], ["CCC"]]
+    assert failures == {}
+    assert sorted(frames) == ["AAA", "BBB", "CCC"]
+
+
 def main() -> int:
     test_stage1_accepts_active_tradable_non_otc_optionable_common_stocks()
     test_stage1_rejects_inactive_non_tradable_otc_and_non_optionable_assets()
@@ -144,6 +213,10 @@ def main() -> int:
     test_hygiene_rejects_derivative_symbol_suffixes()
     test_hygiene_rejects_leveraged_inverse_etfs_without_blocking_plain_bull_company_names()
     test_discovery_stage_counts()
+    test_dollar_volume_metrics_pass_without_flat_price_floor()
+    test_dollar_volume_metrics_reject_low_dollar_volume_and_insufficient_bars()
+    test_apply_dollar_volume_filter_tracks_unverifiable_fetch_failures()
+    test_fetch_discovery_daily_bars_batches_through_provider()
     print("Alpaca asset discovery v1 tests passed")
     return 0
 
