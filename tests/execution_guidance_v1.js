@@ -126,6 +126,9 @@ assert.deepStrictEqual(guidance.cardStatus(setup({ entryStatus: 'Waiting' }), { 
 const invalid = guidance.nextStep(setup({ trade_eval: { trade_stage: 'RANGE / NO TRADE' } }), { bucket: 'SKIP' }, 'pending');
 assert.deepStrictEqual(invalid.lines, ['No entry. The setup is not currently valid.']);
 assert.deepStrictEqual(guidance.cardStatus(setup({ trade_eval: { trade_stage: 'RANGE / NO TRADE' } }), { bucket: 'SKIP' }), { label: 'NO TRADE', className: 'skip' });
+const skipStages = guidance.readinessStages(setup({ trade_eval: { trade_stage: 'RANGE / NO TRADE' } }), { bucket: 'SKIP' });
+assert.deepStrictEqual(skipStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:No Trade', 'Zone:Muted', 'Confirm:Muted', 'Execute:Not Ready']);
+assert.ok(skipStages.every(stage => !stage.state.includes('current')), 'No-trade timeline should not use current-step styling');
 
 // Nike-style unfilled planned entry remains unfilled: price and planned entry are not forced together.
 const nike = setup({ ticker: 'NKE', price: 77.25, entry: 70.5, direction: 'SHORT' });

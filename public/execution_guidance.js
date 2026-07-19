@@ -151,7 +151,7 @@
   function readinessStages(setup = {}, readiness = {}) {
     if (isNoTrade(setup, readiness)) {
       return [
-        { label: 'Trend', state: 'current skip', status: 'Review' },
+        { label: 'Trend', state: 'pending skip', status: 'No Trade' },
         { label: 'Zone', state: 'pending skip', status: 'Muted' },
         { label: 'Confirm', state: 'pending skip', status: 'Muted' },
         { label: 'Execute', state: 'pending skip execute-not-ready', status: 'Not Ready' },
