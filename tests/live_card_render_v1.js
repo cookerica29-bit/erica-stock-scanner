@@ -236,6 +236,48 @@ assert.ok(!earlyEntryCard.includes('Price is at the planned entry. You can execu
 assert.ok(context.passesFrameworkFilters(bPlusOnlySetup, { status: 'EARLY_ENTRY', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
 assert.ok(!context.passesFrameworkFilters(bPlusOnlySetup, { status: 'ENTER_NOW', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
 
+const snapshotElements = {
+  statusFilter: elementStub(),
+  qualityFilter: elementStub(),
+  directionFilter: elementStub(),
+  contractTypeFilter: elementStub(),
+};
+snapshotElements.statusFilter.value = 'ACTIONABLE';
+snapshotElements.qualityFilter.value = 'all';
+snapshotElements.directionFilter.value = 'all';
+snapshotElements.contractTypeFilter.value = 'all';
+const originalGetElementById = context.document.getElementById;
+let snapshotRenderCount = 0;
+context.document.getElementById = id => snapshotElements[id] || elementStub();
+context.renderScannerResults = () => { snapshotRenderCount += 1; };
+
+const inactiveSnapshotBadge = context.renderSnapshotBadge('Almost Ready', 3, 'timing-area', 'status', 'ALMOST_READY');
+assert.ok(inactiveSnapshotBadge.includes('<button type="button"'));
+assert.ok(inactiveSnapshotBadge.includes("onclick=\"applySnapshotFilter('status', 'ALMOST_READY')\""));
+assert.ok(inactiveSnapshotBadge.includes('aria-pressed="false"'));
+
+context.applySnapshotFilter('status', 'ALMOST_READY');
+assert.strictEqual(snapshotElements.statusFilter.value, 'ALMOST_READY');
+assert.strictEqual(snapshotElements.statusFilter.dataset.userTouched, 'true');
+assert.strictEqual(snapshotRenderCount, 1);
+const activeSnapshotBadge = context.renderSnapshotBadge('Almost Ready', 3, 'timing-area', 'status', 'ALMOST_READY');
+assert.ok(activeSnapshotBadge.includes(' active'));
+assert.ok(activeSnapshotBadge.includes('aria-pressed="true"'));
+
+context.applySnapshotFilter('status', 'ALMOST_READY');
+assert.strictEqual(snapshotElements.statusFilter.value, 'all');
+assert.strictEqual(snapshotRenderCount, 2);
+
+context.applySnapshotFilter('quality', 'B');
+context.applySnapshotFilter('direction', 'SHORT');
+context.applySnapshotFilter('contractType', 'PUT');
+assert.strictEqual(snapshotElements.qualityFilter.value, 'B');
+assert.strictEqual(snapshotElements.directionFilter.value, 'SHORT');
+assert.strictEqual(snapshotElements.contractTypeFilter.value, 'PUT');
+assert.strictEqual(snapshotElements.qualityFilter.dataset.userTouched, undefined);
+
+context.document.getElementById = originalGetElementById;
+
 const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 }));
 assert.ok(reachedLive.includes('data-execution-state="SETUP_CONFIRMED_ENTRY_REACHED"'));
 assert.ok(reachedLive.includes('data-execute-visual-state="ready"'));

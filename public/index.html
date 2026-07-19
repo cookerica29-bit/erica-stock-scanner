@@ -237,10 +237,28 @@
     background: rgba(65,80,106,0.58);
     border: 1px solid var(--border-soft);
     border-radius: 10px;
+    color: inherit;
     display: inline-flex;
+    font: inherit;
     gap: 8px;
     min-height: 32px;
     padding: 7px 10px;
+    text-align: left;
+  }
+  button.snapshot-badge {
+    appearance: none;
+    cursor: pointer;
+  }
+  button.snapshot-badge:hover {
+    background: rgba(148,163,184,0.16);
+    border-color: rgba(125,211,252,0.55);
+  }
+  .snapshot-badge.active {
+    background: rgba(14,165,233,0.14);
+    border-color: rgba(125,211,252,0.8);
+  }
+  .snapshot-badge.active .label {
+    color: var(--text);
   }
   .snapshot-badge .label {
     color: var(--muted);
@@ -3916,8 +3934,34 @@ function countBy(rows, labels, resolver) {
   return counts;
 }
 
-function renderSnapshotBadge(label, count, extraClass = '') {
-  return `<div class="snapshot-badge ${extraClass}"><span class="label">${label}</span><span class="count">${count}</span></div>`;
+const SNAPSHOT_FILTER_CONTROLS = {
+  status: 'statusFilter',
+  quality: 'qualityFilter',
+  direction: 'directionFilter',
+  contractType: 'contractTypeFilter',
+};
+
+function applySnapshotFilter(filterType, filterValue) {
+  const controlId = SNAPSHOT_FILTER_CONTROLS[filterType];
+  const control = controlId ? document.getElementById(controlId) : null;
+  if (!control) return;
+  control.value = control.value === filterValue ? 'all' : filterValue;
+  if (filterType === 'status') control.dataset.userTouched = 'true';
+  renderScannerResults();
+}
+
+function snapshotFilterActive(filterType, filterValue) {
+  const controlId = SNAPSHOT_FILTER_CONTROLS[filterType];
+  const control = controlId ? document.getElementById(controlId) : null;
+  return Boolean(control && control.value === filterValue);
+}
+
+function renderSnapshotBadge(label, count, extraClass = '', filterType = '', filterValue = '') {
+  if (!filterType || !filterValue) {
+    return `<div class="snapshot-badge ${extraClass}"><span class="label">${label}</span><span class="count">${count}</span></div>`;
+  }
+  const active = snapshotFilterActive(filterType, filterValue);
+  return `<button type="button" class="snapshot-badge ${extraClass}${active ? ' active' : ''}" aria-pressed="${active ? 'true' : 'false'}" title="Filter by ${escapeHtml(label)}" onclick="applySnapshotFilter('${escapeHtml(filterType)}', '${escapeHtml(filterValue)}')"><span class="label">${label}</span><span class="count">${count}</span></button>`;
 }
 
 function renderMarketSnapshot(rows) {
@@ -3936,33 +3980,33 @@ function renderMarketSnapshot(rows) {
         <div>
           <div class="snapshot-group-title">Setup Quality</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Top Setup', gradeCounts.A || 0, 'grade-a')}
-            ${renderSnapshotBadge('Strong Setup', gradeCounts.B || 0, 'grade-b')}
-            ${renderSnapshotBadge('Skip / Low Quality', gradeCounts.C || 0, 'grade-c')}
+            ${renderSnapshotBadge('Top Setup', gradeCounts.A || 0, 'grade-a', 'quality', 'A')}
+            ${renderSnapshotBadge('Strong Setup', gradeCounts.B || 0, 'grade-b', 'quality', 'B')}
+            ${renderSnapshotBadge('Skip / Low Quality', gradeCounts.C || 0, 'grade-c', 'quality', 'C')}
           </div>
         </div>
         <div>
           <div class="snapshot-group-title">Status</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Skip', progressCounts.SKIP || 0, 'timing-not-ready')}
-            ${renderSnapshotBadge('Waiting', progressCounts.WAITING || 0, 'timing-reaction')}
-            ${renderSnapshotBadge('Almost Ready', progressCounts.ALMOST_READY || 0, 'timing-area')}
-            ${renderSnapshotBadge('Early Entry', progressCounts.EARLY_ENTRY || 0, 'timing-area')}
-            ${renderSnapshotBadge('Enter Now', progressCounts.ENTER_NOW || 0, 'timing-entry')}
+            ${renderSnapshotBadge('Skip', progressCounts.SKIP || 0, 'timing-not-ready', 'status', 'SKIP')}
+            ${renderSnapshotBadge('Waiting', progressCounts.WAITING || 0, 'timing-reaction', 'status', 'WAITING')}
+            ${renderSnapshotBadge('Almost Ready', progressCounts.ALMOST_READY || 0, 'timing-area', 'status', 'ALMOST_READY')}
+            ${renderSnapshotBadge('Early Entry', progressCounts.EARLY_ENTRY || 0, 'timing-area', 'status', 'EARLY_ENTRY')}
+            ${renderSnapshotBadge('Enter Now', progressCounts.ENTER_NOW || 0, 'timing-entry', 'status', 'ENTER_NOW')}
           </div>
         </div>
         <div>
           <div class="snapshot-group-title">Direction</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Long', directionCounts.LONG || 0, 'direction-long')}
-            ${renderSnapshotBadge('Short', directionCounts.SHORT || 0, 'direction-short')}
+            ${renderSnapshotBadge('Long', directionCounts.LONG || 0, 'direction-long', 'direction', 'LONG')}
+            ${renderSnapshotBadge('Short', directionCounts.SHORT || 0, 'direction-short', 'direction', 'SHORT')}
           </div>
         </div>
         <div>
           <div class="snapshot-group-title">Contract Type</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Calls', contractCounts.CALL || 0, 'status-ready')}
-            ${renderSnapshotBadge('Puts', contractCounts.PUT || 0, 'status-tradeable')}
+            ${renderSnapshotBadge('Calls', contractCounts.CALL || 0, 'status-ready', 'contractType', 'CALL')}
+            ${renderSnapshotBadge('Puts', contractCounts.PUT || 0, 'status-tradeable', 'contractType', 'PUT')}
           </div>
         </div>
       </div>
