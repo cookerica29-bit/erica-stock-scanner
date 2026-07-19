@@ -141,7 +141,7 @@
     font-size: 9px;
     margin-top: 2px;
   }
-  #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter { min-width: 150px; }
+  #universeFilter, #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter { min-width: 150px; }
 
   button {
     background: var(--accent);
@@ -2233,6 +2233,10 @@
       <input type="search" id="tickerInput" placeholder="Search AAPL or Apple..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
       <div class="control-hint">Scan refreshes all cards. Type AAPL or Apple here to filter the loaded cards.</div>
     </div>
+    <select id="universeFilter" onchange="handleUniverseChange()">
+      <option value="default">My Watchlist</option>
+      <option value="discovered">Discovered</option>
+    </select>
     <select id="statusFilter" onchange="renderScannerResults()">
       <option value="all">All Statuses</option>
       <option value="ACTIONABLE" selected>Opportunities</option>
@@ -3253,6 +3257,30 @@ function normalizeScanRowsForClient(rows = []) {
   return (Array.isArray(rows) ? rows : []).map(stripContractDataForIneligibleGrade);
 }
 
+function currentScannerUniverse() {
+  return document.getElementById('universeFilter')?.value || 'default';
+}
+
+function scannerScanUrl({ refresh = false } = {}) {
+  const params = new URLSearchParams();
+  const universe = currentScannerUniverse();
+  if (universe && universe !== 'default') params.set('universe', universe);
+  if (refresh) params.set('refresh', 'true');
+  const query = params.toString();
+  return `${API}/api/scan${query ? `?${query}` : ''}`;
+}
+
+function handleUniverseChange() {
+  clearContractRefreshPoll();
+  scannerRows = [];
+  scannerNearMiss = [];
+  latestScannerMeta = null;
+  contractRefreshAttempts = 0;
+  contractPendingTimedOutKeys = new Set();
+  renderScannerResults();
+  runScan();
+}
+
 function setupHasDatedEarnings(setup = {}) {
   const normalized = window.KairosCardData?.normalizeEarnings
     ? window.KairosCardData.normalizeEarnings(setup)
@@ -3315,7 +3343,7 @@ async function runScan() {
   let scanMeta = null;
 
   try {
-    const res  = await fetchWithTimeout(`${API}/api/scan`, {}, 15000);
+    const res  = await fetchWithTimeout(scannerScanUrl(), {}, 15000);
     const data = await res.json();
     scanMeta = data.meta || null;
     latestScannerMeta = scanMeta;
@@ -3726,7 +3754,7 @@ function scheduleContractRefreshPoll() {
   contractRefreshAttempts += 1;
   contractRefreshTimer = setTimeout(async () => {
     try {
-      const res = await fetchWithTimeout(`${API}/api/scan`, {}, 15000);
+      const res = await fetchWithTimeout(scannerScanUrl(), {}, 15000);
       if (!res.ok) throw new Error(`Scan refresh failed with HTTP ${res.status}`);
       const data = await res.json();
       const previousRows = [...scannerRows, ...scannerNearMiss];
@@ -3779,6 +3807,13 @@ function updateDataStatus(meta = {}) {
       <div class="data-status-main">${config.icon} ${config.label}</div>
       <div class="data-status-sub">${escapeHtml(config.sub)}</div>
     </div>`;
+}
+
+function scannerWarmingMessage(meta = latestScannerMeta || {}) {
+  if (meta?.universe === 'discovered' || meta?.cache_key === 'discovered') {
+    return 'Discovered universe is refreshing. Check back shortly.';
+  }
+  return 'Kairos is warming market data. Try Scan again in a moment.';
 }
 
 async function loadCacheStatus() {
@@ -4054,7 +4089,7 @@ function renderScannerResults() {
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
     const warming = scannerRows.length === 0 && scannerNearMiss.length === 0 && document.getElementById('dataStatus')?.textContent?.includes('Warming');
-    results.innerHTML = `<div class="empty">${warming ? 'Kairos is warming market data. Try Scan again in a moment.' : `No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.`}</div>`;
+    results.innerHTML = `<div class="empty">${warming ? scannerWarmingMessage(latestScannerMeta || {}) : `No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.`}</div>`;
   } else {
     results.innerHTML = rows.map(renderCard).join('');
   }

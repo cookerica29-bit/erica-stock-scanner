@@ -37,6 +37,7 @@ const context = {
   Object,
   JSON,
   RegExp,
+  URLSearchParams,
   encodeURIComponent,
   decodeURIComponent,
   setTimeout: () => 1,
@@ -127,6 +128,19 @@ context.fetch = (_url, options) => {
 context.fetchWithTimeout('/api/scan', {}, 12000);
 assert.strictEqual(fetchOptions.cache, 'no-store');
 context.fetch = originalFetch;
+const originalGetElementByIdForUniverse = context.document.getElementById;
+const universeElements = {
+  universeFilter: { ...elementStub(), value: 'default' },
+};
+context.document.getElementById = id => universeElements[id] || elementStub();
+assert.strictEqual(context.currentScannerUniverse(), 'default');
+assert.strictEqual(context.scannerScanUrl(), '/api/scan');
+assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?refresh=true');
+universeElements.universeFilter.value = 'discovered';
+assert.strictEqual(context.currentScannerUniverse(), 'discovered');
+assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=discovered');
+assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?universe=discovered&refresh=true');
+context.document.getElementById = originalGetElementByIdForUniverse;
 assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
@@ -317,6 +331,8 @@ scannerRenderElements.directionFilter.selectedOptions = [{ textContent: 'All Dir
 scannerRenderElements.contractTypeFilter.value = 'all';
 scannerRenderElements.contractTypeFilter.selectedOptions = [{ textContent: 'All Contracts' }];
 scannerRenderElements.tickerInput.value = '';
+scannerRenderElements.universeFilter = elementStub();
+scannerRenderElements.universeFilter.value = 'default';
 context.document.getElementById = id => scannerRenderElements[id] || elementStub();
 
 const snapshotFullA = setup({
@@ -356,6 +372,100 @@ assert.ok(
   'Market Snapshot should keep full-universe Strong Setup count while quality filter is active'
 );
 context.document.getElementById = originalGetElementById;
+
+const warmingElements = {
+  results: elementStub(),
+  summary: elementStub(),
+  marketSnapshot: elementStub(),
+  dataStatus: { ...elementStub(), textContent: '🟡 Warming Building market cache' },
+  statusFilter: elementStub(),
+  qualityFilter: elementStub(),
+  directionFilter: elementStub(),
+  contractTypeFilter: elementStub(),
+  tickerInput: elementStub(),
+  'near-miss-section': elementStub(),
+  'near-miss-results': elementStub(),
+  'near-miss-header': elementStub(),
+};
+warmingElements.statusFilter.value = 'all';
+warmingElements.statusFilter.selectedOptions = [{ textContent: 'All Statuses' }];
+warmingElements.qualityFilter.value = 'all';
+warmingElements.qualityFilter.selectedOptions = [{ textContent: 'All Setup Quality' }];
+warmingElements.directionFilter.value = 'all';
+warmingElements.directionFilter.selectedOptions = [{ textContent: 'All Directions' }];
+warmingElements.contractTypeFilter.value = 'all';
+warmingElements.contractTypeFilter.selectedOptions = [{ textContent: 'All Contracts' }];
+warmingElements.tickerInput.value = '';
+context.document.getElementById = id => warmingElements[id] || elementStub();
+vm.runInContext('scannerRows = []; scannerNearMiss = []; latestScannerMeta = { cache_key: "discovered", universe: "discovered", status: "warming" };', context);
+context.renderScannerResults();
+assert.ok(
+  warmingElements.results.innerHTML.includes('Discovered universe is refreshing. Check back shortly.'),
+  'Discovered warming state should use discovered-specific user-facing copy'
+);
+context.document.getElementById = originalGetElementById;
+
+const originalFetchWithTimeoutForContractPoll = context.fetchWithTimeout;
+const originalSetTimeoutForContractPoll = context.setTimeout;
+let scheduledContractPoll = null;
+let contractPollUrl = null;
+const pollElements = {
+  universeFilter: { ...elementStub(), value: 'discovered' },
+  statusFilter: elementStub(),
+  qualityFilter: elementStub(),
+  directionFilter: elementStub(),
+  contractTypeFilter: elementStub(),
+  tickerInput: elementStub(),
+  results: elementStub(),
+  summary: elementStub(),
+  marketSnapshot: elementStub(),
+  dataStatus: elementStub(),
+  'near-miss-section': elementStub(),
+  'near-miss-results': elementStub(),
+  'near-miss-header': elementStub(),
+};
+pollElements.statusFilter.value = 'all';
+pollElements.statusFilter.selectedOptions = [{ textContent: 'All Statuses' }];
+pollElements.qualityFilter.value = 'all';
+pollElements.qualityFilter.selectedOptions = [{ textContent: 'All Setup Quality' }];
+pollElements.directionFilter.value = 'all';
+pollElements.directionFilter.selectedOptions = [{ textContent: 'All Directions' }];
+pollElements.contractTypeFilter.value = 'all';
+pollElements.contractTypeFilter.selectedOptions = [{ textContent: 'All Contracts' }];
+pollElements.tickerInput.value = '';
+context.document.getElementById = id => pollElements[id] || elementStub();
+context.setTimeout = cb => { scheduledContractPoll = cb; return 1; };
+context.fetchWithTimeout = (url) => {
+  contractPollUrl = url;
+  return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [], near_miss: [], meta: { cache_key: 'discovered' } }) });
+};
+vm.runInContext('scannerRows = [{ ticker: "PENDING", direction: "LONG", setupGrade: "B", best_contract: { available: true } }]; scannerNearMiss = []; contractRefreshAttempts = 0;', context);
+context.scheduleContractRefreshPoll();
+assert.strictEqual(typeof scheduledContractPoll, 'function');
+scheduledContractPoll();
+assert.strictEqual(contractPollUrl, '/api/scan?universe=discovered');
+context.fetchWithTimeout = originalFetchWithTimeoutForContractPoll;
+context.setTimeout = originalSetTimeoutForContractPoll;
+context.document.getElementById = originalGetElementById;
+
+vm.runInContext(`
+  globalThis.__savedRunScan = runScan;
+  globalThis.__savedRenderScannerResults = renderScannerResults;
+  globalThis.__renderCountForUniverseChange = 0;
+  globalThis.__runScanCountForUniverseChange = 0;
+  renderScannerResults = () => { globalThis.__renderCountForUniverseChange += 1; };
+  runScan = () => { globalThis.__runScanCountForUniverseChange += 1; };
+`, context);
+vm.runInContext('scannerRows = [{ ticker: "OLD" }]; scannerNearMiss = [{ ticker: "OLDMISS" }]; latestScannerMeta = { cache_key: "default" }; contractRefreshAttempts = 2; contractPendingTimedOutKeys = new Set(["OLD"]);', context);
+context.handleUniverseChange();
+assert.strictEqual(vm.runInContext('scannerRows.length', context), 0);
+assert.strictEqual(vm.runInContext('scannerNearMiss.length', context), 0);
+assert.strictEqual(vm.runInContext('latestScannerMeta', context), null);
+assert.strictEqual(vm.runInContext('contractRefreshAttempts', context), 0);
+assert.strictEqual(vm.runInContext('contractPendingTimedOutKeys.size', context), 0);
+assert.strictEqual(vm.runInContext('__renderCountForUniverseChange', context), 1);
+assert.strictEqual(vm.runInContext('__runScanCountForUniverseChange', context), 1);
+vm.runInContext('runScan = globalThis.__savedRunScan; renderScannerResults = globalThis.__savedRenderScannerResults;', context);
 
 const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 }));
 assert.ok(reachedLive.includes('data-execution-state="SETUP_CONFIRMED_ENTRY_REACHED"'));
