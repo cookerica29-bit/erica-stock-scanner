@@ -4152,12 +4152,6 @@ function setupProgressState(setup) {
   return { stage: 0, label: 'SKIP', bucket: 'SKIP', className: 'skip', percent: 0 };
 }
 
-function readinessStars(setup) {
-  const pct = setupProgressState(setup).percent;
-  const count = pct === 100 ? 5 : pct >= 75 ? 4 : pct >= 50 ? 3 : 0;
-  return `${'★'.repeat(count)}${'☆'.repeat(5 - count)}`;
-}
-
 function renderReadinessBadge(setup) {
   const status = window.KairosExecutionGuidance?.cardStatus
     ? window.KairosExecutionGuidance.cardStatus(setup, setupProgressState(setup))
@@ -4285,11 +4279,6 @@ function renderPositionManagement(setup) {
 
 function simpleSetupLabel(grade) {
   return { A: 'Top Setup', B: 'Strong Setup', C: 'Skip / Low Quality' }[normalizeSetupGrade(grade)] || 'Skip / Low Quality';
-}
-
-function starsForGrade(grade) {
-  const count = { A: 5, B: 4, C: 2 }[normalizeSetupGrade(grade)] ?? 2;
-  return `${'★'.repeat(count)}${'☆'.repeat(5 - count)}`;
 }
 
 function simpleDirection(direction) {
@@ -5440,7 +5429,7 @@ function renderCard(s) {
     <div class="card-body">
       <div class="price-row">
         <span class="price-big">${fmtMoney(s.price)}</span>
-        <span class="price-meta">${readinessStars(s)} ${cardStatus.label}</span>
+        <span class="price-meta">${cardStatus.label}</span>
       </div>
       <div class="index-status-block">
         <div class="index-simple-label">Status</div>
