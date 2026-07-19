@@ -207,8 +207,44 @@ def test_scan_discovered_universe_uses_cached_symbols_without_touching_default_o
         client = TestClient(main.app)
         response = client.get("/api/scan?universe=discovered")
         assert response.status_code == 200
-        assert calls == [(["AAPL", "F", "KMI"], {"force_refresh": False, "universe": "discovered"})]
+        assert calls == [(["AAPL", "F", "KMI"], {"force_refresh": False, "universe": "discovered", "max_symbols": None})]
         assert response.json()["meta"]["cache_key"] == "discovered"
+    finally:
+        main.scan_cached = original_scan_cached
+        reset_discovery_cache()
+
+
+def test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncation():
+    original_scan_cached = main.scan_cached
+    calls = []
+    symbols = [f"T{i}" for i in range(550)]
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            "symbols": symbols,
+            "generated_at": __import__("datetime").datetime.utcnow(),
+            "expires_at": __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=1),
+            "running": False,
+            "last_error": None,
+        })
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        return {
+            "rows": [],
+            "near_miss": [],
+            "meta": {
+                "cache_key": kwargs.get("universe") or "default",
+                "configured_universe_count": len(watchlist or []),
+            },
+        }
+
+    main.scan_cached = fake_scan_cached
+    try:
+        client = TestClient(main.app)
+        response = client.get("/api/scan?universe=discovered")
+        assert response.status_code == 200
+        assert calls == [(symbols, {"force_refresh": False, "universe": "discovered", "max_symbols": None})]
+        assert response.json()["meta"]["configured_universe_count"] == 550
     finally:
         main.scan_cached = original_scan_cached
         reset_discovery_cache()
@@ -246,6 +282,7 @@ def main_test() -> int:
     test_discovery_run_populates_cache_with_valid_token()
     test_scan_discovered_universe_returns_warming_when_cache_missing()
     test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz()
+    test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncation()
     test_scan_default_and_finviz_modes_remain_unchanged()
     print("Discovery endpoints v1 tests passed")
     return 0

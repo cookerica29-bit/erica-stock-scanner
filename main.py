@@ -252,7 +252,7 @@ def api_scan(
         ready, symbols, status = _discovery_symbols_ready()
         if not ready:
             return _discovery_scan_not_ready_response(status)
-        result = scan_cached(symbols, force_refresh=refresh, universe="discovered")
+        result = scan_cached(symbols, force_refresh=refresh, universe="discovered", max_symbols=None)
     else:
         use_finviz = bool(discover) or str(universe or "").strip().lower() == "finviz"
         result = scan_cached(force_refresh=refresh, discover=use_finviz)

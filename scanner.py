@@ -390,6 +390,7 @@ def _submit_analysis_refresh(
     watchlist: Optional[list],
     reason: str = "background",
     discover: bool = False,
+    max_symbols: Optional[int] = 200,
 ) -> bool:
     """Submit an analysis refresh job.
 
@@ -401,7 +402,7 @@ def _submit_analysis_refresh(
     if snapshot.get("refreshing"):
         return False
     job_id = f"{_analysis_state_key(key)}:{int(time.time())}:{reason}"
-    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id, discover)
+    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id, discover, max_symbols)
     if submitted:
         _mark_analysis_refresh_started(key, job_id)
     return submitted
@@ -531,6 +532,7 @@ def _refresh_analysis_cache(
     watchlist: Optional[list],
     job_id: Optional[str] = None,
     discover: bool = False,
+    max_symbols: Optional[int] = 200,
 ) -> None:
     started = time.perf_counter()
     try:
@@ -539,6 +541,7 @@ def _refresh_analysis_cache(
             watchlist,
             max_workers=BACKGROUND_ANALYSIS_SCAN_WORKERS,
             discover=discover,
+            max_symbols=max_symbols,
         )
         _store_analysis_cache(key, rows, near_miss, scan_meta)
         _mark_analysis_refresh_finished(key, started)
@@ -3935,7 +3938,12 @@ def _enrich_stock_scout_fields(
     return result
 
 
-def scan_all(watchlist: Optional[list] = None, max_workers: int = 12, discover: bool = False) -> tuple:
+def scan_all(
+    watchlist: Optional[list] = None,
+    max_workers: int = 12,
+    discover: bool = False,
+    max_symbols: Optional[int] = 200,
+) -> tuple:
     scan_start = time.perf_counter()
     _scan_activity_started()
     try:
@@ -3946,7 +3954,12 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12, discover: 
         elif watchlist is None:
             watchlist = list(WATCHLIST)
         else:
-            watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))[:200]
+            watchlist = list(dict.fromkeys([str(t).strip().upper() for t in watchlist if str(t).strip()]))
+            if max_symbols is not None:
+                try:
+                    watchlist = watchlist[:max(0, int(max_symbols))]
+                except (TypeError, ValueError):
+                    watchlist = watchlist[:200]
 
         original_count = len(watchlist)
 
@@ -4045,7 +4058,14 @@ def scan_all(watchlist: Optional[list] = None, max_workers: int = 12, discover: 
         _scan_activity_finished()
 
 
-def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False, discover: bool = False, universe: str = "default") -> dict:
+def scan_cached(
+    watchlist: Optional[list] = None,
+    *,
+    force_refresh: bool = False,
+    discover: bool = False,
+    universe: str = "default",
+    max_symbols: Optional[int] = 200,
+) -> dict:
     key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
     with _cache_lock:
         cached = _analysis_cache.get(key)
@@ -4055,7 +4075,7 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         age_seconds = _age_seconds(generated_at)
         should_refresh = bool(force_refresh) or age_seconds is None or age_seconds > ANALYSIS_CACHE_STALE_SECONDS
         if should_refresh:
-            _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover)
+            _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover, max_symbols=max_symbols)
         return {
             "rows": _hydrate_scan_rows_from_cache(list(cached.get("rows", []))),
             "near_miss": _hydrate_scan_rows_from_cache(list(cached.get("near_miss", []))),
@@ -4066,7 +4086,7 @@ def scan_cached(watchlist: Optional[list] = None, *, force_refresh: bool = False
         }
 
     if not cached:
-        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover)
+        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover, max_symbols=max_symbols)
         return {
             "rows": [],
             "near_miss": [],

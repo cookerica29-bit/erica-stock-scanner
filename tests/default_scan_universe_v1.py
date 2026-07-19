@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 import scanner  # noqa: E402
 
 
-def run_with_stubs(discover: bool = False):
+def run_with_stubs(discover: bool = False, watchlist=None, max_symbols=200):
     calls = {"finviz": 0, "prefilter_watchlist": None}
     original_finviz = scanner.get_finviz_watchlist
     original_batch = scanner._batch_download
@@ -36,7 +36,7 @@ def run_with_stubs(discover: bool = False):
     scanner._prefilter_stock_universe = fake_prefilter
     scanner._ensure_background_refresh_started = lambda: None
     try:
-        rows, near_miss, meta = scanner.scan_all(discover=discover)
+        rows, near_miss, meta = scanner.scan_all(watchlist=watchlist, discover=discover, max_symbols=max_symbols)
         return calls, rows, near_miss, meta
     finally:
         scanner.get_finviz_watchlist = original_finviz
@@ -59,6 +59,17 @@ def main() -> int:
     assert rows == []
     assert near_miss == []
     assert meta["configured_universe_count"] == 2
+
+    custom_symbols = [f"T{i}" for i in range(250)]
+    calls, rows, near_miss, meta = run_with_stubs(watchlist=custom_symbols)
+    assert len(calls["prefilter_watchlist"]) == 200
+    assert calls["prefilter_watchlist"] == custom_symbols[:200]
+    assert meta["configured_universe_count"] == 200
+
+    calls, rows, near_miss, meta = run_with_stubs(watchlist=custom_symbols, max_symbols=None)
+    assert len(calls["prefilter_watchlist"]) == 250
+    assert calls["prefilter_watchlist"] == custom_symbols
+    assert meta["configured_universe_count"] == 250
 
     assert scanner._analysis_cache_key(None) == ("default",)
     assert scanner._analysis_cache_key(None, discover=True) == ("discover",)
