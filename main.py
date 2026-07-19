@@ -1,5 +1,5 @@
 from datetime import datetime
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -16,6 +16,12 @@ from market_data import (
 
 app = FastAPI(title="Stock Options Scanner")
 
+NO_STORE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,6 +30,14 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="public"), name="static")
+
+
+@app.middleware("http")
+async def add_no_store_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers.update(NO_STORE_HEADERS)
+    return response
 
 
 @app.on_event("startup")
@@ -35,7 +49,7 @@ def startup_market_cache_refresh():
 def index():
     return FileResponse(
         "public/index.html",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+        headers=NO_STORE_HEADERS,
     )
 
 

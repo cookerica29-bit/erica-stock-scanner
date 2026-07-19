@@ -3181,7 +3181,7 @@ async function runTrendScan() {
 
   try {
     const url = `${API}/api/trends?direction=${encodeURIComponent(direction)}&min_score=${encodeURIComponent(minScore)}&hide_choppy=${hideChoppy}`;
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, {}, 12000);
     const data = await res.json();
     const rows = data.rows || [];
     const refreshed = data.generated_at ? new Date(data.generated_at).toLocaleString() : 'Unknown';
@@ -3413,7 +3413,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, { cache: 'no-store', ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }

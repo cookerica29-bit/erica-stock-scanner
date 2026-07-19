@@ -112,6 +112,21 @@ assert.strictEqual(context.scanStatusText({ cache: 'hit', age_seconds: 180, stal
 assert.strictEqual(context.scanStatusText({ cache: 'hit', age_seconds: 180, refreshing: true }), 'Refreshing cached data...');
 assert.strictEqual(context.scanStatusText({ cache: 'hit', age_seconds: 180, last_refresh_error: 'timeout', refreshing: false }), 'Refresh failed');
 assert.ok(!context.scanStatusText({ cache: 'hit', age_seconds: 16 }).includes('Last updated'));
+let fetchOptions = null;
+const originalFetch = context.fetch;
+context.AbortController = class {
+  constructor() {
+    this.signal = {};
+  }
+  abort() {}
+};
+context.fetch = (_url, options) => {
+  fetchOptions = options;
+  return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+};
+context.fetchWithTimeout('/api/scan', {}, 12000);
+assert.strictEqual(fetchOptions.cache, 'no-store');
+context.fetch = originalFetch;
 assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
