@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pandas as pd
 
@@ -204,6 +205,221 @@ def test_fetch_discovery_daily_bars_batches_through_provider():
     assert sorted(frames) == ["AAA", "BBB", "CCC"]
 
 
+def dollar_metric(symbol="AAA", latest_close=100.0):
+    return discovery.DollarVolumeMetrics(
+        symbol=symbol,
+        latest_close=latest_close,
+        average_daily_volume=2_000_000,
+        average_daily_dollar_volume=200_000_000,
+        valid_daily_bars=30,
+        passed=True,
+    )
+
+
+def contract(symbol, contract_type, strike, open_interest, *, underlying="AAA", tradable=True, status="active"):
+    return {
+        "symbol": symbol,
+        "underlying_symbol": underlying,
+        "type": contract_type,
+        "strike_price": str(strike),
+        "open_interest": str(open_interest),
+        "tradable": tradable,
+        "status": status,
+    }
+
+
+class FakeOptionsClient:
+    def __init__(self, pages_by_symbol):
+        self.pages_by_symbol = pages_by_symbol
+        self.calls = []
+
+    def fetch_option_contracts_pages(self, params):
+        symbol = params["underlying_symbols"]
+        self.calls.append(dict(params))
+        page = self.pages_by_symbol[symbol]
+        if isinstance(page, list):
+            next_item = page.pop(0)
+            if isinstance(next_item, Exception):
+                raise next_item
+            return next_item
+        if isinstance(page, Exception):
+            raise page
+        return page
+
+
+def test_option_contract_request_params_use_dte_window_and_strike_band():
+    params = discovery.option_contract_request_params("AAPL", 200.0, today=__import__("datetime").date(2026, 7, 19))
+    assert params["underlying_symbols"] == "AAPL"
+    assert params["status"] == "active"
+    assert params["expiration_date_gte"] == "2026-08-02"
+    assert params["expiration_date_lte"] == "2026-09-17"
+    assert params["strike_price_gte"] == "180.0000"
+    assert params["strike_price_lte"] == "220.0000"
+    assert params["limit"] == discovery.DISCOVERY_OPTIONS_CONTRACT_LIMIT
+
+
+def test_options_liquidity_requires_call_and_put_open_interest():
+    contracts = [
+        contract("AAA260821C00100000", "call", 100, 250),
+        contract("AAA260821P00100000", "put", 100, 125),
+    ]
+    metrics = discovery.options_liquidity_metrics_from_contracts("AAA", 100.0, contracts, pages_fetched=1)
+    assert metrics.passed is True
+    assert metrics.near_atm_call_open_interest == 250
+    assert metrics.near_atm_put_open_interest == 125
+    assert metrics.near_atm_contracts_checked == 2
+
+
+def test_options_liquidity_rejects_when_either_side_is_thin():
+    call_thin = discovery.options_liquidity_metrics_from_contracts(
+        "AAA",
+        100.0,
+        [
+            contract("AAA260821C00100000", "call", 100, 99),
+            contract("AAA260821P00100000", "put", 100, 200),
+        ],
+    )
+    assert call_thin.passed is False
+    assert call_thin.rejection_reason == "thin call open interest"
+
+    put_thin = discovery.options_liquidity_metrics_from_contracts(
+        "AAA",
+        100.0,
+        [
+            contract("AAA260821C00100000", "call", 100, 200),
+            contract("AAA260821P00100000", "put", 100, 99),
+        ],
+    )
+    assert put_thin.passed is False
+    assert put_thin.rejection_reason == "thin put open interest"
+
+
+def test_options_liquidity_filters_to_near_atm_tradable_active_contracts():
+    metrics = discovery.options_liquidity_metrics_from_contracts(
+        "AAA",
+        100.0,
+        [
+            contract("AAA260821C00150000", "call", 150, 999),
+            contract("AAA260821P00050000", "put", 50, 999),
+            contract("AAA260821C00100000", "call", 100, 175, tradable=False),
+            contract("AAA260821C00100001", "call", 101, 180),
+            contract("AAA260821P00099000", "put", 99, 190, status="inactive"),
+            contract("AAA260821P00100001", "put", 101, 195),
+        ],
+    )
+    assert metrics.passed is True
+    assert metrics.near_atm_call_contract == "AAA260821C00100001"
+    assert metrics.near_atm_put_contract == "AAA260821P00100001"
+    assert metrics.near_atm_contracts_checked == 2
+
+
+def test_options_liquidity_fetch_failure_fails_closed():
+    client = FakeOptionsClient({"AAA": RuntimeError("timeout")})
+    metrics = discovery.options_liquidity_for_symbol(dollar_metric("AAA"), client=client)
+    assert metrics.passed is False
+    assert metrics.rejection_reason == "option contracts fetch failed"
+
+
+def test_options_liquidity_retries_rate_limit_then_recovers():
+    import os
+
+    previous_attempts = os.environ.get("DISCOVERY_OPTIONS_MAX_ATTEMPTS")
+    previous_backoff = os.environ.get("DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS")
+    os.environ["DISCOVERY_OPTIONS_MAX_ATTEMPTS"] = "2"
+    os.environ["DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS"] = "0"
+    try:
+        client = FakeOptionsClient({
+            "AAA": [
+                HTTPError(url="https://example.test", code=429, msg="rate limited", hdrs=None, fp=None),
+                ([
+                    contract("AAA260821C00100000", "call", 100, 200),
+                    contract("AAA260821P00100000", "put", 100, 200),
+                ], 1),
+            ],
+        })
+        metrics = discovery.options_liquidity_for_symbol(dollar_metric("AAA"), client=client)
+        assert metrics.passed is True
+        assert len(client.calls) == 2
+    finally:
+        if previous_attempts is None:
+            os.environ.pop("DISCOVERY_OPTIONS_MAX_ATTEMPTS", None)
+        else:
+            os.environ["DISCOVERY_OPTIONS_MAX_ATTEMPTS"] = previous_attempts
+        if previous_backoff is None:
+            os.environ.pop("DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS", None)
+        else:
+            os.environ["DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS"] = previous_backoff
+
+
+def test_stage4_options_liquidity_filter_uses_only_stage3_passed_symbols():
+    client = FakeOptionsClient({
+        "AAA": ([
+            contract("AAA260821C00100000", "call", 100, 200),
+            contract("AAA260821P00100000", "put", 100, 200),
+        ], 1),
+    })
+    failed_dollar = discovery.DollarVolumeMetrics("MISS", None, None, None, 0, False, "low dollar volume")
+    metrics = discovery.stage4_options_liquidity_filter(
+        [dollar_metric("AAA"), failed_dollar],
+        client=client,
+        max_workers=1,
+    )
+    assert [metric.symbol for metric in metrics] == ["AAA"]
+    assert metrics[0].passed is True
+    assert [call["underlying_symbols"] for call in client.calls] == ["AAA"]
+
+
+def test_percentile_ranks_handle_ties_and_single_values():
+    ranks = discovery._percentile_ranks({"LOW": 10.0, "MID1": 20.0, "MID2": 20.0, "HIGH": 40.0})
+    assert ranks["LOW"] == 0.0
+    assert ranks["MID1"] == ranks["MID2"]
+    assert ranks["MID1"] == (1 + 2) / 2 / 3
+    assert ranks["HIGH"] == 1.0
+    assert discovery._percentile_ranks({"ONLY": 99.0}) == {"ONLY": 1.0}
+
+
+def test_rank_discovery_candidates_combines_dollar_volume_and_both_options_sides():
+    dollar_metrics = [
+        dollar_metric("DOLLAR", latest_close=100.0),
+        dollar_metric("BALANCED", latest_close=100.0),
+        dollar_metric("OPTIONS", latest_close=100.0),
+        dollar_metric("WEAK", latest_close=100.0),
+    ]
+    dollar_metrics[0] = discovery.DollarVolumeMetrics("DOLLAR", 100.0, 10_000_000, 1_000_000_000, 30, True)
+    dollar_metrics[1] = discovery.DollarVolumeMetrics("BALANCED", 100.0, 8_000_000, 800_000_000, 30, True)
+    dollar_metrics[2] = discovery.DollarVolumeMetrics("OPTIONS", 100.0, 2_000_000, 200_000_000, 30, True)
+    dollar_metrics[3] = discovery.DollarVolumeMetrics("WEAK", 100.0, 1_000_000, 100_000_000, 30, True)
+    option_metrics = [
+        discovery.OptionsLiquidityMetrics("DOLLAR", 100.0, 100, 100, "DOLLARC", "DOLLARP", 2, 1, True),
+        discovery.OptionsLiquidityMetrics("BALANCED", 100.0, 600, 600, "BALANCEDC", "BALANCEDP", 2, 1, True),
+        discovery.OptionsLiquidityMetrics("OPTIONS", 100.0, 1_000, 1_000, "OPTIONSC", "OPTIONSP", 2, 1, True),
+        discovery.OptionsLiquidityMetrics("WEAK", 100.0, 100, 100, "WEAKC", "WEAKP", 2, 1, True),
+    ]
+    ranked = discovery.rank_discovery_candidates(dollar_metrics, option_metrics, target_size=2)
+    assert ranked[0].symbol == "BALANCED"
+    assert [candidate.symbol for candidate in ranked if candidate.selected] == ["BALANCED", "OPTIONS"]
+    assert ranked[0].combined_liquidity_score == ranked[1].combined_liquidity_score
+    assert ranked[1].combined_liquidity_score > ranked[2].combined_liquidity_score
+    assert ranked[-1].symbol == "WEAK"
+
+
+def test_rank_discovery_candidates_ignores_unpassed_or_unmatched_metrics():
+    dollar_metrics = [
+        discovery.DollarVolumeMetrics("GOOD", 100.0, 2_000_000, 200_000_000, 30, True),
+        discovery.DollarVolumeMetrics("LOWVOL", 100.0, 1_000, 100_000, 30, False, "low dollar volume"),
+    ]
+    option_metrics = [
+        discovery.OptionsLiquidityMetrics("GOOD", 100.0, 200, 200, "GOODC", "GOODP", 2, 1, True),
+        discovery.OptionsLiquidityMetrics("LOWVOL", 100.0, 999, 999, "LOWVOLC", "LOWVOLP", 2, 1, True),
+        discovery.OptionsLiquidityMetrics("NO_DOLLAR", 100.0, 999, 999, "NOC", "NOP", 2, 1, True),
+        discovery.OptionsLiquidityMetrics("THIN", 100.0, 20, 20, "THINC", "THINP", 2, 1, False, "thin call and put open interest"),
+    ]
+    ranked = discovery.rank_discovery_candidates(dollar_metrics, option_metrics, target_size=10)
+    assert [candidate.symbol for candidate in ranked] == ["GOOD"]
+    assert ranked[0].rank == 1
+    assert ranked[0].selected is True
+
+
 def main() -> int:
     test_stage1_accepts_active_tradable_non_otc_optionable_common_stocks()
     test_stage1_rejects_inactive_non_tradable_otc_and_non_optionable_assets()
@@ -217,6 +433,16 @@ def main() -> int:
     test_dollar_volume_metrics_reject_low_dollar_volume_and_insufficient_bars()
     test_apply_dollar_volume_filter_tracks_unverifiable_fetch_failures()
     test_fetch_discovery_daily_bars_batches_through_provider()
+    test_option_contract_request_params_use_dte_window_and_strike_band()
+    test_options_liquidity_requires_call_and_put_open_interest()
+    test_options_liquidity_rejects_when_either_side_is_thin()
+    test_options_liquidity_filters_to_near_atm_tradable_active_contracts()
+    test_options_liquidity_fetch_failure_fails_closed()
+    test_options_liquidity_retries_rate_limit_then_recovers()
+    test_stage4_options_liquidity_filter_uses_only_stage3_passed_symbols()
+    test_percentile_ranks_handle_ties_and_single_values()
+    test_rank_discovery_candidates_combines_dollar_volume_and_both_options_sides()
+    test_rank_discovery_candidates_ignores_unpassed_or_unmatched_metrics()
     print("Alpaca asset discovery v1 tests passed")
     return 0
 

@@ -11,8 +11,11 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any, Optional
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -23,6 +26,7 @@ from market_data import AlpacaMarketDataProvider
 
 DEFAULT_ALPACA_TRADING_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_ASSETS_ENDPOINT = "/v2/assets"
+ALPACA_OPTION_CONTRACTS_ENDPOINT = "/v2/options/contracts"
 SUPPORTED_US_EQUITY_EXCHANGES = {
     "AMEX",
     "ARCA",
@@ -37,6 +41,19 @@ DISCOVERY_MIN_VALID_DAILY_BARS = 25
 DISCOVERY_MIN_AVG_DOLLAR_VOLUME = 100_000_000
 DISCOVERY_DAILY_BARS_PERIOD = "60d"
 DISCOVERY_DAILY_BARS_BATCH_SIZE = 1000
+DISCOVERY_OPTIONS_MIN_DTE = 14
+DISCOVERY_OPTIONS_MAX_DTE = 60
+DISCOVERY_OPTIONS_STRIKE_BAND_PCT = 0.10
+DISCOVERY_OPTIONS_MIN_OPEN_INTEREST = 100
+DISCOVERY_OPTIONS_CONTRACT_LIMIT = 10000
+DISCOVERY_OPTIONS_MAX_PAGES = 10
+DISCOVERY_OPTIONS_MAX_WORKERS = 2
+DISCOVERY_OPTIONS_MAX_ATTEMPTS = 4
+DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS = 1.5
+DISCOVERY_TARGET_UNIVERSE_SIZE = 550
+DISCOVERY_RANK_DOLLAR_VOLUME_WEIGHT = 0.50
+DISCOVERY_RANK_CALL_OI_WEIGHT = 0.25
+DISCOVERY_RANK_PUT_OI_WEIGHT = 0.25
 
 WARRANT_NAME_RE = re.compile(r"\bwarrants?\b|\bwt\b", re.IGNORECASE)
 UNIT_NAME_RE = re.compile(r"\bunits?\b", re.IGNORECASE)
@@ -82,6 +99,35 @@ class DollarVolumeMetrics:
     rejection_reason: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class OptionsLiquidityMetrics:
+    symbol: str
+    latest_close: Optional[float]
+    near_atm_call_open_interest: Optional[int]
+    near_atm_put_open_interest: Optional[int]
+    near_atm_call_contract: Optional[str]
+    near_atm_put_contract: Optional[str]
+    near_atm_contracts_checked: int
+    pages_fetched: int
+    passed: bool
+    rejection_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RankedDiscoveryCandidate:
+    symbol: str
+    latest_close: Optional[float]
+    average_daily_dollar_volume: Optional[float]
+    near_atm_call_open_interest: Optional[int]
+    near_atm_put_open_interest: Optional[int]
+    dollar_volume_percentile: float
+    call_open_interest_percentile: float
+    put_open_interest_percentile: float
+    combined_liquidity_score: float
+    rank: int
+    selected: bool
+
+
 class AlpacaAssetDiscoveryClient:
     """Small Trading API client for Alpaca asset discovery."""
 
@@ -114,6 +160,45 @@ class AlpacaAssetDiscoveryClient:
         if not isinstance(payload, list):
             raise RuntimeError("Alpaca assets response was not a list")
         return payload
+
+    def _request_option_contracts_page(self, params: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self.base_url}{ALPACA_OPTION_CONTRACTS_ENDPOINT}?{urlencode(params)}"
+        request = Request(url, headers=self._headers())
+        with urlopen(request, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def fetch_option_contracts_pages(
+        self,
+        params: dict[str, Any],
+        *,
+        max_pages: int = DISCOVERY_OPTIONS_MAX_PAGES,
+    ) -> tuple[list[dict[str, Any]], int]:
+        contracts: list[dict[str, Any]] = []
+        page_token = None
+        seen_tokens = set()
+        page_count = 0
+
+        while True:
+            if page_count >= max(int(max_pages or 1), 1):
+                raise RuntimeError("Alpaca option-contract pagination exceeded max pages")
+
+            page_params = dict(params)
+            if page_token:
+                if page_token in seen_tokens:
+                    raise RuntimeError("Alpaca option-contract pagination repeated page token")
+                seen_tokens.add(page_token)
+                page_params["page_token"] = page_token
+
+            payload = self._request_option_contracts_page(page_params)
+            page_count += 1
+            page_contracts = payload.get("option_contracts")
+            if not isinstance(page_contracts, list):
+                raise RuntimeError("Alpaca option-contract response missing option_contracts list")
+            contracts.extend(page_contracts)
+
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                return contracts, page_count
 
 
 def asset_symbol(asset: dict[str, Any]) -> str:
@@ -350,6 +435,313 @@ def stage3_dollar_volume_filter(
     return apply_dollar_volume_filter(symbols, daily_bars, failures), failures
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not pd.notna(parsed):
+        return None
+    return parsed
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    parsed = _safe_float(value)
+    if parsed is None:
+        return None
+    return int(parsed)
+
+
+def _options_expiration_window(today: Optional[date] = None) -> tuple[str, str]:
+    base = today or date.today()
+    return (
+        (base + timedelta(days=DISCOVERY_OPTIONS_MIN_DTE)).isoformat(),
+        (base + timedelta(days=DISCOVERY_OPTIONS_MAX_DTE)).isoformat(),
+    )
+
+
+def option_contract_request_params(symbol: str, latest_close: float, *, today: Optional[date] = None) -> dict[str, Any]:
+    min_expiry, max_expiry = _options_expiration_window(today)
+    lower_strike = float(latest_close) * (1 - DISCOVERY_OPTIONS_STRIKE_BAND_PCT)
+    upper_strike = float(latest_close) * (1 + DISCOVERY_OPTIONS_STRIKE_BAND_PCT)
+    return {
+        "underlying_symbols": str(symbol or "").strip().upper(),
+        "status": "active",
+        "expiration_date_gte": min_expiry,
+        "expiration_date_lte": max_expiry,
+        "strike_price_gte": f"{lower_strike:.4f}",
+        "strike_price_lte": f"{upper_strike:.4f}",
+        "limit": DISCOVERY_OPTIONS_CONTRACT_LIMIT,
+    }
+
+
+def options_liquidity_metrics_from_contracts(
+    symbol: str,
+    latest_close: Optional[float],
+    contracts: list[dict[str, Any]],
+    *,
+    pages_fetched: int = 0,
+    min_open_interest: int = DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+) -> OptionsLiquidityMetrics:
+    symbol = str(symbol or "").strip().upper()
+    if latest_close is None:
+        return OptionsLiquidityMetrics(symbol, None, None, None, None, None, 0, pages_fetched, False, "missing current price")
+
+    lower_strike = float(latest_close) * (1 - DISCOVERY_OPTIONS_STRIKE_BAND_PCT)
+    upper_strike = float(latest_close) * (1 + DISCOVERY_OPTIONS_STRIKE_BAND_PCT)
+    best_call = None
+    best_put = None
+    checked = 0
+
+    for contract in contracts:
+        if str(contract.get("underlying_symbol") or "").strip().upper() != symbol:
+            continue
+        if str(contract.get("status") or "").strip().lower() != "active":
+            continue
+        if contract.get("tradable") is not True:
+            continue
+        strike = _safe_float(contract.get("strike_price"))
+        open_interest = _safe_int(contract.get("open_interest"))
+        if strike is None or open_interest is None:
+            continue
+        if strike < lower_strike or strike > upper_strike:
+            continue
+        checked += 1
+        contract_type = str(contract.get("type") or "").strip().lower()
+        candidate = {
+            "symbol": contract.get("symbol"),
+            "open_interest": open_interest,
+            "strike_distance": abs(strike - float(latest_close)),
+        }
+        if contract_type == "call" and (
+            best_call is None
+            or candidate["open_interest"] > best_call["open_interest"]
+            or (
+                candidate["open_interest"] == best_call["open_interest"]
+                and candidate["strike_distance"] < best_call["strike_distance"]
+            )
+        ):
+            best_call = candidate
+        elif contract_type == "put" and (
+            best_put is None
+            or candidate["open_interest"] > best_put["open_interest"]
+            or (
+                candidate["open_interest"] == best_put["open_interest"]
+                and candidate["strike_distance"] < best_put["strike_distance"]
+            )
+        ):
+            best_put = candidate
+
+    call_oi = best_call["open_interest"] if best_call else None
+    put_oi = best_put["open_interest"] if best_put else None
+    call_ok = call_oi is not None and call_oi >= int(min_open_interest)
+    put_ok = put_oi is not None and put_oi >= int(min_open_interest)
+    if call_ok and put_ok:
+        return OptionsLiquidityMetrics(
+            symbol,
+            float(latest_close),
+            call_oi,
+            put_oi,
+            str(best_call.get("symbol") or ""),
+            str(best_put.get("symbol") or ""),
+            checked,
+            pages_fetched,
+            True,
+        )
+    if not best_call and not best_put:
+        reason = "no near-atm contracts"
+    elif not call_ok and not put_ok:
+        reason = "thin call and put open interest"
+    elif not call_ok:
+        reason = "thin call open interest"
+    else:
+        reason = "thin put open interest"
+    return OptionsLiquidityMetrics(
+        symbol,
+        float(latest_close),
+        call_oi,
+        put_oi,
+        str((best_call or {}).get("symbol") or "") or None,
+        str((best_put or {}).get("symbol") or "") or None,
+        checked,
+        pages_fetched,
+        False,
+        reason,
+    )
+
+
+def _retryable_options_error(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or 500 <= exc.code <= 599
+    return isinstance(exc, (URLError, TimeoutError))
+
+
+def options_liquidity_for_symbol(
+    metric: DollarVolumeMetrics,
+    *,
+    client: Optional[AlpacaAssetDiscoveryClient] = None,
+) -> OptionsLiquidityMetrics:
+    symbol = metric.symbol
+    if not metric.passed:
+        return OptionsLiquidityMetrics(symbol, metric.latest_close, None, None, None, None, 0, 0, False, "dollar volume not passed")
+    if metric.latest_close is None or metric.latest_close <= 0:
+        return OptionsLiquidityMetrics(symbol, metric.latest_close, None, None, None, None, 0, 0, False, "missing current price")
+
+    discovery_client = client or AlpacaAssetDiscoveryClient()
+    params = option_contract_request_params(symbol, metric.latest_close)
+    attempts = max(int(os.getenv("DISCOVERY_OPTIONS_MAX_ATTEMPTS", str(DISCOVERY_OPTIONS_MAX_ATTEMPTS)) or 1), 1)
+    backoff = max(float(os.getenv("DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS", str(DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS)) or 0), 0)
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            contracts, pages = discovery_client.fetch_option_contracts_pages(params)
+            return options_liquidity_metrics_from_contracts(symbol, metric.latest_close, contracts, pages_fetched=pages)
+        except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
+            last_error = exc
+            if attempt >= attempts - 1 or not _retryable_options_error(exc):
+                break
+            time.sleep(backoff * (attempt + 1))
+    reason = "option contracts fetch failed"
+    if isinstance(last_error, HTTPError) and last_error.code == 429:
+        reason = "option contracts rate limited"
+    return OptionsLiquidityMetrics(symbol, metric.latest_close, None, None, None, None, 0, 0, False, reason)
+
+
+def stage4_options_liquidity_filter(
+    dollar_volume_metrics: list[DollarVolumeMetrics],
+    *,
+    client: Optional[AlpacaAssetDiscoveryClient] = None,
+    max_workers: int = DISCOVERY_OPTIONS_MAX_WORKERS,
+) -> list[OptionsLiquidityMetrics]:
+    candidates = [metric for metric in dollar_volume_metrics if metric.passed]
+    if not candidates:
+        return []
+    worker_count = max(int(max_workers or 1), 1)
+    results: list[OptionsLiquidityMetrics] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(options_liquidity_for_symbol, metric, client=client): metric.symbol
+            for metric in candidates
+        }
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                results.append(future.result())
+            except Exception:
+                results.append(OptionsLiquidityMetrics(symbol, None, None, None, None, None, 0, 0, False, "option contracts fetch failed"))
+    return sorted(results, key=lambda item: item.symbol)
+
+
+def _percentile_ranks(values_by_symbol: dict[str, float]) -> dict[str, float]:
+    if not values_by_symbol:
+        return {}
+    ordered = sorted(values_by_symbol.items(), key=lambda item: (item[1], item[0]))
+    count = len(ordered)
+    if count == 1:
+        return {ordered[0][0]: 1.0}
+
+    ranks = {}
+    index = 0
+    while index < count:
+        value = ordered[index][1]
+        end = index
+        while end + 1 < count and ordered[end + 1][1] == value:
+            end += 1
+        percentile = ((index + end) / 2) / (count - 1)
+        for position in range(index, end + 1):
+            ranks[ordered[position][0]] = percentile
+        index = end + 1
+    return ranks
+
+
+def rank_discovery_candidates(
+    dollar_volume_metrics: list[DollarVolumeMetrics],
+    options_metrics: list[OptionsLiquidityMetrics],
+    *,
+    target_size: int = DISCOVERY_TARGET_UNIVERSE_SIZE,
+) -> list[RankedDiscoveryCandidate]:
+    dollar_by_symbol = {
+        metric.symbol: metric
+        for metric in dollar_volume_metrics
+        if metric.passed and metric.average_daily_dollar_volume is not None
+    }
+    option_by_symbol = {
+        metric.symbol: metric
+        for metric in options_metrics
+        if metric.passed
+        and metric.near_atm_call_open_interest is not None
+        and metric.near_atm_put_open_interest is not None
+        and metric.symbol in dollar_by_symbol
+    }
+    if not option_by_symbol:
+        return []
+
+    dollar_percentiles = _percentile_ranks({
+        symbol: float(dollar_by_symbol[symbol].average_daily_dollar_volume or 0)
+        for symbol in option_by_symbol
+    })
+    call_percentiles = _percentile_ranks({
+        symbol: float(metric.near_atm_call_open_interest or 0)
+        for symbol, metric in option_by_symbol.items()
+    })
+    put_percentiles = _percentile_ranks({
+        symbol: float(metric.near_atm_put_open_interest or 0)
+        for symbol, metric in option_by_symbol.items()
+    })
+
+    candidates = []
+    for symbol, option_metric in option_by_symbol.items():
+        dollar_metric = dollar_by_symbol[symbol]
+        dollar_rank = dollar_percentiles[symbol]
+        call_rank = call_percentiles[symbol]
+        put_rank = put_percentiles[symbol]
+        combined_score = (
+            DISCOVERY_RANK_DOLLAR_VOLUME_WEIGHT * dollar_rank
+            + DISCOVERY_RANK_CALL_OI_WEIGHT * call_rank
+            + DISCOVERY_RANK_PUT_OI_WEIGHT * put_rank
+        )
+        candidates.append(RankedDiscoveryCandidate(
+            symbol=symbol,
+            latest_close=dollar_metric.latest_close,
+            average_daily_dollar_volume=dollar_metric.average_daily_dollar_volume,
+            near_atm_call_open_interest=option_metric.near_atm_call_open_interest,
+            near_atm_put_open_interest=option_metric.near_atm_put_open_interest,
+            dollar_volume_percentile=dollar_rank,
+            call_open_interest_percentile=call_rank,
+            put_open_interest_percentile=put_rank,
+            combined_liquidity_score=combined_score,
+            rank=0,
+            selected=False,
+        ))
+
+    selected_cutoff = max(int(target_size or 0), 0)
+    ranked = []
+    for index, candidate in enumerate(sorted(
+        candidates,
+        key=lambda item: (
+            item.combined_liquidity_score,
+            item.average_daily_dollar_volume or 0,
+            min(item.near_atm_call_open_interest or 0, item.near_atm_put_open_interest or 0),
+            item.symbol,
+        ),
+        reverse=True,
+    ), start=1):
+        ranked.append(RankedDiscoveryCandidate(
+            symbol=candidate.symbol,
+            latest_close=candidate.latest_close,
+            average_daily_dollar_volume=candidate.average_daily_dollar_volume,
+            near_atm_call_open_interest=candidate.near_atm_call_open_interest,
+            near_atm_put_open_interest=candidate.near_atm_put_open_interest,
+            dollar_volume_percentile=candidate.dollar_volume_percentile,
+            call_open_interest_percentile=candidate.call_open_interest_percentile,
+            put_open_interest_percentile=candidate.put_open_interest_percentile,
+            combined_liquidity_score=candidate.combined_liquidity_score,
+            rank=index,
+            selected=index <= selected_cutoff,
+        ))
+    return ranked
+
+
 def _sample_metric(metric: DollarVolumeMetrics) -> dict[str, Any]:
     return {
         "symbol": metric.symbol,
@@ -359,6 +751,37 @@ def _sample_metric(metric: DollarVolumeMetrics) -> dict[str, Any]:
         "valid_daily_bars": metric.valid_daily_bars,
         "passed": metric.passed,
         "rejection_reason": metric.rejection_reason,
+    }
+
+
+def _sample_options_metric(metric: OptionsLiquidityMetrics) -> dict[str, Any]:
+    return {
+        "symbol": metric.symbol,
+        "latest_close": metric.latest_close,
+        "near_atm_call_open_interest": metric.near_atm_call_open_interest,
+        "near_atm_put_open_interest": metric.near_atm_put_open_interest,
+        "near_atm_call_contract": metric.near_atm_call_contract,
+        "near_atm_put_contract": metric.near_atm_put_contract,
+        "near_atm_contracts_checked": metric.near_atm_contracts_checked,
+        "pages_fetched": metric.pages_fetched,
+        "passed": metric.passed,
+        "rejection_reason": metric.rejection_reason,
+    }
+
+
+def _sample_ranked_candidate(candidate: RankedDiscoveryCandidate) -> dict[str, Any]:
+    return {
+        "rank": candidate.rank,
+        "symbol": candidate.symbol,
+        "latest_close": candidate.latest_close,
+        "average_daily_dollar_volume": candidate.average_daily_dollar_volume,
+        "near_atm_call_open_interest": candidate.near_atm_call_open_interest,
+        "near_atm_put_open_interest": candidate.near_atm_put_open_interest,
+        "dollar_volume_percentile": round(candidate.dollar_volume_percentile, 4),
+        "call_open_interest_percentile": round(candidate.call_open_interest_percentile, 4),
+        "put_open_interest_percentile": round(candidate.put_open_interest_percentile, 4),
+        "combined_liquidity_score": round(candidate.combined_liquidity_score, 4),
+        "selected": candidate.selected,
     }
 
 
@@ -377,6 +800,8 @@ def _sample_asset(asset: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     run_stage3 = "--stage3" in sys.argv
+    run_stage4 = "--stage4" in sys.argv
+    run_stage5 = "--stage5" in sys.argv
     client = AlpacaAssetDiscoveryClient()
     assets = client.fetch_assets()
     stage1 = stage1_optionable_assets(assets)
@@ -400,7 +825,7 @@ def main() -> int:
         ][:12],
         "sample_stage2_symbols": [asset_symbol(asset) for asset in stage2[:25]],
     }
-    if run_stage3:
+    if run_stage3 or run_stage4 or run_stage5:
         started = time.perf_counter()
         metrics, failures = stage3_dollar_volume_filter(stage2)
         elapsed_seconds = round(time.perf_counter() - started, 2)
@@ -423,6 +848,51 @@ def main() -> int:
             "sample_failed": [_sample_metric(metric) for metric in sorted(failed, key=lambda item: item.average_daily_dollar_volume or 0, reverse=True)[:20]],
             "ford": _sample_metric(next((metric for metric in metrics if metric.symbol == "F"), DollarVolumeMetrics("F", None, None, None, 0, False, "not in input"))),
         }
+        if run_stage4 or run_stage5:
+            options_started = time.perf_counter()
+            options_metrics = stage4_options_liquidity_filter(metrics)
+            options_elapsed_seconds = round(time.perf_counter() - options_started, 2)
+            options_passed = [metric for metric in options_metrics if metric.passed]
+            options_failed = [metric for metric in options_metrics if not metric.passed]
+            report["stage4"] = {
+                "thresholds": {
+                    "minimum_dte": DISCOVERY_OPTIONS_MIN_DTE,
+                    "maximum_dte": DISCOVERY_OPTIONS_MAX_DTE,
+                    "near_atm_strike_band_pct": DISCOVERY_OPTIONS_STRIKE_BAND_PCT,
+                    "minimum_call_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+                    "minimum_put_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+                    "snapshot_spread_checks": False,
+                },
+                "elapsed_seconds": options_elapsed_seconds,
+                "input_symbols": len(passed),
+                "passed": len(options_passed),
+                "failed_or_unverifiable": len(options_failed),
+                "failure_reasons": dict(sorted({reason: sum(1 for metric in options_failed if metric.rejection_reason == reason) for reason in {metric.rejection_reason for metric in options_failed}}.items())),
+                "total_pages_fetched": sum(metric.pages_fetched for metric in options_metrics),
+                "sample_passed": [_sample_options_metric(metric) for metric in sorted(options_passed, key=lambda item: min(item.near_atm_call_open_interest or 0, item.near_atm_put_open_interest or 0), reverse=True)[:20]],
+                "sample_failed": [_sample_options_metric(metric) for metric in sorted(options_failed, key=lambda item: min(item.near_atm_call_open_interest or 0, item.near_atm_put_open_interest or 0), reverse=True)[:20]],
+                "ford": _sample_options_metric(next((metric for metric in options_metrics if metric.symbol == "F"), OptionsLiquidityMetrics("F", None, None, None, None, None, 0, 0, False, "not in input"))),
+            }
+            if run_stage5:
+                ranked = rank_discovery_candidates(metrics, options_metrics)
+                selected = [candidate for candidate in ranked if candidate.selected]
+                report["stage5"] = {
+                    "target_universe_size": DISCOVERY_TARGET_UNIVERSE_SIZE,
+                    "formula": {
+                        "combined_liquidity_score": (
+                            f"{DISCOVERY_RANK_DOLLAR_VOLUME_WEIGHT:.2f} * dollar_volume_percentile"
+                            f" + {DISCOVERY_RANK_CALL_OI_WEIGHT:.2f} * call_open_interest_percentile"
+                            f" + {DISCOVERY_RANK_PUT_OI_WEIGHT:.2f} * put_open_interest_percentile"
+                        ),
+                        "flat_price_floor": None,
+                    },
+                    "input_symbols": len(options_passed),
+                    "ranked": len(ranked),
+                    "selected": len(selected),
+                    "top_20": [_sample_ranked_candidate(candidate) for candidate in ranked[:20]],
+                    "bottom_20_selected": [_sample_ranked_candidate(candidate) for candidate in selected[-20:]],
+                    "full_selected_symbols": [candidate.symbol for candidate in selected],
+                }
     print(json.dumps(report, indent=2))
     return 0
 
