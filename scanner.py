@@ -3741,37 +3741,55 @@ def _stock_confirmation(result: dict, setup_direction: str, setup_status: str) -
     trade_direction = _stock_trade_direction(result)
     structure_label = str(result.get("structureLabel") or result.get("structure") or "").lower()
     displacement = str(ev.get("displacement") or "").upper()
+    in_zone = bool(result.get("in_ob") or result.get("near_ob"))
 
     bullish_flow = setup_direction == "Bullish" or "bullish" in structure_label
     bearish_flow = setup_direction == "Bearish" or "bearish" in structure_label
+    status_has_confirmation = (
+        "Early Confirmation" in setup_status
+        or "Strong Confirmation" in setup_status
+        or "Trend Resumption" in setup_status
+    )
+
+    def _ema_relation_matches(direction: str) -> bool:
+        try:
+            price = float(result["price"])
+            ema20 = float(result["ema20"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if direction == "LONG":
+            return price > ema20
+        if direction == "SHORT":
+            return price < ema20
+        return False
+
+    candidates = []
+
+    def add_signal(condition: bool, priority: int, reason: str) -> None:
+        if condition:
+            candidates.append((priority, reason))
 
     if ev.get("trigger_confirmed"):
         return True, "trigger confirmed after pullback"
 
     if trade_direction == "LONG":
-        if result.get("bos_confirmed") and bullish_flow:
-            return True, "bullish structure shift after pullback"
-        if ev.get("rejection_confirmed") and (result.get("in_ob") or result.get("near_ob")):
-            return True, "strong bullish reaction from demand/support"
-        if displacement == "STRONG" and bullish_flow:
-            return True, "strong bullish reaction candle from support"
-        if result.get("price") and result.get("ema20") and float(result["price"]) > float(result["ema20"]) and bullish_flow:
-            return True, "reclaimed EMA20 with bullish short-term flow"
-        if "Early Confirmation" in setup_status or "Strong Confirmation" in setup_status or "Trend Resumption" in setup_status:
-            return True, "bullish confirmation started"
+        add_signal(ev.get("rejection_confirmed") and in_zone, 90, "strong bullish reaction from demand/support")
+        add_signal(displacement == "STRONG" and bullish_flow, 80, "strong bullish reaction candle from support")
+        add_signal(result.get("bos_confirmed") and bullish_flow, 70, "bullish structure shift after pullback")
+        add_signal(_ema_relation_matches("LONG") and bullish_flow, 60, "reclaimed EMA20 with bullish short-term flow")
+        add_signal(status_has_confirmation, 50, "bullish confirmation started")
+        if candidates:
+            return True, max(candidates, key=lambda item: item[0])[1]
         return False, "waiting for bullish structure shift or support reaction"
 
     if trade_direction == "SHORT":
-        if result.get("bos_confirmed") and bearish_flow:
-            return True, "bearish structure shift after pullback"
-        if ev.get("rejection_confirmed") and (result.get("in_ob") or result.get("near_ob")):
-            return True, "strong bearish reaction from supply/resistance"
-        if displacement == "STRONG" and bearish_flow:
-            return True, "strong bearish reaction candle from resistance"
-        if result.get("price") and result.get("ema20") and float(result["price"]) < float(result["ema20"]) and bearish_flow:
-            return True, "rejected EMA20 with bearish short-term flow"
-        if "Early Confirmation" in setup_status or "Strong Confirmation" in setup_status or "Trend Resumption" in setup_status:
-            return True, "bearish confirmation started"
+        add_signal(ev.get("rejection_confirmed") and in_zone, 90, "strong bearish reaction from supply/resistance")
+        add_signal(displacement == "STRONG" and bearish_flow, 80, "strong bearish reaction candle from resistance")
+        add_signal(result.get("bos_confirmed") and bearish_flow, 70, "bearish structure shift after pullback")
+        add_signal(_ema_relation_matches("SHORT") and bearish_flow, 60, "rejected EMA20 with bearish short-term flow")
+        add_signal(status_has_confirmation, 50, "bearish confirmation started")
+        if candidates:
+            return True, max(candidates, key=lambda item: item[0])[1]
         return False, "waiting for bearish structure shift or resistance rejection"
 
     return False, "direction unclear"
