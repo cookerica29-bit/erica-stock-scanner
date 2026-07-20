@@ -160,6 +160,7 @@ _background_jobs = set()
 _background_jobs_lock = threading.Lock()
 _background_refresh_started = False
 _background_last_refresh = {}
+_background_periodic_tasks = {}
 _active_scan_count = 0
 _analysis_cache = {}
 ANALYSIS_CACHE_STALE_SECONDS = 180
@@ -272,6 +273,16 @@ def _periodic_refresh_due(key: str, ttl_seconds: int) -> bool:
             return False
         _background_last_refresh[key] = now
         return True
+
+
+def register_background_periodic_task(key: str, ttl_seconds: int, callback) -> None:
+    if not key or ttl_seconds <= 0 or not callable(callback):
+        return
+    with _background_jobs_lock:
+        _background_periodic_tasks[str(key)] = {
+            "ttl_seconds": int(ttl_seconds),
+            "callback": callback,
+        }
 
 
 def _scan_activity_started() -> None:
@@ -2868,6 +2879,17 @@ def _background_refresh_loop() -> None:
             if _periodic_refresh_due("earnings", 6 * 60 * 60):
                 for ticker in [s for s in symbols if s not in NO_EARNINGS_SYMBOLS][:40]:
                     _submit_background_job(("earnings_periodic", ticker), _refresh_earnings, ticker)
+
+            with _background_jobs_lock:
+                periodic_tasks = list(_background_periodic_tasks.items())
+            for key, task in periodic_tasks:
+                ttl_seconds = int(task.get("ttl_seconds") or 0)
+                callback = task.get("callback")
+                if ttl_seconds > 0 and callable(callback) and _periodic_refresh_due(f"periodic:{key}", ttl_seconds):
+                    try:
+                        callback()
+                    except Exception as task_exc:
+                        logger.warning("[background] periodic task failed key=%s error=%s", key, task_exc)
         except Exception as exc:
             logger.warning("[background] refresh loop error: %s", exc)
         time.sleep(30)

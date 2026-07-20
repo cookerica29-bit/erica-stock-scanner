@@ -8,7 +8,16 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from scanner import analysis_cache_status, scan_cached, scan_ticker, debug_ticker, scan_trends, WATCHLIST, start_market_cache_refresh
+from scanner import (
+    analysis_cache_status,
+    scan_cached,
+    scan_ticker,
+    debug_ticker,
+    scan_trends,
+    WATCHLIST,
+    register_background_periodic_task,
+    start_market_cache_refresh,
+)
 from discovery import build_ranked_discovery_universe
 from market_data import (
     alpaca_credentials_configured,
@@ -174,6 +183,25 @@ def _require_discovery_admin_token(header_value) -> None:
     if header_value != token:
         raise HTTPException(status_code=403, detail="Invalid discovery admin token")
 
+
+def _discovery_cache_needs_refresh() -> bool:
+    status = _discovery_status_snapshot()
+    return not status.get("has_cache") or bool(status.get("stale"))
+
+
+def _submit_discovery_universe_job_if_needed() -> tuple[bool, str]:
+    if not _discovery_cache_needs_refresh():
+        return False, "cache fresh"
+    return _submit_discovery_universe_job(force=False)
+
+
+def _register_discovery_background_refresh() -> None:
+    register_background_periodic_task(
+        "discovery_universe",
+        DISCOVERY_UNIVERSE_TTL_SECONDS,
+        _submit_discovery_universe_job_if_needed,
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -194,7 +222,9 @@ async def add_no_store_headers(request: Request, call_next):
 
 @app.on_event("startup")
 def startup_market_cache_refresh():
+    _register_discovery_background_refresh()
     start_market_cache_refresh()
+    _submit_discovery_universe_job_if_needed()
 
 
 @app.get("/")

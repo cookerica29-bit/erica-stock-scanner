@@ -146,6 +146,28 @@ try:
 finally:
     scanner._background_executor = original_executor
 
+# Periodic task registration stores a bounded callback for the shared background refresh loop.
+with scanner._background_jobs_lock:
+    original_periodic_tasks = dict(scanner._background_periodic_tasks)
+    scanner._background_periodic_tasks.clear()
+try:
+    callback = lambda: None
+    scanner.register_background_periodic_task("unit_test", 60, callback)
+    with scanner._background_jobs_lock:
+        task = scanner._background_periodic_tasks.get("unit_test")
+    assert task["ttl_seconds"] == 60
+    assert task["callback"] is callback
+
+    scanner.register_background_periodic_task("", 60, callback)
+    scanner.register_background_periodic_task("bad_ttl", 0, callback)
+    scanner.register_background_periodic_task("bad_callback", 60, None)
+    with scanner._background_jobs_lock:
+        assert set(scanner._background_periodic_tasks) == {"unit_test"}
+finally:
+    with scanner._background_jobs_lock:
+        scanner._background_periodic_tasks.clear()
+        scanner._background_periodic_tasks.update(original_periodic_tasks)
+
 # scan_cached treats a failed refresh submission as "serve cached data", not success or already-running metadata.
 reset_refresh_state()
 stale_cached = {

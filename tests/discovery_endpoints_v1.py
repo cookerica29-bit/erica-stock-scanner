@@ -275,6 +275,79 @@ def test_scan_default_and_finviz_modes_remain_unchanged():
         main.scan_cached = original_scan_cached
 
 
+def test_discovery_cache_refresh_needed_for_missing_and_stale_cache():
+    reset_discovery_cache()
+    assert main._discovery_cache_needs_refresh() is True
+
+    now = __import__("datetime").datetime.utcnow()
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            "symbols": ["AAPL"],
+            "generated_at": now,
+            "expires_at": now + __import__("datetime").timedelta(hours=1),
+            "running": False,
+            "last_error": None,
+        })
+    assert main._discovery_cache_needs_refresh() is False
+
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache["expires_at"] = now - __import__("datetime").timedelta(seconds=1)
+    assert main._discovery_cache_needs_refresh() is True
+    reset_discovery_cache()
+
+
+def test_discovery_auto_submit_skips_fresh_cache_and_running_job():
+    previous_executor = main._discovery_universe_executor
+    previous_builder = main.build_ranked_discovery_universe
+    main._discovery_universe_executor = InlineExecutor()
+    main.build_ranked_discovery_universe = fake_discovery_result
+    reset_discovery_cache()
+    try:
+        accepted, job_id = main._submit_discovery_universe_job_if_needed()
+        assert accepted is True
+        assert job_id.startswith("discovery:")
+        assert main._discovery_status_snapshot()["status"] == "ready"
+
+        accepted, reason = main._submit_discovery_universe_job_if_needed()
+        assert accepted is False
+        assert reason == "cache fresh"
+
+        with main._discovery_universe_lock:
+            main._discovery_universe_cache.update({
+                "running": True,
+                "symbols": [],
+                "generated_at": None,
+                "expires_at": None,
+            })
+        accepted, reason = main._submit_discovery_universe_job_if_needed()
+        assert accepted is False
+        assert reason == "already running"
+    finally:
+        main._discovery_universe_executor = previous_executor
+        main.build_ranked_discovery_universe = previous_builder
+        reset_discovery_cache()
+
+
+def test_startup_registers_and_submits_discovery_refresh():
+    previous_register = main.register_background_periodic_task
+    previous_submit = main._submit_discovery_universe_job_if_needed
+    previous_start_market_cache = main.start_market_cache_refresh
+    calls = []
+    main.register_background_periodic_task = lambda key, ttl, callback: calls.append(("register", key, ttl, callback))
+    main._submit_discovery_universe_job_if_needed = lambda: calls.append(("submit",)) or (True, "job")
+    main.start_market_cache_refresh = lambda: calls.append(("market_cache",))
+    try:
+        main.startup_market_cache_refresh()
+        assert calls[0][0:3] == ("register", "discovery_universe", main.DISCOVERY_UNIVERSE_TTL_SECONDS)
+        assert callable(calls[0][3])
+        assert calls[1] == ("market_cache",)
+        assert calls[2] == ("submit",)
+    finally:
+        main.register_background_periodic_task = previous_register
+        main._submit_discovery_universe_job_if_needed = previous_submit
+        main.start_market_cache_refresh = previous_start_market_cache
+
+
 def main_test() -> int:
     test_discovery_status_warming_without_cache()
     test_discovery_run_disabled_when_token_unset()
@@ -284,6 +357,9 @@ def main_test() -> int:
     test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz()
     test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncation()
     test_scan_default_and_finviz_modes_remain_unchanged()
+    test_discovery_cache_refresh_needed_for_missing_and_stale_cache()
+    test_discovery_auto_submit_skips_fresh_cache_and_running_job()
+    test_startup_registers_and_submits_discovery_refresh()
     print("Discovery endpoints v1 tests passed")
     return 0
 
