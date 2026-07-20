@@ -783,6 +783,49 @@
   .execution-risk { color:#fbbf24; font-size:13px; font-weight:950; margin-top:7px; }
   .execution-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
   .execution-actions button { flex:1 1 130px; }
+  .positions-list { display:grid; gap:14px; }
+  .position-card { overflow:hidden; position:relative; }
+  .position-progress-strip {
+    height:4px;
+    margin:-14px -14px 14px;
+  }
+  .position-progress-strip.green { background:linear-gradient(90deg, var(--long), #86efac); }
+  .position-progress-strip.yellow { background:linear-gradient(90deg, var(--warn), #fde68a); }
+  .position-progress-strip.red { background:linear-gradient(90deg, var(--fail), #fb7185); }
+  .position-progress-strip.gray { background:linear-gradient(90deg, rgba(148,163,184,0.5), rgba(203,213,225,0.42)); }
+  .position-urgency {
+    border:1px solid rgba(148,163,184,0.28);
+    border-radius:999px;
+    color:var(--text);
+    font-size:10px;
+    font-weight:950;
+    padding:5px 8px;
+    text-transform:uppercase;
+    white-space:nowrap;
+  }
+  .position-urgency.green { border-color:rgba(34,197,94,0.36); color:#86efac; }
+  .position-urgency.yellow { border-color:rgba(245,158,11,0.42); color:#fbbf24; }
+  .position-urgency.red { border-color:rgba(239,68,68,0.46); color:#fca5a5; }
+  .position-urgency.gray { border-color:rgba(148,163,184,0.28); color:var(--muted); }
+  .position-card-grid {
+    display:grid;
+    gap:11px;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+  }
+  .position-section { min-width:0; }
+  .position-section.live { border-color:rgba(139,92,246,0.18); }
+  .position-section.contract { border-color:rgba(245,158,11,0.16); }
+  .position-warning { color:#fbbf24; font-size:11px; font-weight:850; line-height:1.4; margin-top:8px; }
+  .position-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .position-actions button { flex:1 1 140px; }
+  .position-actions .btn-danger {
+    background:rgba(239,68,68,0.12);
+    border:1px solid rgba(239,68,68,0.34);
+    color:#fca5a5;
+  }
+  @media (max-width: 900px) {
+    .position-card-grid { grid-template-columns:1fr; }
+  }
   .execution-empty {
     background:rgba(15,23,42,0.75);
     border:1px dashed rgba(148,163,184,0.2);
@@ -2220,6 +2263,7 @@
   <button class="tab-btn" data-tab="execution" onclick="switchTab('execution')">Execution</button>
   <button class="tab-btn" data-tab="further" onclick="switchTab('further')">Further Analysis</button>
   <button class="tab-btn" data-tab="journal" onclick="switchTab('journal')">Journal</button>
+  <button class="tab-btn" data-tab="positions" onclick="switchTab('positions')">Positions</button>
   <button class="tab-btn" data-tab="analytics" onclick="switchTab('analytics')">Analytics</button>
   <button class="tab-btn" data-tab="diagnostics" onclick="switchTab('diagnostics')">Diagnostics</button>
   <button class="tab-btn" data-tab="terms" onclick="switchTab('terms')">Terms</button>
@@ -2416,6 +2460,21 @@
   </div>
   <div class="journal-table-wrap">
     <div id="journalBody"></div>
+  </div>
+</div>
+
+<!-- ── Positions Tab ─────────────────────────────────────────────────────── -->
+<div id="positions-panel" class="tab-panel">
+  <div class="execution-panel">
+    <div class="execution-head">
+      <div>
+        <div class="execution-title">Positions</div>
+        <div class="execution-subtitle">Open journal positions compared against their original locked plan and the latest loaded scanner state.</div>
+      </div>
+      <button class="btn-secondary" onclick="renderPositionsTab()">Refresh View</button>
+    </div>
+    <div id="positionsSummary" class="execution-subtitle"></div>
+    <div id="positionsList"></div>
   </div>
 </div>
 
@@ -3149,6 +3208,7 @@ function switchTab(tab) {
     execution: 'execution-panel',
     further: 'further-panel',
     journal: 'journal-panel',
+    positions: 'positions-panel',
     analytics: 'analytics-panel',
     diagnostics: 'diagnostics-panel',
     terms: 'terms-panel',
@@ -3162,6 +3222,7 @@ function switchTab(tab) {
   if (tab === 'execution') renderExecutionTab();
   if (tab === 'further') renderFurtherAnalysisTab();
   if (tab === 'journal') renderJournal();
+  if (tab === 'positions') renderPositionsTab();
   if (tab === 'analytics' || tab === 'diagnostics') renderAnalytics();
 }
 
@@ -4565,9 +4626,20 @@ function adjustedMarkerPositions(rawPositions, minGap = RR_MARKER_MIN_GAP) {
   }, { ...rawPositions });
 }
 
+function currentDisplayPrice(setup = {}) {
+  return planNumber(firstPresent(
+    setup.current_quote_price,
+    setup.currentQuotePrice,
+    setup.price,
+    setup.current_price,
+    setup.currentPrice,
+    setup.underlying_price
+  ));
+}
+
 function riskRewardBarData(setup) {
   const direction = normalizePlanDirection(setup);
-  const current = planNumber(firstPresent(setup.current_quote_price, setup.currentQuotePrice, setup.price, setup.current_price, setup.currentPrice, setup.underlying_price));
+  const current = currentDisplayPrice(setup);
   const entry = planNumber(firstPresent(setup.entry, setup.entry_price));
   const stop = planNumber(firstPresent(setup.sl, setup.stop, setup.stop_price));
   const tp1 = planNumber(firstPresent(setup.tp1, setup.target, setup.target_price));
@@ -5367,6 +5439,176 @@ function renderExecutionTab() {
         <div class="execution-actions">
           <button onclick="copyExecutionTradePlan(${idx})">Copy Execution Plan</button>
           <button class="btn-secondary" onclick="openRobinhood()">Execute Trade</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderPositionKvRows(items = []) {
+  return items.map(([label, value]) => `
+    <div class="execution-line"><span>${escapeHtml(label)}</span><span>${escapeHtml(value ?? '—')}</span></div>
+  `).join('');
+}
+
+function positionContractLabel(plan = {}) {
+  return [
+    plan.optionType,
+    plan.strike != null ? `$${fmtNumber(plan.strike)}` : null,
+    plan.expiration,
+    plan.contractTierLabel || plan.contractTier,
+  ].filter(Boolean).join(' · ') || '—';
+}
+
+function expectedMoveWindowLabel(plan = {}) {
+  const low = plan.expectedTradingDaysLow;
+  const high = plan.expectedTradingDaysHigh;
+  if (low == null && high == null) return '—';
+  if (low != null && high != null) return `${fmtNumber(low)}-${fmtNumber(high)} trading days`;
+  return `${fmtNumber(firstPresent(low, high))} trading days`;
+}
+
+function isPositionNearStop(model = {}) {
+  const live = model.live || {};
+  return !live.stopTouchedAt && live.rNow != null && live.rNow <= -0.75;
+}
+
+function positionProgressClass(model = {}) {
+  const live = model.live || {};
+  if (live.stopTouchedAt || isPositionNearStop(model) || live.contractHealth?.status === 'TIGHT') return 'red';
+  if (live.tp1TouchedAt || (live.rNow != null && live.rNow >= 1)) return 'green';
+  if (live.entryTouchedAt) return 'yellow';
+  return 'gray';
+}
+
+function positionUrgency(model = {}) {
+  const live = model.live || {};
+  const progress = String(live.tradeProgressStatus || '').toUpperCase();
+  if (live.stopTouchedAt) return { label: 'Stopped', className: 'red', rank: 0 };
+  if (isPositionNearStop(model)) return { label: 'Near Stop', className: 'red', rank: 0 };
+  if (live.contractHealth?.status === 'TIGHT') return { label: 'DTE Tight', className: 'red', rank: 1 };
+  if (live.tp1TouchedAt) return { label: 'TP1 Hit', className: 'green', rank: 2 };
+  if (progress === 'TARGET NEAR') return { label: 'Target Near', className: 'green', rank: 3 };
+  if (progress === 'TREND DEVELOPING' || live.reachedOneR || (live.rNow != null && live.rNow >= 1)) {
+    return { label: 'Trend Developing', className: 'green', rank: 4 };
+  }
+  if (progress === 'MOVE STARTED' || live.reachedHalfR || (live.rNow != null && live.rNow >= 0.5)) {
+    return { label: 'Move Started', className: 'yellow', rank: 5 };
+  }
+  if (live.entryTouchedAt || progress === 'ENTRY REACHED') return { label: 'Entry Reached', className: 'yellow', rank: 6 };
+  return { label: 'Waiting for Entry', className: 'gray', rank: 7 };
+}
+
+function positionOpenedAtMs(model = {}) {
+  const raw = firstPresent(
+    model.entry?.tracking_started_at,
+    model.entry?.createdAt,
+    model.entry?.created_at,
+    model.plan?.signalTimestamp
+  );
+  const parsed = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortPositionModels(models = []) {
+  return models.slice().sort((a, b) => {
+    const urgencyDelta = positionUrgency(a).rank - positionUrgency(b).rank;
+    if (urgencyDelta !== 0) return urgencyDelta;
+    return positionOpenedAtMs(b) - positionOpenedAtMs(a);
+  });
+}
+
+function updatePositionLifecycle(id, action) {
+  updateEntryLifecycle(id, action);
+  if (action !== 'manual') renderPositionsTab();
+}
+
+function updatePositionLifecycleFromButton(button, action) {
+  const rawId = button?.closest('[data-position-id]')?.dataset?.positionId;
+  const numericId = Number(rawId);
+  const id = rawId !== '' && Number.isFinite(numericId) && String(numericId) === rawId ? numericId : rawId;
+  updatePositionLifecycle(id, action);
+}
+
+function renderPositionsTab() {
+  const list = document.getElementById('positionsList');
+  const summary = document.getElementById('positionsSummary');
+  if (!list || !summary) return;
+  const positions = sortPositionModels(buildPositionModels());
+  summary.textContent = positions.length
+    ? `${positions.length} active journal position${positions.length === 1 ? '' : 's'} tracked against the latest loaded scanner state.`
+    : 'No active journal positions. Log a scanner setup with Result = Open to track it here.';
+  if (!positions.length) {
+    list.innerHTML = '<div class="execution-empty">No active positions right now.</div>';
+    return;
+  }
+  list.innerHTML = positions.map(model => {
+    const plan = model.plan;
+    const live = model.live;
+    const urgency = positionUrgency(model);
+    const stripClass = positionProgressClass(model);
+    const healthWarning = live.contractHealth?.warning || '—';
+    return `
+      <div class="execution-card position-card" data-position-id="${escapeHtml(String(model.id ?? ''))}">
+        <div class="position-progress-strip ${stripClass}"></div>
+        <div class="execution-card-head">
+          <div>
+            <div class="execution-ticker ticker-with-direction">${escapeHtml(plan.ticker || '—')} ${renderDirectionMarker(plan.direction)}</div>
+            <div class="execution-subtitle">${escapeHtml(firstPresent(live.tradeProgressStatus, 'WAITING'))} · ${live.rNow == null ? '—' : `${fmtNumber(live.rNow)}R`} · ${live.tradingDaysElapsed ?? '—'} trading days elapsed</div>
+          </div>
+          <div class="position-urgency ${urgency.className}">${escapeHtml(urgency.label)}</div>
+        </div>
+        <div class="position-card-grid">
+          <div class="execution-section position-section plan">
+            <div class="execution-section-title">Plan</div>
+            ${renderPositionKvRows([
+              ['Entry', fmtMoney(plan.entryPrice)],
+              ['Stop', fmtMoney(plan.stopPrice)],
+              ['TP1', fmtMoney(plan.tp1)],
+              ['TP2', fmtMoney(plan.tp2)],
+              ['TP3', fmtMoney(plan.tp3)],
+              ['Grade', plan.setupGrade],
+              ['Reason', plan.setupGradeReason],
+              ['Confirmation', [plan.confirmationStatus, plan.confirmationReason].filter(Boolean).join(' — ')],
+              ['Sector', plan.sector],
+              ['Regime', [plan.marketRegime, plan.marketRegimeScore != null ? fmtNumber(plan.marketRegimeScore) : null].filter(Boolean).join(' · ')],
+              ['Opportunity at Entry', plan.opportunityRemainingAtEntry == null ? '—' : `${fmtNumber(plan.opportunityRemainingAtEntry)}%`],
+              ['Risk Size', [plan.contracts ? `${plan.contracts} contracts` : null, plan.riskPct != null ? `${fmtNumber(plan.riskPct)}%` : null, plan.maxRisk != null ? fmtMoney(plan.maxRisk) : null].filter(Boolean).join(' · ')],
+            ])}
+          </div>
+          <div class="execution-section position-section live">
+            <div class="execution-section-title">Live</div>
+            ${renderPositionKvRows([
+              ['Now', fmtMoney(live.currentPrice)],
+              ['R Now', live.rNow == null ? '—' : `${fmtNumber(live.rNow)}R`],
+              ['MFE / MAE', `${fmtNumber(live.mfeR)}R / ${fmtNumber(live.maeR)}R`],
+              ['Entry', live.entryTouchedAt ? `Touched ${formatShortDate(live.entryTouchedAt)}` : 'Not touched'],
+              ['TP1', live.tp1TouchedAt ? `Touched ${formatShortDate(live.tp1TouchedAt)}` : 'Not reached'],
+              ['Stop', live.stopTouchedAt ? `Touched ${formatShortDate(live.stopTouchedAt)}` : 'Not reached'],
+              ['Current Status', live.currentScannerStatus],
+              ['Current Grade', live.currentGrade],
+              ['Current Entry Status', live.currentEntryStatus],
+              ['Elapsed', `${live.tradingDaysElapsed ?? '—'} trading days · ${live.barsElapsed ?? '—'} bars`],
+            ])}
+          </div>
+          <div class="execution-section position-section contract">
+            <div class="execution-section-title">Contract</div>
+            <div class="execution-contract-main">${escapeHtml(positionContractLabel(plan))}</div>
+            ${renderPositionKvRows([
+              ['DTE at Entry', plan.dteAtEntry],
+              ['DTE Remaining', live.contractDteRemaining],
+              ['Expected Window', expectedMoveWindowLabel(plan)],
+              ['Cost', plan.estimatedContractCost != null ? fmtMoney(plan.estimatedContractCost) : fmtMoney(plan.premiumPaid)],
+              ['Spread at Entry', plan.spreadAtEntry == null ? '—' : fmtMoney(plan.spreadAtEntry)],
+              ['OI / Volume', `${plan.openInterestAtEntry ?? '—'} / ${plan.optionVolumeAtEntry ?? '—'}`],
+              ['Health', live.contractHealth?.status || '—'],
+            ])}
+            <div class="position-warning">${escapeHtml(healthWarning)}</div>
+          </div>
+        </div>
+        <div class="position-actions">
+          <button class="btn-secondary" onclick="updatePositionLifecycleFromButton(this, 'tp1')">Mark TP1</button>
+          <button class="btn-ghost" onclick="updatePositionLifecycleFromButton(this, 'breakeven')">Move Stop to BE</button>
+          <button class="btn-danger" onclick="updatePositionLifecycleFromButton(this, 'manual')">Close or Edit</button>
         </div>
       </div>`;
   }).join('');
@@ -6390,12 +6632,9 @@ function isJournalEntryManuallyClosed(entry = {}) {
 }
 
 function isActiveTrackedSetup(entry = {}) {
-  if (entry.tracking_status === 'completed' || entry.completion_reason) return false;
-  if (isJournalEntryManuallyClosed(entry)) return false;
-  const started = firstPresent(entry.tracking_started_at, entry.signal_timestamp, entry.createdAt);
-  const elapsed = countWeekdaysBetween(started, new Date().toISOString());
-  if (elapsed != null && elapsed > EXPECTED_MOVE_TRACKING_WINDOW_DAYS) return true;
-  return true;
+  return (entry.result || 'Open') === 'Open'
+    && entry.tracking_status !== 'completed'
+    && !entry.completion_reason;
 }
 
 function entryRisk(entry = {}) {
@@ -6404,6 +6643,178 @@ function entryRisk(entry = {}) {
   if (entryPrice == null || stopPrice == null) return null;
   const risk = Math.abs(entryPrice - stopPrice);
   return risk > 0 ? risk : null;
+}
+
+function latestScannerRowsByTicker() {
+  const rows = [...scannerRows, ...scannerNearMiss];
+  const map = new Map();
+  rows.forEach(row => {
+    const ticker = String(row.ticker || '').toUpperCase();
+    if (!ticker || map.has(ticker)) return;
+    map.set(ticker, row);
+  });
+  return map;
+}
+
+function livePriceForPosition(entry = {}, latestSetup = null) {
+  const scannerPrice = latestSetup ? currentDisplayPrice(latestSetup) : null;
+  return scannerPrice ?? coerceNumber(firstPresent(
+    entry.current_quote_price,
+    entry.currentQuotePrice,
+    entry.current_price,
+    entry.currentPrice,
+    entry.underlying_price
+  ));
+}
+
+function rNowForPosition(entry = {}, currentPrice = null) {
+  const entryPrice = coerceNumber(firstPresent(entry.entry_price, entry.entry));
+  const stopPrice = coerceNumber(firstPresent(entry.stop_price, entry.plannedStop));
+  const price = coerceNumber(currentPrice);
+  if (entryPrice == null || stopPrice == null || price == null) return null;
+  const risk = Math.abs(entryPrice - stopPrice);
+  if (!risk) return null;
+  const direction = String(firstPresent(entry.direction, entry.option_type, entry.optionType) || '').toUpperCase();
+  const bullish = direction === 'LONG' || direction === 'CALL';
+  return bullish ? (price - entryPrice) / risk : (entryPrice - price) / risk;
+}
+
+function contractDteRemaining(entry = {}, now = new Date()) {
+  const expiry = firstPresent(entry.expiration_date, entry.expiry, entry.expiration);
+  if (!expiry) return null;
+  const end = new Date(expiry);
+  if (Number.isNaN(end.getTime())) return null;
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const finish = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  return Math.max(0, Math.ceil((finish - start) / 86400000));
+}
+
+function contractHealthForPosition(entry = {}, dteRemaining = null) {
+  const expectedHigh = coerceNumber(firstPresent(
+    entry.expected_trading_days_remaining_high,
+    entry.expected_trading_days_high
+  ));
+  const storedStatus = firstPresent(entry.contract_health_status, null);
+  if (dteRemaining == null) {
+    return {
+      status: storedStatus || 'UNKNOWN',
+      warning: 'Expiration unavailable',
+      dteRemaining: null,
+      expectedTradingDaysRemainingHigh: expectedHigh,
+    };
+  }
+  if (expectedHigh != null && dteRemaining <= expectedHigh) {
+    return {
+      status: 'TIGHT',
+      warning: 'DTE getting tight versus expected move window',
+      dteRemaining,
+      expectedTradingDaysRemainingHigh: expectedHigh,
+    };
+  }
+  return {
+    status: storedStatus || 'OK',
+    warning: 'Time buffer OK',
+    dteRemaining,
+    expectedTradingDaysRemainingHigh: expectedHigh,
+  };
+}
+
+function positionPlanSide(entry = {}) {
+  return {
+    ticker: String(entry.ticker || '').toUpperCase(),
+    direction: firstPresent(entry.direction, entry.option_type, entry.optionType, 'N/A'),
+    timeframe: firstPresent(entry.scanner_timeframe, entry.timeframe, entry.setupTf, 'N/A'),
+    entryPrice: coerceNumber(firstPresent(entry.entry_price, entry.entry)),
+    stopPrice: coerceNumber(firstPresent(entry.stop_price, entry.plannedStop)),
+    tp1: coerceNumber(firstPresent(entry.target_price, entry.plannedTp1)),
+    tp2: coerceNumber(firstPresent(entry.tp2, entry.plannedTp2)),
+    tp3: coerceNumber(firstPresent(entry.tp3, entry.plannedTp3)),
+    setupGrade: firstPresent(entry.setup_grade, entry.setupGrade, null),
+    setupGradeReason: firstPresent(entry.setupGradeReason, ''),
+    scannerStatus: firstPresent(entry.scanner_status, entry.scannerStatus, entry.scanner_status_normalized, null),
+    tradeStage: firstPresent(entry.trade_stage, null),
+    confirmationStatus: firstPresent(entry.confirmation_status, entry.confirmationStatus, entry.confirmationStarted ? 'Started' : 'Pending', null),
+    confirmationReason: firstPresent(entry.confirmationReason, ''),
+    signalTimestamp: firstPresent(entry.signal_timestamp, entry.signal_market_date, entry.snapshot_timestamp, entry.createdAt, null),
+    underlyingPriceAtSignal: coerceNumber(firstPresent(entry.underlying_price_at_signal, entry.entry_price, entry.entry)),
+    contractSymbol: firstPresent(entry.option_symbol, entry.option, ''),
+    optionType: firstPresent(entry.option_type, entry.optionType, 'N/A'),
+    strike: coerceNumber(firstPresent(entry.strike_price, entry.strike)),
+    expiration: firstPresent(entry.expiration_date, entry.expiry, ''),
+    dteAtEntry: coerceInteger(entry.days_to_expiration_at_entry),
+    contractTier: firstPresent(entry.contract_tier, ''),
+    contractTierLabel: firstPresent(entry.contract_tier_label, ''),
+    premiumPaid: coerceNumber(firstPresent(entry.premium_paid, entry.option_ask_at_entry, entry.askAtSelection)),
+    estimatedContractCost: coerceNumber(entry.estimated_contract_cost_at_entry),
+    spreadAtEntry: coerceNumber(firstPresent(entry.option_spread_at_entry, entry.bidAskSpread)),
+    openInterestAtEntry: coerceInteger(firstPresent(entry.open_interest_at_entry, entry.openInterest)),
+    optionVolumeAtEntry: coerceInteger(firstPresent(entry.option_volume_at_entry, entry.optionVolume)),
+    opportunityRemainingAtEntry: coerceNumber(entry.original_opportunity_remaining_pct),
+    opportunityStatus: firstPresent(entry.opportunity_status, null),
+    expectedTradingDaysLow: coerceNumber(entry.expected_trading_days_low),
+    expectedTradingDaysHigh: coerceNumber(entry.expected_trading_days_high),
+    expectedTradingDaysMedian: coerceNumber(entry.expected_trading_days_median),
+    sector: firstPresent(entry.sector, null),
+    marketRegime: firstPresent(entry.market_regime, null),
+    dailyMarketRegime: firstPresent(entry.daily_market_regime, null),
+    h4MarketRegime: firstPresent(entry.h4_market_regime, null),
+    marketRegimeScore: coerceNumber(entry.market_regime_score),
+    contracts: coerceInteger(entry.contracts),
+    accountSize: coerceNumber(entry.accountSize),
+    riskPct: coerceNumber(entry.riskPct),
+    maxRisk: coerceNumber(entry.maxRisk),
+  };
+}
+
+function positionLiveSide(entry = {}, latestSetup = null) {
+  const currentPrice = livePriceForPosition(entry, latestSetup);
+  const dteRemaining = contractDteRemaining(entry);
+  const health = contractHealthForPosition(entry, dteRemaining);
+  const latestProgress = latestSetup && typeof setupProgressState === 'function' ? setupProgressState(latestSetup) : null;
+  const latestCardStatus = latestSetup && window.KairosExecutionGuidance?.cardStatus
+    ? window.KairosExecutionGuidance.cardStatus(latestSetup, latestProgress)
+    : null;
+  return {
+    currentPrice,
+    currentScannerStatus: latestCardStatus?.label || latestProgress?.label || null,
+    currentGrade: latestSetup ? firstPresent(latestSetup.setupGrade, latestSetup.setup_grade, latestSetup.quality?.grade, null) : null,
+    currentEntryStatus: latestSetup ? firstPresent(latestSetup.entryStatus, latestSetup.entry_status, null) : null,
+    mfe: coerceNumber(entry.maximum_favorable_excursion),
+    mae: coerceNumber(entry.maximum_adverse_excursion),
+    mfeR: coerceNumber(entry.maximum_favorable_excursion_r),
+    maeR: coerceNumber(entry.maximum_adverse_excursion_r),
+    rNow: rNowForPosition(entry, currentPrice),
+    entryTouchedAt: firstPresent(entry.first_entry_touch_at, entry.entry_reached_at, null),
+    tp1TouchedAt: firstPresent(entry.first_target_touch_at, entry.tp1_reached_at, null),
+    stopTouchedAt: firstPresent(entry.first_stop_touch_at, null),
+    reachedHalfR: Boolean(entry.reached_0_5r),
+    reachedOneR: Boolean(entry.reached_1r),
+    reachedTwoR: Boolean(entry.reached_2r),
+    tradingDaysElapsed: coerceNumber(entry.trading_days_elapsed),
+    barsElapsed: coerceInteger(entry.bars_elapsed),
+    tradingDaysToEntry: coerceNumber(entry.trading_days_to_entry),
+    tradingDaysToTarget: coerceNumber(entry.trading_days_to_target),
+    tradingDaysToStop: coerceNumber(entry.trading_days_to_stop),
+    tradeProgressStatus: firstPresent(entry.trade_progress_status, 'WAITING'),
+    contractDteRemaining: dteRemaining,
+    contractHealth: health,
+  };
+}
+
+function buildPositionModels(entries = loadJournal(), latestByTicker = latestScannerRowsByTicker()) {
+  return entries
+    .filter(isActiveTrackedSetup)
+    .map(entry => {
+      const ticker = String(entry.ticker || '').toUpperCase();
+      const latestSetup = latestByTicker.get(ticker) || null;
+      return {
+        id: entry.id,
+        entry,
+        latestSetup,
+        plan: positionPlanSide(entry),
+        live: positionLiveSide(entry, latestSetup),
+      };
+    });
 }
 
 function hasEntryTouched(entry = {}, obs = {}) {
