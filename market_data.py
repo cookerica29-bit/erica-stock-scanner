@@ -30,6 +30,7 @@ ALPACA_PROVIDER_NAME = "alpaca"
 DEFAULT_DATA_PROVIDER = YAHOO_PROVIDER_NAME
 DEFAULT_ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 DEFAULT_ALPACA_MAX_PAGES = 25
+DEFAULT_ALPACA_QUOTE_CHUNK_SIZE = 200
 EASTERN_TZ = ZoneInfo("America/New_York")
 SCANNER_TIMEFRAMES = [
     {"label": "1D", "period": "1y", "interval": "1d", "minimum_candles": 50},
@@ -185,6 +186,11 @@ def _parse_positive_int_env(name: str, default: int) -> int:
     return max(1, value)
 
 
+def _chunks(items: list[str], size: int):
+    for index in range(0, len(items), size):
+        yield items[index:index + size]
+
+
 class YahooMarketDataProvider(MarketDataProvider):
     name = YAHOO_PROVIDER_NAME
 
@@ -235,6 +241,12 @@ class AlpacaMarketDataProvider(MarketDataProvider):
 
     def _request_bars_page(self, params: dict[str, Any]) -> dict:
         url = f"{self.base_url}/v2/stocks/bars?{urlencode(params)}"
+        req = Request(url, headers=self._headers())
+        with urlopen(req, timeout=int(os.getenv("ALPACA_DATA_TIMEOUT", "20"))) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _request_latest_quotes(self, params: dict[str, Any]) -> dict:
+        url = f"{self.base_url}/v2/stocks/quotes/latest?{urlencode(params)}"
         req = Request(url, headers=self._headers())
         with urlopen(req, timeout=int(os.getenv("ALPACA_DATA_TIMEOUT", "20"))) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -336,6 +348,69 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         if len(symbols) == 1:
             return frames.get(symbols[0], pd.DataFrame())
         return _multi_symbol_frame(frames)
+
+    @staticmethod
+    def _quote_price(quote: dict[str, Any]) -> Optional[float]:
+        def positive_number(value) -> Optional[float]:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if number > 0 else None
+
+        bid = positive_number(quote.get("bp"))
+        ask = positive_number(quote.get("ap"))
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        if ask is not None:
+            return ask
+        if bid is not None:
+            return bid
+        return None
+
+    def latest_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        requested_symbols = list(dict.fromkeys(_as_symbol_list(symbols)))
+        if not requested_symbols:
+            return {}
+
+        reverse_symbol_map = {self.normalize_symbol(symbol): symbol for symbol in requested_symbols}
+        chunk_size = _parse_positive_int_env("ALPACA_QUOTE_CHUNK_SIZE", DEFAULT_ALPACA_QUOTE_CHUNK_SIZE)
+        results: dict[str, dict[str, Any]] = {}
+        for chunk in _chunks(requested_symbols, chunk_size):
+            params = {"symbols": ",".join(self.normalize_symbol(symbol) for symbol in chunk)}
+            try:
+                payload = self._request_latest_quotes(params)
+            except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
+                logger.warning(
+                    "[alpaca] latest quote request failed symbols=%s error=%s",
+                    len(chunk),
+                    _classify_error(exc),
+                )
+                continue
+
+            quotes = payload.get("quotes") or {}
+            for provider_symbol, quote in quotes.items():
+                original_symbol = reverse_symbol_map.get(str(provider_symbol or "").strip().upper())
+                if not original_symbol or not isinstance(quote, dict):
+                    continue
+                price = self._quote_price(quote)
+                if price is None:
+                    continue
+                results[original_symbol] = {
+                    "price": price,
+                    "bid": quote.get("bp"),
+                    "ask": quote.get("ap"),
+                    "timestamp": quote.get("t"),
+                    "source": "alpaca_latest_quote",
+                }
+
+        logger.info(
+            "[alpaca] latest quotes completed symbols=%s quotes=%s chunks=%s",
+            len(requested_symbols),
+            len(results),
+            math.ceil(len(requested_symbols) / chunk_size),
+        )
+        return results
 
 
 def _bars_to_frame(bars: list[dict[str, Any]]) -> pd.DataFrame:

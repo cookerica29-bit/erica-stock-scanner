@@ -4567,7 +4567,7 @@ function adjustedMarkerPositions(rawPositions, minGap = RR_MARKER_MIN_GAP) {
 
 function riskRewardBarData(setup) {
   const direction = normalizePlanDirection(setup);
-  const current = planNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price));
+  const current = planNumber(firstPresent(setup.current_quote_price, setup.currentQuotePrice, setup.price, setup.current_price, setup.currentPrice, setup.underlying_price));
   const entry = planNumber(firstPresent(setup.entry, setup.entry_price));
   const stop = planNumber(firstPresent(setup.sl, setup.stop, setup.stop_price));
   const tp1 = planNumber(firstPresent(setup.tp1, setup.target, setup.target_price));

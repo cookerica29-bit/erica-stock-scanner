@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from market_data import MarketDataFacade, build_market_data_provider, provider_name_for_timeframe
+from market_data import ALPACA_PROVIDER_NAME, MarketDataFacade, build_market_data_provider, provider_name_for_timeframe
 
 logger = logging.getLogger(__name__)
 yf = MarketDataFacade()
@@ -2950,6 +2950,38 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
     return result
 
 
+def _attach_current_quotes(rows: list[dict]) -> None:
+    """Attach display-only current quote prices without changing strategy price."""
+    tickers = list(dict.fromkeys(
+        str(row.get("ticker") or "").strip().upper()
+        for row in rows
+        if isinstance(row, dict) and str(row.get("ticker") or "").strip()
+    ))
+    if not tickers:
+        return
+    try:
+        provider = build_market_data_provider(ALPACA_PROVIDER_NAME)
+        quotes = provider.latest_quotes(tickers)
+    except Exception as exc:
+        logger.warning("[quotes] current quote enrichment failed symbols=%s error=%s", len(tickers), type(exc).__name__)
+        return
+
+    attached = 0
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        quote = quotes.get(ticker) or {}
+        price = quote.get("price")
+        try:
+            current_quote_price = round(float(price), 2)
+        except (TypeError, ValueError):
+            continue
+        row["current_quote_price"] = current_quote_price
+        row["current_quote_source"] = quote.get("source") or "alpaca_latest_quote"
+        row["current_quote_timestamp"] = quote.get("timestamp")
+        attached += 1
+    logger.info("[quotes] attached current quote prices rows=%s/%s", attached, len(rows))
+
+
 def _refresh_cached_best_contracts(limit: int = 40) -> None:
     with _cache_lock:
         keys = list(_best_contract_cache.keys())[:limit]
@@ -4147,6 +4179,7 @@ def scan_all(
         near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
         process_stage_ms = round((time.perf_counter() - process_stage_start) * 1000, 1)
         all_results = [*rows, *near_miss]
+        _attach_current_quotes(all_results)
         earnings_ms = round(sum((r.get("_scan_timing") or {}).get("earnings_ms", 0) for r in all_results), 1)
         best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
         evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") != "not_evaluated")

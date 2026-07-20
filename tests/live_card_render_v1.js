@@ -594,6 +594,10 @@ assert.ok(singleTarget.includes('<div class="rr-value-label">TP1</div>'));
 assert.ok(singleTarget.includes('<div class="rr-value-price">$44.00</div>'));
 assert.ok(!singleTarget.includes('<div class="rr-value-label">TP2</div>'));
 assert.ok(!singleTarget.includes('<div class="rr-value-label">TP3</div>'));
+assert.ok(singleTarget.includes('data-current-pct="22.00"'), 'Risk/reward Now marker should fall back to candle-close price');
+
+const quoteCurrent = htmlFor(setup({ current_quote_price: 46.5, tp1: 44, tp2: null, tp3: null, final_target: null }));
+assert.ok(quoteCurrent.includes('data-current-pct="16.67"'), 'Risk/reward Now marker should prefer current quote price over candle-close price');
 
 const planValueLabels = [...singleTarget.matchAll(/<div class="rr-value-label">([^<]+)<\/div>/g)].map(match => match[1]);
 assert.deepStrictEqual(planValueLabels, ['Entry', 'Stop', 'TP1']);
