@@ -34,6 +34,26 @@ class EmptyOptionsTicker:
         return []
 
 
+class EmptyThenGoodTicker:
+    calls = 0
+
+    @property
+    def options(self):
+        type(self).calls += 1
+        if type(self).calls == 1:
+            return []
+        return ["2026-08-28"]
+
+
+class EmptyThenEmptyTicker:
+    calls = 0
+
+    @property
+    def options(self):
+        type(self).calls += 1
+        return []
+
+
 class GoodOptionsTicker:
     @property
     def options(self):
@@ -184,6 +204,54 @@ def test_unknown_expiration_failure_retries_after_short_ttl():
         scanner._submit_background_job = original_submit
 
 
+def test_empty_expiration_response_retries_and_uses_populated_result():
+    reset_options_state()
+    original_yf = scanner.yf
+    original_sleep = scanner.time.sleep
+    EmptyThenGoodTicker.calls = 0
+    sleeps = []
+    scanner.yf = FakeYF(EmptyThenGoodTicker)
+    scanner.time.sleep = lambda seconds: sleeps.append(seconds)
+    try:
+        expirations = scanner._fetch_option_expirations("GS")
+        assert expirations == ["2026-08-28"]
+        assert EmptyThenGoodTicker.calls == 2
+        assert sleeps == [scanner.OPTION_EXPIRATION_EMPTY_RETRY_DELAY_SECONDS]
+        with scanner._cache_lock:
+            cached = scanner._option_chain_cache["GS"]
+            assert cached["expirations_status"] == "ready"
+            assert cached["expirations"] == ["2026-08-28"]
+        known, cached_expirations = scanner._cached_option_expirations_for_ticker("GS")
+        assert known is True
+        assert cached_expirations == ["2026-08-28"]
+    finally:
+        scanner.yf = original_yf
+        scanner.time.sleep = original_sleep
+
+
+def test_empty_expiration_response_retries_once_then_confirms_empty():
+    reset_options_state()
+    original_yf = scanner.yf
+    original_sleep = scanner.time.sleep
+    EmptyThenEmptyTicker.calls = 0
+    sleeps = []
+    scanner.yf = FakeYF(EmptyThenEmptyTicker)
+    scanner.time.sleep = lambda seconds: sleeps.append(seconds)
+    try:
+        expirations = scanner._fetch_option_expirations("NOOPT")
+        assert expirations == []
+        assert EmptyThenEmptyTicker.calls == 2
+        assert sleeps == [scanner.OPTION_EXPIRATION_EMPTY_RETRY_DELAY_SECONDS]
+        with scanner._cache_lock:
+            cached = scanner._option_chain_cache["NOOPT"]
+            assert cached["expirations_status"] == "empty"
+            assert cached["expirations"] == []
+        assert scanner._stock_universe_skip_reason("NOOPT", daily_df()) == "no options"
+    finally:
+        scanner.yf = original_yf
+        scanner.time.sleep = original_sleep
+
+
 def main() -> int:
     test_rate_limit_preserves_existing_good_expirations()
     test_rate_limit_without_prior_data_is_unknown_not_no_options()
@@ -191,6 +259,8 @@ def main() -> int:
     test_successful_expiration_fetch_uses_long_availability_ttl()
     test_backoff_prevents_prefilter_from_submitting_more_yahoo_jobs()
     test_unknown_expiration_failure_retries_after_short_ttl()
+    test_empty_expiration_response_retries_and_uses_populated_result()
+    test_empty_expiration_response_retries_once_then_confirms_empty()
     print("Options expiration rate-limit v1 tests passed")
     return 0
 

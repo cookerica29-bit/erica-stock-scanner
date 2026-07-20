@@ -148,6 +148,7 @@ _option_chain_cache = {}
 OPTION_CHAIN_CACHE_TTL = timedelta(minutes=8)
 OPTION_EXPIRATION_CACHE_TTL = timedelta(hours=24)
 OPTION_EXPIRATION_FAILURE_RETRY_TTL = timedelta(minutes=5)
+OPTION_EXPIRATION_EMPTY_RETRY_DELAY_SECONDS = 1.5
 OPTION_YAHOO_RATE_LIMIT_COOLDOWN = timedelta(minutes=10)
 _best_contract_cache = {}
 BEST_CONTRACT_CACHE_TTL = timedelta(minutes=8)
@@ -753,6 +754,10 @@ def _fetch_option_expirations(ticker: str) -> list:
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
 
+    def _download_expirations_once() -> list:
+        _cache_record("api_option_expirations", "call")
+        return list(yf.Ticker(ticker).options or [])
+
     with _cache_lock:
         existing = _option_chain_cache.get(ticker) or {}
         existing_expirations = list(existing.get("expirations", []))
@@ -779,8 +784,15 @@ def _fetch_option_expirations(ticker: str) -> list:
 
     expirations = []
     try:
-        _cache_record("api_option_expirations", "call")
-        expirations = list(yf.Ticker(ticker).options or [])
+        expirations = _download_expirations_once()
+        if not expirations:
+            logger.info(
+                "[options] empty expiration response for %s; retrying once after %.1fs",
+                ticker,
+                OPTION_EXPIRATION_EMPTY_RETRY_DELAY_SECONDS,
+            )
+            time.sleep(OPTION_EXPIRATION_EMPTY_RETRY_DELAY_SECONDS)
+            expirations = _download_expirations_once()
     except Exception as e:
         logger.warning(f"[options] expiration fetch failed for {ticker}: {e}")
         rate_limited = _is_yahoo_rate_limit_error(e)
