@@ -146,9 +146,13 @@ _price_cache = {}
 PRICE_CACHE_TTL = timedelta(minutes=3)
 _option_chain_cache = {}
 OPTION_CHAIN_CACHE_TTL = timedelta(minutes=8)
+OPTION_EXPIRATION_CACHE_TTL = timedelta(hours=24)
+OPTION_EXPIRATION_FAILURE_RETRY_TTL = timedelta(minutes=5)
+OPTION_YAHOO_RATE_LIMIT_COOLDOWN = timedelta(minutes=10)
 _best_contract_cache = {}
 BEST_CONTRACT_CACHE_TTL = timedelta(minutes=8)
 _option_chain_fetch_semaphore = threading.BoundedSemaphore(4)
+_option_yahoo_backoff_until = None
 _earnings_cache = {}
 EARNINGS_CACHE_TTL = timedelta(hours=12)
 EARNINGS_UNAVAILABLE_CACHE_TTL = timedelta(hours=1)
@@ -263,6 +267,47 @@ def _submit_background_job(key: tuple, fn, *args, **kwargs) -> bool:
         logger.warning("[background] could not submit refresh for %s: %s", key, exc)
         return False
     return True
+
+
+def _is_yahoo_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "too many requests" in text
+        or "rate limited" in text
+        or "yfratelimiterror" in text
+    )
+
+
+def _option_yahoo_backoff_active(now: Optional[datetime] = None) -> bool:
+    current = now or datetime.utcnow()
+    with _cache_lock:
+        until = _option_yahoo_backoff_until
+    return until is not None and current < until
+
+
+def _option_expiration_retry_due(ticker: str, now: Optional[datetime] = None) -> bool:
+    ticker = str(ticker or "").upper()
+    current = now or datetime.utcnow()
+    with _cache_lock:
+        cached = _option_chain_cache.get(ticker) or {}
+        failure_at = cached.get("expirations_failure_at")
+        status = cached.get("expirations_status")
+    if status != "unknown" or not failure_at:
+        return True
+    return current - failure_at >= OPTION_EXPIRATION_FAILURE_RETRY_TTL
+
+
+def _mark_option_yahoo_rate_limited(now: Optional[datetime] = None) -> None:
+    global _option_yahoo_backoff_until
+    current = now or datetime.utcnow()
+    until = current + OPTION_YAHOO_RATE_LIMIT_COOLDOWN
+    with _cache_lock:
+        if _option_yahoo_backoff_until is None or until > _option_yahoo_backoff_until:
+            _option_yahoo_backoff_until = until
+    logger.warning(
+        "[options] Yahoo rate limit detected; pausing option expiration fetches for %.0fs",
+        OPTION_YAHOO_RATE_LIMIT_COOLDOWN.total_seconds(),
+    )
 
 
 def _periodic_refresh_due(key: str, ttl_seconds: int) -> bool:
@@ -677,11 +722,13 @@ def _option_expirations_for_ticker(ticker: str) -> list:
         cached = _option_chain_cache.get(ticker)
         if cached:
             expirations = list(cached.get("expirations", []))
-            age = now - cached.get("fetched_at", now)
-            if age < OPTION_CHAIN_CACHE_TTL:
+            status = cached.get("expirations_status") or ("ready" if expirations else "unknown")
+            fetched_at = cached.get("expirations_fetched_at") or cached.get("fetched_at", now)
+            age = now - fetched_at
+            if status in {"ready", "empty"} and age < OPTION_EXPIRATION_CACHE_TTL:
                 _cache_record("option_chains", "hit")
                 return expirations
-            if expirations:
+            if status == "ready" and expirations:
                 _cache_record("option_chains", "stale")
                 _submit_background_job(("option_expirations", ticker), _refresh_option_expirations, ticker)
                 return expirations
@@ -696,6 +743,9 @@ def _cached_option_expirations_for_ticker(ticker: str) -> tuple[bool, list]:
         cached = _option_chain_cache.get(ticker)
         if not cached:
             return False, []
+        status = cached.get("expirations_status") or ("ready" if cached.get("expirations") else "unknown")
+        if status == "unknown":
+            return False, []
         return True, list(cached.get("expirations", []))
 
 
@@ -703,17 +753,63 @@ def _fetch_option_expirations(ticker: str) -> list:
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
 
+    with _cache_lock:
+        existing = _option_chain_cache.get(ticker) or {}
+        existing_expirations = list(existing.get("expirations", []))
+        existing_status = existing.get("expirations_status") or ("ready" if existing_expirations else "unknown")
+
+    if _option_yahoo_backoff_active(now):
+        with _cache_lock:
+            cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
+            cached.setdefault("chains", {})
+            if existing_status == "ready" and existing_expirations:
+                cached["expirations"] = existing_expirations
+                cached["expirations_status"] = "ready"
+                cached.setdefault(
+                    "expirations_fetched_at",
+                    existing.get("expirations_fetched_at", existing.get("fetched_at", now)),
+                )
+                _cache_record("option_expirations", "preserve")
+                return existing_expirations
+            cached["expirations_status"] = "unknown"
+            cached["expirations_failure_at"] = now
+            cached["expirations_failure_reason"] = "rate_limited_backoff"
+        _cache_record("option_expirations", "backoff")
+        return []
+
     expirations = []
     try:
         _cache_record("api_option_expirations", "call")
         expirations = list(yf.Ticker(ticker).options or [])
     except Exception as e:
         logger.warning(f"[options] expiration fetch failed for {ticker}: {e}")
+        rate_limited = _is_yahoo_rate_limit_error(e)
+        if rate_limited:
+            _mark_option_yahoo_rate_limited(now)
+        with _cache_lock:
+            cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
+            cached.setdefault("chains", {})
+            cached["expirations_failure_at"] = now
+            cached["expirations_failure_reason"] = "rate_limited" if rate_limited else "fetch_error"
+            if existing_status == "ready" and existing_expirations:
+                cached["expirations"] = existing_expirations
+                cached["expirations_status"] = "ready"
+                cached.setdefault(
+                    "expirations_fetched_at",
+                    existing.get("expirations_fetched_at", existing.get("fetched_at", now)),
+                )
+                _cache_record("option_expirations", "preserve")
+                return existing_expirations
+            cached["expirations_status"] = "unknown"
+        return []
 
     with _cache_lock:
         cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
-        cached["fetched_at"] = now
+        cached["expirations_fetched_at"] = now
         cached["expirations"] = expirations
+        cached["expirations_status"] = "ready" if expirations else "empty"
+        cached.pop("expirations_failure_at", None)
+        cached.pop("expirations_failure_reason", None)
         cached.setdefault("chains", {})
     return expirations
 
@@ -847,7 +943,8 @@ def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -
             if len(expirations) < min_expirations:
                 return "thin options chain"
         else:
-            _submit_background_job(("option_expirations_prefilter", ticker), _refresh_option_expirations, ticker)
+            if not _option_yahoo_backoff_active() and _option_expiration_retry_due(ticker):
+                _submit_background_job(("option_expirations_prefilter", ticker), _refresh_option_expirations, ticker)
 
     return None
 
