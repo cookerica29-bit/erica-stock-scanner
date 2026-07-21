@@ -821,5 +821,13 @@ assert.strictEqual(tracked.entry_reached_at, '2026-07-14T18:30:00Z');
 assert.strictEqual(tracked.first_target_touch_at, '2026-07-14T18:30:00Z');
 assert.strictEqual(tracked.tp1_reached_at, '2026-07-14T18:30:00Z');
 assert.strictEqual(tracked.completion_reason, 'target');
+assert.strictEqual(
+  context.positionUrgency({ live: { rNow: 1.21, contractHealth: { status: 'OK' } } }).label,
+  'Up 1R+'
+);
+assert.strictEqual(
+  context.positionUrgency({ live: { rNow: 0.62, contractHealth: { status: 'OK' } } }).label,
+  'Move Started'
+);
 
 console.log('Live card render v1 tests passed');

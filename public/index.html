@@ -5489,7 +5489,7 @@ function positionUrgency(model = {}) {
   if (live.tp1TouchedAt) return { label: 'TP1 Hit', className: 'green', rank: 2 };
   if (progress === 'TARGET NEAR') return { label: 'Target Near', className: 'green', rank: 3 };
   if (progress === 'TREND DEVELOPING' || live.reachedOneR || (live.rNow != null && live.rNow >= 1)) {
-    return { label: 'Trend Developing', className: 'green', rank: 4 };
+    return { label: 'Up 1R+', className: 'green', rank: 4 };
   }
   if (progress === 'MOVE STARTED' || live.reachedHalfR || (live.rNow != null && live.rNow >= 0.5)) {
     return { label: 'Move Started', className: 'yellow', rank: 5 };
