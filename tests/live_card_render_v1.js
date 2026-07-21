@@ -501,6 +501,29 @@ const skipCard = htmlFor(setup({
 }));
 assert.ok(skipCard.includes('Short setup with bearish trend; not valid right now.'));
 
+const highQualityTooFar = htmlFor(setup({
+  setupGrade: 'A',
+  entryStatus: 'Too Far',
+  trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true, no_trade_reasons: [] },
+}));
+assert.ok(highQualityTooFar.includes('Short setup with bearish trend; still Grade A — just too far from the ideal entry zone to act on right now.'));
+
+const strongTooFar = htmlFor(setup({
+  setupGrade: 'B',
+  entryStatus: 'Too Far',
+  confirmationStarted: false,
+  trade_eval: { trade_stage: 'BUILDING / WATCHLIST', no_trade_reasons: [] },
+}));
+assert.ok(strongTooFar.includes('Short setup with bearish trend; still Grade B — just too far from the ideal entry zone to act on right now.'));
+
+const structurallyBlockedTooFar = htmlFor(setup({
+  setupGrade: 'A',
+  entryStatus: 'Too Far',
+  trade_eval: { trade_stage: 'RANGE / NO TRADE', no_trade_reasons: ['Macro/context conflict'] },
+}));
+assert.ok(structurallyBlockedTooFar.includes('Short setup with bearish trend; not valid right now.'));
+assert.ok(!structurallyBlockedTooFar.includes('still Grade A — just too far'));
+
 const loadingEarnings = htmlFor(setup({ earnings: { status: 'loading', started_at: new Date().toISOString() } }));
 assert.ok(loadingEarnings.includes('Loading...'));
 const staleLoadingEarnings = htmlFor(setup({ earnings: { loaded: false, loading: true, status: 'loading', date: null, days_until: null, source: 'background_refresh' } }));

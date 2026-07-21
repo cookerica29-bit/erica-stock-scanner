@@ -4567,6 +4567,14 @@ function setupSummaryText(setup) {
 function simpleWhySummary(setup, status, trend) {
   const normalizedStatus = String(status || '').trim().toUpperCase();
   const prefix = `${setupSummaryText(setup)} with ${trendSummaryText(trend)}`;
+  const grade = setupGradeValue(setup);
+  const entryStatus = String(setup.entryStatus || '').trim().toUpperCase();
+  const noTradeReasons = Array.isArray(setup.trade_eval?.no_trade_reasons)
+    ? setup.trade_eval.no_trade_reasons
+    : [];
+  const highQualityTooFar = ['A', 'B'].includes(grade)
+    && entryStatus === 'TOO FAR'
+    && noTradeReasons.length === 0;
 
   if (normalizedStatus === 'ENTER NOW') {
     return `${prefix}; entry area is active.`;
@@ -4585,6 +4593,9 @@ function simpleWhySummary(setup, status, trend) {
   }
   if (normalizedStatus === 'PULLBACK STARTED') {
     return `${prefix}; pullback has started, but the setup is still developing.`;
+  }
+  if ((normalizedStatus === 'SKIP' || normalizedStatus === 'NO TRADE') && highQualityTooFar) {
+    return `${prefix}; still Grade ${grade} — just too far from the ideal entry zone to act on right now.`;
   }
   if (normalizedStatus === 'SKIP' || normalizedStatus === 'NO TRADE') {
     return `${prefix}; not valid right now.`;
