@@ -22,6 +22,7 @@ function elementStub() {
     removeEventListener() {},
     setAttribute() {},
     appendChild() {},
+    remove() {},
   };
 }
 
@@ -53,6 +54,7 @@ const context = {
     removeItem: key => { delete storage[key]; },
   },
   document: {
+    body: { appendChild() {} },
     getElementById: () => elementStub(),
     querySelectorAll: () => [],
     createElement: () => elementStub(),
@@ -829,5 +831,80 @@ assert.strictEqual(
   context.positionUrgency({ live: { rNow: 0.62, contractHealth: { status: 'OK' } } }).label,
   'Move Started'
 );
+
+const defaultPositionPrefs = context.positionAlertPreferences({});
+assert.deepStrictEqual(Object.values(defaultPositionPrefs), Object.values(defaultPositionPrefs).map(() => false));
+
+context.renderJournal = () => {};
+context.renderAnalytics = () => {};
+storage.stock_scanner_journal = JSON.stringify([{
+  id: 9001,
+  ticker: 'OXY',
+  result: 'Open',
+  tracking_status: 'active',
+  direction: 'CALL',
+  entry: 60,
+  plannedStop: 57,
+  plannedTp1: 66,
+  position_alert_preferences: { UP_1R: true },
+}]);
+context.Notification = function Notification() {};
+context.Notification.permission = 'granted';
+context.window.Notification = context.Notification;
+context.togglePositionAlertPreferenceFromInput({
+  checked: false,
+  closest: () => ({ dataset: { positionId: '9001' } }),
+}, 'UP_1R');
+let alertJournal = JSON.parse(storage.stock_scanner_journal);
+assert.strictEqual(alertJournal[0].position_alert_preferences.UP_1R, false);
+assert.strictEqual(alertJournal[0].position_alert_preferences.TP1_HIT, false);
+alertJournal[0].position_alert_preferences.UP_1R = true;
+storage.stock_scanner_journal = JSON.stringify(alertJournal);
+
+let sentNotifications = 0;
+context.Notification = function Notification(title, options) {
+  sentNotifications += 1;
+  this.title = title;
+  this.options = options;
+};
+context.Notification.permission = 'granted';
+context.window.Notification = context.Notification;
+vm.runInContext(`scannerRows = [{
+  ticker: 'OXY',
+  current_quote_price: 63.7,
+  price: 62.5,
+  setupGrade: 'B',
+  entryStatus: 'Near Entry',
+  trade_eval: { trade_stage: 'B+ TRADEABLE' }
+}]; scannerNearMiss = [];`, context);
+assert.strictEqual(context.evaluatePositionAlertNotifications().sent, 1);
+assert.strictEqual(context.evaluatePositionAlertNotifications().sent, 0);
+alertJournal = JSON.parse(storage.stock_scanner_journal);
+assert.ok(alertJournal[0].position_alert_notified_keys.UP_1R);
+assert.strictEqual(sentNotifications, 1);
+
+storage.stock_scanner_journal = JSON.stringify([{
+  id: 9002,
+  ticker: 'WAIT',
+  result: 'Open',
+  tracking_status: 'active',
+  direction: 'CALL',
+  entry: 60,
+  plannedStop: 57,
+  plannedTp1: 66,
+  position_alert_preferences: {},
+}]);
+vm.runInContext(`scannerRows = []; scannerNearMiss = [];`, context);
+assert.strictEqual(context.evaluatePositionAlertNotifications().sent, 0);
+
+context.Notification = function Notification() {};
+context.Notification.permission = 'denied';
+context.window.Notification = context.Notification;
+const blockedHtml = context.renderPositionAlertControls({
+  id: 9003,
+  entry: { id: 9003, position_alert_preferences: { UP_1R: true } },
+});
+assert.ok(blockedHtml.includes('Notifications blocked'));
+assert.ok(blockedHtml.includes('disabled'));
 
 console.log('Live card render v1 tests passed');

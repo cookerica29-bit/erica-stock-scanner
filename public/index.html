@@ -823,6 +823,35 @@
     border:1px solid rgba(239,68,68,0.34);
     color:#fca5a5;
   }
+  .position-alerts {
+    background:rgba(2,6,23,0.18);
+    border:1px solid rgba(148,163,184,0.10);
+    border-radius:8px;
+    margin-top:11px;
+    padding:10px;
+  }
+  .position-alert-grid {
+    display:grid;
+    gap:7px 10px;
+    grid-template-columns:repeat(auto-fit, minmax(135px, 1fr));
+    margin-top:8px;
+  }
+  .position-alert-toggle {
+    align-items:center;
+    color:var(--text);
+    display:flex;
+    font-size:10.5px;
+    gap:7px;
+  }
+  .position-alert-toggle input { accent-color:var(--accent); }
+  .position-alert-toggle input:disabled + span { color:var(--muted); }
+  .position-alert-blocked {
+    color:#fca5a5;
+    font-size:10.5px;
+    font-weight:800;
+    line-height:1.35;
+    margin-top:8px;
+  }
   @media (max-width: 900px) {
     .position-card-grid { grid-template-columns:1fr; }
   }
@@ -2959,6 +2988,15 @@ const STOCK_ALERT_SENT_KEY = 'kairos_stock_alert_sent_v1';
 const STOCK_ALERT_ENTER_NOW_KEY = 'kairos_stock_alert_enter_now_transition_v1';
 const STOCK_ALERT_ENTRY_TOUCH_KEY = 'kairos_stock_alert_entry_touch_v1';
 const STOCK_ALERT_DIAGNOSTICS_KEY = 'kairos_stock_alert_diagnostics_v1';
+const POSITION_ALERT_KEYS = {
+  ENTRY_REACHED: { label: 'Entry Reached', defaultOn: false },
+  MOVE_STARTED: { label: 'Move Started', defaultOn: false },
+  UP_1R: { label: 'Up 1R+', defaultOn: false },
+  TP1_HIT: { label: 'TP1 Hit', defaultOn: false },
+  NEAR_STOP: { label: 'Near Stop', defaultOn: false },
+  DTE_TIGHT: { label: 'DTE Tight', defaultOn: false },
+  STOPPED: { label: 'Stopped', defaultOn: false },
+};
 const FURTHER_ANALYSIS_SELECTED_KEY = 'kairos_further_analysis_selected_setup';
 const CONTRACT_TIER_SELECTION_KEY = 'kairos_contract_tier_selection_v1';
 const ENTER_NOW_FUNNEL_HISTORY_LIMIT = 20;
@@ -3421,9 +3459,11 @@ async function runScan() {
     scannerNearMiss = nextNearMiss;
     recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
     refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
+    evaluatePositionAlertNotifications();
     renderScannerResults();
     renderExecutionTab();
     renderFurtherAnalysisTab();
+    renderPositionsTab();
     if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
       scheduleContractRefreshPoll();
     }
@@ -3825,10 +3865,12 @@ function scheduleContractRefreshPoll() {
       scannerRows = nextRows;
       scannerNearMiss = nextNearMiss;
       refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
+      evaluatePositionAlertNotifications();
       updateDataStatus(data.meta || {});
       renderScannerResults();
       renderExecutionTab();
       renderFurtherAnalysisTab();
+      renderPositionsTab();
       if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
         scheduleContractRefreshPoll();
       }
@@ -3910,6 +3952,62 @@ function maybeSendBrowserNotification(ticker, message, alertType = 'ENTER_NOW') 
       if (permission === 'granted') show();
     }).catch(() => {});
   }
+}
+
+function positionAlertMessage(model = {}, urgency = {}) {
+  const plan = model.plan || {};
+  const live = model.live || {};
+  const rText = live.rNow == null ? 'R unavailable' : `${fmtNumber(live.rNow)}R`;
+  return [
+    `${plan.ticker || 'Position'} position: ${urgency.label}`,
+    `Current: ${rText}.`,
+    `Original plan: Entry ${fmtMoney(plan.entryPrice)}, Stop ${fmtMoney(plan.stopPrice)}, TP1 ${fmtMoney(plan.tp1)}.`,
+  ].join(' ');
+}
+
+function sendPositionBrowserNotification(model = {}, urgency = {}) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  const ticker = model.plan?.ticker || 'Position';
+  new Notification(`${ticker} position: ${urgency.label}`, {
+    body: positionAlertMessage(model, urgency),
+    tag: `kairos-position-${model.id}-${urgency.key}`,
+    renotify: true,
+  });
+  return true;
+}
+
+function evaluatePositionAlertNotifications() {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return { sent: 0 };
+  const entries = loadJournal();
+  const latestByTicker = latestScannerRowsByTicker();
+  const now = new Date().toISOString();
+  let sent = 0;
+
+  const nextEntries = entries.map(entry => {
+    if (!isActiveTrackedSetup(entry)) return entry;
+    const model = buildPositionModels([entry], latestByTicker)[0];
+    if (!model) return entry;
+    const urgency = positionUrgency(model);
+    if (!POSITION_ALERT_KEYS[urgency.key]) return entry;
+
+    const prefs = positionAlertPreferences(entry);
+    if (!prefs[urgency.key]) return entry;
+
+    const notified = entry.position_alert_notified_keys || {};
+    if (notified[urgency.key]) return entry;
+
+    if (!sendPositionBrowserNotification(model, urgency)) return entry;
+    sent += 1;
+    return {
+      ...entry,
+      position_alert_notified_keys: { ...notified, [urgency.key]: now },
+      position_alert_last_notified_key: urgency.key,
+      position_alert_notified_at: now,
+    };
+  });
+
+  if (sent > 0) saveJournal(nextEntries);
+  return { sent };
 }
 
 function inferEntryType(setup) {
@@ -5483,19 +5581,19 @@ function positionProgressClass(model = {}) {
 function positionUrgency(model = {}) {
   const live = model.live || {};
   const progress = String(live.tradeProgressStatus || '').toUpperCase();
-  if (live.stopTouchedAt) return { label: 'Stopped', className: 'red', rank: 0 };
-  if (isPositionNearStop(model)) return { label: 'Near Stop', className: 'red', rank: 0 };
-  if (live.contractHealth?.status === 'TIGHT') return { label: 'DTE Tight', className: 'red', rank: 1 };
-  if (live.tp1TouchedAt) return { label: 'TP1 Hit', className: 'green', rank: 2 };
-  if (progress === 'TARGET NEAR') return { label: 'Target Near', className: 'green', rank: 3 };
+  if (live.stopTouchedAt) return { key: 'STOPPED', label: 'Stopped', className: 'red', rank: 0 };
+  if (isPositionNearStop(model)) return { key: 'NEAR_STOP', label: 'Near Stop', className: 'red', rank: 0 };
+  if (live.contractHealth?.status === 'TIGHT') return { key: 'DTE_TIGHT', label: 'DTE Tight', className: 'red', rank: 1 };
+  if (live.tp1TouchedAt) return { key: 'TP1_HIT', label: 'TP1 Hit', className: 'green', rank: 2 };
+  if (progress === 'TARGET NEAR') return { key: 'TARGET_NEAR', label: 'Target Near', className: 'green', rank: 3 };
   if (progress === 'TREND DEVELOPING' || live.reachedOneR || (live.rNow != null && live.rNow >= 1)) {
-    return { label: 'Up 1R+', className: 'green', rank: 4 };
+    return { key: 'UP_1R', label: 'Up 1R+', className: 'green', rank: 4 };
   }
   if (progress === 'MOVE STARTED' || live.reachedHalfR || (live.rNow != null && live.rNow >= 0.5)) {
-    return { label: 'Move Started', className: 'yellow', rank: 5 };
+    return { key: 'MOVE_STARTED', label: 'Move Started', className: 'yellow', rank: 5 };
   }
-  if (live.entryTouchedAt || progress === 'ENTRY REACHED') return { label: 'Entry Reached', className: 'yellow', rank: 6 };
-  return { label: 'Waiting for Entry', className: 'gray', rank: 7 };
+  if (live.entryTouchedAt || progress === 'ENTRY REACHED') return { key: 'ENTRY_REACHED', label: 'Entry Reached', className: 'yellow', rank: 6 };
+  return { key: 'WAITING_FOR_ENTRY', label: 'Waiting for Entry', className: 'gray', rank: 7 };
 }
 
 function positionOpenedAtMs(model = {}) {
@@ -5527,6 +5625,85 @@ function updatePositionLifecycleFromButton(button, action) {
   const numericId = Number(rawId);
   const id = rawId !== '' && Number.isFinite(numericId) && String(numericId) === rawId ? numericId : rawId;
   updatePositionLifecycle(id, action);
+}
+
+function positionAlertPreferences(entry = {}) {
+  const stored = entry.position_alert_preferences || {};
+  return Object.fromEntries(Object.entries(POSITION_ALERT_KEYS).map(([key, config]) => [
+    key,
+    stored[key] === undefined ? Boolean(config.defaultOn) : Boolean(stored[key]),
+  ]));
+}
+
+function positionNotificationsBlocked() {
+  return 'Notification' in window && Notification.permission === 'denied';
+}
+
+function renderPositionAlertControls(model = {}) {
+  const prefs = positionAlertPreferences(model.entry);
+  const blocked = positionNotificationsBlocked();
+  return `
+    <div class="position-alerts">
+      <div class="execution-section-title">Alerts</div>
+      <div class="position-alert-grid">
+        ${Object.entries(POSITION_ALERT_KEYS).map(([key, config]) => `
+          <label class="position-alert-toggle">
+            <input
+              type="checkbox"
+              ${prefs[key] ? 'checked' : ''}
+              onchange="togglePositionAlertPreferenceFromInput(this, '${key}')"
+              ${blocked ? 'disabled' : ''}
+            />
+            <span>${escapeHtml(config.label)}</span>
+          </label>
+        `).join('')}
+      </div>
+      ${blocked ? '<div class="position-alert-blocked">Notifications blocked — enable them in browser settings.</div>' : ''}
+    </div>`;
+}
+
+function requestPositionNotificationPermission() {
+  if (!('Notification' in window)) return Promise.resolve('unsupported');
+  if (Notification.permission === 'granted' || Notification.permission === 'denied') {
+    return Promise.resolve(Notification.permission);
+  }
+  return Notification.requestPermission().catch(() => 'denied');
+}
+
+function togglePositionAlertPreferenceFromInput(input, key) {
+  const rawId = input?.closest('[data-position-id]')?.dataset?.positionId;
+  const nextValue = Boolean(input?.checked);
+  const entries = loadJournal();
+  const idx = entries.findIndex(e => String(e.id) === String(rawId));
+  if (idx === -1 || !POSITION_ALERT_KEYS[key]) return;
+
+  const apply = permission => {
+    if (nextValue && permission !== 'granted') {
+      if (input) input.checked = false;
+      entries[idx].position_alert_preferences = {
+        ...positionAlertPreferences(entries[idx]),
+        [key]: false,
+      };
+      saveJournal(entries);
+      renderPositionsTab();
+      showToast(
+        permission === 'denied'
+          ? 'Browser notifications are blocked. Enable them in browser settings.'
+          : 'Browser notifications are unavailable.',
+        'error'
+      );
+      return;
+    }
+    entries[idx].position_alert_preferences = {
+      ...positionAlertPreferences(entries[idx]),
+      [key]: nextValue,
+    };
+    saveJournal(entries);
+    renderPositionsTab();
+  };
+
+  if (nextValue) requestPositionNotificationPermission().then(apply);
+  else apply('granted');
 }
 
 function renderPositionsTab() {
@@ -5610,6 +5787,7 @@ function renderPositionsTab() {
           <button class="btn-ghost" onclick="updatePositionLifecycleFromButton(this, 'breakeven')">Move Stop to BE</button>
           <button class="btn-danger" onclick="updatePositionLifecycleFromButton(this, 'manual')">Close or Edit</button>
         </div>
+        ${renderPositionAlertControls(model)}
       </div>`;
   }).join('');
 }
