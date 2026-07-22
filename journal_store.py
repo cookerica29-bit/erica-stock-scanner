@@ -385,7 +385,7 @@ class SQLiteJournalRepository(JournalRepository):
 
     def create_backup(self, backup_dir: str | os.PathLike[str] | None = None, keep_latest: int = 10) -> dict[str, Any]:
         source = Path(self.db_path)
-        directory = Path(backup_dir or os.getenv("JOURNAL_BACKUP_DIR") or source.parent / "journal_backups")
+        directory = self._backup_directory(backup_dir)
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         destination = directory / f"kairos_journal_{timestamp}.sqlite3"
@@ -403,6 +403,7 @@ class SQLiteJournalRepository(JournalRepository):
             "filename": destination.name,
             "path": str(destination),
             "timestamp": timestamp,
+            "size_bytes": len(data),
             "size": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
             "retention_keep_latest": keep_latest,
@@ -442,6 +443,29 @@ class SQLiteJournalRepository(JournalRepository):
         except OSError:
             return False
 
+    def _backup_directory(self, backup_dir: str | os.PathLike[str] | None = None) -> Path:
+        source = Path(self.db_path)
+        return Path(backup_dir or os.getenv("JOURNAL_BACKUP_DIR") or source.parent / "journal_backups")
+
+    def _latest_backup_metadata(self) -> dict[str, Any] | None:
+        directory = self._backup_directory()
+        try:
+            backups = sorted(directory.glob("kairos_journal_*.sqlite3"), key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            return None
+        if not backups:
+            return None
+        latest = backups[0]
+        try:
+            stat = latest.stat()
+        except OSError:
+            return None
+        return {
+            "filename": latest.name,
+            "path": str(latest),
+            "size_bytes": stat.st_size,
+        }
+
     def diagnostics(self) -> dict[str, Any]:
         entries = self.list_entries({"status": "all", "limit": 1000})
         ids = [entry.get("journal_id") for entry in entries]
@@ -480,7 +504,7 @@ class SQLiteJournalRepository(JournalRepository):
             "duplicate_ids": duplicate_ids,
             "migration_conflicts": 0,
             "pending_sync_count": 0,
-            "last_successful_backup": None,
+            "last_successful_backup": self._latest_backup_metadata(),
             "last_write_timestamp": max([entry.get("updated_at") or "" for entry in entries], default=None),
         }
 
