@@ -213,10 +213,13 @@ assert.ok(Math.abs(screenshotExampleBar.xPositions.current - screenshotExampleBa
 assert.ok(screenshotExampleBar.xPositions.current < screenshotExampleBar.xPositions.entry);
 const closeEntryNowHtml = htmlFor(setup({ price: 170.06, entry: 169.05, sl: 172.15, tp1: 162.85 }));
 assert.ok(closeEntryNowHtml.includes('viewBox="0 0 300 86"'));
-assert.ok(closeEntryNowHtml.includes('x="24" y="12">Risk</text>'));
-assert.ok(closeEntryNowHtml.includes('x="276" y="12" text-anchor="end">Reward</text>'));
-assert.ok(closeEntryNowHtml.includes('y="14" text-anchor="middle">Entry</text>'));
+assert.ok(closeEntryNowHtml.includes('x="24" y="8">Risk</text>'));
+assert.ok(closeEntryNowHtml.includes('x="276" y="8" text-anchor="end">Reward</text>'));
+assert.ok(closeEntryNowHtml.includes('y="24" text-anchor="middle">Entry</text>'));
 assert.ok(closeEntryNowHtml.includes('y="80" text-anchor="middle">Now</text>'));
+const riskAxisY = Number(closeEntryNowHtml.match(/<text class="rr-axis-label" x="24" y="([^"]+)">Risk<\/text>/)[1]);
+const closeEntryLabelY = Number(closeEntryNowHtml.match(/<text class="rr-point-label" x="[^"]+" y="([^"]+)" text-anchor="middle">Entry<\/text>/)[1]);
+assert.ok(closeEntryLabelY - riskAxisY >= 12, 'close Entry label must clear the Risk/Reward axis row');
 
 const missingPlanFallback = htmlFor(setup({ entry: null, sl: null, tp1: null }));
 assert.ok(!missingPlanFallback.includes('data-plan-visual="risk-reward"'));

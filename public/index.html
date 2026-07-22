@@ -4813,7 +4813,7 @@ function renderRiskRewardBar(setup) {
   const x = key => data.xPositions[key].toFixed(2);
   const pct = key => data.positions[key].toFixed(2);
   const entryNowClose = Math.abs(data.xPositions.entry - data.xPositions.current) < RR_CLOSE_MARKER_THRESHOLD;
-  const entryLabelY = entryNowClose ? 14 : 22;
+  const entryLabelY = entryNowClose ? 24 : 22;
   const nowLabelY = entryNowClose ? 80 : 68;
   const optionalTargetMarkers = [
     data.positions.tp2 !== null ? `<line class="rr-marker-line" x1="${x('tp2')}" x2="${x('tp2')}" y1="33" y2="49"></line><circle class="rr-marker-target" cx="${x('tp2')}" cy="41" r="3.5"></circle>` : '',
@@ -4839,8 +4839,8 @@ function renderRiskRewardBar(setup) {
       data-current-pct="${pct('current')}"
       data-target-pct="${pct('tp1')}">
       <svg class="risk-reward-svg" viewBox="0 0 ${RR_BAR_WIDTH} 86" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Risk and reward plan">
-        <text class="rr-axis-label" x="${RR_TRACK_START}" y="12">Risk</text>
-        <text class="rr-axis-label" x="${RR_TRACK_END}" y="12" text-anchor="end">Reward</text>
+        <text class="rr-axis-label" x="${RR_TRACK_START}" y="8">Risk</text>
+        <text class="rr-axis-label" x="${RR_TRACK_END}" y="8" text-anchor="end">Reward</text>
         <line class="rr-track-bg" x1="${RR_TRACK_START}" y1="41" x2="${RR_TRACK_END}" y2="41"></line>
         <line class="rr-track-risk" x1="${RR_TRACK_START}" y1="41" x2="${x('entry')}" y2="41"></line>
         <line class="rr-track-reward" x1="${x('entry')}" y1="41" x2="${RR_TRACK_END}" y2="41"></line>
