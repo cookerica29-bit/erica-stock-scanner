@@ -123,6 +123,49 @@ def test_provider_error_mid_pagination_fails_closed():
     assert isinstance(df.columns, pd.MultiIndex)
 
 
+def test_large_multi_symbol_download_chunks_requests_and_retains_successes():
+    previous = os.environ.get("ALPACA_BAR_SYMBOL_CHUNK_SIZE")
+    os.environ["ALPACA_BAR_SYMBOL_CHUNK_SIZE"] = "1"
+    try:
+        provider, calls = provider_with_pages([
+            {"bars": {"AAPL": [bar(1, 200), bar(2, 201)]}},
+            URLError("timeout"),
+        ])
+        market_data.reset_provider_metrics()
+        df = provider.download(["AAPL", "MSFT"], period="2y", interval="1wk")
+        assert len(calls) == 2
+        assert calls[0]["symbols"] == "AAPL"
+        assert calls[1]["symbols"] == "MSFT"
+        assert_multi_has_symbol(df, "AAPL", 2)
+        assert "MSFT" not in df.columns.get_level_values(0)
+        metrics = market_data.provider_metrics_snapshot()
+        assert metrics["alpaca_bar_requests"] == 2
+        assert metrics["alpaca_bar_symbols_requested"] == 2
+        assert metrics["alpaca_bar_symbols_succeeded"] == 1
+        assert metrics["alpaca_bar_symbols_failed"] == 1
+    finally:
+        if previous is None:
+            os.environ.pop("ALPACA_BAR_SYMBOL_CHUNK_SIZE", None)
+        else:
+            os.environ["ALPACA_BAR_SYMBOL_CHUNK_SIZE"] = previous
+
+
+def test_page_ceiling_env_is_bounded():
+    previous = os.environ.get("ALPACA_BARS_MAX_PAGES")
+    os.environ["ALPACA_BARS_MAX_PAGES"] = "9999"
+    try:
+        assert market_data._parse_bounded_positive_int_env(
+            "ALPACA_BARS_MAX_PAGES",
+            market_data.DEFAULT_ALPACA_MAX_PAGES,
+            market_data.MAX_ALPACA_MAX_PAGES,
+        ) == market_data.MAX_ALPACA_MAX_PAGES
+    finally:
+        if previous is None:
+            os.environ.pop("ALPACA_BARS_MAX_PAGES", None)
+        else:
+            os.environ["ALPACA_BARS_MAX_PAGES"] = previous
+
+
 def main() -> int:
     test_one_page_response()
     test_two_page_response()
@@ -130,6 +173,8 @@ def main() -> int:
     test_repeated_token_guard_fails_closed()
     test_max_page_guard_fails_closed()
     test_provider_error_mid_pagination_fails_closed()
+    test_large_multi_symbol_download_chunks_requests_and_retains_successes()
+    test_page_ceiling_env_is_bounded()
     print("Alpaca pagination v1 tests passed")
     return 0
 

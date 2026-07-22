@@ -11,7 +11,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from market_data import ALPACA_PROVIDER_NAME, MarketDataFacade, build_market_data_provider, provider_name_for_timeframe
+from market_data import (
+    ALPACA_PROVIDER_NAME,
+    MarketDataFacade,
+    build_market_data_provider,
+    provider_metrics_snapshot,
+    provider_name_for_timeframe,
+    reset_provider_metrics,
+)
 
 logger = logging.getLogger(__name__)
 yf = MarketDataFacade()
@@ -515,6 +522,7 @@ def build_discovered_scan_coverage_snapshot(
     skipped = scan_meta.get("tradeability_skipped", 0)
     failed = scan_meta.get("no_setup_or_failed_count", 0)
     returned = len(all_rows)
+    cache_stats = scan_meta.get("cache_stats") or {}
     partial = bool(
         (requested is not None and (processed or 0) + (skipped or 0) + (failed or 0) < requested)
         or scan_meta.get("partial_result")
@@ -558,6 +566,20 @@ def build_discovered_scan_coverage_snapshot(
         },
         "blocker_distribution": dict(sorted(blocker_distribution.items())),
         "provider_failures": dict(sorted(_coverage_provider_failure_distribution(all_rows, scan_meta).items())),
+        "provider_diagnostics": {
+            **(scan_meta.get("provider_metrics") or {}),
+            "bar_cache_hits": cache_stats.get("prices_hit", 0),
+            "bar_cache_misses": cache_stats.get("prices_miss", 0),
+            "option_eligibility_from_discovery": scan_meta.get("option_eligibility_from_discovery", 0),
+            "yahoo_expiration_requests": cache_stats.get("api_option_expirations_call", 0),
+            "yahoo_expiration_unknown": (scan_meta.get("tradeability_skip_reasons") or {}).get("options data unknown", 0),
+            "live_chain_requests": cache_stats.get("api_option_chain_call", 0),
+            "live_chain_failures": sum(
+                1
+                for row in all_rows
+                if _coverage_contract_bucket(row) == "option data unknown or temporarily failed"
+            ),
+        },
     }
     return snapshot
 
@@ -606,6 +628,7 @@ def _submit_analysis_refresh(
     discover: bool = False,
     max_symbols: Optional[int] = 200,
     coverage_context: Optional[dict] = None,
+    trusted_options_symbols: Optional[set[str]] = None,
 ) -> bool:
     """Submit an analysis refresh job.
 
@@ -617,7 +640,17 @@ def _submit_analysis_refresh(
     if snapshot.get("refreshing"):
         return False
     job_id = f"{_analysis_state_key(key)}:{int(time.time())}:{reason}"
-    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id, discover, max_symbols, coverage_context)
+    submitted = _submit_background_job(
+        refresh_key,
+        _refresh_analysis_cache,
+        key,
+        watchlist,
+        job_id,
+        discover,
+        max_symbols,
+        coverage_context,
+        trusted_options_symbols,
+    )
     if submitted:
         _mark_analysis_refresh_started(key, job_id)
     return submitted
@@ -749,6 +782,7 @@ def _refresh_analysis_cache(
     discover: bool = False,
     max_symbols: Optional[int] = 200,
     coverage_context: Optional[dict] = None,
+    trusted_options_symbols: Optional[set[str]] = None,
 ) -> None:
     started = time.perf_counter()
     try:
@@ -758,6 +792,7 @@ def _refresh_analysis_cache(
             max_workers=BACKGROUND_ANALYSIS_SCAN_WORKERS,
             discover=discover,
             max_symbols=max_symbols,
+            trusted_options_symbols=trusted_options_symbols,
         )
         _store_analysis_cache(key, rows, near_miss, scan_meta)
         if isinstance(key, tuple) and len(key) >= 2 and key[0] == "universe" and key[1] == "discovered":
@@ -1101,7 +1136,7 @@ def _is_known_etf(ticker: str) -> bool:
     return ticker in NO_EARNINGS_SYMBOLS
 
 
-def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -> Optional[str]:
+def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame], trusted_options_eligible: bool = False) -> Optional[str]:
     config = STOCK_TRADEABILITY_FILTER
     if not config.get("enabled", True):
         return None
@@ -1126,7 +1161,7 @@ def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -
             return "low liquidity"
 
     min_expirations = int(config.get("min_option_expirations") or 0)
-    if min_expirations > 0:
+    if min_expirations > 0 and not trusted_options_eligible:
         known, expirations = _cached_option_expirations_for_ticker(ticker)
         if known:
             if not expirations:
@@ -1140,14 +1175,19 @@ def _stock_universe_skip_reason(ticker: str, daily_df: Optional[pd.DataFrame]) -
     return None
 
 
-def _prefilter_stock_universe(watchlist: list, daily_data: dict) -> tuple[list, list]:
+def _prefilter_stock_universe(watchlist: list, daily_data: dict, trusted_options_symbols: Optional[set[str]] = None) -> tuple[list, list]:
+    trusted_options_symbols = {str(symbol or "").strip().upper() for symbol in (trusted_options_symbols or set()) if str(symbol or "").strip()}
     accepted = []
     skipped = []
     for ticker in watchlist:
         symbol = str(ticker or "").strip().upper()
         if not symbol:
             continue
-        reason = _stock_universe_skip_reason(symbol, daily_data.get(symbol))
+        reason = _stock_universe_skip_reason(
+            symbol,
+            daily_data.get(symbol),
+            trusted_options_eligible=symbol in trusted_options_symbols,
+        )
         if reason:
             skipped.append({"ticker": symbol, "reason": reason})
         else:
@@ -4285,9 +4325,11 @@ def scan_all(
     max_workers: int = 12,
     discover: bool = False,
     max_symbols: Optional[int] = 200,
+    trusted_options_symbols: Optional[set[str]] = None,
 ) -> tuple:
     scan_start = time.perf_counter()
     scan_started_at = _utc_now()
+    reset_provider_metrics()
     _scan_activity_started()
     try:
         logger.info("Stock Scanner Strategy: %s", STOCK_SCANNER_STRATEGY_VERSION)
@@ -4305,11 +4347,20 @@ def scan_all(
                     watchlist = watchlist[:200]
 
         original_count = len(watchlist)
+        trusted_options_symbols = {
+            str(symbol or "").strip().upper()
+            for symbol in (trusted_options_symbols or set())
+            if str(symbol or "").strip()
+        }
 
         # ── Step 1: batch-download daily OHLCV for cheap tradeability filtering ───
         price_stage_start = time.perf_counter()
         daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
-        filtered_watchlist, skipped_symbols = _prefilter_stock_universe(watchlist, daily_data)
+        filtered_watchlist, skipped_symbols = _prefilter_stock_universe(
+            watchlist,
+            daily_data,
+            trusted_options_symbols=trusted_options_symbols,
+        )
         skip_counts = {}
         for item in skipped_symbols:
             reason = item.get("reason") or "unknown"
@@ -4387,6 +4438,7 @@ def scan_all(
             cache_stats,
             ", ".join(slow_contracts) if slow_contracts else "none",
         )
+        provider_metrics = provider_metrics_snapshot()
         scan_meta = {
             "configured_universe_count": original_count,
             "symbols_attempted": len(filtered_watchlist),
@@ -4401,6 +4453,9 @@ def scan_all(
             "scan_completed_at": _format_utc_timestamp(scan_completed_at),
             "scan_duration_ms": total_ms,
             "partial_result": False,
+            "option_eligibility_from_discovery": len([symbol for symbol in filtered_watchlist if symbol in trusted_options_symbols]),
+            "provider_metrics": provider_metrics,
+            "cache_stats": cache_stats,
         }
         return rows, near_miss, scan_meta
     finally:
@@ -4415,6 +4470,7 @@ def scan_cached(
     universe: str = "default",
     max_symbols: Optional[int] = 200,
     coverage_context: Optional[dict] = None,
+    trusted_options_symbols: Optional[set[str]] = None,
 ) -> dict:
     key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
     with _cache_lock:
@@ -4432,6 +4488,7 @@ def scan_cached(
                 discover=discover,
                 max_symbols=max_symbols,
                 coverage_context=coverage_context,
+                trusted_options_symbols=trusted_options_symbols,
             )
         return {
             "rows": _hydrate_scan_rows_from_cache(list(cached.get("rows", []))),
@@ -4450,6 +4507,7 @@ def scan_cached(
             discover=discover,
             max_symbols=max_symbols,
             coverage_context=coverage_context,
+            trusted_options_symbols=trusted_options_symbols,
         )
         return {
             "rows": [],

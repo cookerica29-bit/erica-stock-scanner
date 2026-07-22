@@ -379,6 +379,7 @@ def api_scan(
             universe="discovered",
             max_symbols=None,
             coverage_context=_discovery_coverage_context(),
+            trusted_options_symbols=set(symbols),
         )
     else:
         use_finviz = bool(discover) or str(universe or "").strip().lower() == "finviz"
@@ -458,6 +459,7 @@ def api_coverage_baseline():
             "contract_distribution": {},
             "blocker_distribution": {},
             "provider_failures": {},
+            "provider_diagnostics": {},
         }
     return {
         "status": "ready",

@@ -27,7 +27,7 @@ def run_with_stubs(discover: bool = False, watchlist=None, max_symbols=200):
     def fake_batch(tickers, period, interval):
         return {}
 
-    def fake_prefilter(watchlist, daily_data):
+    def fake_prefilter(watchlist, daily_data, trusted_options_symbols=None):
         calls["prefilter_watchlist"] = list(watchlist)
         return [], [{"ticker": t, "reason": "no price data"} for t in watchlist]
 

@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
@@ -30,6 +31,8 @@ ALPACA_PROVIDER_NAME = "alpaca"
 DEFAULT_DATA_PROVIDER = YAHOO_PROVIDER_NAME
 DEFAULT_ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 DEFAULT_ALPACA_MAX_PAGES = 25
+MAX_ALPACA_MAX_PAGES = 100
+DEFAULT_ALPACA_BAR_SYMBOL_CHUNK_SIZE = 200
 DEFAULT_ALPACA_QUOTE_CHUNK_SIZE = 200
 EASTERN_TZ = ZoneInfo("America/New_York")
 SCANNER_TIMEFRAMES = [
@@ -51,6 +54,16 @@ TIMEFRAME_PROVIDER_PROFILES = {
         "1W": ALPACA_PROVIDER_NAME,
         "4H": YAHOO_PROVIDER_NAME,
     },
+}
+
+_provider_metrics_lock = threading.RLock()
+_provider_metrics = {
+    "alpaca_bar_requests": 0,
+    "alpaca_bar_pages": 0,
+    "alpaca_bar_symbols_requested": 0,
+    "alpaca_bar_symbols_succeeded": 0,
+    "alpaca_bar_symbols_failed": 0,
+    "alpaca_max_pages_exceeded_count": 0,
 }
 
 
@@ -186,6 +199,26 @@ def _parse_positive_int_env(name: str, default: int) -> int:
     return max(1, value)
 
 
+def _parse_bounded_positive_int_env(name: str, default: int, maximum: int) -> int:
+    return min(_parse_positive_int_env(name, default), max(1, int(maximum)))
+
+
+def reset_provider_metrics() -> None:
+    with _provider_metrics_lock:
+        for key in _provider_metrics:
+            _provider_metrics[key] = 0
+
+
+def provider_metrics_snapshot() -> dict[str, int]:
+    with _provider_metrics_lock:
+        return dict(_provider_metrics)
+
+
+def _record_provider_metric(name: str, amount: int = 1) -> None:
+    with _provider_metrics_lock:
+        _provider_metrics[name] = int(_provider_metrics.get(name, 0)) + int(amount or 0)
+
+
 def _chunks(items: list[str], size: int):
     for index in range(0, len(items), size):
         yield items[index:index + size]
@@ -252,7 +285,8 @@ class AlpacaMarketDataProvider(MarketDataProvider):
             return json.loads(response.read().decode("utf-8"))
 
     def _request_bars_pages(self, params: dict[str, Any], symbols: list[str]) -> dict[str, list[dict[str, Any]]]:
-        max_pages = _parse_positive_int_env("ALPACA_MAX_PAGES", DEFAULT_ALPACA_MAX_PAGES)
+        max_pages_env = "ALPACA_BARS_MAX_PAGES" if os.getenv("ALPACA_BARS_MAX_PAGES") else "ALPACA_MAX_PAGES"
+        max_pages = _parse_bounded_positive_int_env(max_pages_env, DEFAULT_ALPACA_MAX_PAGES, MAX_ALPACA_MAX_PAGES)
         reverse_symbol_map = {self.normalize_symbol(symbol): symbol for symbol in symbols}
         bars_by_symbol = {symbol: [] for symbol in symbols}
         page_token = None
@@ -267,6 +301,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                     len(symbols),
                     params.get("timeframe"),
                 )
+                _record_provider_metric("alpaca_max_pages_exceeded_count")
                 raise RuntimeError("Alpaca pagination exceeded max pages")
 
             page_params = dict(params)
@@ -295,6 +330,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                 raise
 
             page_count += 1
+            _record_provider_metric("alpaca_bar_pages")
             page_bars = payload.get("bars") or {}
             for provider_symbol, bars in page_bars.items():
                 original_symbol = reverse_symbol_map.get(str(provider_symbol or "").strip().upper())
@@ -327,23 +363,39 @@ class AlpacaMarketDataProvider(MarketDataProvider):
             return pd.DataFrame()
 
         start = _alpaca_period_start(period, interval)
-        params = {
-            "symbols": ",".join(self.normalize_symbol(s) for s in symbols),
-            "timeframe": _alpaca_timeframe(interval),
-            "start": start.isoformat().replace("+00:00", "Z"),
-            "limit": 10000,
-            "adjustment": "all" if auto_adjust else "raw",
-        }
-        try:
-            bars_by_symbol = self._request_bars_pages(params, symbols)
-        except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
-            logger.warning("[alpaca] candle request failed symbols=%s interval=%s error=%s", symbols, interval, _classify_error(exc))
-            return pd.DataFrame() if len(symbols) == 1 else _empty_multi_symbol_frame(symbols)
+        chunk_size = _parse_positive_int_env("ALPACA_BAR_SYMBOL_CHUNK_SIZE", DEFAULT_ALPACA_BAR_SYMBOL_CHUNK_SIZE)
+        bars_by_symbol = {symbol: [] for symbol in symbols}
+        failed_symbols: set[str] = set()
+
+        for chunk in _chunks(symbols, chunk_size):
+            params = {
+                "symbols": ",".join(self.normalize_symbol(s) for s in chunk),
+                "timeframe": _alpaca_timeframe(interval),
+                "start": start.isoformat().replace("+00:00", "Z"),
+                "limit": 10000,
+                "adjustment": "all" if auto_adjust else "raw",
+            }
+            _record_provider_metric("alpaca_bar_requests")
+            _record_provider_metric("alpaca_bar_symbols_requested", len(chunk))
+            try:
+                chunk_bars = self._request_bars_pages(params, chunk)
+            except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
+                failed_symbols.update(chunk)
+                _record_provider_metric("alpaca_bar_symbols_failed", len(chunk))
+                logger.warning("[alpaca] candle request failed symbols=%s interval=%s error=%s", len(chunk), interval, _classify_error(exc))
+                continue
+            for symbol, bars in chunk_bars.items():
+                bars_by_symbol[symbol] = bars
 
         frames = {}
         for symbol in symbols:
             bars = bars_by_symbol.get(symbol) or []
             frames[symbol] = _bars_to_frame(bars)
+            if symbol in failed_symbols or frames[symbol].empty:
+                if symbol not in failed_symbols:
+                    _record_provider_metric("alpaca_bar_symbols_failed")
+            else:
+                _record_provider_metric("alpaca_bar_symbols_succeeded")
 
         if len(symbols) == 1:
             return frames.get(symbols[0], pd.DataFrame())
