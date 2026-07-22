@@ -3465,7 +3465,6 @@ def _background_refresh_loop() -> None:
             if _periodic_refresh_due("option_expirations", 600):
                 for ticker in list(STOCK_UNIVERSE_FILTER.get("allowlist", []))[:24]:
                     _submit_background_job(("option_expirations_periodic", ticker), _refresh_option_expirations, ticker)
-                _refresh_cached_best_contracts()
 
             if _periodic_refresh_due("earnings", 6 * 60 * 60):
                 for ticker in [s for s in symbols if s not in NO_EARNINGS_SYMBOLS][:40]:
