@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from urllib.error import HTTPError
@@ -420,6 +421,51 @@ def test_rank_discovery_candidates_ignores_unpassed_or_unmatched_metrics():
     assert ranked[0].selected is True
 
 
+def test_discovery_universe_max_symbols_defaults_to_550_and_accepts_env_override():
+    previous = os.environ.get(discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV)
+    try:
+        os.environ.pop(discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV, None)
+        assert discovery.discovery_universe_max_symbols() == 550
+        os.environ[discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV] = "750"
+        assert discovery.discovery_universe_max_symbols() == 750
+        assert discovery.discovery_universe_max_symbols("1250") == 1250
+    finally:
+        if previous is None:
+            os.environ.pop(discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV, None)
+        else:
+            os.environ[discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV] = previous
+
+
+def test_discovery_universe_max_symbols_invalid_values_fail_safe_to_default():
+    assert discovery.discovery_universe_max_symbols("bad") == 550
+    assert discovery.discovery_universe_max_symbols("0") == 550
+    assert discovery.discovery_universe_max_symbols("-10") == 550
+
+
+def test_rank_discovery_candidates_uses_configured_default_cap_when_target_omitted():
+    previous = os.environ.get(discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV)
+    try:
+        os.environ[discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV] = "2"
+        dollar_metrics = [
+            discovery.DollarVolumeMetrics("A", 100.0, 10_000_000, 1_000_000_000, 30, True),
+            discovery.DollarVolumeMetrics("B", 100.0, 9_000_000, 900_000_000, 30, True),
+            discovery.DollarVolumeMetrics("C", 100.0, 8_000_000, 800_000_000, 30, True),
+        ]
+        option_metrics = [
+            discovery.OptionsLiquidityMetrics("A", 100.0, 900, 900, "AC", "AP", 2, 1, True),
+            discovery.OptionsLiquidityMetrics("B", 100.0, 800, 800, "BC", "BP", 2, 1, True),
+            discovery.OptionsLiquidityMetrics("C", 100.0, 700, 700, "CC", "CP", 2, 1, True),
+        ]
+        ranked = discovery.rank_discovery_candidates(dollar_metrics, option_metrics)
+        assert len(ranked) == 3
+        assert sum(1 for candidate in ranked if candidate.selected) == 2
+    finally:
+        if previous is None:
+            os.environ.pop(discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV, None)
+        else:
+            os.environ[discovery.DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV] = previous
+
+
 def main() -> int:
     test_stage1_accepts_active_tradable_non_otc_optionable_common_stocks()
     test_stage1_rejects_inactive_non_tradable_otc_and_non_optionable_assets()
@@ -443,6 +489,9 @@ def main() -> int:
     test_percentile_ranks_handle_ties_and_single_values()
     test_rank_discovery_candidates_combines_dollar_volume_and_both_options_sides()
     test_rank_discovery_candidates_ignores_unpassed_or_unmatched_metrics()
+    test_discovery_universe_max_symbols_defaults_to_550_and_accepts_env_override()
+    test_discovery_universe_max_symbols_invalid_values_fail_safe_to_default()
+    test_rank_discovery_candidates_uses_configured_default_cap_when_target_omitted()
     print("Alpaca asset discovery v1 tests passed")
     return 0
 

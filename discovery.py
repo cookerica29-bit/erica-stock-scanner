@@ -50,10 +50,22 @@ DISCOVERY_OPTIONS_MAX_PAGES = 10
 DISCOVERY_OPTIONS_MAX_WORKERS = 2
 DISCOVERY_OPTIONS_MAX_ATTEMPTS = 4
 DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS = 1.5
-DISCOVERY_TARGET_UNIVERSE_SIZE = 550
+DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS = 550
+DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV = "DISCOVERY_UNIVERSE_MAX_SYMBOLS"
 DISCOVERY_RANK_DOLLAR_VOLUME_WEIGHT = 0.50
 DISCOVERY_RANK_CALL_OI_WEIGHT = 0.25
 DISCOVERY_RANK_PUT_OI_WEIGHT = 0.25
+
+
+def discovery_universe_max_symbols(value: Optional[str] = None) -> int:
+    raw = os.getenv(DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV) if value is None else value
+    if raw is None or str(raw).strip() == "":
+        return DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
+    return parsed if parsed > 0 else DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
 
 WARRANT_NAME_RE = re.compile(r"\bwarrants?\b|\bwt\b", re.IGNORECASE)
 UNIT_NAME_RE = re.compile(r"\bunits?\b", re.IGNORECASE)
@@ -658,8 +670,9 @@ def rank_discovery_candidates(
     dollar_volume_metrics: list[DollarVolumeMetrics],
     options_metrics: list[OptionsLiquidityMetrics],
     *,
-    target_size: int = DISCOVERY_TARGET_UNIVERSE_SIZE,
+    target_size: Optional[int] = None,
 ) -> list[RankedDiscoveryCandidate]:
+    effective_target_size = discovery_universe_max_symbols() if target_size is None else target_size
     dollar_by_symbol = {
         metric.symbol: metric
         for metric in dollar_volume_metrics
@@ -714,7 +727,7 @@ def rank_discovery_candidates(
             selected=False,
         ))
 
-    selected_cutoff = max(int(target_size or 0), 0)
+    selected_cutoff = max(int(effective_target_size or 0), 0)
     ranked = []
     for index, candidate in enumerate(sorted(
         candidates,
@@ -809,7 +822,8 @@ def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None
     stage4_passed = [metric for metric in options_metrics if metric.passed]
     stage4_failed = [metric for metric in options_metrics if not metric.passed]
 
-    ranked = rank_discovery_candidates(dollar_metrics, options_metrics)
+    effective_cap = discovery_universe_max_symbols()
+    ranked = rank_discovery_candidates(dollar_metrics, options_metrics, target_size=effective_cap)
     selected = [candidate for candidate in ranked if candidate.selected]
     selected_symbols = [candidate.symbol for candidate in selected]
     selected_symbol_set = set(selected_symbols)
@@ -848,7 +862,9 @@ def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None
             "near_atm_strike_band_pct": DISCOVERY_OPTIONS_STRIKE_BAND_PCT,
             "minimum_call_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
             "minimum_put_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
-            "target_universe_size": DISCOVERY_TARGET_UNIVERSE_SIZE,
+            "target_universe_size": effective_cap,
+            "default_target_universe_size": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
+            "target_universe_size_env": DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV,
         },
         "formula": {
             "combined_liquidity_score": (
@@ -963,10 +979,13 @@ def main() -> int:
                 "ford": _sample_options_metric(next((metric for metric in options_metrics if metric.symbol == "F"), OptionsLiquidityMetrics("F", None, None, None, None, None, 0, 0, False, "not in input"))),
             }
             if run_stage5:
-                ranked = rank_discovery_candidates(metrics, options_metrics)
+                effective_cap = discovery_universe_max_symbols()
+                ranked = rank_discovery_candidates(metrics, options_metrics, target_size=effective_cap)
                 selected = [candidate for candidate in ranked if candidate.selected]
                 report["stage5"] = {
-                    "target_universe_size": DISCOVERY_TARGET_UNIVERSE_SIZE,
+                    "target_universe_size": effective_cap,
+                    "default_target_universe_size": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
+                    "target_universe_size_env": DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV,
                     "formula": {
                         "combined_liquidity_score": (
                             f"{DISCOVERY_RANK_DOLLAR_VOLUME_WEIGHT:.2f} * dollar_volume_percentile"
