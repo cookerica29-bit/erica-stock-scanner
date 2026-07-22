@@ -5,7 +5,7 @@ import os
 import threading
 import time
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -29,6 +29,12 @@ from market_data import (
     configured_timeframe_provider_profile,
     hybrid_strategy_diagnostics,
     validate_watchlist_candles,
+)
+from journal_store import (
+    JournalConflictError,
+    JournalValidationError,
+    SQLiteJournalRepository,
+    default_journal_db_path,
 )
 
 app = FastAPI(title="Stock Options Scanner")
@@ -57,6 +63,7 @@ _discovery_universe_cache = {
 }
 _discovery_universe_lock = threading.RLock()
 _discovery_universe_executor = ThreadPoolExecutor(max_workers=1)
+_journal_repository = SQLiteJournalRepository(default_journal_db_path())
 
 NO_STORE_HEADERS = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -86,6 +93,10 @@ def _coerce_utc_datetime(value):
 
 def _discovery_admin_token() -> str:
     return os.getenv("DISCOVERY_ADMIN_TOKEN", "").strip()
+
+
+def _journal_admin_token() -> str:
+    return os.getenv("JOURNAL_ADMIN_TOKEN", "").strip() or _discovery_admin_token()
 
 
 def _discovery_status_snapshot() -> dict:
@@ -273,6 +284,14 @@ def _require_discovery_admin_token(header_value) -> None:
         raise HTTPException(status_code=503, detail="Discovery manual trigger is disabled; set DISCOVERY_ADMIN_TOKEN to enable it")
     if header_value != token:
         raise HTTPException(status_code=403, detail="Invalid discovery admin token")
+
+
+def _require_journal_admin_token(header_value) -> None:
+    token = _journal_admin_token()
+    if not token:
+        raise HTTPException(status_code=503, detail="Journal API is disabled; set JOURNAL_ADMIN_TOKEN or DISCOVERY_ADMIN_TOKEN to enable it")
+    if header_value != token:
+        raise HTTPException(status_code=403, detail="Invalid journal admin token")
 
 
 def _discovery_cache_needs_refresh() -> bool:
@@ -465,6 +484,113 @@ def api_coverage_baseline():
         "status": "ready",
         "ready": True,
         **snapshot,
+    }
+
+
+@app.get("/api/journal")
+def api_journal_list(
+    status: str = Query(default="all"),
+    ticker: str = Query(default=""),
+    direction: str = Query(default=""),
+    position_id: str = Query(default=""),
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return {
+        "entries": _journal_repository.list_entries({
+            "status": status,
+            "ticker": ticker,
+            "direction": direction,
+            "position_id": position_id,
+            "limit": limit,
+            "offset": offset,
+        }),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/api/journal/export")
+def api_journal_export(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _journal_repository.export_entries()
+
+
+@app.get("/api/journal/diagnostics")
+def api_journal_diagnostics(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _journal_repository.diagnostics()
+
+
+@app.get("/api/journal/{journal_id}")
+def api_journal_get(journal_id: str, x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.get_entry(journal_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    return entry
+
+
+@app.post("/api/journal")
+def api_journal_create(
+    entry: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    try:
+        return _journal_repository.create_entry(entry)
+    except JournalValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.patch("/api/journal/{journal_id}")
+def api_journal_update(
+    journal_id: str,
+    patch: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    try:
+        return _journal_repository.update_entry(journal_id, patch)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    except JournalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except JournalValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.delete("/api/journal/{journal_id}")
+def api_journal_delete(journal_id: str, x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.delete_entry(journal_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    return {"deleted": True, "journal_id": journal_id, "deleted_at": entry.get("deleted_at")}
+
+
+@app.post("/api/journal/migrate")
+def api_journal_migrate(
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=422, detail="Migration payload must include entries list")
+    try:
+        result = _journal_repository.upsert_entries(entries)
+    except JournalValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {
+        "accepted": True,
+        "created": result["created"],
+        "updated": result["updated"],
+        "conflicts": result["conflicts"],
+        "conflict_ids": result["conflict_ids"],
+        "entries": result["entries"],
     }
 
 

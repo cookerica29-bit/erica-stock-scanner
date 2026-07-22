@@ -3033,6 +3033,12 @@
 <script>
 const API = '';
 const JOURNAL_KEY = 'stock_scanner_journal';
+const JOURNAL_AUTH_TOKEN_KEY = 'kairos_journal_admin_token';
+const JOURNAL_SERVER_CACHE_KEY = 'stock_scanner_journal_server_cache';
+const JOURNAL_PENDING_SYNC_KEY = 'stock_scanner_journal_pending_sync';
+const JOURNAL_MIGRATED_IDS_KEY = 'stock_scanner_journal_migrated_ids';
+const JOURNAL_SERVER_AUTHORITATIVE_KEY = 'stock_scanner_journal_server_authoritative';
+const JOURNAL_BACKUP_PREFIX = 'stock_scanner_journal_backup_';
 const OPPORTUNITY_HISTORY_KEY = 'kairos_opportunity_history_v1';
 const JOURNAL_DUPLICATE_PREVENTION_KEY = 'stock_scanner_journal_duplicate_preventions';
 const EXPECTED_MOVE_TRACKING_WINDOW_DAYS = 30;
@@ -8458,6 +8464,183 @@ function migrateJournalEntries(entries = []) {
   return { entries: migrated, changed: JSON.stringify(migrated) !== before };
 }
 
+function journalAuthToken() {
+  return localStorage.getItem(JOURNAL_AUTH_TOKEN_KEY) || '';
+}
+
+function journalAuthHeaders() {
+  const token = journalAuthToken();
+  return token ? { 'Content-Type': 'application/json', 'X-Kairos-Admin-Token': token } : { 'Content-Type': 'application/json' };
+}
+
+function journalServerSyncEnabled() {
+  return Boolean(journalAuthToken());
+}
+
+function journalServerAuthoritative() {
+  return localStorage.getItem(JOURNAL_SERVER_AUTHORITATIVE_KEY) === 'true';
+}
+
+function ensureJournalStableIds(entry = {}) {
+  const next = { ...entry };
+  const existing = firstPresent(next.journal_id, next.id, null);
+  const generated = existing || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `journal-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  next.journal_id = String(generated);
+  next.position_id = String(firstPresent(next.position_id, next.journal_id));
+  return next;
+}
+
+function journalMigrationFingerprint(entry = {}) {
+  return [
+    String(entry.ticker || '').toUpperCase(),
+    String(entry.direction || '').toUpperCase(),
+    firstPresent(entry.entry_timestamp, entry.actual_entry_at, entry.position_opened_at, entry.tracking_started_at, entry.signal_timestamp, ''),
+    firstPresent(entry.actual_underlying_entry, entry.planned_underlying_entry, entry.entry_price, entry.entry, ''),
+    firstPresent(entry.actual_strike, entry.strike_price, entry.strike, ''),
+    firstPresent(entry.actual_expiration, entry.expiration_date, entry.expiry, ''),
+  ].join('|');
+}
+
+function mergeJournalHistoriesForMigration(localHistory = [], serverHistory = []) {
+  const output = [];
+  const seen = new Set();
+  [...(serverHistory || []), ...(localHistory || [])].forEach(event => {
+    if (!event || typeof event !== 'object') return;
+    const key = event.event_id || event.event_key || JSON.stringify(event);
+    if (seen.has(key)) return;
+    seen.add(key);
+    output.push(event);
+  });
+  return output;
+}
+
+function migrationTimestampReliable(value) {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed);
+}
+
+function analyzeJournalMigration(localEntries = [], serverEntries = []) {
+  const serverById = new Map(serverEntries.map(entry => [String(firstPresent(entry.journal_id, entry.id, '')), entry]).filter(([id]) => id));
+  const serverFingerprints = new Map(serverEntries.map(entry => [journalMigrationFingerprint(entry), entry]));
+  const result = { localCount: localEntries.length, serverCount: serverEntries.length, newEntries: [], matchingEntries: [], conflicts: [], possibleDuplicates: [] };
+  localEntries.forEach(raw => {
+    const local = ensureJournalStableIds(migrateJournalEntry(raw));
+    const server = serverById.get(local.journal_id);
+    if (server) {
+      const localUpdated = firstPresent(local.updated_at, local.updatedAt, local.snapshot_timestamp, null);
+      const serverUpdated = firstPresent(server.updated_at, server.updatedAt, null);
+      const trustworthy = migrationTimestampReliable(localUpdated) && migrationTimestampReliable(serverUpdated);
+      result.matchingEntries.push({ local, server, trustworthy, merged_history: mergeJournalHistoriesForMigration(local.position_state_history, server.position_state_history) });
+      if (!trustworthy && JSON.stringify(local) !== JSON.stringify(server)) result.conflicts.push({ local, server, reason: 'matching ID with untrusted timestamps' });
+      return;
+    }
+    const possible = serverFingerprints.get(journalMigrationFingerprint(local));
+    if (possible) {
+      result.possibleDuplicates.push({ local, server: possible, reason: 'matching cautious fingerprint' });
+      result.conflicts.push({ local, server: possible, reason: 'possible duplicate requires review' });
+      return;
+    }
+    result.newEntries.push(local);
+  });
+  return result;
+}
+
+function backupLocalJournalBeforeMigration(entries = loadJournal()) {
+  const key = `${JOURNAL_BACKUP_PREFIX}${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  localStorage.setItem(key, JSON.stringify(entries));
+  return key;
+}
+
+function queuePendingJournalSync(entries = []) {
+  const pending = JSON.parse(localStorage.getItem(JOURNAL_PENDING_SYNC_KEY) || '[]');
+  localStorage.setItem(JOURNAL_PENDING_SYNC_KEY, JSON.stringify([...pending, ...entries.map(ensureJournalStableIds)]));
+}
+
+async function fetchServerJournalEntries(filters = {}) {
+  if (!journalServerSyncEnabled()) return { entries: [], disabled: true };
+  const params = new URLSearchParams({ status: filters.status || 'all', limit: String(filters.limit || 1000) });
+  if (filters.ticker) params.set('ticker', filters.ticker);
+  if (filters.direction) params.set('direction', filters.direction);
+  if (filters.position_id) params.set('position_id', filters.position_id);
+  const response = await fetchWithTimeout(`${API}/api/journal?${params.toString()}`, { headers: journalAuthHeaders() });
+  if (!response.ok) throw new Error(`Journal fetch failed: ${response.status}`);
+  const payload = await response.json();
+  localStorage.setItem(JOURNAL_SERVER_CACHE_KEY, JSON.stringify(payload.entries || []));
+  return payload;
+}
+
+async function migrateLocalJournalToServer(confirmFn = confirm) {
+  if (!journalServerSyncEnabled()) return { migrated: false, reason: 'server sync disabled' };
+  const localEntries = loadJournal().map(ensureJournalStableIds);
+  const serverPayload = await fetchServerJournalEntries({ status: 'all' });
+  const analysis = analyzeJournalMigration(localEntries, serverPayload.entries || []);
+  if (!analysis.newEntries.length && !analysis.matchingEntries.length) return { migrated: false, analysis };
+  const message = `Migrate ${analysis.newEntries.length} new local journal entr${analysis.newEntries.length === 1 ? 'y' : 'ies'} to the server? Server has ${analysis.serverCount}. Conflicts flagged: ${analysis.conflicts.length}.`;
+  if (!confirmFn(message)) return { migrated: false, analysis };
+  const backupKey = backupLocalJournalBeforeMigration(localEntries);
+  const response = await fetchWithTimeout(`${API}/api/journal/migrate`, {
+    method: 'POST',
+    headers: journalAuthHeaders(),
+    body: JSON.stringify({ entries: localEntries, backup_key: backupKey }),
+  });
+  if (!response.ok) {
+    queuePendingJournalSync(localEntries);
+    throw new Error(`Journal migration failed: ${response.status}`);
+  }
+  const payload = await response.json();
+  const migratedIds = new Set(JSON.parse(localStorage.getItem(JOURNAL_MIGRATED_IDS_KEY) || '[]'));
+  (payload.entries || []).forEach(entry => migratedIds.add(entry.journal_id));
+  localStorage.setItem(JOURNAL_MIGRATED_IDS_KEY, JSON.stringify([...migratedIds]));
+  localStorage.setItem(JOURNAL_SERVER_AUTHORITATIVE_KEY, 'true');
+  localStorage.setItem(JOURNAL_KEY, JSON.stringify(payload.entries || localEntries));
+  localStorage.setItem(JOURNAL_SERVER_CACHE_KEY, JSON.stringify(payload.entries || []));
+  return { migrated: true, backupKey, analysis, payload };
+}
+
+async function syncJournalEntriesToServer(entries = []) {
+  if (!journalServerSyncEnabled()) return { synced: false, reason: 'server sync disabled' };
+  const stableEntries = entries.map(ensureJournalStableIds);
+  try {
+    const response = await fetchWithTimeout(`${API}/api/journal/migrate`, {
+      method: 'POST',
+      headers: journalAuthHeaders(),
+      body: JSON.stringify({ entries: stableEntries }),
+    });
+    if (!response.ok) throw new Error(`Journal sync failed: ${response.status}`);
+    const payload = await response.json();
+    localStorage.setItem(JOURNAL_SERVER_CACHE_KEY, JSON.stringify(payload.entries || []));
+    localStorage.removeItem(JOURNAL_PENDING_SYNC_KEY);
+    return { synced: true, payload };
+  } catch (error) {
+    queuePendingJournalSync(stableEntries);
+    showToast('Journal saved locally but server sync is pending.', 'error');
+    return { synced: false, error: String(error) };
+  }
+}
+
+async function initializeJournalServerSync() {
+  if (!journalServerSyncEnabled()) return { enabled: false };
+  try {
+    const serverPayload = await fetchServerJournalEntries({ status: 'all' });
+    const localEntries = loadJournal();
+    const analysis = analyzeJournalMigration(localEntries, serverPayload.entries || []);
+    if (analysis.newEntries.length || analysis.conflicts.length) {
+      console.info('[Journal] local entries need migration review', analysis);
+      return { enabled: true, migration_required: true, analysis };
+    }
+    if ((serverPayload.entries || []).length) {
+      localStorage.setItem(JOURNAL_KEY, JSON.stringify(serverPayload.entries));
+      localStorage.setItem(JOURNAL_SERVER_AUTHORITATIVE_KEY, 'true');
+      renderJournal();
+      renderPositionsTab();
+    }
+    return { enabled: true, migration_required: false };
+  } catch (error) {
+    showToast('Journal server unavailable; showing local cached journal.', 'error');
+    return { enabled: true, error: String(error) };
+  }
+}
+
 function loadJournal() {
   try {
     const raw = JSON.parse(localStorage.getItem(JOURNAL_KEY) || '[]');
@@ -8468,7 +8651,9 @@ function loadJournal() {
   catch { return []; }
 }
 function saveJournal(entries) {
-  localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+  const stable = entries.map(ensureJournalStableIds);
+  localStorage.setItem(JOURNAL_KEY, JSON.stringify(stable));
+  if (journalServerAuthoritative()) syncJournalEntriesToServer(stable);
   renderJournal();
   renderAnalytics();
 }
@@ -10932,6 +11117,7 @@ function exportCSV() {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 initializeScannerDefaults();
+initializeJournalServerSync();
 bindTickerSearch();
 setAutoScanButtonState();
 scheduleNextAutoScan();
