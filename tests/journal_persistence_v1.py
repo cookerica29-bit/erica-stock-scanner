@@ -211,8 +211,12 @@ def test_safe_sqlite_backup_retention_and_isolated_restore():
         backup_dir = Path(tmp.name) / "journal_backups"
         first = repo.create_backup(backup_dir=backup_dir, keep_latest=2)
         assert first["filename"].startswith("kairos_journal_")
+        assert first["size_bytes"] > 0
         assert first["size"] > 0
         assert len(first["sha256"]) == 64
+        diag = repo.diagnostics()
+        assert diag["last_successful_backup"]["filename"] == first["filename"]
+        assert diag["last_successful_backup"]["size_bytes"] == first["size_bytes"]
         validation = repo.restore_validation(first["path"])
         assert validation["schema_version"] == 1
         assert validation["record_count"] == 1
@@ -223,6 +227,28 @@ def test_safe_sqlite_backup_retention_and_isolated_restore():
         repo.create_backup(backup_dir=backup_dir, keep_latest=2)
         assert len(list(backup_dir.glob("kairos_journal_*.sqlite3"))) <= 2
     finally:
+        tmp.cleanup()
+
+
+def test_invalid_configured_path_does_not_silently_fallback_to_tmp():
+    tmp = tempfile.TemporaryDirectory()
+    previous_journal_path = os.environ.get("JOURNAL_DB_PATH")
+    try:
+        invalid_parent = Path(tmp.name) / "not-a-directory"
+        invalid_parent.write_text("blocking file", encoding="utf-8")
+        configured = invalid_parent / "kairos_journal.sqlite3"
+        os.environ["JOURNAL_DB_PATH"] = str(configured)
+        assert journal_store.default_journal_db_path() == str(configured)
+        try:
+            journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+            raise AssertionError("invalid configured journal path must fail explicitly")
+        except OSError:
+            pass
+    finally:
+        if previous_journal_path is None:
+            os.environ.pop("JOURNAL_DB_PATH", None)
+        else:
+            os.environ["JOURNAL_DB_PATH"] = previous_journal_path
         tmp.cleanup()
 
 
@@ -351,6 +377,7 @@ if __name__ == "__main__":
     test_history_append_and_milestone_deduplication()
     test_soft_delete_export_and_diagnostics()
     test_safe_sqlite_backup_retention_and_isolated_restore()
+    test_invalid_configured_path_does_not_silently_fallback_to_tmp()
     test_invalid_payload_rejection_and_missing_optional_fields()
     test_server_restart_and_multiple_device_simulation()
     test_api_crud_migrate_filters_and_auth()
