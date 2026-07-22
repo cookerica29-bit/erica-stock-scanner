@@ -93,6 +93,16 @@ function setup(overrides = {}) {
     stockLocation: 'Premium',
     confirmationStarted: true,
     trade_eval: { trade_stage: 'A+ READY', trigger_confirmed: true },
+    option_plan: {
+      available: true,
+      type: 'PUT',
+      preferred_strike: 45,
+      suggested_expiration: { min_dte: 21, max_dte: 35, label: '21–35 DTE' },
+      expected_hold: { min_trading_days: 7, max_trading_days: 12, label: '7–12 Trading Days' },
+      expected_move: { dollars: -2.05, percent: -4.5, label: '-$2.05 (-4.5%)' },
+      confidence: { stars: 4, label: '★★★★☆' },
+      source: 'kairos_trade_plan',
+    },
     best_contract: { available: true, type: 'PUT', strike: 45, expiry: '2026-08-21', ask: 1.2, bid: 1.1, spread: 0.1 },
     ...overrides,
   };
@@ -107,7 +117,7 @@ const enterWaiting = htmlFor(setup());
 assert.ok(enterWaiting.includes('data-normalized-status="ENTER_NOW"'));
 assert.ok(enterWaiting.includes('data-execution-state="SETUP_CONFIRMED_WAITING_FOR_ENTRY"'));
 assert.ok(enterWaiting.includes('data-execute-visual-state="waiting"'));
-assert.ok(!/[★☆]/.test(enterWaiting), 'Scanner cards should not render redundant readiness stars');
+assert.ok(!enterWaiting.includes('price-meta'), 'Scanner cards should not render redundant readiness stars/status meta');
 assert.ok(!enterWaiting.includes('class="price-meta"'), 'Scanner cards should not repeat status beside the price');
 assert.strictEqual(context.scanStatusText({ cache: 'hit', age_seconds: 16 }), '');
 assert.strictEqual(context.scanStatusText({ cache: 'refresh', age_seconds: 16 }), '');
@@ -150,10 +160,18 @@ assert.ok(enterWaiting.includes('<div class="index-simple-label">Why</div>'));
 assert.ok(enterWaiting.includes('Short setup with bearish trend; entry area is active.'));
 assert.ok(!enterWaiting.includes('Short setup with bearish trend; Setup confirmed. Wait'), 'Why summary should not duplicate Next Step wording verbatim');
 assert.ok(!enterWaiting.includes('Continue monitoring. The setup is still developing.'));
-assert.ok(enterWaiting.includes('Suggested Contract'));
-assert.ok(enterWaiting.includes('Best Quality'));
-assert.ok(enterWaiting.includes('top pick'));
-assert.ok(enterWaiting.includes('$120.00'));
+assert.ok(enterWaiting.includes('🎯 Option Plan'));
+assert.ok(enterWaiting.includes('🔴 PUT'));
+assert.ok(enterWaiting.includes('Preferred Strike'));
+assert.ok(enterWaiting.includes('$45.00'));
+assert.ok(enterWaiting.includes('21–35 DTE'));
+assert.ok(enterWaiting.includes('7–12 Trading Days'));
+assert.ok(enterWaiting.includes('-$2.05 (-4.5%)'));
+assert.ok(enterWaiting.includes('★★★★☆'));
+assert.ok(!enterWaiting.includes('Suggested Contract'));
+assert.ok(!enterWaiting.includes('Best Quality'));
+assert.ok(!enterWaiting.includes('top pick'));
+assert.ok(!enterWaiting.includes('$120.00'));
 assert.ok(!enterWaiting.includes('Kairos Confidence'));
 assert.ok(!enterWaiting.includes('View contract details'));
 assert.ok(enterWaiting.includes('data-plan-visual="risk-reward"'));
@@ -476,15 +494,15 @@ const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', dist
 assert.ok(reachedLive.includes('data-execution-state="SETUP_CONFIRMED_ENTRY_REACHED"'));
 assert.ok(reachedLive.includes('data-execute-visual-state="ready"'));
 assert.ok(reachedLive.includes('execute-entry-ready'));
-assert.ok(reachedLive.includes('Price is at the planned entry. You can execute this trade.'));
+assert.ok(reachedLive.includes('Price is at the planned entry. Use the Option Plan and confirm your selected contract in your broker.'));
 
 const reachedPotential = htmlFor(
-  setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 }),
+  setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1, option_plan: null }),
   { available: false, source: 'unavailable', reason: 'no contract passed filters' }
 );
 assert.ok(reachedPotential.includes('execute-entry-ready'));
 assert.ok(reachedPotential.includes('Price is at the planned entry.'));
-assert.ok(reachedPotential.includes('Verify and select the live option contract before executing.'));
+assert.ok(reachedPotential.includes('Use the Option Plan to select and confirm a contract in your broker before executing.'));
 
 const almostReady = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B', entryStatus: 'Near Entry', confirmationStarted: false }));
 assert.ok(almostReady.includes('data-normalized-status="ALMOST_READY"'));
@@ -664,6 +682,16 @@ const snapshot = context.scannerSnapshotFromSetup(setup({
 assert.strictEqual(snapshot.earnings_date, '2026-07-30');
 assert.strictEqual(snapshot.days_until_earnings, 17);
 assert.strictEqual(snapshot.earnings_source, 'cache');
+assert.strictEqual(snapshot.option_type, 'PUT');
+assert.strictEqual(snapshot.preferred_strike, 45);
+assert.strictEqual(snapshot.suggested_min_dte, 21);
+assert.strictEqual(snapshot.suggested_max_dte, 35);
+assert.strictEqual(snapshot.expected_hold_min_days, 7);
+assert.strictEqual(snapshot.expected_hold_max_days, 12);
+assert.strictEqual(snapshot.expected_move_dollars, -2.05);
+assert.strictEqual(snapshot.expected_move_percent, -4.5);
+assert.strictEqual(snapshot.option_plan_confidence, 4);
+assert.strictEqual(snapshot.actual_strike, null);
 
 // Opportunity Remaining is hidden until the existing analytics engine says confidence is sufficient.
 assert.ok(!htmlFor(setup()).includes('Opportunity Remaining'));
@@ -709,7 +737,7 @@ const tieredSetup = setup({
     },
   },
 });
-const tieredHtml = htmlFor(tieredSetup);
+const tieredHtml = context.renderBestContractBlock(tieredSetup);
 assert.ok(tieredHtml.includes('Best Quality'));
 assert.ok(tieredHtml.includes('Balanced'));
 assert.ok(tieredHtml.includes('Budget'));

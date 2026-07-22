@@ -479,6 +479,50 @@ def _coverage_provider_failure_distribution(rows: list, scan_meta: dict) -> dict
     return provider_failures
 
 
+def _coverage_option_plan_diagnostics(rows: list) -> dict:
+    metrics = {
+        "option_plans_generated": 0,
+        "option_plans_unavailable": 0,
+        "missing_planned_entry": 0,
+        "missing_tp1": 0,
+        "invalid_projected_move": 0,
+        "expected_hold_fallback_used": 0,
+        "strike_rounding_distribution": {},
+        "expiration_window_distribution": {},
+        "confidence_distribution": {},
+    }
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        plan = row.get("option_plan") or {}
+        if not isinstance(plan, dict):
+            metrics["option_plans_unavailable"] += 1
+            continue
+        if plan.get("available") is True:
+            metrics["option_plans_generated"] += 1
+            rounding = str(plan.get("strike_rounding_increment") or "unknown")
+            _increment_counter(metrics["strike_rounding_distribution"], rounding)
+            expiration = (plan.get("suggested_expiration") or {}).get("label") or "unknown"
+            _increment_counter(metrics["expiration_window_distribution"], expiration)
+            confidence = (plan.get("confidence") or {}).get("label") or "unknown"
+            _increment_counter(metrics["confidence_distribution"], confidence)
+            if (plan.get("expected_hold") or {}).get("fallback_used"):
+                metrics["expected_hold_fallback_used"] += 1
+        else:
+            metrics["option_plans_unavailable"] += 1
+            reason = str(plan.get("reason") or plan.get("unavailable_reason") or "").strip().lower()
+            if "planned entry" in reason:
+                metrics["missing_planned_entry"] += 1
+            elif "tp1" in reason or "target" in reason:
+                metrics["missing_tp1"] += 1
+            elif "projected move" in reason:
+                metrics["invalid_projected_move"] += 1
+    metrics["strike_rounding_distribution"] = dict(sorted(metrics["strike_rounding_distribution"].items()))
+    metrics["expiration_window_distribution"] = dict(sorted(metrics["expiration_window_distribution"].items()))
+    metrics["confidence_distribution"] = dict(sorted(metrics["confidence_distribution"].items()))
+    return metrics
+
+
 def build_discovered_scan_coverage_snapshot(
     rows: list,
     near_miss: list,
@@ -564,6 +608,7 @@ def build_discovered_scan_coverage_snapshot(
             "contract unavailable": contract_distribution.get("contract unavailable", 0),
             "option data unknown or temporarily failed": contract_distribution.get("option data unknown or temporarily failed", 0),
         },
+        "option_plan_diagnostics": _coverage_option_plan_diagnostics(all_rows),
         "blocker_distribution": dict(sorted(blocker_distribution.items())),
         "provider_failures": dict(sorted(_coverage_provider_failure_distribution(all_rows, scan_meta).items())),
         "provider_diagnostics": {
@@ -1891,6 +1936,192 @@ def _should_enrich_best_contract(result: dict, setup_grade: str, entry_status: s
     if entry_status not in {"Tradeable", "Near Entry"}:
         return False
     return _has_valid_trade_plan(result)
+
+
+OPTION_PLAN_SOURCE = "kairos_trade_plan"
+
+
+def _option_plan_unavailable(reason: str) -> dict:
+    return {
+        "available": False,
+        "reason": reason,
+        "source": OPTION_PLAN_SOURCE,
+    }
+
+
+def _option_type_for_direction(direction: str) -> Optional[str]:
+    raw = str(direction or "").upper()
+    if raw in {"LONG", "CALL"}:
+        return "CALL"
+    if raw in {"SHORT", "PUT"}:
+        return "PUT"
+    return None
+
+
+def _option_strike_increment(planned_entry: float) -> Optional[float]:
+    price = _safe_float(planned_entry)
+    if price is None or price <= 0:
+        return None
+    if price < 25:
+        return 0.5
+    if price < 100:
+        return 1.0
+    if price < 250:
+        return 2.5
+    return 5.0
+
+
+def _round_option_plan_strike(value: float, increment: float, option_type: str) -> Optional[float]:
+    raw = _safe_float(value)
+    step = _safe_float(increment)
+    if raw is None or step is None or step <= 0:
+        return None
+    scaled = raw / step
+    if str(option_type or "").upper() == "PUT":
+        rounded = math.floor(scaled + 1e-9) * step
+    else:
+        rounded = math.ceil(scaled - 1e-9) * step
+    decimals = 2 if step < 1 else 1 if step % 1 else 0
+    return round(rounded, decimals)
+
+
+def _option_plan_expected_hold(setup: dict) -> dict:
+    low = _safe_int(
+        setup.get("expected_hold_min_days")
+        or setup.get("expected_trading_days_low")
+        or setup.get("expected_move_min_days")
+    )
+    high = _safe_int(
+        setup.get("expected_hold_max_days")
+        or setup.get("expected_trading_days_high")
+        or setup.get("expected_move_max_days")
+    )
+    if low is not None and high is not None and low > 0 and high >= low:
+        return {
+            "min_trading_days": low,
+            "max_trading_days": high,
+            "label": f"{low}–{high} Trading Days",
+            "fallback_used": False,
+        }
+
+    ev = setup.get("trade_eval") or {}
+    entry_status = str(setup.get("entryStatus") or "").strip()
+    if ev.get("trigger_confirmed") or ev.get("a_plus_ready"):
+        low, high, speed = 3, 7, "fast"
+    elif ev.get("b_plus_tradeable") or entry_status in {"Tradeable", "Near Entry"} or setup.get("confirmationStarted"):
+        low, high, speed = 7, 12, "standard"
+    else:
+        low, high, speed = 10, 18, "extended"
+    return {
+        "min_trading_days": low,
+        "max_trading_days": high,
+        "label": f"{low}–{high} Trading Days",
+        "fallback_used": True,
+        "fallback_speed": speed,
+    }
+
+
+def _option_plan_expiration_window(expected_hold: dict) -> dict:
+    high = _safe_int((expected_hold or {}).get("max_trading_days"))
+    if high is None:
+        min_dte, max_dte = 21, 35
+    elif high <= 7:
+        min_dte, max_dte = 21, 30
+    elif high <= 12:
+        min_dte, max_dte = 21, 35
+    elif high <= 18:
+        min_dte, max_dte = 30, 45
+    else:
+        min_dte, max_dte = 45, 60
+    return {
+        "min_dte": min_dte,
+        "max_dte": max_dte,
+        "label": f"{min_dte}–{max_dte} DTE",
+    }
+
+
+def _option_plan_confidence(setup: dict) -> dict:
+    grade = str(setup.get("setupGrade") or setup.get("setup_grade") or "").strip().upper()
+    ev = setup.get("trade_eval") or {}
+    if grade.startswith("A") and (ev.get("trigger_confirmed") or ev.get("a_plus_ready")):
+        stars = 5
+    elif grade.startswith("A"):
+        stars = 4
+    elif grade.startswith("B"):
+        stars = 3
+    else:
+        stars = 2
+    return {
+        "stars": stars,
+        "label": "★" * stars + "☆" * (5 - stars),
+        "note": "Confidence reflects Kairos setup quality, not a guaranteed probability of profit.",
+    }
+
+
+def _format_option_plan_move(dollars: float, percent: float) -> str:
+    sign = "+" if dollars >= 0 else "-"
+    return f"{sign}${abs(dollars):.2f} ({sign}{abs(percent):.1f}%)"
+
+
+def build_option_plan(setup: dict) -> dict:
+    if not isinstance(setup, dict):
+        return _option_plan_unavailable("missing setup")
+    option_type = _option_type_for_direction(setup.get("direction"))
+    if not option_type:
+        return _option_plan_unavailable("missing direction")
+
+    planned_entry = _safe_float(setup.get("entry"))
+    entry_source = "planned_entry"
+    if planned_entry is None:
+        planned_entry = _safe_float(
+            setup.get("plannedEntry")
+            or setup.get("entry_price")
+            or setup.get("current_quote_price")
+            or setup.get("price")
+            or setup.get("current_price")
+        )
+        entry_source = "fallback_price" if planned_entry is not None else "missing"
+    if planned_entry is None or planned_entry <= 0:
+        return _option_plan_unavailable("missing planned entry")
+
+    tp1 = _safe_float(setup.get("tp1") or setup.get("target") or setup.get("target_price"))
+    if tp1 is None or tp1 <= 0:
+        return _option_plan_unavailable("missing TP1")
+
+    move_dollars = tp1 - planned_entry
+    if (option_type == "CALL" and move_dollars <= 0) or (option_type == "PUT" and move_dollars >= 0):
+        return _option_plan_unavailable("invalid projected move")
+    move_percent = (move_dollars / planned_entry) * 100
+    increment = _option_strike_increment(planned_entry)
+    if increment is None:
+        return _option_plan_unavailable("strike rounding unavailable")
+    raw_strike = planned_entry + (move_dollars * 0.5)
+    preferred_strike = _round_option_plan_strike(raw_strike, increment, option_type)
+    if preferred_strike is None:
+        return _option_plan_unavailable("preferred strike unavailable")
+
+    expected_hold = _option_plan_expected_hold(setup)
+    expiration = _option_plan_expiration_window(expected_hold)
+    confidence = _option_plan_confidence(setup)
+    return {
+        "available": True,
+        "type": option_type,
+        "preferred_strike": preferred_strike,
+        "raw_preferred_strike": round(raw_strike, 4),
+        "strike_rounding_increment": increment,
+        "entry_source": entry_source,
+        "planned_entry": planned_entry,
+        "tp1": tp1,
+        "suggested_expiration": expiration,
+        "expected_hold": expected_hold,
+        "expected_move": {
+            "dollars": round(move_dollars, 2),
+            "percent": round(move_percent, 1),
+            "label": _format_option_plan_move(move_dollars, move_percent),
+        },
+        "confidence": confidence,
+        "source": OPTION_PLAN_SOURCE,
+    }
 
 
 # ── Price Action Functions ────────────────────────────────────────────────────
@@ -4265,22 +4496,22 @@ def _enrich_stock_scout_fields(
     earnings = _earnings_for_ticker(result.get("ticker") or "", allow_fetch=False)
     earnings_ms = round((time.perf_counter() - earnings_start) * 1000, 1)
 
-    best_contract_start = time.perf_counter()
-    if _should_enrich_best_contract(result, setup_grade, entry_status):
-        best_contract = _best_contract(
-            result.get("ticker") or "",
-            result.get("direction") or "",
-            result.get("entry") or 0,
-            block_on_miss=False,
-        )
-    else:
-        best_contract = _unclean_contract("Best contract not evaluated for non-actionable setup", "not_evaluated")
-    best_contract_ms = round((time.perf_counter() - best_contract_start) * 1000, 1)
+    option_plan_start = time.perf_counter()
+    option_plan = build_option_plan({
+        **result,
+        "setupGrade": setup_grade,
+        "entryStatus": entry_status,
+        "confirmationStarted": confirmation_started,
+        "confirmationReason": confirmation_reason,
+    })
+    option_plan_ms = round((time.perf_counter() - option_plan_start) * 1000, 1)
+    best_contract = _unclean_contract("Live contract selection replaced by Option Plan", "option_plan")
 
     timing = result.setdefault("_scan_timing", {})
     timing.update({
         "earnings_ms": earnings_ms,
-        "best_contract_ms": best_contract_ms,
+        "best_contract_ms": 0,
+        "option_plan_ms": option_plan_ms,
     })
 
     result.update({
@@ -4315,6 +4546,7 @@ def _enrich_stock_scout_fields(
         "confirmationStarted": confirmation_started,
         "confirmationReason": confirmation_reason,
         "earnings": earnings,
+        "option_plan": option_plan,
         "best_contract": best_contract,
     })
     return result
@@ -4413,7 +4645,8 @@ def scan_all(
         _attach_current_quotes(all_results)
         earnings_ms = round(sum((r.get("_scan_timing") or {}).get("earnings_ms", 0) for r in all_results), 1)
         best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
-        evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") != "not_evaluated")
+        evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") == "option_chain")
+        option_plans_generated = sum(1 for r in all_results if (r.get("option_plan") or {}).get("available") is True)
         total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
         scan_completed_at = _utc_now()
         cache_stats = _cache_snapshot()
@@ -4423,13 +4656,15 @@ def scan_all(
             if (r.get("_scan_timing") or {}).get("best_contract_ms", 0) >= 750
         ][:8]
         logger.info(
-            "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s universe=%s/%s skipped=%s skip_reasons=%s cache=%s slow_contracts=%s",
+            "[scan timing] total=%.1fms price_trend=%.1fms processing=%.1fms earnings_sum=%.1fms best_contract_sum=%.1fms contract_evaluated=%s/%s option_plans=%s/%s universe=%s/%s skipped=%s skip_reasons=%s cache=%s slow_contracts=%s",
             total_ms,
             price_stage_ms,
             process_stage_ms,
             earnings_ms,
             best_contract_ms,
             evaluated_contracts,
+            len(all_results),
+            option_plans_generated,
             len(all_results),
             len(filtered_watchlist),
             original_count,
@@ -4449,6 +4684,7 @@ def scan_all(
             "no_setup_or_failed_count": max(0, len(filtered_watchlist) - len(all_results)),
             "contract_evaluated": evaluated_contracts,
             "contract_evaluation_pool": len(all_results),
+            "option_plans_generated": option_plans_generated,
             "scan_started_at": _format_utc_timestamp(scan_started_at),
             "scan_completed_at": _format_utc_timestamp(scan_completed_at),
             "scan_duration_ms": total_ms,

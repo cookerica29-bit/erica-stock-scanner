@@ -14,7 +14,13 @@ function setup(overrides = {}) {
     tp2: 55.75,
     tp3: 54.9,
     rr: 2,
-    best_contract: { available: true, expiry: '2026-08-21', strike: 57, type: 'PUT' },
+    option_plan: {
+      available: true,
+      type: 'PUT',
+      preferred_strike: 57,
+      suggested_expiration: { label: '21–35 DTE' },
+      expected_hold: { label: '7–12 Trading Days' },
+    },
     ...overrides,
   };
 }
@@ -36,8 +42,9 @@ assert.strictEqual(transition.events.length, 1);
 assert.strictEqual(transition.events[0].type, 'ENTER_NOW');
 assert.ok(transition.events[0].message.includes('KAIROS SETUP CONFIRMED'));
 assert.ok(transition.events[0].message.includes('Wait for price to reach the Planned Entry.'));
-assert.ok(transition.events[0].message.includes('Suggested Contract:'));
-assert.ok(transition.events[0].message.includes('Aug 21 · $57 Put'));
+assert.ok(transition.events[0].message.includes('Option Plan:'));
+assert.ok(transition.events[0].message.includes('$57 Put'));
+assert.ok(transition.events[0].message.includes('Suggested Expiration: 21–35 DTE'));
 
 sent.add(transition.events[0].key);
 const duplicate = alerts.detectSetupEvents([base], previous, sent, {
@@ -62,12 +69,12 @@ const later = alerts.detectSetupEvents([laterSignal], { [laterId]: 'BUILDING' },
 assert.strictEqual(later.events.length, 1);
 assert.notStrictEqual(later.events[0].key, transition.events[0].key);
 
-const potential = alerts.enterNowMessage(base, {
+const potential = alerts.enterNowMessage(setup({ option_plan: null }), {
   state: 'potential',
   potential: { strike: 57, type: 'PUT' },
   expiration: { label: 'Learning' },
 }, false);
-assert.ok(potential.includes('Potential Contract:'));
+assert.ok(potential.includes('Option Plan:'));
 assert.ok(potential.includes('$57 Put'));
 assert.ok(potential.includes('Expiration Guidance: Learning'));
 assert.ok(!potential.includes('You can execute this trade'));

@@ -90,17 +90,17 @@ assert.deepStrictEqual(enterWaiting.lines, [
 // Contract guidance never overrides waiting for Planned Entry.
 assert.deepStrictEqual(guidance.nextStep(confirmedWaiting, { bucket: 'ENTER_NOW' }, 'potential').lines, enterWaiting.lines);
 
-// Entry-reached Enter Now uses execute wording only when a validated contract exists.
+// Entry-reached Enter Now uses broker-confirmation wording when an Option Plan is available.
 const reached = setup({ price: 70.02, entry: 70, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1 });
 assert.strictEqual(guidance.executionState(reached, { bucket: 'ENTER_NOW' }), 'SETUP_CONFIRMED_ENTRY_REACHED');
 const reachedStages = guidance.readinessStages(reached, { bucket: 'ENTER_NOW' });
 assert.deepStrictEqual(reachedStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Complete', 'Execute:Ready']);
 assert.ok(reachedStages.find(stage => stage.label === 'Execute').state.includes('execute-entry-ready'));
 const enterWithContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'available');
-assert.deepStrictEqual(enterWithContract.lines, ['Price is at the planned entry. You can execute this trade.']);
+assert.deepStrictEqual(enterWithContract.lines, ['Price is at the planned entry. Use the Option Plan and confirm your selected contract in your broker.']);
 
 const enterWithoutContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'potential');
-assert.deepStrictEqual(enterWithoutContract.lines, ['Price is at the planned entry.', 'Verify and select the live option contract before executing.']);
+assert.deepStrictEqual(enterWithoutContract.lines, ['Price is at the planned entry.', 'Use the Option Plan to select and confirm a contract in your broker before executing.']);
 
 // Tradeable but not Enter Now keeps the wording grounded in existing production meaning.
 const tradeable = guidance.nextStep(setup({ entryStatus: 'Tradeable' }), { bucket: 'ALMOST_READY' }, 'available');

@@ -650,6 +650,18 @@
   .index-contract-main { color:var(--text); font-size:14px; font-weight:900; margin-top:3px; overflow-wrap:anywhere; }
   .index-contract-sub { color:var(--muted); font-size:11px; margin-top:3px; overflow-wrap:anywhere; }
   .index-contract-note { color:#fbbf24; font-size:10px; font-weight:800; line-height:1.35; margin-top:5px; }
+  .option-plan-card {
+    background:rgba(30,41,59,0.28);
+    border:1px solid rgba(124,92,255,0.18);
+    border-radius:10px;
+    margin-top:11px;
+    padding:9px;
+  }
+  .option-plan-grid { display:grid; gap:6px; margin-top:8px; }
+  .option-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
+  .option-plan-row span:first-child { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:0.04em; text-transform:uppercase; }
+  .option-plan-row span:last-child { color:var(--text); font-size:12px; font-weight:950; text-align:right; }
+  .option-plan-note { color:var(--muted); font-size:10.5px; line-height:1.35; margin-top:8px; }
   .opportunity-card-block {
     background:rgba(30,41,59,0.24);
     border:1px solid rgba(148,163,184,0.1);
@@ -2689,6 +2701,7 @@
     <div class="term-card" id="term-strike"><div class="term-title">Strike</div><div class="term-copy">The option's selected price level.</div></div>
     <div class="term-card" id="term-expiration"><div class="term-title">Expiration</div><div class="term-copy">The date the option expires.</div></div>
     <div class="term-card" id="term-contract-cost"><div class="term-title">Contract Cost</div><div class="term-copy">The estimated total cost to buy one option contract — one contract usually represents 100 shares, so this is the full price, not a per-share price.</div></div>
+    <div class="term-card" id="term-option-plan-confidence"><div class="term-title">Option Plan Confidence</div><div class="term-copy">Confidence reflects Kairos setup quality, not a guaranteed probability of profit.</div></div>
     <div class="term-card" id="term-best-quality"><div class="term-title">Best Quality</div><div class="term-copy">Kairos' top contract choice because it should be the easiest and most reliable to trade.</div></div>
     <div class="term-card" id="term-balanced"><div class="term-title">Balanced</div><div class="term-copy">A lower-cost choice that still keeps solid trade quality.</div></div>
     <div class="term-card" id="term-budget"><div class="term-title">Budget</div><div class="term-copy">The lowest-cost choice that still meets Kairos' minimum quality bar, but it may be less ideal than the other choices.</div></div>
@@ -3792,7 +3805,7 @@ function contractRawLifecycleState(setup) {
     return hasContractText ? 'available' : 'pending';
   }
   const source = String(contract?.source || '').toLowerCase();
-  if (source === 'not_evaluated') {
+  if (source === 'not_evaluated' || source === 'option_plan') {
     return 'not_evaluated';
   }
   if (contract && contract.available === false && ['unavailable', 'option_chain'].includes(source)) {
@@ -4927,6 +4940,44 @@ function firstPresent(...values) {
   return values.find(value => value !== undefined && value !== null && value !== '');
 }
 
+function optionPlanFromSetup(setup = {}) {
+  return setup.option_plan && typeof setup.option_plan === 'object' ? setup.option_plan : {};
+}
+
+function optionPlanTypeLabel(type = '') {
+  const raw = String(type || '').toUpperCase();
+  if (raw === 'CALL') return '🟢 CALL';
+  if (raw === 'PUT') return '🔴 PUT';
+  return '—';
+}
+
+function renderOptionPlanBlock(setup = {}) {
+  const plan = optionPlanFromSetup(setup);
+  if (!plan.available) return '';
+  const confidence = plan.confidence || {};
+  const rows = [
+    ['Type', optionPlanTypeLabel(plan.type)],
+    ['Preferred Strike', fmtMoney(plan.preferred_strike)],
+    ['Suggested Expiration', plan.suggested_expiration?.label || '—'],
+    ['Expected Hold', plan.expected_hold?.label || '—'],
+    ['Expected Move', plan.expected_move?.label || '—'],
+    ['Confidence', confidence.label || '—'],
+  ];
+  return `
+    <div class="option-plan-card">
+      <div class="index-label-with-help">
+        <div class="index-simple-label">🎯 Option Plan</div>
+        <button type="button" class="term-help-btn" aria-label="Open confidence note" onclick="event.stopPropagation(); openTerms('term-option-plan-confidence')" onkeydown="event.stopPropagation();">?</button>
+      </div>
+      <div class="option-plan-grid">
+        ${rows.map(([label, value]) => `
+          <div class="option-plan-row"><span>${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>
+        `).join('')}
+      </div>
+      <div class="option-plan-note">Based on Kairos’ projected move and expected completion time. Confirm the selected strike and expiration in your broker before placing the trade.</div>
+    </div>`;
+}
+
 function contractPremium(setup) {
   const contract = setup.best_contract || {};
   const option = setup.option || {};
@@ -4998,6 +5049,7 @@ function contractGuidanceState(setup = {}) {
 }
 
 function contractGuidanceLifecycleForNextStep(setup = {}) {
+  if (setup.option_plan?.available) return 'available';
   const state = contractGuidanceState(setup);
   if (state.state === 'validated_live') return 'available';
   if (state.state === 'potential') return 'potential';
@@ -5070,7 +5122,7 @@ function bestContractDisplay(setup) {
   if (lifecycle === 'pending') {
     return {
       className: 'pending',
-      label: '🎯 Suggested Contract',
+      label: '🎯 Option Plan',
       main: 'Updating...',
       sub: 'Options data is refreshing.',
     };
@@ -5080,7 +5132,7 @@ function bestContractDisplay(setup) {
     const strike = Number(potential.strike).toFixed(Number(potential.strike) % 1 === 0 ? 0 : 2);
     return {
       className: `potential ${potential.expiration_status}`,
-      label: '🎯 Potential Contract',
+      label: '🎯 Option Plan',
       main: `$${strike} ${contractTypePlainText(potential.type)}`,
       sub: 'Planning estimate only.',
       potential,
@@ -5111,7 +5163,7 @@ function bestContractDisplay(setup) {
           };
       return {
         className: `none ${confidence.key}`,
-        label: '🎯 Suggested Contract',
+        label: '🎯 Option Plan',
         main: 'No suitable contract found',
         confidence,
         cost: NaN,
@@ -5119,8 +5171,8 @@ function bestContractDisplay(setup) {
     }
     return {
       className: 'none',
-      label: '🎯 Suggested Contract',
-      main: '⚪ Contract suggestion unavailable',
+      label: '🎯 Option Plan',
+      main: '⚪ Option plan unavailable',
       sub: 'Options data is not available for this ticker right now.',
       reason: unavailableContractReason(contract),
     };
@@ -5151,7 +5203,7 @@ function bestContractDisplay(setup) {
   const cost = contractEntryCost(setup);
   return {
     className: `available ${confidence.key}`,
-    label: '🎯 Suggested Contract',
+    label: '🎯 Option Plan',
     main: `${expiry} • $${strike} ${type}`.trim(),
     confidence,
     cost,
@@ -5374,7 +5426,7 @@ function renderBestContractBlock(setup) {
   return `
     <div class="index-contract suggested-contract">
       <div class="index-label-with-help">
-        <div class="index-simple-label">Suggested Contract</div>
+        <div class="index-simple-label">Option Plan</div>
         ${helpButton('term-contract', 'Open contract definition')}
       </div>
       <div class="index-contract-main">${escapeHtml(primaryLabel)}</div>
@@ -5401,6 +5453,23 @@ function bestContractCost(setup) {
 }
 
 function executionContractInfo(setup) {
+  const plan = optionPlanFromSetup(setup);
+  if (plan.available) {
+    return {
+      available: true,
+      source: 'option_plan',
+      expiry: '',
+      expiryText: plan.suggested_expiration?.label || '—',
+      strike: fmtNumber(plan.preferred_strike),
+      type: contractTypePlainText(plan.type),
+      cost: NaN,
+      costText: 'Enter Robinhood premium after selecting a contract',
+      label: `${plan.suggested_expiration?.label || '—'} • ${fmtMoney(plan.preferred_strike)} ${contractTypePlainText(plan.type)}`.trim(),
+      expectedHold: plan.expected_hold?.label || '—',
+      expectedMove: plan.expected_move?.label || '—',
+      confidence: plan.confidence?.label || '—',
+    };
+  }
   const contract = setup.best_contract || {};
   const selectedSource = contractSourceFromSelectedTier(setup);
   if (selectedSource) {
@@ -5461,7 +5530,7 @@ function executionContractInfo(setup) {
 function executionContractCostText(setup, qty = 1) {
   const cost = executionContractInfo(setup).cost;
   const quantity = Math.max(1, Number.parseInt(qty, 10) || 1);
-  if (!Number.isFinite(cost)) return 'Estimated Entry Cost: Unavailable';
+  if (!Number.isFinite(cost)) return 'Estimated Entry Cost: Enter selected Robinhood premium';
   return `Estimated Entry Cost: ${fmtMoney(cost * 100 * quantity)}`;
 }
 
@@ -5485,10 +5554,12 @@ function executionTradePlanText(setup, qty = 1) {
     `Planned Entry: ${fmtMoney(setup.entry)}`,
     `Stop: ${fmtMoney(setup.sl)}`,
     `Target: ${fmtMoney(setup.tp1)}`,
-    `Suggested Contract: ${contract.label || 'Unavailable'}`,
+    `Option Plan: ${contract.label || 'Unavailable'}`,
+    contract.expectedHold ? `Expected Hold: ${contract.expectedHold}` : null,
+    contract.expectedMove ? `Expected Move: ${contract.expectedMove}` : null,
     `Quantity: ${quantity}`,
-    `Estimated Entry Cost: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Unavailable'}`,
-  ].join('\n');
+    `Estimated Entry Cost: ${Number.isFinite(contract.cost) ? fmtMoney(contract.cost * 100 * quantity) : 'Enter selected Robinhood premium'}`,
+  ].filter(Boolean).join('\n');
 }
 
 async function copyExecutionTradePlan(idx) {
@@ -5538,8 +5609,11 @@ function renderExecutionTab() {
           <div class="execution-line"><span>Target</span><span>${fmtMoney(setup.tp1)}</span></div>
         </div>
         <div class="execution-section">
-          <div class="execution-section-title">🎯 Suggested Contract</div>
+          <div class="execution-section-title">🎯 Option Plan</div>
           <div class="execution-contract-main">${escapeHtml(contract.label)}</div>
+          ${contract.expectedHold ? `<div class="execution-line"><span>Expected Hold</span><span>${escapeHtml(contract.expectedHold)}</span></div>` : ''}
+          ${contract.expectedMove ? `<div class="execution-line"><span>Expected Move</span><span>${escapeHtml(contract.expectedMove)}</span></div>` : ''}
+          ${contract.confidence ? `<div class="execution-line"><span>Confidence</span><span>${escapeHtml(contract.confidence)}</span></div>` : ''}
           <div class="execution-risk-row">
             <label class="execution-section-title" for="executionQty-${idx}">Quantity</label>
             <input id="executionQty-${idx}" type="number" min="1" step="1" value="1" oninput="updateExecutionRisk(${idx})" />
@@ -6027,7 +6101,7 @@ function renderCard(s) {
       ${renderOpportunityRemainingBlock(s)}
       ${renderTradePlanBlock(s)}
       ${renderPositionManagement(s)}
-      ${renderBestContractBlock(s)}
+      ${renderOptionPlanBlock(s)}
       ${renderEarningsBlock(s)}
       ${renderCollapsedWhyBlock(why)}
       ${renderMoreDetailsBlock(s, {
@@ -6341,6 +6415,7 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
   const executionState = window.KairosExecutionGuidance?.executionState
     ? window.KairosExecutionGuidance.executionState(snapshotSetup, progress)
     : null;
+  const optionPlan = optionPlanFromSetup(setup);
   return {
     journal_snapshot_version: 'options-v2',
     setup_id: setupIdFromSetup(setup),
@@ -6376,6 +6451,19 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
     earnings_date: earnings.date || '',
     days_until_earnings: earnings.days_until ?? null,
     earnings_source: earnings.source || firstPresent(setup.earnings_source, setup.earningsSource, ''),
+    option_type: optionPlan.available ? optionPlan.type : firstPresent(setup.option_type, null),
+    preferred_strike: optionPlan.available ? coerceNumber(optionPlan.preferred_strike) : coerceNumber(firstPresent(setup.preferred_strike, setup.potential_strike)),
+    suggested_min_dte: optionPlan.available ? coerceNumber(optionPlan.suggested_expiration?.min_dte) : coerceNumber(setup.suggested_min_dte),
+    suggested_max_dte: optionPlan.available ? coerceNumber(optionPlan.suggested_expiration?.max_dte) : coerceNumber(setup.suggested_max_dte),
+    expected_hold_min_days: optionPlan.available ? coerceNumber(optionPlan.expected_hold?.min_trading_days) : coerceNumber(setup.expected_hold_min_days),
+    expected_hold_max_days: optionPlan.available ? coerceNumber(optionPlan.expected_hold?.max_trading_days) : coerceNumber(setup.expected_hold_max_days),
+    expected_move_dollars: optionPlan.available ? coerceNumber(optionPlan.expected_move?.dollars) : coerceNumber(setup.expected_move_dollars),
+    expected_move_percent: optionPlan.available ? coerceNumber(optionPlan.expected_move?.percent) : coerceNumber(setup.expected_move_percent),
+    option_plan_confidence: optionPlan.available ? coerceNumber(optionPlan.confidence?.stars) : coerceNumber(setup.option_plan_confidence),
+    actual_strike: coerceNumber(setup.actual_strike),
+    actual_expiration: firstPresent(setup.actual_expiration, ''),
+    actual_premium: coerceNumber(setup.actual_premium),
+    actual_quantity: coerceNumber(setup.actual_quantity),
   };
 }
 
@@ -6646,7 +6734,7 @@ function renderFurtherOptionContract(model, readiness, setup = {}) {
   const potential = guidance.potential || {};
   const sourceRows = guidance.state === 'potential'
     ? [
-        { label: 'Contract Source', value: 'Potential Contract Estimate' },
+        { label: 'Plan Source', value: 'Kairos Option Plan' },
         { label: 'Potential Type', value: contractTypePlainText(potential.type) },
         { label: 'Potential Strike', value: potential.strike, options: { money: true } },
         { label: 'Potential Expiration', value: potential.expiration_label || 'Learning' },
@@ -6656,7 +6744,7 @@ function renderFurtherOptionContract(model, readiness, setup = {}) {
         { label: 'Verify Before Entry', value: 'Strike availability, bid/ask spread, volume, open interest, IV, and earnings' },
       ]
     : [
-        { label: 'Contract Source', value: guidance.state === 'validated_live' ? 'Validated Live Contract' : 'No validated contract' },
+        { label: 'Plan Source', value: guidance.state === 'validated_live' ? 'Legacy validated live contract' : 'Kairos Option Plan unavailable' },
       ];
   const rows = [
     ...sourceRows,
@@ -9218,8 +9306,8 @@ function renderExpectedMoveDiagnostics(entries = []) {
     ['Missing Strike', diag.counts.missingStrike],
     ['Missing Expiration', diag.counts.missingExpiration],
     ['Duplicates Prevented', diag.counts.duplicatePreventionCount],
-    ['Validated Live Contracts', diag.counts.validatedLiveContracts],
-    ['Potential Contract Fallbacks', diag.counts.potentialContractFallbacks],
+    ['Legacy Live Contracts', diag.counts.validatedLiveContracts],
+    ['Option Plan Fallbacks', diag.counts.potentialContractFallbacks],
     ['Expiration Learning', diag.counts.expirationLearning],
     ['Missing Planned Entry', diag.counts.missingPlannedEntryForContract],
     ['Missing Direction', diag.counts.missingDirectionForContract],

@@ -80,7 +80,7 @@ assert.strictEqual(guidance.potentialContract(setup({ entry: null }), readyExpir
 
 // Next Step never says execute when only a fallback contract exists.
 const fallbackStep = execution.nextStep(setup({ price: 314.54, entryStatus: 'Tradeable' }), { bucket: 'ENTER_NOW' }, 'potential');
-assert.ok(fallbackStep.lines.join(' ').includes('Verify and select the live option contract'));
+assert.ok(fallbackStep.lines.join(' ').includes('Use the Option Plan to select and confirm a contract in your broker'));
 assert.ok(!fallbackStep.lines.join(' ').includes('You can execute this trade'));
 
 // Estimated fields are separate from verified contract fields.

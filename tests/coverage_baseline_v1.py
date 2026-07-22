@@ -35,6 +35,15 @@ def row(**overrides):
             "available": True,
             "source": "option_chain",
         },
+        "option_plan": {
+            "available": True,
+            "type": "CALL",
+            "preferred_strike": 105,
+            "suggested_expiration": {"label": "21–35 DTE"},
+            "expected_hold": {"label": "7–12 Trading Days", "fallback_used": True},
+            "confidence": {"label": "★★★★☆"},
+            "strike_rounding_increment": 2.5,
+        },
     }
     base.update(overrides)
     return base
@@ -122,6 +131,11 @@ def test_discovered_scan_metrics_count_canonical_fields_independently():
     assert snapshot["contract_distribution"]["potential/fallback contract only"] == 1
     assert snapshot["contract_distribution"]["contract unavailable"] == 1
     assert snapshot["contract_distribution"]["option data unknown or temporarily failed"] == 1
+    assert snapshot["option_plan_diagnostics"]["option_plans_generated"] == 4
+    assert snapshot["option_plan_diagnostics"]["expected_hold_fallback_used"] == 4
+    assert snapshot["option_plan_diagnostics"]["strike_rounding_distribution"]["2.5"] == 4
+    assert snapshot["option_plan_diagnostics"]["expiration_window_distribution"]["21–35 DTE"] == 4
+    assert snapshot["option_plan_diagnostics"]["confidence_distribution"]["★★★★☆"] == 4
 
 
 def test_unknown_option_data_is_not_counted_as_confirmed_no_options():

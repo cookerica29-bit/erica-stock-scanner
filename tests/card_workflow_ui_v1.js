@@ -24,9 +24,11 @@ assert.ok(html.includes('data-normalized-status'), 'Cards should expose normaliz
 assert.ok(html.includes('data-execution-state'), 'Cards should expose execution-state diagnostics');
 assert.ok(html.includes('data-execute-visual-state'), 'Cards should expose execute visual-state diagnostics');
 
-assert.ok(html.includes("label: '🎯 Suggested Contract'"), 'Validated live contracts should keep Suggested Contract heading');
-assert.ok(html.includes("label: '🎯 Potential Contract'"), 'Fallback estimates should use Potential Contract heading');
-assert.ok(html.includes('.suggested-contract.potential'), 'Potential Contract should be visually distinct');
+assert.ok(html.includes('🎯 Option Plan'), 'Scanner cards should render Option Plan heading');
+assert.ok(html.includes('Preferred Strike'), 'Option Plan should show preferred strike');
+assert.ok(html.includes('Suggested Expiration'), 'Option Plan should show DTE guidance');
+assert.ok(html.includes('Expected Hold'), 'Option Plan should show hold guidance');
+assert.ok(html.includes('term-option-plan-confidence'), 'Option Plan confidence should link to Terms');
 
 assert.ok(html.includes('window.KairosExecutionGuidance.cardStatus'), 'Status badge should use the execution guidance status contract');
 assert.ok(html.includes('window.KairosExecutionGuidance.readinessStages'), 'Timeline should use the execution guidance stage contract');

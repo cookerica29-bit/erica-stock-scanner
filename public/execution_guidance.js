@@ -224,12 +224,12 @@
         if (hasAvailableContract(contractLifecycle)) {
           return {
             label: 'Next Step',
-            lines: ['Price is at the planned entry. You can execute this trade.'],
+            lines: ['Price is at the planned entry. Use the Option Plan and confirm your selected contract in your broker.'],
           };
         }
         return {
           label: 'Next Step',
-          lines: ['Price is at the planned entry.', 'Verify and select the live option contract before executing.'],
+          lines: ['Price is at the planned entry.', 'Use the Option Plan to select and confirm a contract in your broker before executing.'],
         };
       }
       return {

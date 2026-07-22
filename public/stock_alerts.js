@@ -103,18 +103,28 @@
   }
 
   function contractLines(setup = {}, contractState = {}) {
+    const plan = setup.option_plan || {};
+    if (plan.available) {
+      const type = plan.type ? `${plan.type.charAt(0)}${plan.type.slice(1).toLowerCase()}` : '';
+      return [
+        `Option Plan:`,
+        `${strikeText(plan.preferred_strike)} ${type}`.trim(),
+        `Suggested Expiration: ${plan.suggested_expiration?.label || '—'}`,
+        `Expected Hold: ${plan.expected_hold?.label || '—'}`,
+      ];
+    }
     if (contractState.state === 'validated_live' && contractState.label) {
-      return [`Suggested Contract:`, contractState.label];
+      return [`Option Plan:`, contractState.label];
     }
     if (contractState.state === 'potential' && contractState.potential) {
       const type = contractState.potential.type ? `${contractState.potential.type.charAt(0)}${contractState.potential.type.slice(1).toLowerCase()}` : '';
       return [
-        `Potential Contract:`,
+        `Option Plan:`,
         `${strikeText(contractState.potential.strike)} ${type}`.trim(),
         `Expiration Guidance: ${contractState.expiration?.label || 'Learning'}`,
       ];
     }
-    return ['Suggested Contract:', 'Unavailable'];
+    return ['Option Plan:', 'Unavailable'];
   }
 
   function rrText(setup = {}) {
@@ -131,7 +141,7 @@
     const ticker = upper(setup.ticker) || 'UNKNOWN';
     const direction = upper(setup.direction) || 'N/A';
     const next = entryReached
-      ? 'Price is at the Planned Entry. Verify the live option contract before executing.'
+      ? 'Price is at the Planned Entry. Confirm your selected strike and expiration in your broker before executing.'
       : 'Wait for price to reach the Planned Entry.';
     return [
       `🟢 KAIROS SETUP CONFIRMED — ${ticker}`,
@@ -155,9 +165,7 @@
 
   function entryReachedMessage(setup = {}, contractState = {}) {
     const ticker = upper(setup.ticker) || 'UNKNOWN';
-    const contractNote = contractState.state === 'validated_live'
-      ? 'Verify the live option contract before executing.'
-      : 'Verify and select the live option contract before executing.';
+    const contractNote = 'Confirm your selected strike and expiration in your broker before executing.';
     return [
       `🎯 KAIROS ENTRY REACHED — ${ticker}`,
       '',
