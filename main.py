@@ -524,6 +524,27 @@ def api_journal_diagnostics(x_kairos_admin_token: str = Header(default="")):
     return _journal_repository.diagnostics()
 
 
+@app.post("/api/journal/backup")
+def api_journal_backup(
+    keep_latest: int = Query(default=10, ge=1, le=100),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _journal_repository.create_backup(keep_latest=keep_latest)
+
+
+@app.post("/api/journal/backup/validate")
+def api_journal_backup_validate(
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    backup_path = payload.get("path") if isinstance(payload, dict) else None
+    if not backup_path:
+        raise HTTPException(status_code=422, detail="Backup path required")
+    return _journal_repository.restore_validation(backup_path)
+
+
 @app.get("/api/journal/{journal_id}")
 def api_journal_get(journal_id: str, x_kairos_admin_token: str = Header(default="")):
     _require_journal_admin_token(x_kairos_admin_token)

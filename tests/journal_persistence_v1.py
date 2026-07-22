@@ -180,6 +180,16 @@ def test_soft_delete_export_and_diagnostics():
     try:
         repo.create_entry(entry())
         assert repo.diagnostics()["total_entries"] == 1
+        diag = repo.diagnostics()
+        assert diag["configured_db_path"].endswith("journal.sqlite3")
+        assert diag["resolved_db_path"]
+        assert diag["storage_directory_exists"] is True
+        assert diag["storage_directory_writable"] is True
+        assert diag["database_exists"] is True
+        assert diag["database_size_bytes"] > 0
+        assert diag["sqlite_wal_enabled"] is True
+        assert diag["journal_entry_count"] == 1
+        assert diag["open_entry_count"] == 1
         exported = repo.export_entries()
         assert exported["journal_schema_version"] == 1
         assert exported["entries"][0]["journal_id"] == "j-1"
@@ -187,6 +197,31 @@ def test_soft_delete_export_and_diagnostics():
         assert deleted["deleted_at"]
         assert repo.get_entry("j-1") is None
         assert repo.list_entries({"status": "all"}) == []
+    finally:
+        tmp.cleanup()
+
+
+def test_safe_sqlite_backup_retention_and_isolated_restore():
+    tmp, repo = make_repo()
+    try:
+        repo.create_entry(entry(position_state_history=[
+            {"event_id": "evt-1", "new_state": "WATCH"},
+            {"event_id": "evt-2", "event_type": "TP1_REACHED"},
+        ]))
+        backup_dir = Path(tmp.name) / "journal_backups"
+        first = repo.create_backup(backup_dir=backup_dir, keep_latest=2)
+        assert first["filename"].startswith("kairos_journal_")
+        assert first["size"] > 0
+        assert len(first["sha256"]) == 64
+        validation = repo.restore_validation(first["path"])
+        assert validation["schema_version"] == 1
+        assert validation["record_count"] == 1
+        assert validation["journal_ids"] == ["j-1"]
+        assert validation["position_ids"] == ["p-1"]
+        assert validation["position_history_events"] == 2
+        repo.create_backup(backup_dir=backup_dir, keep_latest=2)
+        repo.create_backup(backup_dir=backup_dir, keep_latest=2)
+        assert len(list(backup_dir.glob("kairos_journal_*.sqlite3"))) <= 2
     finally:
         tmp.cleanup()
 
@@ -246,6 +281,10 @@ def test_api_crud_migrate_filters_and_auth():
         diag = client.get("/api/journal/diagnostics", headers=headers()).json()
         assert diag["storage_backend"] == "sqlite"
         assert diag["durable_storage_confirmed"] is False
+        backup = client.post("/api/journal/backup", headers=headers()).json()
+        assert backup["size"] > 0
+        restored = client.post("/api/journal/backup/validate", headers=headers(), json={"path": backup["path"]}).json()
+        assert restored["record_count"] == 1
         migrated = client.post("/api/journal/migrate", headers=headers(), json={
             "entries": [
                 entry(journal_id="j-1", notes="matching update", position_state_history=[{"event_id": "merge-event"}]),
@@ -311,6 +350,7 @@ if __name__ == "__main__":
     test_record_version_conflict_and_position_patch_isolation()
     test_history_append_and_milestone_deduplication()
     test_soft_delete_export_and_diagnostics()
+    test_safe_sqlite_backup_retention_and_isolated_restore()
     test_invalid_payload_rejection_and_missing_optional_fields()
     test_server_restart_and_multiple_device_simulation()
     test_api_crud_migrate_filters_and_auth()

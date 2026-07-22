@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import uuid
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -382,21 +383,98 @@ class SQLiteJournalRepository(JournalRepository):
             "entries": self.list_entries({"status": "all", "limit": 1000}),
         }
 
+    def create_backup(self, backup_dir: str | os.PathLike[str] | None = None, keep_latest: int = 10) -> dict[str, Any]:
+        source = Path(self.db_path)
+        directory = Path(backup_dir or os.getenv("JOURNAL_BACKUP_DIR") or source.parent / "journal_backups")
+        directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        destination = directory / f"kairos_journal_{timestamp}.sqlite3"
+        with self._connect() as src, sqlite3.connect(str(destination)) as dst:
+            src.backup(dst)
+            dst.execute("PRAGMA wal_checkpoint(FULL)")
+        data = destination.read_bytes()
+        backups = sorted(directory.glob("kairos_journal_*.sqlite3"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in backups[max(1, int(keep_latest)):]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        return {
+            "filename": destination.name,
+            "path": str(destination),
+            "timestamp": timestamp,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "retention_keep_latest": keep_latest,
+        }
+
+    def restore_validation(self, backup_path: str | os.PathLike[str]) -> dict[str, Any]:
+        repo = SQLiteJournalRepository(str(backup_path))
+        entries = repo.list_entries({"status": "all", "limit": 1000})
+        return {
+            "schema_version": JOURNAL_SCHEMA_VERSION,
+            "record_count": len(entries),
+            "journal_ids": [entry.get("journal_id") for entry in entries],
+            "position_ids": [entry.get("position_id") for entry in entries],
+            "position_history_events": sum(len(entry.get("position_state_history") or []) for entry in entries),
+        }
+
+    def _sqlite_wal_enabled(self) -> bool:
+        try:
+            with self._connect() as conn:
+                row = conn.execute("PRAGMA journal_mode").fetchone()
+            return bool(row and str(row[0]).lower() == "wal")
+        except sqlite3.Error:
+            return False
+
+    def _storage_directory_writable(self, directory: Path) -> bool:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            probe = directory / f".kairos_write_probe_{uuid.uuid4().hex}"
+            with open(probe, "w", encoding="utf-8") as handle:
+                handle.write("ok")
+                handle.flush()
+                os.fsync(handle.fileno())
+            renamed = directory / f"{probe.name}.renamed"
+            probe.rename(renamed)
+            renamed.unlink()
+            return True
+        except OSError:
+            return False
+
     def diagnostics(self) -> dict[str, Any]:
         entries = self.list_entries({"status": "all", "limit": 1000})
         ids = [entry.get("journal_id") for entry in entries]
         position_ids = [entry.get("position_id") for entry in entries]
         duplicate_ids = sorted({value for value in ids if ids.count(value) > 1 and value})
         path = Path(self.db_path)
-        durable = bool(os.getenv("DATABASE_URL")) or str(path).startswith(("/data/", "/mnt/", "/var/lib/"))
+        resolved = path.expanduser().resolve()
+        directory = resolved.parent
+        durable_expected = bool(os.getenv("DATABASE_URL")) or bool(os.getenv("JOURNAL_DB_PATH") or os.getenv("KAIROS_JOURNAL_DB_PATH"))
+        durable_confirmed = bool(os.getenv("DATABASE_URL")) or any(
+            str(resolved).startswith(str(Path(prefix).resolve()) + os.sep) and os.path.ismount(prefix)
+            for prefix in ["/data", "/mnt", "/var/lib"]
+            if Path(prefix).exists()
+        )
         return {
             "storage_backend": "sqlite",
             "storage_location": self.db_path,
-            "durable_storage_confirmed": durable,
+            "configured_db_path": self.db_path,
+            "resolved_db_path": str(resolved),
+            "storage_directory_exists": directory.exists(),
+            "storage_directory_writable": self._storage_directory_writable(directory),
+            "database_exists": resolved.exists(),
+            "database_size_bytes": resolved.stat().st_size if resolved.exists() else 0,
+            "sqlite_wal_enabled": self._sqlite_wal_enabled(),
+            "durable_mount_expected": durable_expected,
+            "durable_storage_confirmed": durable_confirmed,
             "schema_version": JOURNAL_SCHEMA_VERSION,
             "total_entries": len(entries),
+            "journal_entry_count": len(entries),
             "open_entries": sum(1 for entry in entries if entry_status(entry) == "open"),
+            "open_entry_count": sum(1 for entry in entries if entry_status(entry) == "open"),
             "closed_entries": sum(1 for entry in entries if entry_status(entry) == "closed"),
+            "closed_entry_count": sum(1 for entry in entries if entry_status(entry) == "closed"),
             "entries_without_journal_id": sum(1 for entry in entries if not entry.get("journal_id")),
             "entries_without_position_id": sum(1 for entry in entries if not entry.get("position_id")),
             "duplicate_ids": duplicate_ids,
