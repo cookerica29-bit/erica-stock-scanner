@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import logging
 import os
 import threading
 import time
@@ -15,6 +16,7 @@ from scanner import (
     debug_ticker,
     scan_trends,
     WATCHLIST,
+    coverage_baseline_snapshot,
     register_background_periodic_task,
     start_market_cache_refresh,
 )
@@ -30,6 +32,7 @@ from market_data import (
 )
 
 app = FastAPI(title="Stock Options Scanner")
+logger = logging.getLogger(__name__)
 
 DISCOVERY_UNIVERSE_TTL_SECONDS = 24 * 60 * 60
 _discovery_universe_cache = {
@@ -49,6 +52,8 @@ _discovery_universe_cache = {
     "job_id": None,
     "running": False,
     "started_at": None,
+    "completed_at": None,
+    "metrics": {},
 }
 _discovery_universe_lock = threading.RLock()
 _discovery_universe_executor = ThreadPoolExecutor(max_workers=1)
@@ -62,8 +67,21 @@ NO_STORE_HEADERS = {
 
 def _format_timestamp(value):
     if isinstance(value, datetime):
-        return value.isoformat() + "Z"
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     return None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _coerce_utc_datetime(value):
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _discovery_admin_token() -> str:
@@ -71,12 +89,13 @@ def _discovery_admin_token() -> str:
 
 
 def _discovery_status_snapshot() -> dict:
-    now = datetime.utcnow()
+    now = _utc_now()
     with _discovery_universe_lock:
         cached = dict(_discovery_universe_cache)
-    generated_at = cached.get("generated_at")
-    expires_at = cached.get("expires_at")
-    started_at = cached.get("started_at")
+    generated_at = _coerce_utc_datetime(cached.get("generated_at"))
+    expires_at = _coerce_utc_datetime(cached.get("expires_at"))
+    started_at = _coerce_utc_datetime(cached.get("started_at"))
+    completed_at = _coerce_utc_datetime(cached.get("completed_at"))
     age_seconds = None
     if isinstance(generated_at, datetime):
         age_seconds = max(0, round((now - generated_at).total_seconds(), 1))
@@ -93,6 +112,7 @@ def _discovery_status_snapshot() -> dict:
         "running": bool(cached.get("running")),
         "job_id": cached.get("job_id"),
         "started_at": _format_timestamp(started_at),
+        "completed_at": _format_timestamp(completed_at),
         "generated_at": _format_timestamp(generated_at),
         "expires_at": _format_timestamp(expires_at),
         "age_seconds": age_seconds,
@@ -110,14 +130,69 @@ def _discovery_status_snapshot() -> dict:
         "watchlist_overlap": cached.get("watchlist_overlap") or {},
         "last_error": cached.get("last_error"),
         "last_duration": cached.get("last_duration"),
+        "metrics": cached.get("metrics") or {},
+    }
+
+
+def _top_reasons(reason_counts: dict, limit: int = 8) -> dict:
+    if not isinstance(reason_counts, dict):
+        return {}
+    items = sorted(reason_counts.items(), key=lambda item: (-int(item[1] or 0), str(item[0])))
+    return {str(reason): int(count or 0) for reason, count in items[:limit]}
+
+
+def _discovery_metrics_from_result(result: dict, started_at: datetime, completed_at: datetime, duration_ms: float) -> dict:
+    result = result or {}
+    counts = result.get("pipeline_counts") or {}
+    thresholds = result.get("thresholds") or {}
+    stage3 = result.get("stage3") or {}
+    stage4 = result.get("stage4") or {}
+    stage3_failures = stage3.get("failure_reasons") or {}
+    stage4_failures = stage4.get("failure_reasons") or {}
+    cap = thresholds.get("target_universe_size")
+    return {
+        "discovery_started_at": _format_timestamp(started_at),
+        "discovery_completed_at": _format_timestamp(completed_at),
+        "discovery_duration_ms": duration_ms,
+        "raw_alpaca_asset_count": counts.get("raw_assets"),
+        "tradable_optionable_count": counts.get("tradable_optionable"),
+        "hygiene_passed_count": counts.get("hygiene_passed"),
+        "dollar_volume_passed_count": counts.get("dollar_volume_passed"),
+        "options_liquidity_passed_count": counts.get("options_liquidity_passed"),
+        "ranked_universe_count_before_cap": counts.get("ranked"),
+        "final_admitted_symbol_count": counts.get("selected"),
+        "configured_cap": cap,
+        "effective_cap": cap,
+        "failure_count_by_stage": {
+            "stage3_dollar_volume": sum(int(value or 0) for value in stage3_failures.values()) + int(stage3.get("fetch_failures") or 0),
+            "stage4_options_liquidity": sum(int(value or 0) for value in stage4_failures.values()),
+        },
+        "top_blocker_or_failure_reasons": {
+            "stage3_dollar_volume": _top_reasons(stage3_failures),
+            "stage4_options_liquidity": _top_reasons(stage4_failures),
+        },
+    }
+
+
+def _discovery_coverage_context() -> dict:
+    with _discovery_universe_lock:
+        cached = dict(_discovery_universe_cache)
+    return {
+        "universe_source": "discovered",
+        "universe_generated_at": cached.get("generated_at"),
+        "universe_symbol_count": len(cached.get("symbols") or []),
+        "discovery": cached.get("metrics") or {},
     }
 
 
 def _run_discovery_universe_job(job_id: str) -> None:
     started = time.perf_counter()
+    started_at = _utc_now()
     try:
         result = build_ranked_discovery_universe(static_watchlist=WATCHLIST)
-        now = datetime.utcnow()
+        now = _utc_now()
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        metrics = _discovery_metrics_from_result(result, started_at, now, duration_ms)
         with _discovery_universe_lock:
             _discovery_universe_cache.update({
                 "symbols": result.get("symbols") or [],
@@ -132,11 +207,26 @@ def _run_discovery_universe_job(job_id: str) -> None:
                 "bottom_20_selected": result.get("bottom_20_selected") or [],
                 "watchlist_overlap": result.get("watchlist_overlap") or {},
                 "last_error": None,
-                "last_duration": round(time.perf_counter() - started, 1),
+                "last_duration": round(duration_ms / 1000, 1),
                 "job_id": job_id,
                 "running": False,
                 "started_at": None,
+                "completed_at": now,
+                "metrics": metrics,
             })
+        counts = result.get("pipeline_counts") or {}
+        logger.info(
+            "coverage.discovery.complete duration_ms=%s raw_assets=%s tradable_optionable=%s hygiene_passed=%s dollar_volume_passed=%s options_liquidity_passed=%s ranked_before_cap=%s final_symbols=%s effective_cap=%s",
+            duration_ms,
+            counts.get("raw_assets"),
+            counts.get("tradable_optionable"),
+            counts.get("hygiene_passed"),
+            counts.get("dollar_volume_passed"),
+            counts.get("options_liquidity_passed"),
+            counts.get("ranked"),
+            counts.get("selected"),
+            metrics.get("effective_cap"),
+        )
     except Exception as exc:
         with _discovery_universe_lock:
             _discovery_universe_cache.update({
@@ -145,6 +235,7 @@ def _run_discovery_universe_job(job_id: str) -> None:
                 "job_id": job_id,
                 "running": False,
                 "started_at": None,
+                "completed_at": _utc_now(),
             })
 
 
@@ -153,13 +244,13 @@ def _submit_discovery_universe_job(force: bool = False) -> tuple[bool, str]:
         if _discovery_universe_cache.get("running"):
             return False, "already running"
         if not force and _discovery_universe_cache.get("symbols"):
-            expires_at = _discovery_universe_cache.get("expires_at")
-            if isinstance(expires_at, datetime) and expires_at > datetime.utcnow():
+            expires_at = _coerce_utc_datetime(_discovery_universe_cache.get("expires_at"))
+            if isinstance(expires_at, datetime) and expires_at > _utc_now():
                 return False, "cache fresh"
         job_id = f"discovery:{int(time.time())}"
         _discovery_universe_cache.update({
             "running": True,
-            "started_at": datetime.utcnow(),
+            "started_at": _utc_now(),
             "job_id": job_id,
             "last_error": None,
         })
@@ -282,7 +373,13 @@ def api_scan(
         ready, symbols, status = _discovery_symbols_ready()
         if not ready:
             return _discovery_scan_not_ready_response(status)
-        result = scan_cached(symbols, force_refresh=refresh, universe="discovered", max_symbols=None)
+        result = scan_cached(
+            symbols,
+            force_refresh=refresh,
+            universe="discovered",
+            max_symbols=None,
+            coverage_context=_discovery_coverage_context(),
+        )
     else:
         use_finviz = bool(discover) or str(universe or "").strip().lower() == "finviz"
         result = scan_cached(force_refresh=refresh, discover=use_finviz)
@@ -342,6 +439,30 @@ def api_discovery_symbols():
         "symbols": symbols,
         "count": len(symbols),
         "status": status,
+    }
+
+
+@app.get("/api/coverage/baseline")
+def api_coverage_baseline():
+    snapshot = coverage_baseline_snapshot()
+    if not snapshot:
+        return {
+            "status": "warming",
+            "ready": False,
+            "message": "No discovered-universe scan coverage baseline has completed yet.",
+            "generated_at": None,
+            "discovery": {},
+            "scan": {},
+            "stage_distribution": {},
+            "grade_distribution": {},
+            "contract_distribution": {},
+            "blocker_distribution": {},
+            "provider_failures": {},
+        }
+    return {
+        "status": "ready",
+        "ready": True,
+        **snapshot,
     }
 
 

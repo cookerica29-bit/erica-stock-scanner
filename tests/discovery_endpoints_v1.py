@@ -35,6 +35,8 @@ def reset_discovery_cache():
             "job_id": None,
             "running": False,
             "started_at": None,
+            "completed_at": None,
+            "metrics": {},
         })
 
 
@@ -73,6 +75,13 @@ def fake_discovery_result(static_watchlist=None):
         },
         "elapsed_seconds": 3.5,
     }
+
+
+def assert_utc_z_timestamp(value):
+    assert isinstance(value, str)
+    assert value.endswith("Z")
+    parsed = __import__("datetime").datetime.fromisoformat(value.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
 
 
 def test_discovery_status_warming_without_cache():
@@ -142,6 +151,10 @@ def test_discovery_run_populates_cache_with_valid_token():
         assert payload["status"]["status"] == "ready"
         assert payload["status"]["selected_count"] == 3
         assert payload["status"]["pipeline_counts"]["selected"] == 3
+        assert payload["status"]["metrics"]["final_admitted_symbol_count"] == 3
+        assert payload["status"]["metrics"]["effective_cap"] == 550
+        assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_started_at"])
+        assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_completed_at"])
         assert payload["status"]["last_error"] is None
 
         symbols = client.get("/api/discovery/symbols").json()
@@ -207,7 +220,13 @@ def test_scan_discovered_universe_uses_cached_symbols_without_touching_default_o
         client = TestClient(main.app)
         response = client.get("/api/scan?universe=discovered")
         assert response.status_code == 200
-        assert calls == [(["AAPL", "F", "KMI"], {"force_refresh": False, "universe": "discovered", "max_symbols": None})]
+        assert len(calls) == 1
+        assert calls[0][0] == ["AAPL", "F", "KMI"]
+        assert calls[0][1]["force_refresh"] is False
+        assert calls[0][1]["universe"] == "discovered"
+        assert calls[0][1]["max_symbols"] is None
+        assert calls[0][1]["coverage_context"]["universe_source"] == "discovered"
+        assert calls[0][1]["coverage_context"]["universe_symbol_count"] == 3
         assert response.json()["meta"]["cache_key"] == "discovered"
     finally:
         main.scan_cached = original_scan_cached
@@ -243,7 +262,12 @@ def test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncat
         client = TestClient(main.app)
         response = client.get("/api/scan?universe=discovered")
         assert response.status_code == 200
-        assert calls == [(symbols, {"force_refresh": False, "universe": "discovered", "max_symbols": None})]
+        assert len(calls) == 1
+        assert calls[0][0] == symbols
+        assert calls[0][1]["force_refresh"] is False
+        assert calls[0][1]["universe"] == "discovered"
+        assert calls[0][1]["max_symbols"] is None
+        assert calls[0][1]["coverage_context"]["universe_symbol_count"] == 550
         assert response.json()["meta"]["configured_universe_count"] == 550
     finally:
         main.scan_cached = original_scan_cached
@@ -348,6 +372,50 @@ def test_startup_registers_and_submits_discovery_refresh():
         main.start_market_cache_refresh = previous_start_market_cache
 
 
+def test_coverage_baseline_endpoint_warms_without_completed_discovered_scan():
+    reset_discovery_cache()
+    previous_snapshot = main.coverage_baseline_snapshot
+    main.coverage_baseline_snapshot = lambda: None
+    try:
+        client = TestClient(main.app)
+        payload = client.get("/api/coverage/baseline").json()
+        assert payload["status"] == "warming"
+        assert payload["ready"] is False
+        assert payload["generated_at"] is None
+        assert payload["scan"] == {}
+    finally:
+        main.coverage_baseline_snapshot = previous_snapshot
+
+
+def test_coverage_baseline_endpoint_returns_latest_snapshot_without_starting_work():
+    previous_snapshot = main.coverage_baseline_snapshot
+    previous_scan_cached = main.scan_cached
+    calls = []
+    snapshot = {
+        "generated_at": "2026-07-22T12:00:00Z",
+        "discovery": {"final_admitted_symbol_count": 550},
+        "scan": {"universe_source": "discovered", "symbols_requested": 550},
+        "stage_distribution": {"Enter Now": 1},
+        "grade_distribution": {"A": 1, "B": 0, "C": 0, "unknown": 0},
+        "contract_distribution": {"suggested contract available": 1},
+        "blocker_distribution": {},
+        "provider_failures": {},
+    }
+    main.coverage_baseline_snapshot = lambda: snapshot
+    main.scan_cached = lambda *args, **kwargs: calls.append((args, kwargs))
+    try:
+        client = TestClient(main.app)
+        payload = client.get("/api/coverage/baseline").json()
+        assert payload["status"] == "ready"
+        assert payload["ready"] is True
+        assert payload["scan"]["symbols_requested"] == 550
+        assert payload["stage_distribution"]["Enter Now"] == 1
+        assert calls == []
+    finally:
+        main.coverage_baseline_snapshot = previous_snapshot
+        main.scan_cached = previous_scan_cached
+
+
 def main_test() -> int:
     test_discovery_status_warming_without_cache()
     test_discovery_run_disabled_when_token_unset()
@@ -360,6 +428,8 @@ def main_test() -> int:
     test_discovery_cache_refresh_needed_for_missing_and_stale_cache()
     test_discovery_auto_submit_skips_fresh_cache_and_running_job()
     test_startup_registers_and_submits_discovery_refresh()
+    test_coverage_baseline_endpoint_warms_without_completed_discovered_scan()
+    test_coverage_baseline_endpoint_returns_latest_snapshot_without_starting_work()
     print("Discovery endpoints v1 tests passed")
     return 0
 

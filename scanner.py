@@ -170,6 +170,8 @@ _active_scan_count = 0
 _analysis_cache = {}
 ANALYSIS_CACHE_STALE_SECONDS = 180
 ANALYSIS_REFRESH_TIMEOUT_SECONDS = 300
+_coverage_baseline_snapshot = None
+_coverage_baseline_lock = threading.RLock()
 
 
 def _parse_background_analysis_scan_workers(value: Optional[str], default: int = 4) -> int:
@@ -418,6 +420,161 @@ def _analysis_refresh_snapshot(key: tuple) -> dict:
     }
 
 
+def _increment_counter(counter: dict, key) -> None:
+    label = str(key or "unknown").strip() or "unknown"
+    counter[label] = counter.get(label, 0) + 1
+
+
+def _coverage_stage_bucket(row: dict) -> str:
+    if not isinstance(row, dict):
+        return "unknown"
+    trade_stage = str((row.get("trade_eval") or {}).get("trade_stage") or "").strip()
+    if trade_stage:
+        return trade_stage
+    setup_status = str(row.get("setupStatus") or row.get("setup_status") or "").strip()
+    if setup_status:
+        return setup_status
+    entry_status = str(row.get("entryStatus") or "").strip()
+    if entry_status:
+        return entry_status
+    return "unknown"
+
+
+def _coverage_contract_bucket(row: dict) -> str:
+    contract = row.get("best_contract") if isinstance(row, dict) else None
+    if not isinstance(contract, dict) or not contract:
+        return "contract unavailable"
+    source = str(contract.get("source") or "").strip().lower()
+    reason = str(contract.get("reason") or contract.get("fallback_reason") or "").strip().lower()
+    if contract.get("available") is True:
+        return "suggested contract available"
+    if source == "fallback":
+        return "potential/fallback contract only"
+    if contract.get("loading") or source == "loading" or "loading" in reason or "refresh" in reason:
+        return "option data unknown or temporarily failed"
+    if source in {"", "not_evaluated"}:
+        return "contract unavailable"
+    if "unavailable" in source or "option" in source:
+        return "contract unavailable"
+    return "contract unavailable"
+
+
+def _coverage_provider_failure_distribution(rows: list, scan_meta: dict) -> dict:
+    provider_failures = {}
+    for reason, count in (scan_meta.get("tradeability_skip_reasons") or {}).items():
+        reason_key = str(reason or "").lower()
+        if "unknown" in reason_key or "failed" in reason_key or "data" in reason_key:
+            provider_failures[str(reason or "unknown")] = count
+    for row in rows:
+        contract = row.get("best_contract") or {}
+        if isinstance(contract, dict) and _coverage_contract_bucket(row) == "option data unknown or temporarily failed":
+            _increment_counter(provider_failures, contract.get("reason") or contract.get("source") or "option data unknown")
+    return provider_failures
+
+
+def build_discovered_scan_coverage_snapshot(
+    rows: list,
+    near_miss: list,
+    scan_meta: Optional[dict],
+    coverage_context: Optional[dict],
+) -> dict:
+    scan_meta = scan_meta or {}
+    coverage_context = coverage_context or {}
+    all_rows = [item for item in [*(rows or []), *(near_miss or [])] if isinstance(item, dict)]
+    stage_distribution = {}
+    grade_distribution = {}
+    contract_distribution = {}
+    blocker_distribution = {}
+    trade_stage_distribution = {}
+    entry_status_distribution = {}
+    setup_status_distribution = {}
+
+    for row in all_rows:
+        _increment_counter(stage_distribution, _coverage_stage_bucket(row))
+        _increment_counter(grade_distribution, row.get("setupGrade") or "unknown")
+        _increment_counter(contract_distribution, _coverage_contract_bucket(row))
+        _increment_counter(trade_stage_distribution, (row.get("trade_eval") or {}).get("trade_stage") or "unknown")
+        _increment_counter(entry_status_distribution, row.get("entryStatus") or "unknown")
+        _increment_counter(setup_status_distribution, row.get("setupStatus") or row.get("setup_status") or "unknown")
+        for reason in (row.get("trade_eval") or {}).get("no_trade_reasons") or []:
+            _increment_counter(blocker_distribution, reason)
+        entry_status = str(row.get("entryStatus") or "").strip()
+        if entry_status == "Too Far":
+            _increment_counter(blocker_distribution, "Too Far")
+        contract = row.get("best_contract") or {}
+        if isinstance(contract, dict) and contract.get("available") is not True:
+            reason = contract.get("reason") or contract.get("fallback_reason")
+            if reason:
+                _increment_counter(blocker_distribution, reason)
+
+    for reason, count in (scan_meta.get("tradeability_skip_reasons") or {}).items():
+        blocker_distribution[str(reason or "unknown")] = blocker_distribution.get(str(reason or "unknown"), 0) + int(count or 0)
+
+    requested = scan_meta.get("configured_universe_count")
+    processed = scan_meta.get("symbols_successfully_processed", len(all_rows))
+    skipped = scan_meta.get("tradeability_skipped", 0)
+    failed = scan_meta.get("no_setup_or_failed_count", 0)
+    returned = len(all_rows)
+    partial = bool(
+        (requested is not None and (processed or 0) + (skipped or 0) + (failed or 0) < requested)
+        or scan_meta.get("partial_result")
+        or scan_meta.get("symbols_omitted_or_rejected", 0)
+    )
+    completed_at = _coerce_utc_datetime(scan_meta.get("scan_completed_at")) or _utc_now()
+    snapshot = {
+        "generated_at": _format_utc_timestamp(completed_at),
+        "discovery": coverage_context.get("discovery") or {},
+        "scan": {
+            "universe_source": coverage_context.get("universe_source") or "discovered",
+            "universe_generated_at": _format_utc_timestamp(coverage_context.get("universe_generated_at")),
+            "universe_symbol_count": coverage_context.get("universe_symbol_count"),
+            "symbols_requested": requested,
+            "symbols_processed": processed,
+            "symbols_returned": returned,
+            "symbols_failed": failed,
+            "symbols_skipped": skipped,
+            "scan_started_at": _format_utc_timestamp(scan_meta.get("scan_started_at")),
+            "scan_completed_at": _format_utc_timestamp(completed_at),
+            "scan_duration_ms": scan_meta.get("scan_duration_ms"),
+            "partial_result": partial,
+        },
+        "stage_distribution": dict(sorted(stage_distribution.items())),
+        "canonical_field_distributions": {
+            "trade_stage": dict(sorted(trade_stage_distribution.items())),
+            "entry_status": dict(sorted(entry_status_distribution.items())),
+            "setup_status": dict(sorted(setup_status_distribution.items())),
+        },
+        "grade_distribution": {
+            "A": grade_distribution.get("A", 0),
+            "B": grade_distribution.get("B", 0),
+            "C": grade_distribution.get("C", 0),
+            "unknown": grade_distribution.get("unknown", 0),
+        },
+        "contract_distribution": {
+            "suggested contract available": contract_distribution.get("suggested contract available", 0),
+            "potential/fallback contract only": contract_distribution.get("potential/fallback contract only", 0),
+            "contract unavailable": contract_distribution.get("contract unavailable", 0),
+            "option data unknown or temporarily failed": contract_distribution.get("option data unknown or temporarily failed", 0),
+        },
+        "blocker_distribution": dict(sorted(blocker_distribution.items())),
+        "provider_failures": dict(sorted(_coverage_provider_failure_distribution(all_rows, scan_meta).items())),
+    }
+    return snapshot
+
+
+def _store_coverage_baseline_snapshot(snapshot: dict) -> None:
+    global _coverage_baseline_snapshot
+    with _coverage_baseline_lock:
+        _coverage_baseline_snapshot = dict(snapshot)
+
+
+def coverage_baseline_snapshot() -> Optional[dict]:
+    with _coverage_baseline_lock:
+        if _coverage_baseline_snapshot is None:
+            return None
+        return dict(_coverage_baseline_snapshot)
+
+
 def _mark_analysis_refresh_started(key: tuple, job_id: str) -> None:
     with _background_jobs_lock:
         prior = _analysis_refresh_state.get(_analysis_state_key(key), {})
@@ -448,6 +605,7 @@ def _submit_analysis_refresh(
     reason: str = "background",
     discover: bool = False,
     max_symbols: Optional[int] = 200,
+    coverage_context: Optional[dict] = None,
 ) -> bool:
     """Submit an analysis refresh job.
 
@@ -459,7 +617,7 @@ def _submit_analysis_refresh(
     if snapshot.get("refreshing"):
         return False
     job_id = f"{_analysis_state_key(key)}:{int(time.time())}:{reason}"
-    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id, discover, max_symbols)
+    submitted = _submit_background_job(refresh_key, _refresh_analysis_cache, key, watchlist, job_id, discover, max_symbols, coverage_context)
     if submitted:
         _mark_analysis_refresh_started(key, job_id)
     return submitted
@@ -590,6 +748,7 @@ def _refresh_analysis_cache(
     job_id: Optional[str] = None,
     discover: bool = False,
     max_symbols: Optional[int] = 200,
+    coverage_context: Optional[dict] = None,
 ) -> None:
     started = time.perf_counter()
     try:
@@ -601,6 +760,26 @@ def _refresh_analysis_cache(
             max_symbols=max_symbols,
         )
         _store_analysis_cache(key, rows, near_miss, scan_meta)
+        if isinstance(key, tuple) and len(key) >= 2 and key[0] == "universe" and key[1] == "discovered":
+            coverage = build_discovered_scan_coverage_snapshot(rows, near_miss, scan_meta, coverage_context)
+            _store_coverage_baseline_snapshot(coverage)
+            scan = coverage.get("scan") or {}
+            stages = coverage.get("stage_distribution") or {}
+            logger.info(
+                "coverage.scan.complete duration_ms=%s symbols_requested=%s symbols_processed=%s symbols_returned=%s symbols_failed=%s symbols_skipped=%s a_plus_ready=%s b_plus_tradeable=%s range_no_trade=%s building_watchlist=%s failed=%s partial_result=%s",
+                scan.get("scan_duration_ms"),
+                scan.get("symbols_requested"),
+                scan.get("symbols_processed"),
+                scan.get("symbols_returned"),
+                scan.get("symbols_failed"),
+                scan.get("symbols_skipped"),
+                stages.get("A+ READY", 0),
+                stages.get("B+ TRADEABLE", 0),
+                stages.get("RANGE / NO TRADE", 0),
+                stages.get("BUILDING / WATCHLIST", 0),
+                scan.get("symbols_failed"),
+                scan.get("partial_result"),
+            )
         _mark_analysis_refresh_finished(key, started)
         logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", _analysis_state_key(key), job_id, len(rows), len(near_miss))
     except Exception as exc:
@@ -4108,6 +4287,7 @@ def scan_all(
     max_symbols: Optional[int] = 200,
 ) -> tuple:
     scan_start = time.perf_counter()
+    scan_started_at = _utc_now()
     _scan_activity_started()
     try:
         logger.info("Stock Scanner Strategy: %s", STOCK_SCANNER_STRATEGY_VERSION)
@@ -4184,6 +4364,7 @@ def scan_all(
         best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
         evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") != "not_evaluated")
         total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
+        scan_completed_at = _utc_now()
         cache_stats = _cache_snapshot()
         slow_contracts = [
             f"{r.get('ticker')}:{(r.get('_scan_timing') or {}).get('best_contract_ms', 0):.0f}ms"
@@ -4216,6 +4397,10 @@ def scan_all(
             "no_setup_or_failed_count": max(0, len(filtered_watchlist) - len(all_results)),
             "contract_evaluated": evaluated_contracts,
             "contract_evaluation_pool": len(all_results),
+            "scan_started_at": _format_utc_timestamp(scan_started_at),
+            "scan_completed_at": _format_utc_timestamp(scan_completed_at),
+            "scan_duration_ms": total_ms,
+            "partial_result": False,
         }
         return rows, near_miss, scan_meta
     finally:
@@ -4229,6 +4414,7 @@ def scan_cached(
     discover: bool = False,
     universe: str = "default",
     max_symbols: Optional[int] = 200,
+    coverage_context: Optional[dict] = None,
 ) -> dict:
     key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
     with _cache_lock:
@@ -4239,7 +4425,14 @@ def scan_cached(
         age_seconds = _age_seconds(generated_at)
         should_refresh = bool(force_refresh) or age_seconds is None or age_seconds > ANALYSIS_CACHE_STALE_SECONDS
         if should_refresh:
-            _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover, max_symbols=max_symbols)
+            _submit_analysis_refresh(
+                key,
+                watchlist,
+                reason="manual" if force_refresh else "cache",
+                discover=discover,
+                max_symbols=max_symbols,
+                coverage_context=coverage_context,
+            )
         return {
             "rows": _hydrate_scan_rows_from_cache(list(cached.get("rows", []))),
             "near_miss": _hydrate_scan_rows_from_cache(list(cached.get("near_miss", []))),
@@ -4250,7 +4443,14 @@ def scan_cached(
         }
 
     if not cached:
-        _submit_analysis_refresh(key, watchlist, reason="manual" if force_refresh else "cache", discover=discover, max_symbols=max_symbols)
+        _submit_analysis_refresh(
+            key,
+            watchlist,
+            reason="manual" if force_refresh else "cache",
+            discover=discover,
+            max_symbols=max_symbols,
+            coverage_context=coverage_context,
+        )
         return {
             "rows": [],
             "near_miss": [],
