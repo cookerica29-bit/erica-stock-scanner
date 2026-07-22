@@ -829,6 +829,46 @@
   .position-section.live { border-color:rgba(139,92,246,0.18); }
   .position-section.contract { border-color:rgba(245,158,11,0.16); }
   .position-warning { color:#fbbf24; font-size:11px; font-weight:850; line-height:1.4; margin-top:8px; }
+  .position-manager {
+    border:1px solid rgba(148,163,184,0.16);
+    background:rgba(15,23,42,0.52);
+    border-radius:8px;
+    padding:12px;
+    margin:12px 0;
+  }
+  .position-manager-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:10px; }
+  .position-manager-title { color:var(--text); font-size:13px; font-weight:900; }
+  .position-manager-status {
+    border:1px solid rgba(148,163,184,0.22);
+    border-radius:999px;
+    padding:5px 9px;
+    font-size:11px;
+    font-weight:900;
+    white-space:nowrap;
+    background:rgba(15,23,42,0.68);
+  }
+  .position-manager-status.healthy { color:#86efac; border-color:rgba(34,197,94,0.34); }
+  .position-manager-status.watch { color:#facc15; border-color:rgba(250,204,21,0.38); }
+  .position-manager-status.protect { color:#fb923c; border-color:rgba(251,146,60,0.38); }
+  .position-manager-status.exit { color:#fca5a5; border-color:rgba(239,68,68,0.44); }
+  .position-manager-status.data-needed { color:#cbd5e1; border-color:rgba(148,163,184,0.3); }
+  .position-manager-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+  .position-manager-metric {
+    border:1px solid rgba(148,163,184,0.12);
+    background:rgba(2,6,23,0.22);
+    border-radius:7px;
+    padding:8px;
+    min-width:0;
+  }
+  .position-manager-metric label { display:block; font-size:10px; font-weight:850; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }
+  .position-manager-metric strong { display:block; font-size:14px; font-weight:900; color:var(--text); }
+  .position-manager-progress { height:7px; border-radius:999px; background:rgba(148,163,184,0.16); overflow:hidden; margin-top:10px; }
+  .position-manager-progress span { display:block; height:100%; background:linear-gradient(90deg,#60a5fa,#86efac); border-radius:999px; }
+  .position-manager-action { margin-top:10px; color:var(--text); font-size:12px; font-weight:900; }
+  .position-manager-reason { margin-top:6px; display:grid; gap:3px; color:var(--muted); font-size:12px; line-height:1.45; }
+  .position-details { border-top:1px solid rgba(148,163,184,0.12); margin-top:10px; padding-top:8px; }
+  .position-details summary { cursor:pointer; color:var(--muted); font-size:11px; font-weight:850; }
+  .position-history-list { margin-top:8px; display:grid; gap:5px; color:var(--muted); font-size:11px; }
   .position-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
   .position-actions button { flex:1 1 140px; }
   .position-actions .btn-danger {
@@ -867,6 +907,7 @@
   }
   @media (max-width: 900px) {
     .position-card-grid { grid-template-columns:1fr; }
+    .position-manager-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
   }
   .execution-empty {
     background:rgba(15,23,42,0.75);
@@ -3002,6 +3043,7 @@ const STOCK_ALERT_SENT_KEY = 'kairos_stock_alert_sent_v1';
 const STOCK_ALERT_ENTER_NOW_KEY = 'kairos_stock_alert_enter_now_transition_v1';
 const STOCK_ALERT_ENTRY_TOUCH_KEY = 'kairos_stock_alert_entry_touch_v1';
 const STOCK_ALERT_DIAGNOSTICS_KEY = 'kairos_stock_alert_diagnostics_v1';
+const POSITION_INTELLIGENCE_VERSION = 1;
 const POSITION_ALERT_KEYS = {
   ENTRY_REACHED: { label: 'Entry Reached', defaultOn: false },
   MOVE_STARTED: { label: 'Move Started', defaultOn: false },
@@ -5748,6 +5790,95 @@ function renderPositionAlertControls(model = {}) {
     </div>`;
 }
 
+function renderPositionManagerMetric(label, value) {
+  return `<div class="position-manager-metric"><label>${escapeHtml(label)}</label><strong>${escapeHtml(value ?? '—')}</strong></div>`;
+}
+
+function renderPositionHistory(history = []) {
+  const recent = Array.isArray(history) ? history.slice(-6).reverse() : [];
+  if (!recent.length) return '<div class="position-history-list"><div>No position-state events recorded yet.</div></div>';
+  return `<div class="position-history-list">${recent.map(event => `
+    <div>${escapeHtml(formatShortDate(event.timestamp) || '—')} · ${escapeHtml(event.event_type || 'Event')} · ${escapeHtml(event.reason_code || event.new_state || '')}</div>
+  `).join('')}</div>`;
+}
+
+function renderOptionPlanSnapshot(plan = {}) {
+  const optionPlan = plan.optionPlan || {};
+  return renderPositionKvRows([
+    ['Type', optionPlan.optionType],
+    ['Preferred Strike', fmtMoney(optionPlan.preferredStrike)],
+    ['Suggested DTE', optionPlan.suggestedMinDte != null && optionPlan.suggestedMaxDte != null ? `${optionPlan.suggestedMinDte}-${optionPlan.suggestedMaxDte} DTE` : '—'],
+    ['Expected Hold', optionPlan.expectedHoldMin != null && optionPlan.expectedHoldMax != null ? `${optionPlan.expectedHoldMin}-${optionPlan.expectedHoldMax} trading days` : '—'],
+    ['Expected Move', optionPlan.expectedMoveDollars == null ? '—' : `${fmtMoney(optionPlan.expectedMoveDollars)} (${fmtNumber(optionPlan.expectedMovePercent)}%)`],
+    ['Confidence', optionPlan.confidence == null ? '—' : `${optionPlan.confidence}/5`],
+  ]);
+}
+
+function renderActualContractSnapshot(plan = {}) {
+  const actual = plan.actualContract || {};
+  return renderPositionKvRows([
+    ['Actual Strike', fmtMoney(actual.strike)],
+    ['Actual Expiration', actual.expiration],
+    ['Actual Premium', fmtMoney(actual.premium)],
+    ['Actual Quantity', actual.quantity],
+  ]);
+}
+
+function renderPositionManagerBlock(model = {}) {
+  const intel = model.position_intelligence || {};
+  const progress = intel.progress_to_tp1?.display_percent;
+  const progressWidth = Math.max(0, Math.min(100, progress ?? 0));
+  const stateClass = String(intel.state || 'DATA_NEEDED').toLowerCase().replace(/_/g, '-');
+  const time = intel.time_in_trade || {};
+  const timeLabel = time.trading_days == null
+    ? '—'
+    : time.expected_min != null && time.expected_max != null
+      ? `Day ${time.trading_days} of ${time.expected_min}-${time.expected_max}`
+      : `Day ${time.trading_days}`;
+  return `
+    <div class="position-manager" data-position-intelligence-version="${POSITION_INTELLIGENCE_VERSION}" data-position-state="${escapeHtml(intel.state || 'DATA_NEEDED')}">
+      <div class="position-manager-head">
+        <div class="position-manager-title">📊 Position Manager</div>
+        <div class="position-manager-status ${stateClass}">${escapeHtml(intel.state_label || '⚪ Data Needed')}</div>
+      </div>
+      <div class="position-manager-grid">
+        ${renderPositionManagerMetric('Current Price', fmtMoney(intel.current_price))}
+        ${renderPositionManagerMetric('Progress to TP1', progress == null ? '—' : `${progress}%`)}
+        ${renderPositionManagerMetric('Current R', formatRMultiple(intel.current_r))}
+        ${renderPositionManagerMetric('Opportunity Remaining', intel.position_opportunity_remaining == null ? '—' : `${intel.position_opportunity_remaining}%`)}
+      </div>
+      <div class="position-manager-progress" aria-label="Progress to TP1"><span style="width:${progressWidth}%"></span></div>
+      <div class="position-manager-action">Next Action: ${escapeHtml(intel.next_action_label || 'Review Position')}</div>
+      <div class="position-manager-reason">${(intel.reason || []).slice(0, 2).map(line => `<div>${escapeHtml(line)}</div>`).join('')}</div>
+      <details class="position-details">
+        <summary>Position Details</summary>
+        <div class="position-card-grid" style="margin-top:10px;">
+          <div class="execution-section position-section">
+            <div class="execution-section-title">Original Plan</div>
+            ${renderPositionKvRows([
+              ['Original Entry', fmtMoney(model.plan?.entryPrice)],
+              ['Original Stop', fmtMoney(intel.original_stop)],
+              ['TP1 / TP2 / TP3', [fmtMoney(intel.tp1), fmtMoney(model.plan?.tp2), fmtMoney(model.plan?.tp3)].join(' / ')],
+              ['Best Price', fmtMoney(intel.best_price)],
+              ['Maximum Progress', intel.max_progress_percent == null ? '—' : `${fmtNumber(intel.max_progress_percent)}%`],
+              ['Pullback From Best', intel.pullback_from_best_progress == null ? '—' : `${fmtNumber(intel.pullback_from_best_progress)} pts`],
+              ['Time In Trade', timeLabel],
+            ])}
+          </div>
+          <div class="execution-section position-section">
+            <div class="execution-section-title">Option Plan Snapshot</div>
+            ${renderOptionPlanSnapshot(model.plan)}
+          </div>
+          <div class="execution-section position-section">
+            <div class="execution-section-title">Actual Robinhood Contract</div>
+            ${renderActualContractSnapshot(model.plan)}
+          </div>
+        </div>
+        ${renderPositionHistory(model.entry?.position_state_history)}
+      </details>
+    </div>`;
+}
+
 function requestPositionNotificationPermission() {
   if (!('Notification' in window)) return Promise.resolve('unsupported');
   if (Notification.permission === 'granted' || Notification.permission === 'denied') {
@@ -5796,9 +5927,12 @@ function renderPositionsTab() {
   const list = document.getElementById('positionsList');
   const summary = document.getElementById('positionsSummary');
   if (!list || !summary) return;
-  const positions = sortPositionModels(buildPositionModels());
+  let positions = buildPositionModels();
+  syncPositionIntelligenceHistory(positions);
+  positions = sortPositionModels(buildPositionModels());
+  const diag = positionDiagnostics(positions);
   summary.textContent = positions.length
-    ? `${positions.length} active journal position${positions.length === 1 ? '' : 's'} tracked against the latest loaded scanner state.`
+    ? `${positions.length} active journal position${positions.length === 1 ? '' : 's'} tracked · Healthy ${diag.healthy_positions} · Watch ${diag.watch_positions} · Protect ${diag.protect_positions} · Exit ${diag.exit_positions} · Data Needed ${diag.data_needed_positions}.`
     : 'No active journal positions. Log a scanner setup with Result = Open to track it here.';
   if (!positions.length) {
     list.innerHTML = '<div class="execution-empty">No active positions right now.</div>';
@@ -5820,6 +5954,7 @@ function renderPositionsTab() {
           </div>
           <div class="position-urgency ${urgency.className}">${escapeHtml(urgency.label)}</div>
         </div>
+        ${renderPositionManagerBlock(model)}
         <div class="position-card-grid">
           <div class="execution-section position-section plan">
             <div class="execution-section-title">Plan</div>
@@ -6439,6 +6574,8 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
     signal_timestamp: signalTimestamp,
     signal_market_date: signalMarketDate,
     underlying_price_at_signal: coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price)),
+    planned_underlying_entry: entry,
+    actual_underlying_entry: coerceNumber(setup.actual_underlying_entry),
     entry_price: entry,
     stop_price: stop,
     target_price: target,
@@ -6520,6 +6657,13 @@ function defaultTrackingFields(startedAt = null) {
     trade_progress_status: 'WAITING',
     final_trading_days: null,
     final_bar_count: null,
+    position_intelligence_version: POSITION_INTELLIGENCE_VERSION,
+    position_last_state: null,
+    position_last_evaluated_at: null,
+    position_best_price: null,
+    position_max_progress_percent: null,
+    position_tp1_reached: false,
+    position_state_history: [],
   };
 }
 
@@ -6946,15 +7090,12 @@ function livePriceForPosition(entry = {}, latestSetup = null) {
 }
 
 function rNowForPosition(entry = {}, currentPrice = null) {
-  const entryPrice = coerceNumber(firstPresent(entry.entry_price, entry.entry));
-  const stopPrice = coerceNumber(firstPresent(entry.stop_price, entry.plannedStop));
-  const price = coerceNumber(currentPrice);
-  if (entryPrice == null || stopPrice == null || price == null) return null;
-  const risk = Math.abs(entryPrice - stopPrice);
-  if (!risk) return null;
-  const direction = String(firstPresent(entry.direction, entry.option_type, entry.optionType) || '').toUpperCase();
-  const bullish = direction === 'LONG' || direction === 'CALL';
-  return bullish ? (price - entryPrice) / risk : (entryPrice - price) / risk;
+  return positionRMultiple(
+    firstPresent(entry.direction, entry.option_type, entry.optionType),
+    positionEntryPrice(entry),
+    positionStopPrice(entry),
+    currentPrice
+  );
 }
 
 function contractDteRemaining(entry = {}, now = new Date()) {
@@ -6997,14 +7138,387 @@ function contractHealthForPosition(entry = {}, dteRemaining = null) {
   };
 }
 
+function normalizePositionDirection(value) {
+  const direction = String(value || '').toUpperCase();
+  if (direction === 'LONG' || direction === 'CALL') return 'LONG';
+  if (direction === 'SHORT' || direction === 'PUT') return 'SHORT';
+  return null;
+}
+
+function positionEntryPrice(entry = {}) {
+  return coerceNumber(firstPresent(
+    entry.actual_underlying_entry,
+    entry.planned_underlying_entry,
+    entry.entry_price,
+    entry.entry
+  ));
+}
+
+function positionStopPrice(entry = {}) {
+  return coerceNumber(firstPresent(entry.stop_price, entry.plannedStop));
+}
+
+function positionTp1Price(entry = {}) {
+  return coerceNumber(firstPresent(entry.target_price, entry.plannedTp1, entry.tp1));
+}
+
+function positionProgressToTp1(direction, entryPrice, tp1, currentPrice) {
+  const dir = normalizePositionDirection(direction);
+  const entry = coerceNumber(entryPrice);
+  const target = coerceNumber(tp1);
+  const price = coerceNumber(currentPrice);
+  if (!dir || entry == null || target == null || price == null) return null;
+  const denominator = dir === 'SHORT' ? entry - target : target - entry;
+  if (!(denominator > 0)) return null;
+  const numerator = dir === 'SHORT' ? entry - price : price - entry;
+  const raw = (numerator / denominator) * 100;
+  return {
+    raw_percent: raw,
+    display_percent: Math.max(0, Math.min(100, Math.round(raw))),
+  };
+}
+
+function positionRMultiple(direction, entryPrice, stopPrice, currentPrice) {
+  const dir = normalizePositionDirection(direction);
+  const entry = coerceNumber(entryPrice);
+  const stop = coerceNumber(stopPrice);
+  const price = coerceNumber(currentPrice);
+  if (!dir || entry == null || stop == null || price == null) return null;
+  const initialRisk = dir === 'SHORT' ? stop - entry : entry - stop;
+  if (!(initialRisk > 0)) return null;
+  const currentReward = dir === 'SHORT' ? entry - price : price - entry;
+  return currentReward / initialRisk;
+}
+
+function positionBestPrice(entry = {}, direction = null, currentPrice = null) {
+  const dir = normalizePositionDirection(direction || entry.direction || entry.option_type || entry.optionType);
+  const current = coerceNumber(currentPrice);
+  const stored = dir === 'SHORT'
+    ? coerceNumber(firstPresent(entry.position_best_price, entry.lowest_price_reached))
+    : coerceNumber(firstPresent(entry.position_best_price, entry.highest_price_reached));
+  if (stored == null) return current;
+  if (current == null) return stored;
+  return dir === 'SHORT' ? Math.min(stored, current) : Math.max(stored, current);
+}
+
+function positionDataIssue(entry = {}, currentPrice = null) {
+  const direction = normalizePositionDirection(firstPresent(entry.direction, entry.option_type, entry.optionType));
+  const entryPrice = positionEntryPrice(entry);
+  const stop = positionStopPrice(entry);
+  const tp1 = positionTp1Price(entry);
+  const price = coerceNumber(currentPrice);
+  if (!direction) return { code: 'MISSING_POSITION_DATA', message: 'Missing direction' };
+  if (entryPrice == null) return { code: 'MISSING_POSITION_DATA', message: 'Missing underlying entry price' };
+  if (stop == null) return { code: 'MISSING_POSITION_DATA', message: 'Missing original stop' };
+  if (tp1 == null) return { code: 'MISSING_POSITION_DATA', message: 'Missing TP1' };
+  if (price == null) return { code: 'MISSING_POSITION_DATA', message: 'Current price unavailable' };
+  if (direction === 'LONG' && !(entryPrice > stop)) return { code: 'INVALID_POSITION_GEOMETRY', message: 'Invalid stop geometry' };
+  if (direction === 'SHORT' && !(stop > entryPrice)) return { code: 'INVALID_POSITION_GEOMETRY', message: 'Invalid stop geometry' };
+  if (direction === 'LONG' && !(tp1 > entryPrice)) return { code: 'INVALID_POSITION_GEOMETRY', message: 'Invalid target geometry' };
+  if (direction === 'SHORT' && !(entryPrice > tp1)) return { code: 'INVALID_POSITION_GEOMETRY', message: 'Invalid target geometry' };
+  return null;
+}
+
+function positionTimeInTrade(entry = {}) {
+  const start = firstPresent(entry.actual_entry_at, entry.position_opened_at, entry.tracking_started_at, entry.signal_timestamp, entry.createdAt);
+  const tradingDays = start ? countWeekdaysBetween(start, new Date().toISOString()) : null;
+  return {
+    trading_days: tradingDays,
+    expected_min: coerceNumber(firstPresent(entry.expected_hold_min_days, entry.expected_trading_days_low)),
+    expected_max: coerceNumber(firstPresent(entry.expected_hold_max_days, entry.expected_trading_days_high)),
+  };
+}
+
+function positionStateLabel(state) {
+  return {
+    HEALTHY: '🟢 Healthy',
+    WATCH: '🟡 Watch',
+    PROTECT: '🟠 Protect',
+    EXIT: '🔴 Exit',
+    DATA_NEEDED: '⚪ Data Needed',
+  }[state] || '⚪ Data Needed';
+}
+
+function positionNextAction(state) {
+  return {
+    HEALTHY: ['HOLD', 'Hold'],
+    WATCH: ['MONITOR', 'Monitor'],
+    PROTECT: ['PROTECT_PROFIT', 'Protect Profit'],
+    EXIT: ['EXIT', 'Exit'],
+    DATA_NEEDED: ['REVIEW_POSITION', 'Review Position'],
+  }[state] || ['REVIEW_POSITION', 'Review Position'];
+}
+
+function build_position_intelligence(position = {}, market_snapshot = {}) {
+  const currentPrice = coerceNumber(firstPresent(market_snapshot.current_price, market_snapshot.price));
+  const direction = normalizePositionDirection(firstPresent(position.direction, position.option_type, position.optionType));
+  const entryPrice = positionEntryPrice(position);
+  const stop = positionStopPrice(position);
+  const tp1 = positionTp1Price(position);
+  const issue = positionDataIssue(position, currentPrice);
+  const base = {
+    available: !issue,
+    position_intelligence_version: POSITION_INTELLIGENCE_VERSION,
+    ticker: String(position.ticker || '').toUpperCase(),
+    direction: direction || String(firstPresent(position.direction, position.option_type, position.optionType, '') || '').toUpperCase(),
+    entry_price: entryPrice,
+    current_price: currentPrice,
+    original_stop: stop,
+    tp1,
+    source: 'journal_trade_plan',
+  };
+  if (issue) {
+    const [nextAction, nextActionLabel] = positionNextAction('DATA_NEEDED');
+    return {
+      ...base,
+      state: 'DATA_NEEDED',
+      state_label: positionStateLabel('DATA_NEEDED'),
+      next_action: nextAction,
+      next_action_label: nextActionLabel,
+      progress_to_tp1: null,
+      position_opportunity_remaining: null,
+      current_r: null,
+      best_price: positionBestPrice(position, direction, currentPrice),
+      max_progress_percent: null,
+      pullback_from_best_progress: null,
+      tp1_reached: false,
+      time_in_trade: positionTimeInTrade(position),
+      reason_code: issue.code,
+      triggered_rule: issue.message,
+      reason: [
+        `Kairos cannot calculate position health because ${issue.message.toLowerCase()}.`,
+        issue.message === 'Missing underlying entry price' ? 'Add the stock entry price to the journal.' : 'Review the original trade-plan fields in the journal.',
+      ],
+    };
+  }
+
+  const progress = positionProgressToTp1(direction, entryPrice, tp1, currentPrice);
+  const currentR = positionRMultiple(direction, entryPrice, stop, currentPrice);
+  const bestPrice = positionBestPrice(position, direction, currentPrice);
+  const bestProgress = positionProgressToTp1(direction, entryPrice, tp1, bestPrice);
+  const maxProgress = bestProgress?.raw_percent ?? progress.raw_percent;
+  const pullback = Math.max(0, maxProgress - progress.raw_percent);
+  const tp1Reached = Boolean(position.tp1_reached || position.first_target_touch_at || progress.raw_percent >= 100 || maxProgress >= 100);
+  const stopInvalidated = direction === 'SHORT' ? currentPrice >= stop : currentPrice <= stop;
+  const scannerInvalidated = Boolean(market_snapshot.strategy_invalidated && normalizePositionDirection(market_snapshot.direction) === direction);
+
+  let state = 'HEALTHY';
+  let reasonCode = 'NORMAL_PROGRESS';
+  let reason = [
+    'Price remains above the original invalidation level.',
+    'The trade is progressing normally toward TP1.',
+  ];
+
+  if (stopInvalidated || scannerInvalidated) {
+    state = 'EXIT';
+    reasonCode = 'STOP_INVALIDATED';
+    reason = [
+      `Price crossed the original stop at ${fmtMoney(stop)}.`,
+      'The original trade thesis is invalidated.',
+    ];
+  } else if (tp1Reached) {
+    state = 'PROTECT';
+    reasonCode = 'TP1_REACHED';
+    reason = [
+      `The trade reached TP1 with ${Math.round(maxProgress)}% maximum progress.`,
+      'Consider protecting gains while the thesis remains valid.',
+    ];
+  } else if (maxProgress >= 70 && progress.raw_percent <= maxProgress - 25) {
+    state = 'PROTECT';
+    reasonCode = 'LARGE_RETRACE_AFTER_70';
+    reason = [
+      `The trade reached ${Math.round(maxProgress)}% progress and has retraced to ${Math.round(progress.raw_percent)}%.`,
+      'Consider protecting gains while the thesis remains valid.',
+    ];
+  } else if (currentR < 0) {
+    state = 'WATCH';
+    reasonCode = 'POSITION_BELOW_ENTRY';
+    reason = [
+      `Current R is ${formatRMultiple(currentR)} while the original stop remains intact.`,
+      'Monitor the trade against the original plan.',
+    ];
+  } else if (maxProgress >= 40 && progress.raw_percent <= maxProgress - 20) {
+    state = 'WATCH';
+    reasonCode = 'RETRACE_AFTER_40';
+    reason = [
+      `Price has pulled back ${Math.round(pullback)} percentage points from its best progress.`,
+      'The original stop remains intact.',
+    ];
+  } else if (market_snapshot.opposing_confirmation === true) {
+    state = 'WATCH';
+    reasonCode = 'OPPOSING_CONFIRMATION';
+    reason = [
+      'The current scanner read shows opposing confirmation.',
+      'The original stop remains intact.',
+    ];
+  }
+
+  const [nextAction, nextActionLabel] = positionNextAction(state);
+  return {
+    ...base,
+    available: true,
+    state,
+    state_label: positionStateLabel(state),
+    next_action: nextAction,
+    next_action_label: nextActionLabel,
+    progress_to_tp1: progress,
+    position_opportunity_remaining: Math.max(0, Math.min(100, 100 - progress.display_percent)),
+    current_r: currentR,
+    best_price: bestPrice,
+    max_progress_percent: maxProgress,
+    pullback_from_best_progress: pullback,
+    tp1_reached: tp1Reached,
+    time_in_trade: positionTimeInTrade(position),
+    reason_code: reasonCode,
+    triggered_rule: reasonCode,
+    reason,
+  };
+}
+
+function formatRMultiple(value) {
+  const n = coerceNumber(value);
+  if (n == null) return '—';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${fmtNumber(n)}R`;
+}
+
+function positionMilestoneKeys(intel = {}) {
+  const keys = [];
+  if (intel.tp1_reached) keys.push('TP1_REACHED');
+  const max = coerceNumber(intel.max_progress_percent);
+  [25, 50, 75, 100].forEach(level => {
+    if (max != null && max >= level) keys.push(`MAX_PROGRESS_${level}`);
+  });
+  return keys;
+}
+
+function positionHistoryEventKey(type, intel = {}, level = '', previousState = '') {
+  return [type, intel.ticker, intel.position_id || '', previousState || '', intel.state || '', level].join(':');
+}
+
+function positionHistoryEvent(type, model = {}, intel = {}, previousState = null, level = '') {
+  return {
+    event_key: positionHistoryEventKey(type, { ...intel, position_id: model.id }, level, type === 'STATE_CHANGE' ? previousState : ''),
+    event_type: type,
+    ticker: intel.ticker,
+    position_id: model.id,
+    previous_state: previousState,
+    new_state: intel.state,
+    timestamp: new Date().toISOString(),
+    current_price: intel.current_price,
+    progress_to_tp1: intel.progress_to_tp1?.raw_percent ?? null,
+    current_r: intel.current_r,
+    reason_code: level || intel.reason_code,
+    reason_text: (intel.reason || []).join(' '),
+  };
+}
+
+function syncPositionIntelligenceHistory(models = []) {
+  const entries = loadJournal();
+  if (!entries.length || !models.length) return { updated: 0, transitionsCreated: 0, deduplicated: 0, tp1MilestonesCreated: 0 };
+  let changed = false;
+  let transitionsCreated = 0;
+  let deduplicated = 0;
+  let tp1MilestonesCreated = 0;
+  const byId = new Map(models.map(model => [String(model.id), model]));
+  const nextEntries = entries.map(entry => {
+    const model = byId.get(String(entry.id));
+    if (!model?.position_intelligence) return entry;
+    const intel = model.position_intelligence;
+    const updated = { ...entry };
+    updated.position_intelligence_version = POSITION_INTELLIGENCE_VERSION;
+    if (updated.position_last_state !== intel.state) {
+      updated.position_last_state = intel.state;
+      changed = true;
+    }
+    updated.position_last_evaluated_at = new Date().toISOString();
+    if (intel.best_price != null && updated.position_best_price !== intel.best_price) {
+      updated.position_best_price = intel.best_price;
+      changed = true;
+    }
+    if (intel.max_progress_percent != null) updated.position_max_progress_percent = intel.max_progress_percent;
+    if (intel.tp1_reached && !updated.position_tp1_reached) {
+      updated.position_tp1_reached = true;
+      changed = true;
+    }
+    const history = Array.isArray(updated.position_state_history) ? updated.position_state_history.slice() : [];
+    const seen = new Set(history.map(event => event.event_key).filter(Boolean));
+    const previousState = entry.position_last_state || null;
+    if (previousState && previousState !== intel.state) {
+      const event = positionHistoryEvent('STATE_CHANGE', model, intel, previousState);
+      if (!seen.has(event.event_key)) {
+        history.push(event);
+        seen.add(event.event_key);
+        transitionsCreated += 1;
+        changed = true;
+      } else {
+        deduplicated += 1;
+      }
+    }
+    positionMilestoneKeys(intel).forEach(level => {
+      const event = positionHistoryEvent(level === 'TP1_REACHED' ? 'TP1_REACHED' : 'MAX_PROGRESS', model, intel, previousState, level);
+      if (!seen.has(event.event_key)) {
+        history.push(event);
+        seen.add(event.event_key);
+        if (level === 'TP1_REACHED') tp1MilestonesCreated += 1;
+        changed = true;
+      } else {
+        deduplicated += 1;
+      }
+    });
+    updated.position_state_history = history;
+    return updated;
+  });
+  if (changed) localStorage.setItem(JOURNAL_KEY, JSON.stringify(nextEntries));
+  return { updated: changed ? 1 : 0, transitionsCreated, deduplicated, tp1MilestonesCreated };
+}
+
+function positionDiagnostics(models = []) {
+  const diag = {
+    open_positions_evaluated: models.length,
+    healthy_positions: 0,
+    watch_positions: 0,
+    protect_positions: 0,
+    exit_positions: 0,
+    data_needed_positions: 0,
+    position_price_fetch_failures: 0,
+    invalid_position_geometry: 0,
+    expected_hold_available: 0,
+    expected_hold_unavailable: 0,
+    current_r: [],
+    progress_to_tp1: [],
+    time_in_trade: [],
+    pullback_from_best_progress: [],
+  };
+  models.forEach(model => {
+    const intel = model.position_intelligence || {};
+    if (intel.state === 'HEALTHY') diag.healthy_positions += 1;
+    else if (intel.state === 'WATCH') diag.watch_positions += 1;
+    else if (intel.state === 'PROTECT') diag.protect_positions += 1;
+    else if (intel.state === 'EXIT') diag.exit_positions += 1;
+    else diag.data_needed_positions += 1;
+    if (intel.reason?.join(' ').includes('Current price unavailable')) diag.position_price_fetch_failures += 1;
+    if (intel.reason_code === 'INVALID_POSITION_GEOMETRY') diag.invalid_position_geometry += 1;
+    if (intel.time_in_trade?.expected_min != null || intel.time_in_trade?.expected_max != null) diag.expected_hold_available += 1;
+    else diag.expected_hold_unavailable += 1;
+    if (intel.current_r != null) diag.current_r.push(intel.current_r);
+    if (intel.progress_to_tp1?.raw_percent != null) diag.progress_to_tp1.push(intel.progress_to_tp1.raw_percent);
+    if (intel.time_in_trade?.trading_days != null) diag.time_in_trade.push(intel.time_in_trade.trading_days);
+    if (intel.pullback_from_best_progress != null) diag.pullback_from_best_progress.push(intel.pullback_from_best_progress);
+  });
+  return diag;
+}
+
 function positionPlanSide(entry = {}) {
   return {
     ticker: String(entry.ticker || '').toUpperCase(),
     direction: firstPresent(entry.direction, entry.option_type, entry.optionType, 'N/A'),
     timeframe: firstPresent(entry.scanner_timeframe, entry.timeframe, entry.setupTf, 'N/A'),
-    entryPrice: coerceNumber(firstPresent(entry.entry_price, entry.entry)),
-    stopPrice: coerceNumber(firstPresent(entry.stop_price, entry.plannedStop)),
-    tp1: coerceNumber(firstPresent(entry.target_price, entry.plannedTp1)),
+    entryPrice: positionEntryPrice(entry),
+    plannedEntryPrice: coerceNumber(firstPresent(entry.planned_underlying_entry, entry.entry_price, entry.entry)),
+    actualUnderlyingEntry: coerceNumber(entry.actual_underlying_entry),
+    stopPrice: positionStopPrice(entry),
+    tp1: positionTp1Price(entry),
     tp2: coerceNumber(firstPresent(entry.tp2, entry.plannedTp2)),
     tp3: coerceNumber(firstPresent(entry.tp3, entry.plannedTp3)),
     setupGrade: firstPresent(entry.setup_grade, entry.setupGrade, null),
@@ -7017,12 +7531,12 @@ function positionPlanSide(entry = {}) {
     underlyingPriceAtSignal: coerceNumber(firstPresent(entry.underlying_price_at_signal, entry.entry_price, entry.entry)),
     contractSymbol: firstPresent(entry.option_symbol, entry.option, ''),
     optionType: firstPresent(entry.option_type, entry.optionType, 'N/A'),
-    strike: coerceNumber(firstPresent(entry.strike_price, entry.strike)),
-    expiration: firstPresent(entry.expiration_date, entry.expiry, ''),
+    strike: coerceNumber(firstPresent(entry.actual_strike, entry.strike_price, entry.strike)),
+    expiration: firstPresent(entry.actual_expiration, entry.expiration_date, entry.expiry, ''),
     dteAtEntry: coerceInteger(entry.days_to_expiration_at_entry),
     contractTier: firstPresent(entry.contract_tier, ''),
     contractTierLabel: firstPresent(entry.contract_tier_label, ''),
-    premiumPaid: coerceNumber(firstPresent(entry.premium_paid, entry.option_ask_at_entry, entry.askAtSelection)),
+    premiumPaid: coerceNumber(firstPresent(entry.actual_premium, entry.premium_paid, entry.option_ask_at_entry, entry.askAtSelection)),
     estimatedContractCost: coerceNumber(entry.estimated_contract_cost_at_entry),
     spreadAtEntry: coerceNumber(firstPresent(entry.option_spread_at_entry, entry.bidAskSpread)),
     openInterestAtEntry: coerceInteger(firstPresent(entry.open_interest_at_entry, entry.openInterest)),
@@ -7041,6 +7555,23 @@ function positionPlanSide(entry = {}) {
     accountSize: coerceNumber(entry.accountSize),
     riskPct: coerceNumber(entry.riskPct),
     maxRisk: coerceNumber(entry.maxRisk),
+    optionPlan: {
+      optionType: firstPresent(entry.option_type, entry.optionType, null),
+      preferredStrike: coerceNumber(entry.preferred_strike),
+      suggestedMinDte: coerceNumber(entry.suggested_min_dte),
+      suggestedMaxDte: coerceNumber(entry.suggested_max_dte),
+      expectedHoldMin: coerceNumber(entry.expected_hold_min_days),
+      expectedHoldMax: coerceNumber(entry.expected_hold_max_days),
+      expectedMoveDollars: coerceNumber(entry.expected_move_dollars),
+      expectedMovePercent: coerceNumber(entry.expected_move_percent),
+      confidence: coerceNumber(entry.option_plan_confidence),
+    },
+    actualContract: {
+      strike: coerceNumber(firstPresent(entry.actual_strike, entry.strike_price)),
+      expiration: firstPresent(entry.actual_expiration, entry.expiration_date, ''),
+      premium: coerceNumber(firstPresent(entry.actual_premium, entry.premium_paid)),
+      quantity: coerceNumber(firstPresent(entry.actual_quantity, entry.contracts)),
+    },
   };
 }
 
@@ -7085,12 +7616,21 @@ function buildPositionModels(entries = loadJournal(), latestByTicker = latestSca
     .map(entry => {
       const ticker = String(entry.ticker || '').toUpperCase();
       const latestSetup = latestByTicker.get(ticker) || null;
+      const currentPrice = livePriceForPosition(entry, latestSetup);
+      const marketSnapshot = {
+        current_price: currentPrice,
+        direction: latestSetup ? firstPresent(latestSetup.direction, null) : null,
+        strategy_invalidated: false,
+        opposing_confirmation: latestSetup ? normalizePositionDirection(latestSetup.direction) && normalizePositionDirection(entry.direction) && normalizePositionDirection(latestSetup.direction) !== normalizePositionDirection(entry.direction) : false,
+      };
+      const positionIntelligence = build_position_intelligence(entry, marketSnapshot);
       return {
         id: entry.id,
         entry,
         latestSetup,
         plan: positionPlanSide(entry),
         live: positionLiveSide(entry, latestSetup),
+        position_intelligence: positionIntelligence,
       };
     });
 }
@@ -7565,6 +8105,11 @@ function journalContractFieldsFromForm(updated = {}) {
       option_spread_at_entry: null,
       open_interest_at_entry: null,
       option_volume_at_entry: null,
+      actual_underlying_entry: coerceNumber(updated.entry),
+      actual_option_premium: null,
+      actual_strike: null,
+      actual_expiration: '',
+      actual_quantity: coerceInteger(updated.contracts) || 1,
     };
   }
   const optionType = normalizeOptionType(updated.optionType, updated.direction);
@@ -7592,6 +8137,11 @@ function journalContractFieldsFromForm(updated = {}) {
     open_interest_at_entry: coerceInteger(updated.openInterest),
     option_volume_at_entry: coerceInteger(updated.optionVolume),
     underlying_price_at_entry: coerceNumber(updated.entry),
+    actual_underlying_entry: coerceNumber(updated.entry),
+    actual_option_premium: premium,
+    actual_strike: strike,
+    actual_expiration: expiry || '',
+    actual_quantity: contracts,
   };
 }
 
@@ -7864,6 +8414,12 @@ function migrateJournalEntry(entry = {}) {
   migrated.relative_volume = coerceNumber(firstPresent(migrated.relative_volume, migrated.relativeVolume));
   migrated.atr_expansion = coerceNumber(firstPresent(migrated.atr_expansion, migrated.atrExpansion));
   migrated.days_to_expiration_at_entry = migrated.days_to_expiration_at_entry ?? (migrated.expiration_date ? daysUntilDate(migrated.signal_timestamp || migrated.createdAt, migrated.expiration_date) : null);
+  migrated.planned_underlying_entry = coerceNumber(firstPresent(migrated.planned_underlying_entry, migrated.entry_price, migrated.entry));
+  migrated.actual_underlying_entry = coerceNumber(firstPresent(migrated.actual_underlying_entry, migrated.underlying_price_at_entry));
+  migrated.actual_option_premium = coerceNumber(firstPresent(migrated.actual_option_premium, migrated.actual_premium, migrated.premium_paid));
+  migrated.actual_strike = coerceNumber(firstPresent(migrated.actual_strike, migrated.strike_price));
+  migrated.actual_expiration = firstPresent(migrated.actual_expiration, migrated.expiration_date, '');
+  migrated.actual_quantity = coerceNumber(firstPresent(migrated.actual_quantity, migrated.contracts));
   migrated.earnings_date = firstPresent(migrated.earnings_date, migrated.earningsDate, '');
   migrated.days_until_earnings = migrated.days_until_earnings ?? migrated.daysUntilEarnings ?? null;
   migrated.earnings_source = firstPresent(migrated.earnings_source, migrated.earningsSource, '');
@@ -7879,6 +8435,13 @@ function migrateJournalEntry(entry = {}) {
   migrated.contract_health_status = migrated.contract_health_status ?? null;
   migrated.contract_dte = migrated.contract_dte ?? null;
   migrated.contract_time_buffer_trading_days = migrated.contract_time_buffer_trading_days ?? null;
+  migrated.position_intelligence_version = migrated.position_intelligence_version ?? POSITION_INTELLIGENCE_VERSION;
+  migrated.position_last_state = migrated.position_last_state ?? null;
+  migrated.position_last_evaluated_at = migrated.position_last_evaluated_at ?? null;
+  migrated.position_best_price = coerceNumber(migrated.position_best_price);
+  migrated.position_max_progress_percent = coerceNumber(migrated.position_max_progress_percent);
+  migrated.position_tp1_reached = Boolean(migrated.position_tp1_reached);
+  migrated.position_state_history = Array.isArray(migrated.position_state_history) ? migrated.position_state_history : [];
 
   const trackingDefaults = defaultTrackingFields(firstPresent(migrated.tracking_started_at, migrated.signal_timestamp, migrated.createdAt, null));
   Object.entries(trackingDefaults).forEach(([key, value]) => {
@@ -9400,6 +9963,8 @@ function renderOpportunityDiagnostics(entries = []) {
   }
   const historyRecords = loadOpportunityHistoryRecords();
   const cohortSummaries = opportunityCohortSummaries();
+  const positionModels = buildPositionModels(entries);
+  const positionDiag = positionDiagnostics(positionModels);
   const historyDiagnostics = window.KairosOpportunityHistory
     ? window.KairosOpportunityHistory.diagnostics(historyRecords, cohortSummaries)
     : { counts: {}, stability: [], sampleReplays: [] };
@@ -9442,6 +10007,7 @@ function renderOpportunityDiagnostics(entries = []) {
     </tr>`).join('');
   return `
     ${renderOpportunityHistorySummary(historyDiagnostics)}
+    ${renderPositionIntelligenceDiagnostics(positionModels, positionDiag)}
     <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
       Shadow mode only. These calculations do not affect scanner cards, qualification, alerts, journal rules, entries, stops, targets, or option selection.
     </div>
@@ -9453,6 +10019,46 @@ function renderOpportunityDiagnostics(entries = []) {
             <tr><th>Ticker</th><th>Direction</th><th>State</th><th>Entry Triggered</th><th>Planned Entry</th><th>Current</th><th>TP1</th><th>Price Progress</th><th>Time Progress</th><th>Remaining</th><th>Expected Total</th><th>Expected Remaining</th><th>Samples</th><th>Confidence</th><th>History Source</th><th>Readiness</th><th>Fallback</th><th>DTE</th><th>Contract</th><th>Explanation / Blocker</th></tr>
           </thead>
           <tbody>${body}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
+function renderPositionIntelligenceDiagnostics(models = [], diag = positionDiagnostics(models)) {
+  if (!models.length) return '';
+  const rows = models.slice(0, 50).map(model => {
+    const intel = model.position_intelligence || {};
+    return `
+      <tr>
+        <td><strong>${escapeHtml(intel.ticker || model.plan?.ticker || '—')}</strong></td>
+        <td>${escapeHtml(intel.direction || '—')}</td>
+        <td>${escapeHtml(intel.state || 'DATA_NEEDED')}</td>
+        <td>${escapeHtml(intel.next_action || 'REVIEW_POSITION')}</td>
+        <td>${fmtMoney(intel.entry_price)}</td>
+        <td>${fmtMoney(intel.current_price)}</td>
+        <td>${fmtMoney(intel.original_stop)}</td>
+        <td>${fmtMoney(intel.tp1)}</td>
+        <td>${intel.progress_to_tp1?.raw_percent == null ? '—' : `${fmtNumber(intel.progress_to_tp1.raw_percent)}%`}</td>
+        <td>${formatRMultiple(intel.current_r)}</td>
+        <td>${intel.max_progress_percent == null ? '—' : `${fmtNumber(intel.max_progress_percent)}%`}</td>
+        <td>${escapeHtml(intel.reason_code || '—')}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <details class="analytics-subdetails" open>
+      <summary>Position Intelligence Shadow Diagnostics</summary>
+      <div class="journal-stats" style="margin:10px 0;">
+        <div class="stat-card"><div class="stat-label">Open Positions</div><div class="stat-value">${diag.open_positions_evaluated}</div></div>
+        <div class="stat-card"><div class="stat-label">Healthy</div><div class="stat-value">${diag.healthy_positions}</div></div>
+        <div class="stat-card"><div class="stat-label">Watch</div><div class="stat-value">${diag.watch_positions}</div></div>
+        <div class="stat-card"><div class="stat-label">Protect</div><div class="stat-value">${diag.protect_positions}</div></div>
+        <div class="stat-card"><div class="stat-label">Exit</div><div class="stat-value">${diag.exit_positions}</div></div>
+        <div class="stat-card"><div class="stat-label">Data Needed</div><div class="stat-value">${diag.data_needed_positions}</div></div>
+      </div>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead><tr><th>Ticker</th><th>Direction</th><th>State</th><th>Action</th><th>Entry</th><th>Current</th><th>Stop</th><th>TP1</th><th>Progress</th><th>R</th><th>Best Progress</th><th>Rule</th></tr></thead>
+          <tbody>${rows}</tbody>
         </table>
       </div>
     </details>`;
