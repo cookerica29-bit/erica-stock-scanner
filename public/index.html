@@ -2608,8 +2608,12 @@
       <label class="check-control"><input type="checkbox" id="positionReplayHighChurn" onchange="loadPositionReplay()" /> High churn only</label>
       <label class="check-control"><input type="checkbox" id="positionReplayAmbiguous" onchange="loadPositionReplay()" /> Ambiguous only</label>
       <label class="check-control"><input type="checkbox" id="positionReplayIncomplete" onchange="loadPositionReplay()" /> Incomplete only</label>
+      <button class="btn-secondary" onclick="refreshPositionReplay('stale')">Refresh Stale</button>
+      <button class="btn-secondary" onclick="refreshPositionReplay('open')">Replay Open</button>
+      <button class="btn-secondary" onclick="refreshPositionReplay('closed')">Replay Closed</button>
     </div>
     <div id="positionReplaySummary" class="journal-stats"></div>
+    <div id="positionReplayReadiness"></div>
     <div class="analytics-card" id="journalMigrationReview">
       <h3>Safe Journal Migration</h3>
       <div class="trend-note">Preview first. Nothing uploads until confirmed. The browser journal is not deleted after migration.</div>
@@ -11384,6 +11388,32 @@ async function loadPositionReplay() {
   }
 }
 
+async function refreshPositionReplay(mode = 'stale') {
+  updateDeveloperReplayAccess();
+  initializeJournalAdminTokenInput();
+  const body = document.getElementById('positionReplayBody');
+  if (!journalServerSyncEnabled()) {
+    if (body) body.innerHTML = '<div class="analytics-empty">Enter the journal admin token before refreshing replay diagnostics.</div>';
+    return null;
+  }
+  if (body) body.innerHTML = '<div class="analytics-empty"><span class="spinner"></span> Refreshing replay diagnostics...</div>';
+  const response = await fetchWithTimeout(`${API}/api/dev/position-replay/refresh`, {
+    method: 'POST',
+    headers: journalAuthHeaders(),
+    body: JSON.stringify({ mode }),
+  });
+  if (response.status === 403) {
+    setJournalAuthStatus('invalid');
+    if (body) body.innerHTML = '<div class="analytics-empty">Invalid journal admin token. Check the token and click Connect again.</div>';
+    return null;
+  }
+  if (!response.ok) throw new Error(`Replay refresh failed: ${response.status}`);
+  const payload = await response.json();
+  setJournalAuthStatus('authenticated');
+  renderPositionReplay(payload);
+  return payload;
+}
+
 function rateLabel(rate = {}) {
   if (!rate || !rate.sample_size) return '— (n=0)';
   return `${fmtNumber(rate.percent)}% (n=${rate.sample_size})`;
@@ -11396,23 +11426,71 @@ function renderReplayStat(label, value) {
 function renderPositionReplay(payload = {}) {
   const summary = document.getElementById('positionReplaySummary');
   const body = document.getElementById('positionReplayBody');
+  const readinessEl = document.getElementById('positionReplayReadiness');
   const aggregate = payload.aggregate || {};
   summary.innerHTML = [
     renderReplayStat('Positions Replayed', aggregate.positions_replayed || 0),
     renderReplayStat('Complete', aggregate.complete_replays || 0),
     renderReplayStat('Incomplete', aggregate.incomplete_replays || 0),
     renderReplayStat('Ambiguous', aggregate.ambiguous_replays || 0),
+    renderReplayStat('Real Closed Complete', aggregate.closed_complete_real_replays || 0),
     renderReplayStat('Entered Watch', rateLabel(aggregate.percent_entered_watch)),
     renderReplayStat('High Churn', rateLabel(aggregate.high_churn_rate)),
   ].join('');
+  if (readinessEl) readinessEl.innerHTML = renderEvidenceReadiness(payload.evidence_readiness || {}, payload.evidence_guard || {}, payload.evidence_log || []);
   if (!payload.ready || !(payload.replays || []).length) {
     body.innerHTML = `<div class="analytics-empty">${escapeHtml(payload.message || 'No server-backed positions are available for replay yet. Migrate or add journal positions to begin historical analysis.')}</div>`;
     return;
   }
   body.innerHTML = `
     <div class="trend-note">Synthetic results included: ${payload.synthetic_results_included ? 'Yes — clearly labeled below' : 'No'}. Replay is diagnostic only and does not alter live journal records.</div>
+    ${payload.evidence_guard?.message ? `<div class="trend-note">${escapeHtml(payload.evidence_guard.message)}</div>` : ''}
     ${(payload.replays || []).map(renderReplayCard).join('')}
   `;
+}
+
+function renderEvidenceReadiness(readiness = {}, guard = {}, evidence = []) {
+  if (!readiness || readiness.total_durable_positions == null) return '';
+  const positions = readiness.positions || [];
+  return `
+    <div class="analytics-card">
+      <h3>Evidence Readiness</h3>
+      <div class="journal-stats" style="margin:10px 0;">
+        ${renderReplayStat('Durable Positions', readiness.total_durable_positions || 0)}
+        ${renderReplayStat('Replay Ready', readiness.replay_ready || 0)}
+        ${renderReplayStat('Partially Ready', readiness.partially_ready || 0)}
+        ${renderReplayStat('Not Replayable', readiness.not_replayable || 0)}
+        ${renderReplayStat('Open / Closed', `${readiness.open_positions || 0}/${readiness.closed_positions || 0}`)}
+        ${renderReplayStat('Journaled TF / Inferred 4H', `${readiness.positions_with_journaled_timeframe || 0}/${readiness.positions_using_inferred_4h || 0}`)}
+        ${renderReplayStat('Missing Outcome', readiness.positions_missing_recorded_outcome || 0)}
+        ${renderReplayStat('Missing Options', readiness.positions_missing_option_details || 0)}
+        ${renderReplayStat('Evidence Items', evidence.length || 0)}
+      </div>
+      ${guard?.message ? `<div class="trend-note">${escapeHtml(guard.message)}</div>` : ''}
+      ${positions.length ? `<details class="analytics-subdetails" open>
+        <summary>Per-position readiness</summary>
+        <div class="analytics-subdetails-body">
+          <table class="journal-table">
+            <thead><tr><th>Ticker</th><th>Direction</th><th>Status</th><th>Available</th><th>Missing</th><th>Invalid</th></tr></thead>
+            <tbody>
+              ${positions.slice(0, 80).map(item => {
+                const available = Object.entries(item.available || {}).filter(([, ok]) => ok).map(([key]) => `✓ ${key}`).join(', ') || '—';
+                const missing = [...(item.missing_required || []), ...(item.missing_optional || [])].join(', ') || '—';
+                return `<tr><td>${escapeHtml(item.ticker || '—')}</td><td>${escapeHtml(item.direction || '—')}</td><td>${escapeHtml(item.status || '—')}</td><td>${escapeHtml(available)}</td><td>${escapeHtml(missing)}</td><td>${escapeHtml((item.invalid || []).join(', ') || '—')}</td></tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </details>` : ''}
+      ${evidence.length ? `<details class="analytics-subdetails">
+        <summary>Evidence Log</summary>
+        <div class="analytics-subdetails-body">
+          <table class="journal-table"><tbody>
+            ${evidence.slice(0, 80).map(item => `<tr><td>${escapeHtml(item.ticker || '—')}</td><td>${escapeHtml(item.observation_type || '')}</td><td>${escapeHtml(item.observation || '')}</td><td>${escapeHtml(item.position_id || '')}</td></tr>`).join('')}
+          </tbody></table>
+        </div>
+      </details>` : ''}
+    </div>`;
 }
 
 function renderReplayCard(replay = {}) {

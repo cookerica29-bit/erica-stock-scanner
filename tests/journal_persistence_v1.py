@@ -89,10 +89,69 @@ def test_create_read_list_and_unknown_field_preservation():
         assert created["journal_id"] == "j-1"
         assert created["position_id"] == "p-1"
         assert created["custom_legacy_field"] == "preserved"
+        assert created["replay_cache_status"] == "stale"
         assert created["record_version"] == 1
         assert repo.get_entry("j-1")["ticker"] == "OXY"
         assert len(repo.list_entries({"status": "open"})) == 1
         assert len(repo.list_entries({"ticker": "OXY", "direction": "LONG"})) == 1
+    finally:
+        tmp.cleanup()
+
+
+def test_canonical_replay_fields_and_stale_cache_behavior():
+    tmp, repo = make_repo()
+    try:
+        created = repo.create_entry(entry(
+            journal_id="legacy",
+            position_id="legacy-pos",
+            setup_grade=None,
+            setupGrade="B",
+            timeframe="1D",
+            entry=42,
+            plannedStop=40,
+            plannedTp1=46,
+            plannedTp2=48,
+            plannedTp3=50,
+            strike=45,
+            expiry="2026-08-21",
+            askAtSelection=1.1,
+            contracts=2,
+            optionType="CALL",
+            actual_underlying_entry=None,
+            planned_underlying_entry=None,
+            original_stop=None,
+            original_tp1=None,
+            original_tp2=None,
+            original_tp3=None,
+            entry_price=None,
+            stop_price=None,
+            target_price=None,
+            actual_option_premium=None,
+            actual_strike=None,
+            actual_expiration="",
+            actual_quantity=None,
+        ))
+        assert created["setup_grade"] == "B"
+        assert created["scanner_timeframe"] == "1D"
+        assert created["planned_underlying_entry"] == 42
+        assert created["original_stop"] == 40
+        assert created["original_tp1"] == 46
+        assert created["original_tp2"] == 48
+        assert created["original_tp3"] == 50
+        assert created["actual_option_type"] == "CALL"
+        assert created["actual_option_premium"] == 1.1
+        assert created["actual_strike"] == 45
+        assert created["actual_expiration"] == "2026-08-21"
+        assert created["actual_quantity"] == 2
+        assert created["replay_cache_status"] == "stale"
+
+        noted = repo.update_entry("legacy", {"record_version": created["record_version"], "notes": "not replay relevant"})
+        assert noted["notes"] == "not replay relevant"
+        assert noted["replay_cache_stale_reason"] == created["replay_cache_stale_reason"]
+        touched = repo.update_entry("legacy", {"record_version": noted["record_version"], "original_tp1": 47, "allow_plan_correction": True})
+        assert touched["original_tp1"] == 47
+        assert touched["replay_cache_status"] == "stale"
+        assert touched["replay_cache_stale_reason"] == "journal_replay_field_updated"
     finally:
         tmp.cleanup()
 
@@ -372,6 +431,7 @@ def test_no_scanner_discovery_option_or_alert_side_effects():
 
 if __name__ == "__main__":
     test_create_read_list_and_unknown_field_preservation()
+    test_canonical_replay_fields_and_stale_cache_behavior()
     test_partial_update_preserves_original_plan_without_explicit_correction()
     test_record_version_conflict_and_position_patch_isolation()
     test_history_append_and_milestone_deduplication()

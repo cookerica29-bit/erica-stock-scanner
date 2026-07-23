@@ -23,7 +23,11 @@ from position_intelligence import (  # noqa: E402
     STRIP_FROM_REPLAY,
     aggregate_replays,
     build_position_intelligence,
+    evidence_guard,
+    evidence_log_from_replays,
+    real_evidence_counts,
     replay_position_intelligence,
+    replay_readiness,
     REPLAY_FIELD_CLASSIFICATION,
 )
 
@@ -344,6 +348,32 @@ def test_aggregate_sample_sizes_and_provider_failure_isolation():
     assert "DATA_INCOMPLETE" in aggregate["outcome_category_distribution"]
 
 
+def test_replay_readiness_and_evidence_counts():
+    ready = replay_readiness(position(scanner_timeframe="4H", actual_strike=100, actual_expiration="2026-08-21", actual_option_premium=1.2), candles_available=True, timeframe_source="journaled")
+    assert ready["status"] == "REPLAY_READY"
+    partial = replay_readiness(position(scanner_timeframe="", original_tp2=None, actual_expiration=""), candles_available=True, timeframe_source="inferred_default")
+    assert partial["status"] == "PARTIALLY_READY"
+    assert "setup timeframe" in partial["missing_optional"]
+    assert "TP2" in partial["missing_optional"]
+    missing_tp1 = replay_readiness(position(original_tp1=None, target_price=None, plannedTp1=None), candles_available=True)
+    assert missing_tp1["status"] == "NOT_REPLAYABLE"
+    invalid = replay_readiness(position(direction="SHORT", actual_underlying_entry=100, original_stop=95, original_tp1=90), candles_available=True)
+    assert invalid["status"] == "NOT_REPLAYABLE"
+    assert "invalid stop geometry" in invalid["invalid"]
+
+    complete = replay_position_intelligence(position(position_best_price=None, result="Win"), [candle("2026-07-01T14:00:00Z", 104, 99, 103)])
+    incomplete = replay_position_intelligence(position(journal_id="j-2", position_id="p-2"), [])
+    counts = real_evidence_counts([complete, incomplete])
+    assert counts["real_positions_replayed"] == 2
+    assert counts["complete_real_replays"] == 1
+    assert counts["incomplete_real_replays"] == 1
+    guard = evidence_guard({"closed_complete_real_replays": 1})
+    assert "No threshold recommendations" in guard["message"]
+    evidence = evidence_log_from_replays([complete, incomplete, incomplete])
+    assert any(item["observation_type"] == "DATA_GAP" for item in evidence)
+    assert len([item for item in evidence if item["observation_type"] == "DATA_GAP" and item["position_id"] == "p-2"]) == 1
+
+
 def test_dev_endpoint_auth_empty_message_and_no_side_effects():
     tmp = tempfile.TemporaryDirectory()
     previous_repo = main._journal_repository
@@ -361,6 +391,7 @@ def test_dev_endpoint_auth_empty_message_and_no_side_effects():
         empty = client.get("/api/dev/position-replay", headers={"X-Kairos-Admin-Token": TOKEN}).json()
         assert empty["status"] == "not_ready"
         assert "No server-backed positions are available for replay yet" in empty["message"]
+        assert empty["evidence_readiness"]["total_durable_positions"] == 0
 
         repo.create_entry(position(journal_id="j-endpoint", position_id="p-endpoint", position_best_price=None))
         previous_fetch = main._fetch_replay_candles
@@ -378,11 +409,21 @@ def test_dev_endpoint_auth_empty_message_and_no_side_effects():
             payload = client.get("/api/dev/position-replay?summary_only=false", headers={"X-Kairos-Admin-Token": TOKEN}).json()
             assert payload["ready"] is True
             assert payload["replays"][0]["timeline"][0]["event_type"] == "ENTRY"
+            assert payload["evidence_readiness"]["total_durable_positions"] == 1
+            assert payload["evidence_readiness"]["partially_ready"] == 1
+            assert "Evidence sample is still developing" in payload["evidence_guard"]["message"]
             assert payload["synthetic_results_included"] is False
             single = client.get("/api/dev/position-replay/p-endpoint?summary_only=true", headers={"X-Kairos-Admin-Token": TOKEN}).json()
             assert single["ready"] is True
             assert single["replays"][0]["position_id"] == "p-endpoint"
             assert "timeline" not in single["replays"][0]
+            before = repo.get_entry("j-endpoint")
+            refresh = client.post("/api/dev/position-replay/refresh", headers={"X-Kairos-Admin-Token": TOKEN}, json={"mode": "stale"}).json()
+            after = repo.get_entry("j-endpoint")
+            assert refresh["refreshed_positions"] == 1
+            assert after["replay_cache_status"] == "ready"
+            assert after["result"] == before["result"]
+            assert after["position_state_history"] == before["position_state_history"]
         finally:
             main._fetch_replay_candles = previous_fetch
     finally:
@@ -404,5 +445,6 @@ if __name__ == "__main__":
     test_data_needed_and_original_plan_not_overwritten()
     test_multiple_trades_same_ticker_long_and_short()
     test_aggregate_sample_sizes_and_provider_failure_isolation()
+    test_replay_readiness_and_evidence_counts()
     test_dev_endpoint_auth_empty_message_and_no_side_effects()
     print("Position replay v1 tests passed")

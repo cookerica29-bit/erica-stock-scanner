@@ -13,6 +13,7 @@ import pandas as pd
 POSITION_INTELLIGENCE_VERSION = 1
 POSITION_REPLAY_VERSION = 1
 DEFAULT_REPLAY_TIMEFRAME = "4H"
+REAL_EVIDENCE_MIN_CLOSED_COMPLETE = 20
 
 STATES = ["HEALTHY", "WATCH", "PROTECT", "EXIT", "DATA_NEEDED"]
 MILESTONE_LEVELS = [25, 50, 75]
@@ -108,6 +109,78 @@ def position_tp_price(position: dict[str, Any], number: int) -> float | None:
         3: ("plannedTp3", "tp3", "original_tp3"),
     }.get(number, ())
     return coerce_number(first_present(*(position.get(key) for key in keys)))
+
+
+def replay_readiness(position: dict[str, Any], candles_available: bool | None = None, timeframe_source: str | None = None) -> dict[str, Any]:
+    direction = normalize_direction(first_present(position.get("direction"), position.get("option_type"), position.get("optionType")))
+    entry_ts = parse_timestamp(first_present(position.get("entry_timestamp"), position.get("tracking_started_at"), position.get("signal_timestamp"), position.get("created_at"), position.get("createdAt")))
+    entry = position_entry_price(position)
+    stop = position_stop_price(position)
+    tp1 = position_tp_price(position, 1)
+    missing_required = []
+    invalid = []
+    if not direction:
+        missing_required.append("direction")
+    if not entry_ts:
+        missing_required.append("entry timestamp")
+    if entry is None:
+        missing_required.append("underlying entry")
+    if stop is None:
+        missing_required.append("stop")
+    if tp1 is None:
+        missing_required.append("TP1")
+    if direction and entry is not None and stop is not None:
+        if direction == "LONG" and not entry > stop:
+            invalid.append("invalid stop geometry")
+        if direction == "SHORT" and not stop > entry:
+            invalid.append("invalid stop geometry")
+    if direction and entry is not None and tp1 is not None:
+        if direction == "LONG" and not tp1 > entry:
+            invalid.append("invalid target geometry")
+        if direction == "SHORT" and not entry > tp1:
+            invalid.append("invalid target geometry")
+
+    optional_missing = []
+    if not first_present(position.get("setup_grade"), position.get("setupGrade"), position.get("grade")):
+        optional_missing.append("grade")
+    if not first_present(position.get("scanner_timeframe"), position.get("timeframe")):
+        optional_missing.append("setup timeframe")
+    if position_tp_price(position, 2) is None:
+        optional_missing.append("TP2")
+    if position_tp_price(position, 3) is None:
+        optional_missing.append("TP3")
+    if not first_present(position.get("actual_strike"), position.get("strike_price"), position.get("strike")):
+        optional_missing.append("option strike")
+    if not first_present(position.get("actual_expiration"), position.get("expiration_date"), position.get("expiry")):
+        optional_missing.append("option expiration")
+    if not first_present(position.get("actual_option_premium"), position.get("premium_paid"), position.get("askAtSelection")):
+        optional_missing.append("option premium")
+    if str(first_present(position.get("result"), position.get("status"), "Open") or "").lower() != "open" and not first_present(position.get("result"), position.get("outcome"), position.get("completion_reason")):
+        optional_missing.append("recorded outcome")
+
+    available = {
+        "direction": bool(direction),
+        "entry": entry is not None,
+        "stop": stop is not None,
+        "TP1": tp1 is not None,
+        "entry timestamp": bool(entry_ts),
+    }
+    if candles_available is False:
+        missing_required.append("historical candles")
+    if missing_required or invalid:
+        status = "NOT_REPLAYABLE"
+    elif optional_missing or timeframe_source == "inferred_default":
+        status = "PARTIALLY_READY"
+    else:
+        status = "REPLAY_READY"
+    return {
+        "status": status,
+        "available": available,
+        "missing_required": sorted(set(missing_required)),
+        "missing_optional": sorted(set(optional_missing)),
+        "invalid": sorted(set(invalid)),
+        "timeframe_source": timeframe_source,
+    }
 
 
 def progress_to_tp1(direction: str | None, entry: float | None, tp1: float | None, price: float | None) -> dict[str, float | int] | None:
@@ -773,6 +846,75 @@ def aggregate_replays(replays: list[dict[str, Any]]) -> dict[str, Any]:
             "outcome_category": dict(category_counts),
         },
     }
+
+
+def evidence_guard(aggregate: dict[str, Any]) -> dict[str, Any]:
+    closed_complete = int(aggregate.get("closed_complete_real_replays") or 0)
+    return {
+        "minimum_closed_complete": REAL_EVIDENCE_MIN_CLOSED_COMPLETE,
+        "closed_complete_real_replays": closed_complete,
+        "message": "Evidence sample is still developing. No threshold recommendations should be made." if closed_complete < REAL_EVIDENCE_MIN_CLOSED_COMPLETE else "",
+    }
+
+
+def real_evidence_counts(replays: list[dict[str, Any]]) -> dict[str, Any]:
+    real = [replay for replay in replays if not replay.get("synthetic")]
+    closed = [replay for replay in real if str(replay.get("status") or "").lower() != "open"]
+    complete = [replay for replay in real if replay.get("data_complete")]
+    closed_complete = [replay for replay in closed if replay.get("data_complete")]
+    return {
+        "real_positions_replayed": len(real),
+        "closed_real_positions_replayed": len(closed),
+        "complete_real_replays": len(complete),
+        "closed_complete_real_replays": len(closed_complete),
+        "incomplete_real_replays": len(real) - len(complete),
+        "ambiguous_real_replays": sum(1 for replay in real if replay.get("outcome_order_ambiguous")),
+    }
+
+
+def evidence_log_from_replays(replays: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    seen = set()
+
+    def add(replay: dict[str, Any], observation_type: str, observation: str, metrics: dict[str, Any]):
+        key = f"{replay.get('position_id')}|{observation_type}|{replay.get('replay_version') or POSITION_REPLAY_VERSION}"
+        if key in seen:
+            return
+        seen.add(key)
+        output.append({
+            "evidence_id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)),
+            "position_id": replay.get("position_id"),
+            "journal_id": replay.get("journal_id"),
+            "ticker": replay.get("ticker"),
+            "direction": replay.get("direction"),
+            "observation_type": observation_type,
+            "observation": observation,
+            "supporting_replay_metrics": metrics,
+            "generated_at": utc_now_iso(),
+            "replay_version": replay.get("replay_version") or POSITION_REPLAY_VERSION,
+        })
+
+    for replay in replays:
+        metrics = {
+            "final_state": replay.get("final_state"),
+            "outcome_category": replay.get("outcome_category"),
+            "maximum_r": replay.get("maximum_r"),
+            "maximum_progress": replay.get("maximum_progress"),
+            "state_transition_count": replay.get("state_transition_count"),
+        }
+        if not replay.get("data_complete") or replay.get("data_gaps"):
+            add(replay, "DATA_GAP", "Replay data incomplete.", {**metrics, "data_gaps": replay.get("data_gaps") or []})
+        if replay.get("watch_recovery_count"):
+            add(replay, "WATCH_RECOVERY", "WATCH recovered to a calmer state.", {**metrics, "watch_recovery_count": replay.get("watch_recovery_count")})
+        if replay.get("stop_timestamp"):
+            add(replay, "STOP_DETECTED", "Original stop invalidation was detected by replay.", {**metrics, "stop_timestamp": replay.get("stop_timestamp")})
+        if replay.get("high_churn"):
+            add(replay, "HIGH_CHURN", "Replay changed states frequently.", {**metrics, "state_changes_per_10_candles": replay.get("state_changes_per_10_candles")})
+        if replay.get("outcome_order_ambiguous"):
+            add(replay, "AMBIGUOUS_CANDLE", "Target and stop order was ambiguous inside a candle.", metrics)
+        if replay.get("recorded_outcome") and replay.get("outcome_category") == "DATA_INCOMPLETE":
+            add(replay, "REPLAY_DISCREPANCY", "Recorded outcome exists but replay data is incomplete.", metrics)
+    return output
 
 
 def _segment_counts(replays: list[dict[str, Any]], key: str) -> dict[str, int]:

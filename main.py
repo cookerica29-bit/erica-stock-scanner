@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
 import os
@@ -37,7 +38,14 @@ from journal_store import (
     default_journal_db_path,
 )
 from market_data import build_market_data_provider, provider_name_for_timeframe
-from position_intelligence import aggregate_replays, replay_position_intelligence
+from position_intelligence import (
+    aggregate_replays,
+    evidence_guard,
+    evidence_log_from_replays,
+    real_evidence_counts,
+    replay_position_intelligence,
+    replay_readiness,
+)
 
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
@@ -692,14 +700,71 @@ def _replay_positions(entries: list[dict], summary_only: bool = False) -> list[d
                 "timeline": [],
             }
         replay["candle_fetch"] = fetch_meta
+        replay["readiness"] = replay_readiness(
+            entry,
+            candles_available=bool(fetch_meta.get("candles_returned")),
+            timeframe_source=fetch_meta.get("timeframe_source"),
+        )
         if fetch_meta.get("fetch_failure"):
             replay["data_complete"] = False
             replay.setdefault("data_gaps", []).append(f"provider failure: {fetch_meta['fetch_failure']}")
             replay["outcome_category"] = "DATA_INCOMPLETE"
+            replay["readiness"] = replay_readiness(entry, candles_available=False, timeframe_source=fetch_meta.get("timeframe_source"))
         if summary_only:
             replay = {key: value for key, value in replay.items() if key != "timeline"}
         results.append(replay)
     return results
+
+
+def _readiness_summary(entries: list[dict], replays: list[dict]) -> dict:
+    readiness = [replay.get("readiness") or replay_readiness(entry, candles_available=None, timeframe_source=_replay_timeframe(entry)[1]) for entry, replay in zip(entries, replays)]
+    statuses = Counter(item.get("status") or "NOT_REPLAYABLE" for item in readiness)
+    open_entries = [entry for entry in entries if str(entry.get("result") or entry.get("status") or "Open").lower() == "open"]
+    closed_entries = [entry for entry in entries if entry not in open_entries]
+    return {
+        "total_durable_positions": len(entries),
+        "replay_ready": statuses.get("REPLAY_READY", 0),
+        "partially_ready": statuses.get("PARTIALLY_READY", 0),
+        "not_replayable": statuses.get("NOT_REPLAYABLE", 0),
+        "open_positions": len(open_entries),
+        "closed_positions": len(closed_entries),
+        "positions_with_journaled_timeframe": sum(1 for entry in entries if entry.get("scanner_timeframe") or entry.get("timeframe")),
+        "positions_using_inferred_4h": sum(1 for replay in replays if (replay.get("readiness") or {}).get("timeframe_source") == "inferred_default"),
+        "positions_missing_recorded_outcome": sum(1 for entry in entries if str(entry.get("result") or entry.get("status") or "Open").lower() != "open" and not (entry.get("result") or entry.get("outcome") or entry.get("completion_reason"))),
+        "positions_missing_option_details": sum(1 for item in readiness if any(part.startswith("option ") for part in item.get("missing_optional") or [])),
+        "positions": [
+            {
+                "journal_id": entry.get("journal_id"),
+                "position_id": entry.get("position_id"),
+                "ticker": entry.get("ticker"),
+                "direction": entry.get("direction"),
+                "status": item.get("status"),
+                "available": item.get("available"),
+                "missing_required": item.get("missing_required"),
+                "missing_optional": item.get("missing_optional"),
+                "invalid": item.get("invalid"),
+            }
+            for entry, item in zip(entries, readiness)
+        ],
+    }
+
+
+def _replay_response(entries: list[dict], replays: list[dict], limit=None, offset=None) -> dict:
+    aggregate = aggregate_replays(replays)
+    aggregate.update(real_evidence_counts(replays))
+    return {
+        "status": "ready",
+        "ready": True,
+        "message": "Replay results are derived diagnostics only. They do not alter journal outcomes or live Position Intelligence history.",
+        "replays": replays,
+        "aggregate": aggregate,
+        "evidence_readiness": _readiness_summary(entries, replays),
+        "evidence_log": evidence_log_from_replays(replays),
+        "evidence_guard": evidence_guard(aggregate),
+        "synthetic_results_included": any(item.get("synthetic") for item in replays),
+        **({"limit": limit} if limit is not None else {}),
+        **({"offset": offset} if offset is not None else {}),
+    }
 
 
 @app.get("/api/dev/position-replay")
@@ -727,12 +792,16 @@ def api_dev_position_replay(
         "offset": offset,
     })
     if not entries:
+        aggregate = aggregate_replays([])
         return {
             "status": "not_ready",
             "ready": False,
             "message": "No server-backed positions are available for replay yet. Migrate or add journal positions to begin historical analysis.",
             "replays": [],
-            "aggregate": aggregate_replays([]),
+            "aggregate": {**aggregate, **real_evidence_counts([])},
+            "evidence_readiness": _readiness_summary([], []),
+            "evidence_log": [],
+            "evidence_guard": evidence_guard(aggregate),
             "synthetic_results_included": False,
         }
     replays = _replay_positions(entries, summary_only=summary_only)
@@ -744,16 +813,45 @@ def api_dev_position_replay(
         replays = [item for item in replays if item.get("outcome_order_ambiguous")]
     if data_incomplete_only:
         replays = [item for item in replays if not item.get("data_complete")]
-    return {
-        "status": "ready",
-        "ready": True,
-        "message": "Replay results are derived diagnostics only. They do not alter journal outcomes or live Position Intelligence history.",
-        "replays": replays,
-        "aggregate": aggregate_replays(replays),
-        "synthetic_results_included": any(item.get("synthetic") for item in replays),
-        "limit": limit,
-        "offset": offset,
-    }
+    entries_by_position = {str(entry.get("position_id")): entry for entry in entries}
+    filtered_entries = [entries_by_position.get(str(replay.get("position_id")), {}) for replay in replays]
+    return _replay_response(filtered_entries, replays, limit=limit, offset=offset)
+
+
+@app.post("/api/dev/position-replay/refresh")
+def api_dev_position_replay_refresh(
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    mode = str((payload or {}).get("mode") or "stale").lower()
+    position_id = str((payload or {}).get("position_id") or "")
+    filters = {"status": "all", "limit": 1000, "offset": 0}
+    if position_id:
+        filters["position_id"] = position_id
+    elif mode in {"open", "closed"}:
+        filters["status"] = mode
+    entries = _journal_repository.list_entries(filters)
+    if mode == "stale" and not position_id:
+        entries = [entry for entry in entries if str(entry.get("replay_cache_status") or "").lower() == "stale"]
+    replays = _replay_positions(entries, summary_only=False)
+    refreshed = []
+    for entry, replay in zip(entries, replays):
+        patch = {
+            "record_version": entry.get("record_version"),
+            "replay_cache_status": "ready" if replay.get("data_complete") else "partial",
+            "replay_cache_generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "replay_cache_replay_version": replay.get("replay_version"),
+            "replay_cache_outcome_category": replay.get("outcome_category"),
+        }
+        try:
+            refreshed.append(_journal_repository.update_entry(str(entry.get("journal_id")), patch))
+        except (KeyError, JournalConflictError, JournalValidationError):
+            continue
+    response = _replay_response(entries, replays)
+    response["refreshed_positions"] = len(refreshed)
+    response["refresh_mode"] = mode
+    return response
 
 
 @app.get("/api/dev/position-replay/{position_id}")
@@ -772,14 +870,7 @@ def api_dev_position_replay_one(
     if not entries:
         raise HTTPException(status_code=404, detail="Position not found")
     replays = _replay_positions(entries, summary_only=summary_only)
-    return {
-        "status": "ready",
-        "ready": True,
-        "message": "Replay results are derived diagnostics only. They do not alter journal outcomes or live Position Intelligence history.",
-        "replays": replays,
-        "aggregate": aggregate_replays(replays),
-        "synthetic_results_included": any(item.get("synthetic") for item in replays),
-    }
+    return _replay_response(entries, replays)
 
 
 @app.get("/api/data-provider/status")

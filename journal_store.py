@@ -36,6 +36,56 @@ NUMERIC_FIELDS = {
     "position_max_progress_percent",
 }
 VALID_DIRECTIONS = {"LONG", "SHORT", "CALL", "PUT", "N/A", ""}
+CANONICAL_REPLAY_FIELDS = {
+    "journal_id",
+    "position_id",
+    "ticker",
+    "direction",
+    "setup_grade",
+    "grade",
+    "scanner_timeframe",
+    "timeframe",
+    "planned_underlying_entry",
+    "actual_underlying_entry",
+    "original_stop",
+    "original_tp1",
+    "original_tp2",
+    "original_tp3",
+    "entry_timestamp",
+    "exit_timestamp",
+    "result",
+    "outcome",
+    "completion_reason",
+    "actual_option_type",
+    "actual_option_premium",
+    "actual_strike",
+    "actual_expiration",
+    "actual_quantity",
+}
+REPLAY_RELEVANT_FIELDS = {
+    *CANONICAL_REPLAY_FIELDS,
+    "entry_price",
+    "entry",
+    "stop_price",
+    "plannedStop",
+    "target_price",
+    "plannedTp1",
+    "plannedTp2",
+    "plannedTp3",
+    "tracking_started_at",
+    "tracking_completed_at",
+    "signal_timestamp",
+    "setupGrade",
+    "setupTf",
+    "option_type",
+    "optionType",
+    "premium_paid",
+    "strike_price",
+    "strike",
+    "expiration_date",
+    "expiry",
+    "contracts",
+}
 
 
 class JournalConflictError(Exception):
@@ -161,6 +211,61 @@ def validate_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
             payload[field] = normalize_timestamp(payload[field], field)
     if "position_state_history" in payload:
         payload["position_state_history"] = merge_history([], payload.get("position_state_history") or [])
+    canonicalize_replay_fields(payload)
+    return payload
+
+
+def canonicalize_replay_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    ticker = core_value(payload, "ticker")
+    if ticker not in (None, ""):
+        payload["ticker"] = str(ticker).upper()
+    direction = core_value(payload, "direction", "option_type", "optionType")
+    if direction is not None:
+        payload["direction"] = normalize_direction(direction)
+    grade = core_value(payload, "setup_grade", "setupGrade", "grade")
+    if grade not in (None, ""):
+        payload["setup_grade"] = grade
+    timeframe = core_value(payload, "scanner_timeframe", "timeframe", "setupTf")
+    if timeframe not in (None, ""):
+        payload["scanner_timeframe"] = str(timeframe).upper()
+    entry_ts = core_value(payload, "entry_timestamp", "actual_entry_at", "position_opened_at", "tracking_started_at", "signal_timestamp", "created_at", "createdAt")
+    if entry_ts not in (None, ""):
+        payload["entry_timestamp"] = normalize_timestamp(entry_ts, "entry_timestamp")
+    exit_ts = core_value(payload, "exit_timestamp", "tracking_completed_at")
+    if exit_ts not in (None, ""):
+        payload["exit_timestamp"] = normalize_timestamp(exit_ts, "exit_timestamp")
+    number_aliases = {
+        "planned_underlying_entry": ("planned_underlying_entry", "entry_price", "entry"),
+        "actual_underlying_entry": ("actual_underlying_entry", "underlying_price_at_entry"),
+        "original_stop": ("original_stop", "stop_price", "plannedStop"),
+        "original_tp1": ("original_tp1", "target_price", "plannedTp1", "tp1"),
+        "original_tp2": ("original_tp2", "plannedTp2", "tp2"),
+        "original_tp3": ("original_tp3", "plannedTp3", "tp3"),
+        "actual_option_premium": ("actual_option_premium", "actual_premium", "premium_paid", "askAtSelection"),
+        "actual_strike": ("actual_strike", "strike_price", "strike"),
+        "actual_quantity": ("actual_quantity", "contracts"),
+    }
+    for target, aliases in number_aliases.items():
+        value = core_value(payload, *aliases)
+        if value not in (None, ""):
+            payload[target] = normalize_number(value, target)
+    expiration = core_value(payload, "actual_expiration", "expiration_date", "expiry")
+    if expiration not in (None, ""):
+        payload["actual_expiration"] = str(expiration)
+    option_type = core_value(payload, "actual_option_type", "option_type", "optionType")
+    if option_type not in (None, ""):
+        payload["actual_option_type"] = str(option_type).upper()
+    return payload
+
+
+def replay_relevant_patch(patch: dict[str, Any]) -> bool:
+    return any(key in REPLAY_RELEVANT_FIELDS for key in (patch or {}))
+
+
+def mark_replay_stale(payload: dict[str, Any], reason: str) -> dict[str, Any]:
+    payload["replay_cache_status"] = "stale"
+    payload["replay_cache_stale_at"] = utc_now_iso()
+    payload["replay_cache_stale_reason"] = reason
     return payload
 
 
@@ -295,6 +400,7 @@ class SQLiteJournalRepository(JournalRepository):
 
     def create_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
         payload = validate_entry_payload(entry)
+        mark_replay_stale(payload, "created")
         now = utc_now_iso()
         values = self._core_tuple(payload, now)
         with self._connect() as conn:
@@ -312,6 +418,7 @@ class SQLiteJournalRepository(JournalRepository):
     def update_entry(self, journal_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         allow_plan_correction = bool((patch or {}).pop("allow_plan_correction", False))
         expected_version = (patch or {}).pop("record_version", None)
+        should_mark_replay_stale = replay_relevant_patch(patch or {})
         existing = self.get_entry(journal_id)
         if not existing:
             raise KeyError(journal_id)
@@ -319,6 +426,8 @@ class SQLiteJournalRepository(JournalRepository):
             raise JournalConflictError("record_version conflict")
         clean_patch = validate_entry_payload(patch or {})
         merged = merge_payload(existing, clean_patch, allow_plan_correction=allow_plan_correction)
+        if should_mark_replay_stale:
+            mark_replay_stale(merged, "journal_replay_field_updated")
         now = utc_now_iso()
         values = self._core_tuple(merged, now, existing=existing)
         with self._connect() as conn:

@@ -969,6 +969,7 @@ assert.ok(html.includes('Connect'));
 assert.ok(html.includes('Clear Token'));
 const replaySummary = elementStub();
 const replayBody = elementStub();
+const replayReadiness = elementStub();
 const replayButton = elementStub();
 const replayTokenInput = elementStub();
 const replayAuthStatus = elementStub();
@@ -976,6 +977,7 @@ const previousGetElementById = context.document.getElementById;
 context.document.getElementById = id => ({
   positionReplaySummary: replaySummary,
   positionReplayBody: replayBody,
+  positionReplayReadiness: replayReadiness,
   positionReplayTabButton: replayButton,
   journalAdminTokenInput: replayTokenInput,
   journalAuthStatus: replayAuthStatus,
@@ -1033,8 +1035,24 @@ context.renderPositionReplay({
     complete_replays: 1,
     incomplete_replays: 0,
     ambiguous_replays: 0,
+    closed_complete_real_replays: 0,
     percent_entered_watch: { percent: 100, sample_size: 1 },
     high_churn_rate: { percent: 0, sample_size: 1 },
+  },
+  evidence_guard: { message: 'Evidence sample is still developing. No threshold recommendations should be made.' },
+  evidence_log: [{ ticker: 'SYN', observation_type: 'WATCH_RECOVERY', observation: 'WATCH recovered to a calmer state.', position_id: 'syn-pos' }],
+  evidence_readiness: {
+    total_durable_positions: 1,
+    replay_ready: 0,
+    partially_ready: 1,
+    not_replayable: 0,
+    open_positions: 1,
+    closed_positions: 0,
+    positions_with_journaled_timeframe: 0,
+    positions_using_inferred_4h: 1,
+    positions_missing_recorded_outcome: 0,
+    positions_missing_option_details: 1,
+    positions: [{ ticker: 'SYN', direction: 'LONG', status: 'PARTIALLY_READY', available: { Direction: true, Entry: true }, missing_required: [], missing_optional: ['setup timeframe'], invalid: [] }],
   },
   replays: [{
     synthetic: true,
@@ -1057,6 +1075,18 @@ context.renderPositionReplay({
 assert.ok(replayBody.innerHTML.includes('Synthetic Fixture'));
 assert.ok(replayBody.innerHTML.includes('STATE_TRANSITION'));
 assert.ok(replayBody.innerHTML.includes('State Duration'));
+assert.ok(replayReadiness.innerHTML.includes('Evidence Readiness'));
+assert.ok(replayReadiness.innerHTML.includes('PARTIALLY_READY'));
+assert.ok(replayReadiness.innerHTML.includes('Evidence sample is still developing'));
+
+let refreshCalled = false;
+context.fetch = (url, options = {}) => {
+  refreshCalled = String(url).includes('/api/dev/position-replay/refresh') && options.method === 'POST';
+  return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ready: true, aggregate: {}, evidence_readiness: { total_durable_positions: 0 }, replays: [] }) });
+};
+await context.refreshPositionReplay('stale');
+assert.ok(refreshCalled);
+context.fetch = previousAuthFetch;
 context.document.getElementById = previousGetElementById;
 
 console.log('Live card render v1 tests passed');
