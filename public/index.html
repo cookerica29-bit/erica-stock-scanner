@@ -2347,6 +2347,7 @@
   <button class="tab-btn" data-tab="further" onclick="switchTab('further')">Further Analysis</button>
   <button class="tab-btn" data-tab="journal" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" data-tab="positions" onclick="switchTab('positions')">Positions</button>
+  <button class="tab-btn" id="positionReplayTabButton" data-tab="positionReplay" onclick="switchTab('positionReplay')" style="display:none;">Position Replay</button>
   <button class="tab-btn" data-tab="analytics" onclick="switchTab('analytics')">Analytics</button>
   <button class="tab-btn" data-tab="diagnostics" onclick="switchTab('diagnostics')">Diagnostics</button>
   <button class="tab-btn" data-tab="terms" onclick="switchTab('terms')">Terms</button>
@@ -2558,6 +2559,49 @@
     </div>
     <div id="positionsSummary" class="execution-subtitle"></div>
     <div id="positionsList"></div>
+  </div>
+</div>
+
+<!-- ── Developer Position Replay Tab ─────────────────────────────────────── -->
+<div id="position-replay-panel" class="tab-panel">
+  <div class="execution-panel">
+    <div class="execution-head">
+      <div>
+        <div class="execution-title">Position Intelligence Replay</div>
+        <div class="execution-subtitle">Developer-only historical validation. Replay diagnostics never modify journal outcomes or live Position Intelligence history.</div>
+      </div>
+      <button class="btn-secondary" onclick="loadPositionReplay()">Run Replay</button>
+    </div>
+    <div class="journal-controls" style="margin-bottom:12px;">
+      <select id="positionReplayStatus" onchange="loadPositionReplay()">
+        <option value="all">All Positions</option>
+        <option value="open">Open</option>
+        <option value="closed">Closed</option>
+      </select>
+      <select id="positionReplayDirection" onchange="loadPositionReplay()">
+        <option value="">All Directions</option>
+        <option value="LONG">Long</option>
+        <option value="SHORT">Short</option>
+      </select>
+      <input id="positionReplayTicker" placeholder="Ticker" style="width:110px;" oninput="loadPositionReplay()" />
+      <select id="positionReplayCategory" onchange="loadPositionReplay()">
+        <option value="">All Categories</option>
+        <option value="CALM_WINNER">Calm Winner</option>
+        <option value="WATCH_RECOVERED">Watch Recovered</option>
+        <option value="PROTECT_USEFUL">Protect Useful</option>
+        <option value="STOP_DETECTED">Stop Detected</option>
+        <option value="CHURNY_BUT_VALID">Churny But Valid</option>
+        <option value="EARLY_WARNING">Early Warning</option>
+        <option value="DATA_INCOMPLETE">Data Incomplete</option>
+        <option value="AMBIGUOUS">Ambiguous</option>
+        <option value="UNCLASSIFIED">Unclassified</option>
+      </select>
+      <label class="check-control"><input type="checkbox" id="positionReplayHighChurn" onchange="loadPositionReplay()" /> High churn only</label>
+      <label class="check-control"><input type="checkbox" id="positionReplayAmbiguous" onchange="loadPositionReplay()" /> Ambiguous only</label>
+      <label class="check-control"><input type="checkbox" id="positionReplayIncomplete" onchange="loadPositionReplay()" /> Incomplete only</label>
+    </div>
+    <div id="positionReplaySummary" class="journal-stats"></div>
+    <div id="positionReplayBody"><div class="analytics-empty">Enter the journal admin token to enable developer replay.</div></div>
   </div>
 </div>
 
@@ -3309,6 +3353,7 @@ function switchTab(tab) {
     further: 'further-panel',
     journal: 'journal-panel',
     positions: 'positions-panel',
+    positionReplay: 'position-replay-panel',
     analytics: 'analytics-panel',
     diagnostics: 'diagnostics-panel',
     terms: 'terms-panel',
@@ -3323,6 +3368,7 @@ function switchTab(tab) {
   if (tab === 'further') renderFurtherAnalysisTab();
   if (tab === 'journal') renderJournal();
   if (tab === 'positions') renderPositionsTab();
+  if (tab === 'positionReplay') loadPositionReplay();
   if (tab === 'analytics' || tab === 'diagnostics') renderAnalytics();
 }
 
@@ -11090,6 +11136,114 @@ function renderAnalytics() {
   renderContractCandidateAuditDiagnostics();
 }
 
+// ── Developer Position Replay ───────────────────────────────────────────────
+
+function updateDeveloperReplayAccess() {
+  const button = document.getElementById('positionReplayTabButton');
+  if (button) button.style.display = journalServerSyncEnabled() ? '' : 'none';
+}
+
+function positionReplayQuery() {
+  const params = new URLSearchParams();
+  params.set('status', document.getElementById('positionReplayStatus')?.value || 'all');
+  params.set('summary_only', 'false');
+  const ticker = String(document.getElementById('positionReplayTicker')?.value || '').trim().toUpperCase();
+  const direction = document.getElementById('positionReplayDirection')?.value || '';
+  const category = document.getElementById('positionReplayCategory')?.value || '';
+  if (ticker) params.set('ticker', ticker);
+  if (direction) params.set('direction', direction);
+  if (category) params.set('outcome_category', category);
+  if (document.getElementById('positionReplayHighChurn')?.checked) params.set('high_churn_only', 'true');
+  if (document.getElementById('positionReplayAmbiguous')?.checked) params.set('ambiguous_only', 'true');
+  if (document.getElementById('positionReplayIncomplete')?.checked) params.set('data_incomplete_only', 'true');
+  return params;
+}
+
+async function loadPositionReplay() {
+  updateDeveloperReplayAccess();
+  const body = document.getElementById('positionReplayBody');
+  const summary = document.getElementById('positionReplaySummary');
+  if (!body || !summary) return;
+  if (!journalServerSyncEnabled()) {
+    summary.innerHTML = '';
+    body.innerHTML = '<div class="analytics-empty">Enter the journal admin token to enable developer replay.</div>';
+    return;
+  }
+  body.innerHTML = '<div class="analytics-empty"><span class="spinner"></span> Running replay...</div>';
+  try {
+    const response = await fetchWithTimeout(`${API}/api/dev/position-replay?${positionReplayQuery().toString()}`, { headers: journalAuthHeaders() });
+    const payload = await response.json();
+    renderPositionReplay(payload);
+  } catch (error) {
+    summary.innerHTML = '';
+    body.innerHTML = `<div class="analytics-empty">Replay unavailable: ${escapeHtml(error.message || String(error))}</div>`;
+  }
+}
+
+function rateLabel(rate = {}) {
+  if (!rate || !rate.sample_size) return '— (n=0)';
+  return `${fmtNumber(rate.percent)}% (n=${rate.sample_size})`;
+}
+
+function renderReplayStat(label, value) {
+  return `<div class="stat-card"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(String(value ?? '—'))}</div></div>`;
+}
+
+function renderPositionReplay(payload = {}) {
+  const summary = document.getElementById('positionReplaySummary');
+  const body = document.getElementById('positionReplayBody');
+  const aggregate = payload.aggregate || {};
+  summary.innerHTML = [
+    renderReplayStat('Positions Replayed', aggregate.positions_replayed || 0),
+    renderReplayStat('Complete', aggregate.complete_replays || 0),
+    renderReplayStat('Incomplete', aggregate.incomplete_replays || 0),
+    renderReplayStat('Ambiguous', aggregate.ambiguous_replays || 0),
+    renderReplayStat('Entered Watch', rateLabel(aggregate.percent_entered_watch)),
+    renderReplayStat('High Churn', rateLabel(aggregate.high_churn_rate)),
+  ].join('');
+  if (!payload.ready || !(payload.replays || []).length) {
+    body.innerHTML = `<div class="analytics-empty">${escapeHtml(payload.message || 'No server-backed positions are available for replay yet. Migrate or add journal positions to begin historical analysis.')}</div>`;
+    return;
+  }
+  body.innerHTML = `
+    <div class="trend-note">Synthetic results included: ${payload.synthetic_results_included ? 'Yes — clearly labeled below' : 'No'}. Replay is diagnostic only and does not alter live journal records.</div>
+    ${(payload.replays || []).map(renderReplayCard).join('')}
+  `;
+}
+
+function renderReplayCard(replay = {}) {
+  const warnings = [...(replay.data_gaps || []), replay.outcome_order_ambiguous ? 'Target/stop order ambiguous inside at least one candle.' : ''].filter(Boolean);
+  const timeline = (replay.timeline || []).slice(0, 12);
+  const duration = replay.time_in_each_state || {};
+  return `
+    <div class="analytics-card" data-position-replay-id="${escapeHtml(String(replay.position_id || ''))}">
+      <h3>${escapeHtml(replay.ticker || '—')} ${escapeHtml(replay.direction || '')} ${replay.synthetic ? '<span class="journal-status-pill waiting">Synthetic Fixture</span>' : ''}</h3>
+      <div class="execution-subtitle">${escapeHtml(replay.timeframe || '4H')} (${escapeHtml(replay.timeframe_source || 'inferred_default')}) · ${escapeHtml(replay.outcome_category || 'UNCLASSIFIED')} · Final ${escapeHtml(replay.final_state || 'DATA_NEEDED')}</div>
+      <div class="journal-stats" style="margin:10px 0;">
+        ${renderReplayStat('Candles', replay.candles_evaluated)}
+        ${renderReplayStat('Transitions', replay.state_transition_count)}
+        ${renderReplayStat('Max R', formatRMultiple(replay.maximum_r))}
+        ${renderReplayStat('Min R', formatRMultiple(replay.minimum_r))}
+        ${renderReplayStat('Max Progress', replay.maximum_progress == null ? '—' : `${fmtNumber(replay.maximum_progress)}%`)}
+      </div>
+      ${warnings.length ? `<div class="trend-note">${warnings.map(escapeHtml).join(' · ')}</div>` : ''}
+      <div class="analytics-grid" style="margin-top:10px;">
+        <div>
+          <h3>Timeline</h3>
+          <table class="journal-table"><tbody>
+            ${timeline.map(event => `<tr><td>${escapeHtml(formatShortDate(event.timestamp) || '—')}</td><td>${escapeHtml(event.event_type || '')}</td><td>${escapeHtml(event.previous_state || '')}${event.previous_state ? ' → ' : ''}${escapeHtml(event.new_state || '')}</td><td>${formatRMultiple(event.current_r)}</td><td>${escapeHtml(event.reason_code || '')}</td></tr>`).join('')}
+          </tbody></table>
+        </div>
+        <div>
+          <h3>State Duration</h3>
+          <table class="journal-table"><tbody>
+            ${['HEALTHY','WATCH','PROTECT','EXIT','DATA_NEEDED'].map(state => `<tr><td>${state}</td><td>${duration[state]?.candle_count || 0} candles</td><td>${fmtNumber(duration[state]?.percent_of_candles || 0)}%</td></tr>`).join('')}
+          </tbody></table>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ── CSV Export ───────────────────────────────────────────────────────────────
 
 function exportCSV() {
@@ -11118,6 +11272,7 @@ function exportCSV() {
 // ── Init ─────────────────────────────────────────────────────────────────────
 initializeScannerDefaults();
 initializeJournalServerSync();
+updateDeveloperReplayAccess();
 bindTickerSearch();
 setAutoScanButtonState();
 scheduleNextAutoScan();

@@ -36,6 +36,8 @@ from journal_store import (
     SQLiteJournalRepository,
     default_journal_db_path,
 )
+from market_data import build_market_data_provider, provider_name_for_timeframe
+from position_intelligence import aggregate_replays, replay_position_intelligence
 
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
@@ -612,6 +614,171 @@ def api_journal_migrate(
         "conflicts": result["conflicts"],
         "conflict_ids": result["conflict_ids"],
         "entries": result["entries"],
+    }
+
+
+def _replay_timeframe(position: dict) -> tuple[str, str]:
+    timeframe = str(position.get("scanner_timeframe") or position.get("timeframe") or "").strip().upper()
+    if timeframe:
+        return timeframe, "journaled"
+    return "4H", "inferred_default"
+
+
+def _replay_period_interval(timeframe: str) -> tuple[str, str]:
+    normalized = str(timeframe or "").strip().upper()
+    if normalized in {"1D", "D", "DAILY"}:
+        return "1y", "1d"
+    if normalized in {"1W", "W", "WEEKLY"}:
+        return "2y", "1wk"
+    return "60d", "4h"
+
+
+def _fetch_replay_candles(position: dict) -> tuple[object, dict]:
+    ticker = str(position.get("ticker") or "").strip().upper()
+    timeframe, timeframe_source = _replay_timeframe(position)
+    period, interval = _replay_period_interval(timeframe)
+    provider_name = provider_name_for_timeframe(timeframe)
+    provider = build_market_data_provider(provider_name)
+    meta = {
+        "provider": provider.name,
+        "timeframe": timeframe,
+        "timeframe_source": timeframe_source,
+        "period": period,
+        "interval": interval,
+        "requested_range": {
+            "entry_timestamp": position.get("entry_timestamp") or position.get("tracking_started_at") or position.get("signal_timestamp"),
+            "exit_timestamp": position.get("exit_timestamp") or position.get("tracking_completed_at"),
+        },
+        "candles_requested": None,
+        "candles_returned": 0,
+        "cache_status": "provider_fetch",
+        "fetch_failure": None,
+    }
+    if not ticker:
+        meta["fetch_failure"] = "missing ticker"
+        return [], meta
+    try:
+        candles = provider.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True, group_by="ticker")
+        meta["candles_returned"] = int(len(candles)) if hasattr(candles, "__len__") else 0
+        return candles, meta
+    except Exception as exc:
+        meta["fetch_failure"] = exc.__class__.__name__
+        return [], meta
+
+
+def _replay_positions(entries: list[dict], summary_only: bool = False) -> list[dict]:
+    results = []
+    for entry in entries:
+        candles, fetch_meta = _fetch_replay_candles(entry)
+        try:
+            replay = replay_position_intelligence(
+                entry,
+                candles,
+                provider=fetch_meta["provider"],
+                timeframe=fetch_meta["timeframe"],
+                timeframe_source=fetch_meta["timeframe_source"],
+            )
+        except Exception as exc:
+            replay = {
+                "journal_id": entry.get("journal_id"),
+                "position_id": entry.get("position_id"),
+                "ticker": str(entry.get("ticker") or "").upper(),
+                "data_complete": False,
+                "data_gaps": ["replay failure"],
+                "provider": fetch_meta.get("provider"),
+                "provider_failure": exc.__class__.__name__,
+                "final_state": "DATA_NEEDED",
+                "outcome_category": "DATA_INCOMPLETE",
+                "timeline": [],
+            }
+        replay["candle_fetch"] = fetch_meta
+        if fetch_meta.get("fetch_failure"):
+            replay["data_complete"] = False
+            replay.setdefault("data_gaps", []).append(f"provider failure: {fetch_meta['fetch_failure']}")
+            replay["outcome_category"] = "DATA_INCOMPLETE"
+        if summary_only:
+            replay = {key: value for key, value in replay.items() if key != "timeline"}
+        results.append(replay)
+    return results
+
+
+@app.get("/api/dev/position-replay")
+def api_dev_position_replay(
+    position_id: str = Query(default=""),
+    status: str = Query(default="all"),
+    ticker: str = Query(default=""),
+    direction: str = Query(default=""),
+    outcome_category: str = Query(default=""),
+    high_churn_only: bool = Query(default=False),
+    ambiguous_only: bool = Query(default=False),
+    data_incomplete_only: bool = Query(default=False),
+    summary_only: bool = Query(default=True),
+    limit: int = Query(default=50, ge=1, le=250),
+    offset: int = Query(default=0, ge=0),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entries = _journal_repository.list_entries({
+        "status": status,
+        "ticker": ticker,
+        "direction": direction,
+        "position_id": position_id,
+        "limit": limit,
+        "offset": offset,
+    })
+    if not entries:
+        return {
+            "status": "not_ready",
+            "ready": False,
+            "message": "No server-backed positions are available for replay yet. Migrate or add journal positions to begin historical analysis.",
+            "replays": [],
+            "aggregate": aggregate_replays([]),
+            "synthetic_results_included": False,
+        }
+    replays = _replay_positions(entries, summary_only=summary_only)
+    if outcome_category:
+        replays = [item for item in replays if str(item.get("outcome_category") or "").upper() == outcome_category.upper()]
+    if high_churn_only:
+        replays = [item for item in replays if item.get("high_churn")]
+    if ambiguous_only:
+        replays = [item for item in replays if item.get("outcome_order_ambiguous")]
+    if data_incomplete_only:
+        replays = [item for item in replays if not item.get("data_complete")]
+    return {
+        "status": "ready",
+        "ready": True,
+        "message": "Replay results are derived diagnostics only. They do not alter journal outcomes or live Position Intelligence history.",
+        "replays": replays,
+        "aggregate": aggregate_replays(replays),
+        "synthetic_results_included": any(item.get("synthetic") for item in replays),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/api/dev/position-replay/{position_id}")
+def api_dev_position_replay_one(
+    position_id: str,
+    summary_only: bool = Query(default=False),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entries = _journal_repository.list_entries({
+        "status": "all",
+        "position_id": position_id,
+        "limit": 1,
+        "offset": 0,
+    })
+    if not entries:
+        raise HTTPException(status_code=404, detail="Position not found")
+    replays = _replay_positions(entries, summary_only=summary_only)
+    return {
+        "status": "ready",
+        "ready": True,
+        "message": "Replay results are derived diagnostics only. They do not alter journal outcomes or live Position Intelligence history.",
+        "replays": replays,
+        "aggregate": aggregate_replays(replays),
+        "synthetic_results_included": any(item.get("synthetic") for item in replays),
     }
 
 

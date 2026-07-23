@@ -961,4 +961,64 @@ const blockedHtml = context.renderPositionAlertControls({
 assert.ok(blockedHtml.includes('Notifications blocked'));
 assert.ok(blockedHtml.includes('disabled'));
 
+assert.ok(html.includes('positionReplayTabButton'));
+assert.ok(html.includes('Position Intelligence Replay'));
+const replaySummary = elementStub();
+const replayBody = elementStub();
+const replayButton = elementStub();
+const previousGetElementById = context.document.getElementById;
+context.document.getElementById = id => ({
+  positionReplaySummary: replaySummary,
+  positionReplayBody: replayBody,
+  positionReplayTabButton: replayButton,
+}[id] || elementStub());
+delete storage.kairos_journal_admin_token;
+context.updateDeveloperReplayAccess();
+assert.strictEqual(replayButton.style.display, 'none');
+storage.kairos_journal_admin_token = 'secret';
+context.updateDeveloperReplayAccess();
+assert.strictEqual(replayButton.style.display, '');
+
+context.renderPositionReplay({
+  ready: false,
+  message: 'No server-backed positions are available for replay yet. Migrate or add journal positions to begin historical analysis.',
+  aggregate: { positions_replayed: 0, complete_replays: 0, incomplete_replays: 0, ambiguous_replays: 0 },
+  replays: [],
+});
+assert.ok(replayBody.innerHTML.includes('No server-backed positions are available for replay yet'));
+
+context.renderPositionReplay({
+  ready: true,
+  synthetic_results_included: true,
+  aggregate: {
+    positions_replayed: 1,
+    complete_replays: 1,
+    incomplete_replays: 0,
+    ambiguous_replays: 0,
+    percent_entered_watch: { percent: 100, sample_size: 1 },
+    high_churn_rate: { percent: 0, sample_size: 1 },
+  },
+  replays: [{
+    synthetic: true,
+    ticker: 'SYN',
+    direction: 'LONG',
+    timeframe: '4H',
+    timeframe_source: 'inferred_default',
+    outcome_category: 'WATCH_RECOVERED',
+    final_state: 'HEALTHY',
+    candles_evaluated: 3,
+    state_transition_count: 2,
+    maximum_r: 1.2,
+    minimum_r: -0.4,
+    maximum_progress: 80,
+    data_gaps: [],
+    timeline: [{ timestamp: '2026-07-22T14:00:00Z', event_type: 'STATE_TRANSITION', previous_state: 'WATCH', new_state: 'HEALTHY', current_r: 0.4, reason_code: 'NORMAL_PROGRESS' }],
+    time_in_each_state: { HEALTHY: { candle_count: 2, percent_of_candles: 66.7 }, WATCH: { candle_count: 1, percent_of_candles: 33.3 } },
+  }],
+});
+assert.ok(replayBody.innerHTML.includes('Synthetic Fixture'));
+assert.ok(replayBody.innerHTML.includes('STATE_TRANSITION'));
+assert.ok(replayBody.innerHTML.includes('State Duration'));
+context.document.getElementById = previousGetElementById;
+
 console.log('Live card render v1 tests passed');
