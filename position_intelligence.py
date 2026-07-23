@@ -518,6 +518,91 @@ def _candle_records(candles: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in candles if isinstance(item, dict)]
 
 
+def _coarse_replay_timeframe(timeframe: str | None) -> bool:
+    normalized = str(timeframe or "").strip().upper()
+    return normalized in {"1D", "D", "DAILY", "1W", "W", "WEEKLY"}
+
+
+def _in_replay_window(ts: datetime, entry_ts: datetime | None, exit_ts: datetime | None, timeframe: str | None) -> bool:
+    if _coarse_replay_timeframe(timeframe):
+        day = ts.astimezone(timezone.utc).date()
+        if entry_ts and day < entry_ts.astimezone(timezone.utc).date():
+            return False
+        if exit_ts and day > exit_ts.astimezone(timezone.utc).date():
+            return False
+        return True
+    if entry_ts and ts < entry_ts:
+        return False
+    if exit_ts and ts > exit_ts:
+        return False
+    return True
+
+
+def _timestamp_covered_by_candles(claimed_ts: datetime | None, evaluated_timestamps: list[datetime], timeframe: str | None) -> bool:
+    if not claimed_ts or not evaluated_timestamps:
+        return False
+    if _coarse_replay_timeframe(timeframe):
+        claimed_day = claimed_ts.astimezone(timezone.utc).date()
+        return any(ts.astimezone(timezone.utc).date() == claimed_day for ts in evaluated_timestamps)
+    return max(evaluated_timestamps) >= claimed_ts
+
+
+def _recorded_target_touch(position: dict[str, Any], target_number: int = 1) -> datetime | None:
+    keys = {
+        1: ("first_target_touch_at", "tp1_reached_at", "target_hit_at"),
+        2: ("second_target_touch_at", "tp2_reached_at"),
+        3: ("third_target_touch_at", "tp3_reached_at"),
+    }.get(target_number, ())
+    return parse_timestamp(first_present(*(position.get(key) for key in keys)))
+
+
+def _recorded_stop_touch(position: dict[str, Any]) -> datetime | None:
+    return parse_timestamp(first_present(position.get("first_stop_touch_at"), position.get("stop_hit_at")))
+
+
+def _journal_claims_target(position: dict[str, Any], target_number: int = 1) -> bool:
+    if _recorded_target_touch(position, target_number):
+        return True
+    if target_number == 1:
+        outcome = str(first_present(position.get("outcome"), position.get("completion_reason"), position.get("result"), "") or "").upper()
+        return outcome in {"TP1", "TARGET", "WIN"}
+    return False
+
+
+def _journal_claims_stop(position: dict[str, Any]) -> bool:
+    if _recorded_stop_touch(position):
+        return True
+    outcome = str(first_present(position.get("outcome"), position.get("completion_reason"), position.get("result"), "") or "").upper()
+    return outcome in {"STOP", "STOP LOSS", "LOSS", "STOPPED"}
+
+
+def classify_journal_replay_parity(position: dict[str, Any], replay: dict[str, Any]) -> dict[str, Any]:
+    status = str(first_present(position.get("result"), position.get("status"), "Open") or "Open")
+    if status.lower() == "open":
+        return {"status": "UNUSED", "reason": "open position"}
+    if not replay:
+        return {"status": "MISSING_REPLAY", "reason": "no replay result"}
+    if not replay.get("data_complete"):
+        return {
+            "status": "INSUFFICIENT_REPLAY_DATA",
+            "reason": "; ".join(replay.get("data_gaps") or ["replay data incomplete"]),
+        }
+
+    journal_target = _journal_claims_target(position, 1)
+    journal_stop = _journal_claims_stop(position)
+    replay_target = bool(replay.get("tp1_timestamp"))
+    replay_stop = bool(replay.get("stop_timestamp"))
+    if journal_target and replay_target:
+        return {"status": "MATCH", "reason": "journal TP1 outcome reproduced by replay"}
+    if journal_stop and replay_stop:
+        return {"status": "MATCH", "reason": "journal stop outcome reproduced by replay"}
+    if journal_target and not replay_target:
+        return {"status": "JOURNAL_EVENT_UNSUPPORTED", "reason": "journal TP1 outcome was not reproduced by replay candles"}
+    if journal_stop and not replay_stop:
+        return {"status": "JOURNAL_EVENT_UNSUPPORTED", "reason": "journal stop outcome was not reproduced by replay candles"}
+    return {"status": "NEEDS_INVESTIGATION", "reason": "completed journal outcome has no comparable replay event"}
+
+
 def _event_id(position_id: str, event_type: str, timestamp: str | None, suffix: str = "") -> str:
     return ":".join([str(position_id or ""), event_type, str(timestamp or ""), str(suffix or "")])
 
@@ -569,14 +654,17 @@ def replay_position_intelligence(position: dict[str, Any], candles: Any, provide
     if not records:
         data_gaps.append("missing candles")
 
+    input_timestamps = []
     filtered = []
+    rejected_candles = 0
     for record in records:
         ts = parse_timestamp(record.get("timestamp") or record.get("Datetime") or record.get("Date"))
         if not ts:
+            rejected_candles += 1
             continue
-        if entry_ts and ts < entry_ts:
-            continue
-        if exit_ts and ts > exit_ts:
+        input_timestamps.append(ts)
+        if not _in_replay_window(ts, entry_ts, exit_ts, tf):
+            rejected_candles += 1
             continue
         filtered.append((ts, record))
     filtered.sort(key=lambda item: item[0])
@@ -595,8 +683,10 @@ def replay_position_intelligence(position: dict[str, Any], candles: Any, provide
     mfe = mae = max_r = min_r = max_progress = final_progress = final_r = None
     best_price = entry_price
     last_ts = None
+    evaluated_timestamps = []
 
     for idx, (ts, candle) in enumerate(filtered):
+        evaluated_timestamps.append(ts)
         timestamp = ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         high = coerce_number(first_present(candle.get("high"), candle.get("High")))
         low = coerce_number(first_present(candle.get("low"), candle.get("Low")))
@@ -671,6 +761,14 @@ def replay_position_intelligence(position: dict[str, Any], candles: Any, provide
         final_r = current_r
         previous_state = state
 
+    for target_number in (1, 2, 3):
+        claimed_ts = _recorded_target_touch(original, target_number)
+        if claimed_ts and not target_timestamps[target_number] and not _timestamp_covered_by_candles(claimed_ts, evaluated_timestamps, tf):
+            data_gaps.append(f"insufficient candles through recorded TP{target_number} timestamp")
+    claimed_stop_ts = _recorded_stop_touch(original)
+    if claimed_stop_ts and not stop_timestamp and not _timestamp_covered_by_candles(claimed_stop_ts, evaluated_timestamps, tf):
+        data_gaps.append("insufficient candles through recorded stop timestamp")
+
     total_candles = len(states_seen)
     for state in STATES:
         if total_candles:
@@ -701,6 +799,14 @@ def replay_position_intelligence(position: dict[str, Any], candles: Any, provide
         "timeframe": tf,
         "timeframe_source": tf_source,
         "provider": provider,
+        "candle_input_count": len(records),
+        "candles_accepted": len(filtered),
+        "candles_rejected": rejected_candles,
+        "first_input_candle_timestamp": iso_timestamp(min(input_timestamps)) if input_timestamps else None,
+        "last_input_candle_timestamp": iso_timestamp(max(input_timestamps)) if input_timestamps else None,
+        "first_evaluated_candle_timestamp": iso_timestamp(filtered[0][0]) if filtered else None,
+        "last_evaluated_candle_timestamp": iso_timestamp(filtered[-1][0]) if filtered else None,
+        "replay_window_filter": "date_inclusive" if _coarse_replay_timeframe(tf) else "timestamp_inclusive",
         "candles_evaluated": total_candles,
         "data_complete": not data_gaps,
         "data_gaps": sorted(set(data_gaps)),

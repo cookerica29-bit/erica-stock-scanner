@@ -44,6 +44,7 @@ from journal_store import (
 from market_data import build_market_data_provider, provider_name_for_timeframe
 from position_intelligence import (
     aggregate_replays,
+    classify_journal_replay_parity,
     evidence_guard,
     evidence_log_from_replays,
     real_evidence_counts,
@@ -732,6 +733,7 @@ def _replay_positions(entries: list[dict], summary_only: bool = False) -> list[d
             replay.setdefault("data_gaps", []).append(f"provider failure: {fetch_meta['fetch_failure']}")
             replay["outcome_category"] = "DATA_INCOMPLETE"
             replay["readiness"] = replay_readiness(entry, candles_available=False, timeframe_source=fetch_meta.get("timeframe_source"))
+        replay["journal_replay_parity"] = classify_journal_replay_parity(entry, replay)
         if summary_only:
             replay = {key: value for key, value in replay.items() if key != "timeline"}
         results.append(replay)

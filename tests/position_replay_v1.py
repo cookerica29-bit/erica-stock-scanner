@@ -23,6 +23,7 @@ from position_intelligence import (  # noqa: E402
     STRIP_FROM_REPLAY,
     aggregate_replays,
     build_position_intelligence,
+    classify_journal_replay_parity,
     evidence_guard,
     evidence_log_from_replays,
     real_evidence_counts,
@@ -158,6 +159,7 @@ def test_replay_ignores_final_journal_target_touch_state_until_reached_chronolog
     replay = replay_position_intelligence(position(
         ticker="OXY",
         direction="SHORT",
+        timeframe="1D",
         entry_timestamp="2026-07-16T16:13:17.667006Z",
         exit_timestamp="2026-07-21T00:29:30.725000Z",
         actual_underlying_entry=54.28,
@@ -177,8 +179,88 @@ def test_replay_ignores_final_journal_target_touch_state_until_reached_chronolog
     assert round(replay["maximum_progress"], 2) == 8.64
     assert round(replay["maximum_r"], 2) == 0.17
     assert replay["final_state"] == "WATCH"
+    assert replay["data_complete"] is False
+    assert replay["outcome_category"] == "DATA_INCOMPLETE"
+    assert "insufficient candles through recorded TP1 timestamp" in replay["data_gaps"]
     assert replay["time_in_each_state"]["PROTECT"]["candle_count"] == 0
     assert replay["time_in_each_state"]["WATCH"]["candle_count"] == 2
+
+
+def test_daily_replay_includes_completion_date_and_can_refute_journal_tp1():
+    oxy = position(
+        ticker="OXY",
+        direction="SHORT",
+        timeframe="1D",
+        entry_timestamp="2026-07-16T16:13:17.667006Z",
+        exit_timestamp="2026-07-21T00:29:30.725000Z",
+        actual_underlying_entry=54.28,
+        original_stop=55.9,
+        original_tp1=51.04,
+        original_tp2=49.42,
+        original_tp3=47.8,
+        result="Win",
+        outcome="TP1",
+        completion_reason="target",
+        first_target_touch_at="2026-07-21T00:29:30.724Z",
+        position_last_state="PROTECT",
+        position_best_price=51.04,
+        position_tp1_reached=True,
+    )
+    replay = replay_position_intelligence(oxy, [
+        candle("2026-07-16T04:00:00Z", 54.2, 53.53, 53.65),
+        candle("2026-07-17T04:00:00Z", 55.17, 54.005, 54.86),
+        candle("2026-07-20T04:00:00Z", 55.6699, 54.0, 55.19),
+        candle("2026-07-21T04:00:00Z", 56.5, 55.36, 56.5),
+        candle("2026-07-22T04:00:00Z", 57.82, 57.09, 57.5),
+    ], timeframe="1D")
+    assert replay["replay_window_filter"] == "date_inclusive"
+    assert replay["candles_evaluated"] == 4
+    assert replay["last_evaluated_candle_timestamp"] == "2026-07-21T04:00:00Z"
+    assert replay["tp1_timestamp"] is None
+    assert replay["stop_timestamp"] == "2026-07-21T04:00:00Z"
+    assert replay["data_complete"] is True
+    parity = classify_journal_replay_parity(oxy, replay)
+    assert parity["status"] == "JOURNAL_EVENT_UNSUPPORTED"
+    assert "TP1" in parity["reason"]
+
+
+def test_complete_multi_day_replay_reaches_tp1_after_entry_date():
+    replay = replay_position_intelligence(position(
+        result="Win",
+        outcome="TP1",
+        completion_reason="target",
+        first_target_touch_at="2026-07-03T20:00:00Z",
+        exit_timestamp="2026-07-03T20:00:00Z",
+    ), [
+        candle("2026-07-01T14:00:00Z", 101, 99, 100),
+        candle("2026-07-02T14:00:00Z", 106, 101, 104),
+        candle("2026-07-03T14:00:00Z", 111, 103, 108),
+    ])
+    assert replay["candles_evaluated"] == 3
+    assert replay["tp1_timestamp"] == "2026-07-03T14:00:00Z"
+    assert replay["data_complete"] is True
+    assert classify_journal_replay_parity(position(result="Win", outcome="TP1", first_target_touch_at="2026-07-03T20:00:00Z"), replay)["status"] == "MATCH"
+
+
+def test_long_and_short_tp1_touch_are_direction_aware():
+    long = replay_position_intelligence(position(result="Win", first_target_touch_at="2026-07-02T14:00:00Z"), [
+        candle("2026-07-01T14:00:00Z", 105, 99, 104),
+        candle("2026-07-02T14:00:00Z", 110, 104, 108),
+    ])
+    assert long["tp1_timestamp"] == "2026-07-02T14:00:00Z"
+
+    short = replay_position_intelligence(position(
+        direction="SHORT",
+        actual_underlying_entry=100,
+        original_stop=105,
+        original_tp1=90,
+        result="Win",
+        first_target_touch_at="2026-07-02T14:00:00Z",
+    ), [
+        candle("2026-07-01T14:00:00Z", 101, 95, 96),
+        candle("2026-07-02T14:00:00Z", 96, 90, 92),
+    ])
+    assert short["tp1_timestamp"] == "2026-07-02T14:00:00Z"
 
 
 def test_replay_output_ignores_misleading_final_values_for_long_and_short():
@@ -222,7 +304,7 @@ def test_replay_output_ignores_misleading_final_values_for_long_and_short():
         candle("2026-07-02T14:00:00Z", 103, 97, 98),
     ]
     clean_long = replay_position_intelligence(position(position_best_price=None), long_candles)
-    polluted_long = replay_position_intelligence(position(position_best_price=None, **final_values), long_candles)
+    polluted_long = replay_position_intelligence(position(**final_values), long_candles)
     assert polluted_long["final_state"] == clean_long["final_state"]
     assert polluted_long["maximum_progress"] == clean_long["maximum_progress"]
     assert polluted_long["maximum_r"] == clean_long["maximum_r"]
@@ -268,6 +350,8 @@ def test_recorded_exit_timestamp_only_bounds_replay_range():
     assert replay["recorded_outcome"] == "Win"
     assert replay["tp1_timestamp"] is None
     assert replay["final_state"] == "HEALTHY"
+    assert replay["data_complete"] is False
+    assert replay["outcome_category"] == "DATA_INCOMPLETE"
 
 
 def test_watch_recovery_protect_exit_and_churn_metrics():
@@ -440,6 +524,13 @@ def test_dev_endpoint_auth_empty_message_and_no_side_effects():
 if __name__ == "__main__":
     test_shared_builder_and_long_short_replay_math()
     test_no_lookahead_best_price_and_state_transitions()
+    test_replay_field_classification_documents_no_lookahead_inputs()
+    test_replay_ignores_final_journal_target_touch_state_until_reached_chronologically()
+    test_daily_replay_includes_completion_date_and_can_refute_journal_tp1()
+    test_complete_multi_day_replay_reaches_tp1_after_entry_date()
+    test_long_and_short_tp1_touch_are_direction_aware()
+    test_replay_output_ignores_misleading_final_values_for_long_and_short()
+    test_recorded_exit_timestamp_only_bounds_replay_range()
     test_watch_recovery_protect_exit_and_churn_metrics()
     test_milestone_dedup_and_target_stop_ambiguity()
     test_data_needed_and_original_plan_not_overwritten()
