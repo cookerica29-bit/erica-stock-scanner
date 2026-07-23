@@ -2601,6 +2601,19 @@
       <label class="check-control"><input type="checkbox" id="positionReplayIncomplete" onchange="loadPositionReplay()" /> Incomplete only</label>
     </div>
     <div id="positionReplaySummary" class="journal-stats"></div>
+    <div class="analytics-card" id="journalMigrationReview">
+      <h3>Safe Journal Migration</h3>
+      <div class="trend-note">Preview first. Nothing uploads until confirmed. The browser journal is not deleted after migration.</div>
+      <div class="journal-controls" style="margin:10px 0;">
+        <button class="btn-secondary" onclick="previewJournalMigration()">Preview Migration</button>
+        <button class="btn-secondary" onclick="confirmAndRunJournalMigration()">Confirm & Migrate New Entries</button>
+        <button class="btn-secondary" onclick="downloadJournalMigrationBackup()">Download JSON Backup</button>
+      </div>
+      <div id="journalMigrationPreview"><div class="analytics-empty">Run preview before migrating.</div></div>
+      <div id="journalMigrationProgress"></div>
+      <div id="journalMigrationReport"></div>
+      <div id="journalMigrationFindings"></div>
+    </div>
     <div id="positionReplayBody"><div class="analytics-empty">Enter the journal admin token to enable developer replay.</div></div>
   </div>
 </div>
@@ -8568,9 +8581,11 @@ function migrationTimestampReliable(value) {
 function analyzeJournalMigration(localEntries = [], serverEntries = []) {
   const serverById = new Map(serverEntries.map(entry => [String(firstPresent(entry.journal_id, entry.id, '')), entry]).filter(([id]) => id));
   const serverFingerprints = new Map(serverEntries.map(entry => [journalMigrationFingerprint(entry), entry]));
-  const result = { localCount: localEntries.length, serverCount: serverEntries.length, newEntries: [], matchingEntries: [], conflicts: [], possibleDuplicates: [] };
+  const result = { localCount: localEntries.length, serverCount: serverEntries.length, newEntries: [], matchingEntries: [], conflicts: [], possibleDuplicates: [], incompleteRecords: [] };
   localEntries.forEach(raw => {
     const local = ensureJournalStableIds(migrateJournalEntry(raw));
+    const validation = validateJournalEntryForMigration(local);
+    if (!validation.valid) result.incompleteRecords.push({ local, missing: validation.missing, warnings: validation.warnings });
     const server = serverById.get(local.journal_id);
     if (server) {
       const localUpdated = firstPresent(local.updated_at, local.updatedAt, local.snapshot_timestamp, null);
@@ -8591,10 +8606,52 @@ function analyzeJournalMigration(localEntries = [], serverEntries = []) {
   return result;
 }
 
+function validateJournalEntryForMigration(entry = {}) {
+  const migrated = ensureJournalStableIds(migrateJournalEntry(entry));
+  const missing = [];
+  const warnings = [];
+  const required = {
+    journal_id: migrated.journal_id,
+    position_id: migrated.position_id,
+    ticker: migrated.ticker,
+    direction: firstPresent(migrated.direction, migrated.option_type, migrated.optionType),
+    entry_timestamp: firstPresent(migrated.entry_timestamp, migrated.actual_entry_at, migrated.position_opened_at, migrated.tracking_started_at, migrated.signal_timestamp, migrated.createdAt),
+    planned_entry: firstPresent(migrated.planned_underlying_entry, migrated.entry_price, migrated.entry),
+    stop: firstPresent(migrated.original_stop, migrated.stop_price, migrated.plannedStop),
+    tp1: firstPresent(migrated.original_tp1, migrated.target_price, migrated.plannedTp1, migrated.tp1),
+    grade: firstPresent(migrated.grade, migrated.setupGrade, migrated.setup_grade),
+    status: firstPresent(migrated.status, migrated.result, migrated.scannerStatus),
+  };
+  Object.entries(required).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') missing.push(key);
+  });
+  if (firstPresent(migrated.actual_underlying_entry, null) == null) warnings.push('actual underlying entry missing; replay will use planned entry fallback');
+  return { valid: missing.length === 0, missing, warnings, normalized: migrated };
+}
+
+function journalMigrationBackupPayload(entries = loadJournal()) {
+  return {
+    backup_type: 'stock_scanner_journal_browser_backup',
+    generated_at: new Date().toISOString(),
+    source_key: JOURNAL_KEY,
+    entries: entries.map(ensureJournalStableIds),
+  };
+}
+
 function backupLocalJournalBeforeMigration(entries = loadJournal()) {
   const key = `${JOURNAL_BACKUP_PREFIX}${new Date().toISOString().replace(/[:.]/g, '-')}`;
   localStorage.setItem(key, JSON.stringify(entries));
   return key;
+}
+
+function downloadJournalMigrationBackup() {
+  const payload = journalMigrationBackupPayload(loadJournal());
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `stock_scanner_journal_backup_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  return payload;
 }
 
 function queuePendingJournalSync(entries = []) {
@@ -8641,6 +8698,65 @@ async function migrateLocalJournalToServer(confirmFn = confirm) {
   localStorage.setItem(JOURNAL_KEY, JSON.stringify(payload.entries || localEntries));
   localStorage.setItem(JOURNAL_SERVER_CACHE_KEY, JSON.stringify(payload.entries || []));
   return { migrated: true, backupKey, analysis, payload };
+}
+
+async function uploadMigrationEntriesOneByOne(entries = [], onProgress = () => {}) {
+  const uploaded = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = ensureJournalStableIds(migrateJournalEntry(entries[index]));
+    const validation = validateJournalEntryForMigration(entry);
+    if (!validation.valid) {
+      return { completed: false, uploaded, remaining: entries.slice(index), failed: { entry, status: 'validation', reason: validation.missing.join(', ') } };
+    }
+    const response = await fetchWithTimeout(`${API}/api/journal`, {
+      method: 'POST',
+      headers: journalAuthHeaders(),
+      body: JSON.stringify(entry),
+    });
+    if (!response.ok) {
+      return { completed: false, uploaded, remaining: entries.slice(index), failed: { entry, status: response.status, reason: await response.text() } };
+    }
+    const saved = await response.json();
+    if (saved.journal_id !== entry.journal_id || saved.position_id !== entry.position_id || saved.record_version == null) {
+      return { completed: false, uploaded, remaining: entries.slice(index + 1), failed: { entry, status: 'verification', reason: 'server response did not preserve stable IDs/version' } };
+    }
+    uploaded.push(saved);
+    onProgress({ uploaded: uploaded.length, remaining: entries.length - uploaded.length, last: saved });
+  }
+  return { completed: true, uploaded, remaining: [], failed: null };
+}
+
+function compareMigratedJournalFields(local = {}, server = {}) {
+  const fields = [
+    ['ticker', local.ticker, server.ticker],
+    ['direction', firstPresent(local.direction, local.option_type, local.optionType), firstPresent(server.direction, server.option_type, server.optionType)],
+    ['entry', firstPresent(local.actual_underlying_entry, local.planned_underlying_entry, local.entry_price, local.entry), firstPresent(server.actual_underlying_entry, server.planned_underlying_entry, server.entry_price, server.entry)],
+    ['stop', firstPresent(local.original_stop, local.stop_price, local.plannedStop), firstPresent(server.original_stop, server.stop_price, server.plannedStop)],
+    ['tp1', firstPresent(local.original_tp1, local.target_price, local.plannedTp1, local.tp1), firstPresent(server.original_tp1, server.target_price, server.plannedTp1, server.tp1)],
+    ['tp2', firstPresent(local.original_tp2, local.plannedTp2, local.tp2), firstPresent(server.original_tp2, server.plannedTp2, server.tp2)],
+    ['tp3', firstPresent(local.original_tp3, local.plannedTp3, local.tp3), firstPresent(server.original_tp3, server.plannedTp3, server.tp3)],
+    ['grade', firstPresent(local.grade, local.setupGrade, local.setup_grade), firstPresent(server.grade, server.setupGrade, server.setup_grade)],
+    ['status', firstPresent(local.status, local.result, local.scannerStatus), firstPresent(server.status, server.result, server.scannerStatus)],
+    ['notes', local.notes, server.notes],
+    ['option_type', firstPresent(local.actual_option_type, local.option_type, local.optionType), firstPresent(server.actual_option_type, server.option_type, server.optionType)],
+    ['strike', firstPresent(local.actual_strike, local.strike_price, local.strike), firstPresent(server.actual_strike, server.strike_price, server.strike)],
+    ['expiration', firstPresent(local.actual_expiration, local.expiration_date, local.expiry), firstPresent(server.actual_expiration, server.expiration_date, server.expiry)],
+    ['position_state_history', JSON.stringify(local.position_state_history || []), JSON.stringify(server.position_state_history || [])],
+  ];
+  return fields
+    .filter(([, left, right]) => String(left ?? '') !== String(right ?? ''))
+    .map(([field, localValue, serverValue]) => ({ field, localValue, serverValue }));
+}
+
+function buildReplayEvidenceLog(replays = []) {
+  const evidence = [];
+  replays.forEach(replay => {
+    if (!replay.data_complete) evidence.push({ observation: 'Replay data incomplete', evidence: (replay.data_gaps || []).join('; '), trades_affected: [replay.ticker], possible_future_improvement: 'Improve journal completeness or candle retrieval.', confidence: 'High' });
+    if (replay.high_churn) evidence.push({ observation: 'Position Intelligence churned between states', evidence: `${replay.state_transition_count} transitions / ${replay.candles_evaluated} candles`, trades_affected: [replay.ticker], possible_future_improvement: 'Review thresholds later with a larger sample; no tuning in this sprint.', confidence: 'Medium' });
+    if (replay.outcome_order_ambiguous) evidence.push({ observation: 'Target and stop touched within the same candle', evidence: 'Intrabar order cannot be known from OHLC candles.', trades_affected: [replay.ticker], possible_future_improvement: 'Use lower-timeframe replay data in a future playback sprint.', confidence: 'High' });
+    if (replay.timeframe_source === 'inferred_default') evidence.push({ observation: 'Timeframe missing from journal', evidence: 'Replay used inferred default 4H timeframe.', trades_affected: [replay.ticker], possible_future_improvement: 'Ensure future journal snapshots persist scanner_timeframe.', confidence: 'High' });
+  });
+  return evidence;
 }
 
 async function syncJournalEntriesToServer(entries = []) {
@@ -11241,6 +11357,165 @@ function renderReplayCard(replay = {}) {
           </tbody></table>
         </div>
       </div>
+    </div>`;
+}
+
+async function previewJournalMigration() {
+  const preview = document.getElementById('journalMigrationPreview');
+  const progress = document.getElementById('journalMigrationProgress');
+  const report = document.getElementById('journalMigrationReport');
+  const findings = document.getElementById('journalMigrationFindings');
+  if (!preview) return null;
+  if (!journalServerSyncEnabled()) {
+    preview.innerHTML = '<div class="analytics-empty">Enter the journal admin token before previewing migration.</div>';
+    return null;
+  }
+  progress.innerHTML = '';
+  report.innerHTML = '';
+  findings.innerHTML = '';
+  const localEntries = loadJournal().map(ensureJournalStableIds);
+  const serverPayload = await fetchServerJournalEntries({ status: 'all' });
+  const analysis = analyzeJournalMigration(localEntries, serverPayload.entries || []);
+  window.__kairosLastMigrationPreview = { analysis, localEntries, serverEntries: serverPayload.entries || [] };
+  preview.innerHTML = renderJournalMigrationPreview(analysis);
+  return window.__kairosLastMigrationPreview;
+}
+
+function renderJournalMigrationPreview(analysis = {}) {
+  const cards = [
+    ['Local journal entries', analysis.localCount || 0],
+    ['Server journal entries', analysis.serverCount || 0],
+    ['New positions', (analysis.newEntries || []).length],
+    ['Matching positions', (analysis.matchingEntries || []).length],
+    ['Potential duplicates', (analysis.possibleDuplicates || []).length],
+    ['Conflicts', (analysis.conflicts || []).length],
+    ['Incomplete records', (analysis.incompleteRecords || []).length],
+  ].map(([label, value]) => renderReplayStat(label, value)).join('');
+  return `
+    <div class="journal-stats">${cards}</div>
+    ${renderMigrationList('New Positions', analysis.newEntries || [])}
+    ${renderMigrationList('Potential Duplicates', (analysis.possibleDuplicates || []).map(item => item.local), 'Requires manual review; not uploaded automatically.')}
+    ${renderMigrationList('Incomplete Records', (analysis.incompleteRecords || []).map(item => item.local), 'Missing: ' + (analysis.incompleteRecords || []).map(item => `${item.local.ticker || '—'} ${item.missing.join('/')}`).join('; '))}
+    ${(analysis.conflicts || []).length ? `<div class="trend-note">Conflicts must be reviewed manually. This migration only uploads new, validated entries.</div>` : ''}
+  `;
+}
+
+function renderMigrationList(title, entries = [], note = '') {
+  if (!entries.length) return '';
+  return `
+    <div style="margin-top:10px;">
+      <h3>${escapeHtml(title)}</h3>
+      ${note ? `<div class="trend-note">${escapeHtml(note)}</div>` : ''}
+      <table class="journal-table"><tbody>
+        ${entries.slice(0, 20).map(entry => `<tr><td>${escapeHtml(entry.ticker || '—')}</td><td>${escapeHtml(firstPresent(entry.direction, entry.option_type, entry.optionType, '—'))}</td><td>${escapeHtml(firstPresent(entry.result, entry.status, '—'))}</td><td>${escapeHtml(entry.journal_id || '—')}</td></tr>`).join('')}
+      </tbody></table>
+      ${entries.length > 20 ? `<div class="trend-note">Showing 20 of ${entries.length}.</div>` : ''}
+    </div>`;
+}
+
+async function confirmAndRunJournalMigration() {
+  const progress = document.getElementById('journalMigrationProgress');
+  const report = document.getElementById('journalMigrationReport');
+  const findings = document.getElementById('journalMigrationFindings');
+  const previewState = window.__kairosLastMigrationPreview || await previewJournalMigration();
+  if (!previewState) return null;
+  const { analysis, localEntries } = previewState;
+  const uploadable = (analysis.newEntries || []).filter(entry => validateJournalEntryForMigration(entry).valid);
+  if ((analysis.conflicts || []).length || (analysis.possibleDuplicates || []).length) {
+    progress.innerHTML = '<div class="trend-note">Conflicts or possible duplicates are present. Only new validated entries will upload; uncertain matches are left untouched.</div>';
+  }
+  const message = `Upload ${uploadable.length} new validated journal entr${uploadable.length === 1 ? 'y' : 'ies'} to the server? This will not delete the browser journal.`;
+  if (!confirm(message)) return { migrated: false, reason: 'cancelled', analysis };
+  const backupKey = backupLocalJournalBeforeMigration(localEntries);
+  const backupPayload = journalMigrationBackupPayload(localEntries);
+  localStorage.setItem(`${backupKey}_download_payload`, JSON.stringify(backupPayload));
+  progress.innerHTML = `<div class="trend-note">Backup created: ${escapeHtml(backupKey)}. Uploading one entry at a time...</div>`;
+  const upload = await uploadMigrationEntriesOneByOne(uploadable, state => {
+    progress.innerHTML = `<div class="trend-note">Uploaded ${state.uploaded}. Remaining ${state.remaining}. Last: ${escapeHtml(state.last.ticker || state.last.journal_id)}</div>`;
+  });
+  if (!upload.completed) {
+    queuePendingJournalSync(upload.remaining);
+    report.innerHTML = renderMigrationUploadReport(upload, backupKey);
+    return { migrated: false, backupKey, upload, analysis };
+  }
+  const serverPayload = await fetchServerJournalEntries({ status: 'all' });
+  const migratedIds = new Set(JSON.parse(localStorage.getItem(JOURNAL_MIGRATED_IDS_KEY) || '[]'));
+  upload.uploaded.forEach(entry => migratedIds.add(entry.journal_id));
+  localStorage.setItem(JOURNAL_MIGRATED_IDS_KEY, JSON.stringify([...migratedIds]));
+  localStorage.setItem(JOURNAL_SERVER_AUTHORITATIVE_KEY, 'true');
+  localStorage.setItem(JOURNAL_SERVER_CACHE_KEY, JSON.stringify(serverPayload.entries || []));
+  const comparisons = upload.uploaded.map(saved => {
+    const local = uploadable.find(entry => entry.journal_id === saved.journal_id) || {};
+    const server = (serverPayload.entries || []).find(entry => entry.journal_id === saved.journal_id) || {};
+    return { journal_id: saved.journal_id, ticker: saved.ticker, mismatches: compareMigratedJournalFields(local, server) };
+  });
+  const replayPayload = await fetchWithTimeout(`${API}/api/dev/position-replay?status=all&summary_only=false`, { headers: journalAuthHeaders() }).then(r => r.json());
+  const migratedReplayIds = new Set(upload.uploaded.map(entry => entry.position_id));
+  const migratedReplays = (replayPayload.replays || []).filter(replay => migratedReplayIds.has(replay.position_id));
+  const evidence = buildReplayEvidenceLog(migratedReplays);
+  report.innerHTML = renderMigrationCompletionReport({ backupKey, upload, comparisons, replays: migratedReplays, aggregate: replayPayload.aggregate });
+  findings.innerHTML = renderReplayFindings(evidence, migratedReplays);
+  renderPositionReplay(replayPayload);
+  return { migrated: true, backupKey, upload, comparisons, replays: migratedReplays, evidence };
+}
+
+function renderMigrationUploadReport(upload = {}, backupKey = '') {
+  return `
+    <div class="analytics-card">
+      <h3>Migration Progress</h3>
+      <div class="trend-note">Backup: ${escapeHtml(backupKey)}</div>
+      <div>Uploaded: ${upload.uploaded?.length || 0}</div>
+      <div>Remaining: ${upload.remaining?.length || 0}</div>
+      ${upload.failed ? `<div class="trend-note">Failed: ${escapeHtml(String(upload.failed.status))} · ${escapeHtml(String(upload.failed.reason || ''))}</div>` : ''}
+    </div>`;
+}
+
+function renderMigrationCompletionReport(result = {}) {
+  const mismatches = (result.comparisons || []).filter(item => item.mismatches.length);
+  const replays = result.replays || [];
+  return `
+    <div class="analytics-card">
+      <h3>Migration Report</h3>
+      <div class="journal-stats">
+        ${renderReplayStat('Uploaded', result.upload?.uploaded?.length || 0)}
+        ${renderReplayStat('Remaining', result.upload?.remaining?.length || 0)}
+        ${renderReplayStat('Mismatches', mismatches.length)}
+        ${renderReplayStat('Replay Count', replays.length)}
+      </div>
+      ${mismatches.length ? `<div class="trend-note">Mismatches found; neither local nor server copy was overwritten automatically.</div>` : '<div class="trend-note">Post-migration comparison found no field mismatches for uploaded entries.</div>'}
+      ${renderPerTradeReplaySummary(replays)}
+    </div>`;
+}
+
+function renderPerTradeReplaySummary(replays = []) {
+  if (!replays.length) return '<div class="analytics-empty">No migrated trades were replayed.</div>';
+  return `
+    <h3>Per-Trade Replay Summary</h3>
+    <table class="journal-table"><thead><tr><th>Ticker</th><th>Direction</th><th>Result</th><th>Category</th><th>Max R</th><th>Max Progress</th><th>Transitions</th><th>Warnings</th></tr></thead><tbody>
+      ${replays.map(replay => `<tr><td>${escapeHtml(replay.ticker || '—')}</td><td>${escapeHtml(replay.direction || '—')}</td><td>${escapeHtml(replay.recorded_outcome || '—')}</td><td>${escapeHtml(replay.outcome_category || '—')}</td><td>${formatRMultiple(replay.maximum_r)}</td><td>${replay.maximum_progress == null ? '—' : `${fmtNumber(replay.maximum_progress)}%`}</td><td>${replay.state_transition_count || 0}</td><td>${escapeHtml([...(replay.data_gaps || []), replay.high_churn ? 'high churn' : '', replay.outcome_order_ambiguous ? 'ambiguous' : ''].filter(Boolean).join('; ') || '—')}</td></tr>`).join('')}
+    </tbody></table>`;
+}
+
+function renderReplayFindings(evidence = [], replays = []) {
+  const worked = [];
+  const noisy = [];
+  const missing = [];
+  if (replays.some(r => !r.high_churn && r.data_complete)) worked.push('Low churn on complete replays.');
+  if (replays.some(r => r.watch_recovery_count > 0)) worked.push('WATCH recovered to a calmer state on at least one trade.');
+  if (replays.some(r => r.tp1_timestamp)) worked.push('TP detection fired on at least one trade.');
+  if (replays.some(r => r.high_churn)) noisy.push('Repeated state transitions appeared in at least one replay.');
+  if (replays.some(r => r.outcome_order_ambiguous)) noisy.push('At least one candle had ambiguous target/stop ordering.');
+  evidence.filter(e => e.observation.includes('missing') || e.observation.includes('incomplete') || e.observation.includes('Timeframe')).forEach(e => missing.push(e.evidence));
+  return `
+    <div class="analytics-card">
+      <h3>Replay Findings</h3>
+      <div class="analytics-grid">
+        <div><h3>What worked well?</h3><div>${(worked.length ? worked : ['No complete real-trade replay evidence yet.']).map(escapeHtml).join('<br>')}</div></div>
+        <div><h3>What looked noisy?</h3><div>${(noisy.length ? noisy : ['No noisy behavior detected in this sample.']).map(escapeHtml).join('<br>')}</div></div>
+        <div><h3>What data is missing?</h3><div>${(missing.length ? missing : ['No missing-data evidence in this sample.']).map(escapeHtml).join('<br>')}</div></div>
+      </div>
+      <h3>Evidence Log</h3>
+      ${evidence.length ? `<table class="journal-table"><tbody>${evidence.map(item => `<tr><td>${escapeHtml(item.observation)}</td><td>${escapeHtml(item.evidence)}</td><td>${escapeHtml((item.trades_affected || []).join(', '))}</td><td>${escapeHtml(item.possible_future_improvement)}</td><td>${escapeHtml(item.confidence)}</td></tr>`).join('')}</tbody></table>` : '<div class="analytics-empty">No evidence log items yet.</div>'}
     </div>`;
 }
 
