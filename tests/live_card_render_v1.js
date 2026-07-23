@@ -502,7 +502,7 @@ context.document.getElementById = id => warmingElements[id] || elementStub();
 vm.runInContext('scannerRows = []; scannerNearMiss = []; latestScannerMeta = { cache_key: "discovered", universe: "discovered", status: "warming" };', context);
 context.renderScannerResults();
 assert.ok(
-  warmingElements.results.innerHTML.includes('Discovered universe is refreshing. Check back shortly.'),
+  warmingElements.results.innerHTML.includes('Discovering the market...'),
   'Discovered warming state should use discovered-specific user-facing copy'
 );
 context.document.getElementById = originalGetElementById;
@@ -1092,6 +1092,191 @@ context.fetch = (url, options = {}) => {
 };
 
 (async () => {
+const scannerLifecycleElements = {
+  scanBtn: elementStub(),
+  status: elementStub(),
+  results: elementStub(),
+  summary: elementStub(),
+  universeFilter: { ...elementStub(), value: 'discovered' },
+  dataStatus: elementStub(),
+  marketCoverage: elementStub(),
+  marketSnapshot: elementStub(),
+  marketIntelligence: elementStub(),
+  topOpportunities: elementStub(),
+  statusFilter: elementStub(),
+  qualityFilter: elementStub(),
+  directionFilter: elementStub(),
+  contractTypeFilter: elementStub(),
+  sortFilter: elementStub(),
+  tickerInput: elementStub(),
+  'near-miss-section': elementStub(),
+  'near-miss-results': elementStub(),
+  'near-miss-header': elementStub(),
+};
+scannerLifecycleElements.statusFilter.value = 'all';
+scannerLifecycleElements.statusFilter.selectedOptions = [{ textContent: 'All Statuses' }];
+scannerLifecycleElements.qualityFilter.value = 'all';
+scannerLifecycleElements.qualityFilter.selectedOptions = [{ textContent: 'All Setup Quality' }];
+scannerLifecycleElements.directionFilter.value = 'all';
+scannerLifecycleElements.directionFilter.selectedOptions = [{ textContent: 'All Directions' }];
+scannerLifecycleElements.contractTypeFilter.value = 'all';
+scannerLifecycleElements.contractTypeFilter.selectedOptions = [{ textContent: 'All Contracts' }];
+scannerLifecycleElements.sortFilter.value = 'RANK';
+scannerLifecycleElements.sortFilter.selectedOptions = [{ textContent: 'Opportunity Rank' }];
+scannerLifecycleElements.tickerInput.value = '';
+const originalFetchWithTimeoutForScannerLifecycle = context.fetchWithTimeout;
+const originalSetTimeoutForScannerLifecycle = context.setTimeout;
+const previousGetElementByIdForScannerLifecycle = context.document.getElementById;
+context.document.getElementById = id => scannerLifecycleElements[id] || elementStub();
+
+vm.runInContext(`
+  globalThis.__savedLifecycleRenderScannerResults = renderScannerResults;
+  globalThis.__savedLifecycleRenderExecutionTab = renderExecutionTab;
+  globalThis.__savedLifecycleRenderFurtherAnalysisTab = renderFurtherAnalysisTab;
+  globalThis.__savedLifecycleRenderPositionsTab = renderPositionsTab;
+  globalThis.__savedLifecycleDetectStockAlertEvents = detectStockAlertEvents;
+  globalThis.__savedLifecycleDeliverStockAlertEvent = deliverStockAlertEvent;
+  globalThis.__savedLifecycleEvaluatePositionAlertNotifications = evaluatePositionAlertNotifications;
+  globalThis.__savedLifecycleRefreshExpectedMoveTrackingFromRows = refreshExpectedMoveTrackingFromRows;
+  globalThis.__savedLifecycleRecordEnterNowFunnelSnapshot = recordEnterNowFunnelSnapshot;
+  globalThis.__savedLifecycleFetchWithTimeout = fetchWithTimeout;
+  globalThis.__savedLifecycleSetTimeout = setTimeout;
+  renderScannerResults = () => {
+    globalThis.__scannerLifecycleRenderCount += 1;
+    document.getElementById('results').innerHTML = 'completed result rendered';
+  };
+  renderExecutionTab = () => {};
+  renderFurtherAnalysisTab = () => {};
+  renderPositionsTab = () => {};
+  detectStockAlertEvents = () => [];
+  deliverStockAlertEvent = () => {};
+  evaluatePositionAlertNotifications = () => {};
+  refreshExpectedMoveTrackingFromRows = () => {};
+  recordEnterNowFunnelSnapshot = () => {};
+`, context);
+context.__scannerLifecycleRenderCount = 0;
+
+const completedNoSetupPayload = {
+  rows: Array.from({ length: 715 }, (_, index) => ({ ticker: `T${index}`, direction: 'LONG', setupGrade: 'B', best_contract: { available: false, source: 'option_plan' } })),
+  near_miss: [],
+  meta: {
+    status: 'complete',
+    universe: 'discovered',
+    cache_key: 'discovered',
+    symbols_attempted: 750,
+    symbols_terminally_evaluated: 750,
+    symbols_successfully_processed: 715,
+    symbols_with_setup: 715,
+    symbols_without_setup: 35,
+    symbols_operationally_failed: 0,
+    evaluation_coverage_percent: 100,
+    partial_result: false,
+    partial_result_reasons: [],
+  },
+};
+let scannerLifecyclePollScheduled = false;
+context.setTimeout = () => { scannerLifecyclePollScheduled = true; return 1; };
+context.fetchWithTimeout = (url) => {
+  assert.strictEqual(url, '/api/scan');
+  return Promise.resolve({ ok: true, json: () => Promise.resolve(completedNoSetupPayload) });
+};
+await context.runScan();
+assert.strictEqual(scannerLifecycleElements.scanBtn.disabled, false);
+assert.strictEqual(scannerLifecyclePollScheduled, false);
+assert.ok(context.__scannerLifecycleRenderCount >= 1);
+assert.strictEqual(vm.runInContext('scannerRows.length', context), 715);
+assert.strictEqual(vm.runInContext('latestScannerMeta.partial_result', context), false);
+assert.strictEqual(vm.runInContext('latestScannerMeta.symbols_terminally_evaluated', context), 750);
+assert.ok(!scannerLifecycleElements.status.innerHTML.includes('spinner'), 'completed scan should clear spinner even when rows returned are fewer than attempted');
+
+let warmingPollCallback = null;
+let warmingFetchCount = 0;
+context.__scannerLifecycleRenderCount = 0;
+context.setTimeout = cb => { warmingPollCallback = cb; return 1; };
+context.fetchWithTimeout = (url) => {
+  assert.strictEqual(url, '/api/scan', 'warming poll must not use refresh=true');
+  warmingFetchCount += 1;
+  const payload = warmingFetchCount === 1
+    ? { rows: [], near_miss: [], meta: { status: 'warming', universe: 'discovered', cache_key: 'discovered', cache: 'miss', has_cache: false, refreshing: true, generated_at: null } }
+    : { ...completedNoSetupPayload, rows: completedNoSetupPayload.rows.slice(0, 1), meta: { ...completedNoSetupPayload.meta, symbols_successfully_processed: 1, symbols_with_setup: 1, symbols_without_setup: 749 } };
+  return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
+};
+await context.runScan();
+assert.strictEqual(scannerLifecycleElements.scanBtn.disabled, true);
+assert.strictEqual(typeof warmingPollCallback, 'function');
+assert.ok(scannerLifecycleElements.status.innerHTML.includes('Discovering the market'));
+warmingPollCallback();
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.strictEqual(warmingFetchCount, 2);
+assert.strictEqual(scannerLifecycleElements.scanBtn.disabled, false);
+assert.ok(!scannerLifecycleElements.status.innerHTML.includes('spinner'), 'warming poll should clear spinner after complete response');
+
+context.__scannerLifecycleRenderCount = 0;
+context.setTimeout = () => { throw new Error('partial scans should not schedule warming polls'); };
+context.fetchWithTimeout = () => Promise.resolve({
+  ok: true,
+  json: () => Promise.resolve({
+    ...completedNoSetupPayload,
+    meta: {
+      ...completedNoSetupPayload.meta,
+      partial_result: true,
+      partial_result_reasons: [{ stage: 'market_data', reason: 'provider_timeout', count: 1 }],
+      symbols_operationally_failed: 1,
+    },
+  }),
+});
+await context.runScan();
+assert.strictEqual(scannerLifecycleElements.scanBtn.disabled, false);
+assert.ok(context.__scannerLifecycleRenderCount >= 1);
+assert.ok(!scannerLifecycleElements.status.innerHTML.includes('spinner'), 'operationally partial scans are finished requests and should clear spinner');
+
+vm.runInContext('renderScannerResults = () => { throw new Error("render exploded"); };', context);
+context.fetchWithTimeout = () => Promise.resolve({ ok: true, json: () => Promise.resolve(completedNoSetupPayload) });
+await context.runScan();
+assert.strictEqual(scannerLifecycleElements.scanBtn.disabled, false);
+assert.ok(scannerLifecycleElements.status.textContent.includes('Error: render exploded'));
+assert.ok(scannerLifecycleElements.results.innerHTML.includes('Full scan is still unavailable'));
+vm.runInContext(`
+  renderScannerResults = () => {
+    globalThis.__scannerLifecycleRenderCount += 1;
+    document.getElementById('results').innerHTML = 'completed result rendered';
+  };
+`, context);
+
+let duplicateFetchCount = 0;
+let releaseDuplicateFetch;
+const duplicateFetchPromise = new Promise(resolve => { releaseDuplicateFetch = resolve; });
+context.fetchWithTimeout = () => {
+  duplicateFetchCount += 1;
+  return duplicateFetchPromise;
+};
+const firstDuplicateScan = context.runScan();
+const secondDuplicateScan = context.runScan();
+assert.strictEqual(await secondDuplicateScan, null);
+assert.strictEqual(duplicateFetchCount, 1, 'duplicate runScan calls should not overlap full discovered scans');
+releaseDuplicateFetch({ ok: true, json: () => Promise.resolve(completedNoSetupPayload) });
+await firstDuplicateScan;
+assert.strictEqual(scannerLifecycleElements.scanBtn.disabled, false);
+
+context.fetchWithTimeout = originalFetchWithTimeoutForScannerLifecycle;
+context.setTimeout = originalSetTimeoutForScannerLifecycle;
+context.document.getElementById = previousGetElementByIdForScannerLifecycle;
+vm.runInContext(`
+  renderScannerResults = globalThis.__savedLifecycleRenderScannerResults;
+  renderExecutionTab = globalThis.__savedLifecycleRenderExecutionTab;
+  renderFurtherAnalysisTab = globalThis.__savedLifecycleRenderFurtherAnalysisTab;
+  renderPositionsTab = globalThis.__savedLifecycleRenderPositionsTab;
+  detectStockAlertEvents = globalThis.__savedLifecycleDetectStockAlertEvents;
+  deliverStockAlertEvent = globalThis.__savedLifecycleDeliverStockAlertEvent;
+  evaluatePositionAlertNotifications = globalThis.__savedLifecycleEvaluatePositionAlertNotifications;
+  refreshExpectedMoveTrackingFromRows = globalThis.__savedLifecycleRefreshExpectedMoveTrackingFromRows;
+  recordEnterNowFunnelSnapshot = globalThis.__savedLifecycleRecordEnterNowFunnelSnapshot;
+  fetchWithTimeout = globalThis.__savedLifecycleFetchWithTimeout;
+  setTimeout = globalThis.__savedLifecycleSetTimeout;
+`, context);
+context.fetchWithTimeout = (url, options = {}) => context.fetch(url, options);
+vm.runInContext('fetchWithTimeout = globalThis.fetchWithTimeout;', context);
+
 const result = await context.connectJournalAdminToken();
 assert.strictEqual(result.authenticated, false);
 assert.strictEqual(result.status, 403);

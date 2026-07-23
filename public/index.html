@@ -3387,6 +3387,13 @@ let contractRefreshTimer = null;
 let contractRefreshAttempts = 0;
 const CONTRACT_PENDING_MAX_ATTEMPTS = 4;
 let contractPendingTimedOutKeys = new Set();
+let scannerRequestController = null;
+let scannerRequestGeneration = 0;
+let scannerWarmingPollTimer = null;
+let scannerWarmingPollAttempts = 0;
+const SCANNER_SCAN_TIMEOUT_MS = 120000;
+const SCANNER_WARMING_POLL_INTERVAL_MS = 15000;
+const SCANNER_WARMING_MAX_POLLS = 20;
 let indexContractRefreshTimer = null;
 let indexContractRefreshAttempts = 0;
 let indexContractPendingTimedOutKeys = new Set();
@@ -3694,6 +3701,8 @@ function scannerScanUrl({ refresh = false } = {}) {
 }
 
 function handleUniverseChange() {
+  clearScannerWarmingPoll();
+  abortActiveScannerRequest();
   clearContractRefreshPoll();
   scannerRows = [];
   scannerNearMiss = [];
@@ -3702,6 +3711,44 @@ function handleUniverseChange() {
   contractPendingTimedOutKeys = new Set();
   renderScannerResults();
   runScan();
+}
+
+function clearScannerWarmingPoll() {
+  if (scannerWarmingPollTimer) {
+    clearTimeout(scannerWarmingPollTimer);
+    scannerWarmingPollTimer = null;
+  }
+}
+
+function abortActiveScannerRequest() {
+  if (scannerRequestController) {
+    scannerRequestController.abort();
+    scannerRequestController = null;
+  }
+}
+
+function isDiscoveredWarmingMeta(meta = {}) {
+  const universe = String(meta.universe || meta.cache_key || '').toLowerCase();
+  const status = String(meta.status || '').toLowerCase();
+  return universe === 'discovered'
+    && status === 'warming'
+    && !meta.generated_at
+    && (meta.cache === 'miss' || meta.has_cache === false || meta.refreshing === true);
+}
+
+function isCompletedScanMeta(meta = {}) {
+  if (!meta || String(meta.status || '').toLowerCase() === 'warming') return false;
+  if (meta.partial_result === true || meta.partial_result === false) return true;
+  if (meta.generated_at || meta.scan_completed_at) return true;
+  const attempted = Number(meta.symbols_attempted ?? meta.configured_universe_count);
+  const terminal = Number(meta.symbols_terminally_evaluated);
+  return Number.isFinite(attempted) && attempted >= 0
+    && Number.isFinite(terminal)
+    && terminal >= attempted;
+}
+
+function shouldRenderCompletedScan(meta = {}) {
+  return isCompletedScanMeta(meta) && !isDiscoveredWarmingMeta(meta);
 }
 
 function setupHasDatedEarnings(setup = {}) {
@@ -3750,53 +3797,71 @@ function preservePriorEarningsRows(nextRows = [], previousRows = []) {
   });
 }
 
-async function runScan() {
-  const btn     = document.getElementById('scanBtn');
+async function runScan(options = {}) {
+  const polling = Boolean(options.polling);
   const status  = document.getElementById('status');
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
 
-  btn.disabled = true;
+  if (scannerRequestController) return null;
+
   clearContractRefreshPoll();
-  contractRefreshAttempts = 0;
-  contractPendingTimedOutKeys = new Set();
-  status.innerHTML = '<span class="spinner"></span>Scanning...';
-  results.innerHTML = renderLoadingSkeletonCards(4);
-  summary.textContent = '';
+  if (!polling) {
+    clearScannerWarmingPoll();
+    scannerWarmingPollAttempts = 0;
+    contractRefreshAttempts = 0;
+    contractPendingTimedOutKeys = new Set();
+    setScannerLoadingState(true, '<span class="spinner"></span>Scanning...');
+    if (results) results.innerHTML = renderLoadingSkeletonCards(4);
+    if (summary) summary.textContent = '';
+  } else {
+    setScannerLoadingState(true, '<span class="spinner"></span>Discovering the market...');
+  }
+
+  const requestGeneration = ++scannerRequestGeneration;
+  const controller = new AbortController();
+  scannerRequestController = controller;
   let scanMeta = null;
+  let keepLoadingForWarming = false;
+  let hadError = false;
 
   try {
-    const res  = await fetchWithTimeout(scannerScanUrl(), {}, 15000);
+    const res = await fetchWithTimeout(scannerScanUrl(), { signal: controller.signal }, SCANNER_SCAN_TIMEOUT_MS);
+    if (!res.ok) throw new Error(`Scan failed with HTTP ${res.status}`);
     const data = await res.json();
-    scanMeta = data.meta || null;
-    latestScannerMeta = scanMeta;
-    updateDataStatus(scanMeta || {});
+    if (requestGeneration !== scannerRequestGeneration) return null;
+    scanMeta = data.meta || {};
 
-    const previousRows = [...scannerRows, ...scannerNearMiss];
-    const nextRows = preservePriorEarningsRows(normalizeScanRowsForClient(data.rows || []), previousRows);
-    const nextNearMiss = preservePriorEarningsRows(normalizeScanRowsForClient(data.near_miss || []), previousRows);
-    const stockAlerts = detectStockAlertEvents([...nextRows, ...nextNearMiss], scanMeta || {});
-    aPlusReadyAlerts = new Set(stockAlerts.filter(a => a.type === 'ENTER_NOW').map(a => a.setup?.ticker));
-    stockAlerts.forEach(deliverStockAlertEvent);
-
-    scannerRows = nextRows;
-    scannerNearMiss = nextNearMiss;
-    recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
-    refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
-    evaluatePositionAlertNotifications();
-    renderScannerResults();
-    renderExecutionTab();
-    renderFurtherAnalysisTab();
-    renderPositionsTab();
-    if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
-      scheduleContractRefreshPoll();
+    if (isDiscoveredWarmingMeta(scanMeta)) {
+      renderScannerWarming(data);
+      keepLoadingForWarming = true;
+      scheduleScannerWarmingPoll();
+      return data;
     }
+
+    applyScanPayload(data);
+    if (shouldRenderCompletedScan(scanMeta)) {
+      clearScannerWarmingPoll();
+    }
+    return data;
   } catch (e) {
-    status.textContent = `Error: ${e.message}`;
-    results.innerHTML = '<div class="empty">Full scan is still unavailable.</div>';
+    if (e?.name === 'AbortError') return null;
+    hadError = true;
+    clearScannerWarmingPoll();
+    if (status) status.textContent = `Error: ${e.message}`;
+    if (results) results.innerHTML = '<div class="empty">Full scan is still unavailable. Check the connection and try again.</div>';
+    return null;
   } finally {
-    btn.disabled = false;
-    status.innerHTML = status.innerHTML.includes('Error') ? status.innerHTML : scanStatusText(scanMeta);
+    if (scannerRequestController === controller) {
+      scannerRequestController = null;
+    }
+    if (requestGeneration === scannerRequestGeneration) {
+      if (keepLoadingForWarming) {
+        setScannerLoadingState(true, '<span class="spinner"></span>Discovering the market...');
+      } else {
+        setScannerLoadingState(false, hadError ? (status?.innerHTML || '') : scanStatusText(scanMeta));
+      }
+    }
   }
 }
 
@@ -3881,11 +3946,20 @@ async function loadIndexWatchlist(options = {}) {
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
+  const externalSignal = options.signal;
+  if (externalSignal?.aborted) controller.abort();
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.addEventListener) {
+    externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { cache: 'no-store', ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+    if (externalSignal?.removeEventListener) {
+      externalSignal.removeEventListener('abort', abortFromExternal);
+    }
   }
 }
 
@@ -4238,9 +4312,65 @@ function updateDataStatus(meta = {}) {
 
 function scannerWarmingMessage(meta = latestScannerMeta || {}) {
   if (meta?.universe === 'discovered' || meta?.cache_key === 'discovered') {
-    return 'Discovered universe is refreshing. Check back shortly.';
+    return 'Discovering the market...';
   }
   return 'Kairos is warming market data. Try Scan again in a moment.';
+}
+
+function setScannerLoadingState(isLoading, message = '') {
+  const btn = document.getElementById('scanBtn');
+  const status = document.getElementById('status');
+  if (btn) btn.disabled = Boolean(isLoading);
+  if (status) status.innerHTML = message;
+}
+
+function applyScanPayload(data = {}) {
+  const scanMeta = data.meta || {};
+  latestScannerMeta = scanMeta;
+  updateDataStatus(scanMeta || {});
+
+  const previousRows = [...scannerRows, ...scannerNearMiss];
+  const nextRows = preservePriorEarningsRows(normalizeScanRowsForClient(data.rows || []), previousRows);
+  const nextNearMiss = preservePriorEarningsRows(normalizeScanRowsForClient(data.near_miss || []), previousRows);
+  const stockAlerts = detectStockAlertEvents([...nextRows, ...nextNearMiss], scanMeta || {});
+  aPlusReadyAlerts = new Set(stockAlerts.filter(a => a.type === 'ENTER_NOW').map(a => a.setup?.ticker));
+  stockAlerts.forEach(deliverStockAlertEvent);
+
+  scannerRows = nextRows;
+  scannerNearMiss = nextNearMiss;
+  recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
+  refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
+  evaluatePositionAlertNotifications();
+  renderScannerResults();
+  renderExecutionTab();
+  renderFurtherAnalysisTab();
+  renderPositionsTab();
+  if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
+    scheduleContractRefreshPoll();
+  }
+  return scanMeta;
+}
+
+function renderScannerWarming(data = {}) {
+  latestScannerMeta = data.meta || latestScannerMeta || {};
+  updateDataStatus(latestScannerMeta || {});
+  scannerRows = [];
+  scannerNearMiss = [];
+  renderScannerResults();
+}
+
+function scheduleScannerWarmingPoll() {
+  clearScannerWarmingPoll();
+  if (scannerWarmingPollAttempts >= SCANNER_WARMING_MAX_POLLS) {
+    setScannerLoadingState(false, 'Discovery is still warming. Try Scan again shortly.');
+    return;
+  }
+  scannerWarmingPollAttempts += 1;
+  scannerWarmingPollTimer = setTimeout(() => {
+    runScan({ polling: true }).catch(e => {
+      console.warn('[Scanner] warming poll failed:', e);
+    });
+  }, SCANNER_WARMING_POLL_INTERVAL_MS);
 }
 
 async function loadCacheStatus() {
