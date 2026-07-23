@@ -11,6 +11,7 @@ from position_intelligence import coerce_number, first_present
 TRADE_INTELLIGENCE_VERSION = "trade-intelligence-v1"
 DEFAULT_EXACT_MIN_TRADES = 30
 DEFAULT_BROAD_MIN_TRADES = 100
+EXCLUSION_SAMPLE_LIMIT = 5
 
 
 def _upper(value: Any) -> str:
@@ -105,6 +106,40 @@ def broad_key(dimensions: dict[str, str]) -> tuple[str, ...]:
         dimensions["confirmation"],
         dimensions["market_regime"],
     )
+
+
+def display_label(value: Any) -> str:
+    raw = _text(value)
+    if not raw or raw.lower() == "unknown":
+        return "Unknown"
+    return raw.replace("_", " ").title()
+
+
+def exact_group_label(key: tuple[str, ...]) -> str:
+    symbol, direction, grade, lifecycle, timeframe, location, confirmation = key
+    parts = [
+        symbol,
+        display_label(direction),
+        f"{display_label(grade)} Grade" if grade and grade.lower() != "unknown" else "Unknown Grade",
+        display_label(lifecycle),
+        timeframe,
+        display_label(location),
+        display_label(confirmation),
+    ]
+    return " · ".join(part for part in parts if part and part != "Unknown")
+
+
+def broad_group_label(key: tuple[str, ...]) -> str:
+    direction, grade, timeframe, location, confirmation, market_regime = key
+    parts = [
+        display_label(direction),
+        f"{display_label(grade)} Grade" if grade and grade.lower() != "unknown" else "Unknown Grade",
+        timeframe,
+        display_label(location),
+        display_label(confirmation),
+        display_label(market_regime),
+    ]
+    return " · ".join(part for part in parts if part and part != "Unknown")
 
 
 def _verified_record(entry: dict[str, Any], replay: dict[str, Any], verification: dict[str, Any]) -> dict[str, Any] | None:
@@ -230,6 +265,115 @@ def confidence_drivers(group_records: list[dict[str, Any]], baseline_records: li
     return drivers[:4]
 
 
+def group_progress_rows(groups: dict[tuple[str, ...], list[dict[str, Any]]], threshold: int, group_type: str, limit: int = 5) -> list[dict[str, Any]]:
+    rows = []
+    for key, records in groups.items():
+        count = len(records)
+        if count <= 0:
+            continue
+        rows.append({
+            "group_type": group_type,
+            "key": json_key(key),
+            "label": exact_group_label(key) if group_type == "exact" else broad_group_label(key),
+            "verified_trades": count,
+            "threshold": threshold,
+            "progress_percent": round(min(100, (count / threshold) * 100), 1) if threshold else 0,
+            "eligible": count >= threshold,
+        })
+    return sorted(rows, key=lambda row: (-row["progress_percent"], -row["verified_trades"], row["label"]))[:limit]
+
+
+def _safe_identifier(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "journal_id": entry.get("journal_id"),
+        "position_id": entry.get("position_id"),
+        "ticker": entry.get("ticker"),
+    }
+
+
+def trade_intelligence_eligibility_funnel(
+    entries: list[dict[str, Any]],
+    replays: list[dict[str, Any]],
+    analytics_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    replay_by_position = {str(replay.get("position_id")): replay for replay in replays if replay.get("position_id")}
+    verification_by_position = {
+        str(record.get("position_id")): record.get("analytics_verification") or {}
+        for record in analytics_records
+        if record.get("position_id")
+    }
+    counts = Counter()
+    exclusions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    completed_entries = 0
+    for entry in entries:
+        position_id = str(entry.get("position_id") or "")
+        verification = verification_by_position.get(position_id) or {}
+        status = _upper(verification.get("status") or "REPLAY_PENDING")
+        replay = replay_by_position.get(position_id)
+        if status == "NOT_APPLICABLE":
+            counts["not_applicable_count"] += 1
+            counts["not_completed_count"] += 1
+            reason = "NOT_COMPLETED"
+        else:
+            completed_entries += 1
+            counts["completed_journal_count"] += 1
+            if replay:
+                counts["replay_available_count"] += 1
+            if replay and replay.get("data_complete"):
+                counts["replay_data_complete_count"] += 1
+            if status == "VERIFIED":
+                record = _verified_record(entry, replay, verification)
+                if record:
+                    counts["verified_match_count"] += 1
+                    counts["eligible_trade_intelligence_count"] += 1
+                    continue
+                reason = "MISSING_REQUIRED_FEATURES"
+            elif not replay:
+                reason = "NO_REPLAY"
+                counts["replay_pending_count"] += 1
+            elif status == "REPLAY_PENDING":
+                reason = "REPLAY_PENDING"
+                counts["replay_pending_count"] += 1
+            elif status == "INSUFFICIENT_REPLAY_DATA":
+                reason = "REPLAY_DATA_INCOMPLETE"
+                counts["insufficient_replay_data_count"] += 1
+            elif status == "JOURNAL_REPLAY_MISMATCH":
+                reason = "JOURNAL_REPLAY_MISMATCH"
+                counts["journal_replay_mismatch_count"] += 1
+            elif status == "JOURNAL_ONLY":
+                reason = "JOURNAL_ONLY"
+                counts["journal_only_count"] += 1
+            else:
+                reason = "UNSUPPORTED_OUTCOME"
+        counts["excluded_count"] += 1
+        if len(exclusions[reason]) < EXCLUSION_SAMPLE_LIMIT:
+            exclusions[reason].append(_safe_identifier(entry))
+    completed_excluded = counts["excluded_count"] - counts["not_completed_count"]
+    return {
+        "journal_record_count": len(entries),
+        "completed_journal_count": counts["completed_journal_count"],
+        "replay_available_count": counts["replay_available_count"],
+        "replay_data_complete_count": counts["replay_data_complete_count"],
+        "verified_match_count": counts["verified_match_count"],
+        "eligible_trade_intelligence_count": counts["eligible_trade_intelligence_count"],
+        "journal_replay_mismatch_count": counts["journal_replay_mismatch_count"],
+        "journal_only_count": counts["journal_only_count"],
+        "replay_pending_count": counts["replay_pending_count"],
+        "insufficient_replay_data_count": counts["insufficient_replay_data_count"],
+        "not_applicable_count": counts["not_applicable_count"],
+        "not_completed_count": counts["not_completed_count"],
+        "excluded_count": counts["excluded_count"],
+        "exclusion_reasons": {key: len(value) for key, value in sorted(exclusions.items())},
+        "exclusion_samples": dict(sorted(exclusions.items())),
+        "reconciliation": {
+            "journal_records_reconciled": counts["eligible_trade_intelligence_count"] + counts["excluded_count"] == len(entries),
+            "completed_records_reconciled": counts["eligible_trade_intelligence_count"] + completed_excluded == completed_entries,
+            "included_plus_excluded": counts["eligible_trade_intelligence_count"] + counts["excluded_count"],
+            "completed_included_plus_excluded": counts["eligible_trade_intelligence_count"] + completed_excluded,
+        },
+    }
+
+
 def build_trade_intelligence_snapshot(
     verified_records: list[dict[str, Any]],
     exact_min_trades: int = DEFAULT_EXACT_MIN_TRADES,
@@ -253,6 +397,29 @@ def build_trade_intelligence_snapshot(
         "generated_at": started.isoformat().replace("+00:00", "Z"),
         "verified_trade_count": len(verified_records),
         "thresholds": {"exact_min_trades": exact_min_trades, "broad_min_trades": broad_min_trades},
+        "knowledge_growth": {
+            "verified_trades_collected": len(verified_records),
+            "exact_threshold": exact_min_trades,
+            "broader_threshold": broad_min_trades,
+            "exact_threshold_progress": {
+                "current": min(len(verified_records), exact_min_trades),
+                "required": exact_min_trades,
+                "label": f"{min(len(verified_records), exact_min_trades)} of {exact_min_trades}",
+            },
+            "broader_threshold_progress": {
+                "current": min(len(verified_records), broad_min_trades),
+                "required": broad_min_trades,
+                "label": f"{min(len(verified_records), broad_min_trades)} of {broad_min_trades}",
+            },
+            "status": "Ready" if any(len(records) >= exact_min_trades for records in exact_groups.values()) or any(len(records) >= broad_min_trades for records in broad_groups.values()) else "Building verified history",
+            "clarification": "Insights unlock when enough verified trades share similar setup characteristics.",
+            "closest_exact_groups": group_progress_rows(exact_groups, exact_min_trades, "exact"),
+            "closest_broader_groups": group_progress_rows(broad_groups, broad_min_trades, "broader"),
+            "eligible_exact_groups": sum(1 for records in exact_groups.values() if len(records) >= exact_min_trades),
+            "eligible_broader_groups": sum(1 for records in broad_groups.values() if len(records) >= broad_min_trades),
+            "insufficient_exact_groups": sum(1 for records in exact_groups.values() if len(records) < exact_min_trades),
+            "insufficient_broader_groups": sum(1 for records in broad_groups.values() if len(records) < broad_min_trades),
+        },
         "diagnostics": {
             "cache_status": "rebuilt",
             "sample_sizes": {
@@ -344,6 +511,16 @@ def similar_trade_insight(
             "dimensions": dimensions,
             "exact_match_count": len(exact_records),
             "broader_match_count": len(broad_records),
+            "exact_progress": {
+                "current": len(exact_records),
+                "required": exact_min_trades,
+                "label": f"{len(exact_records)} of {exact_min_trades}",
+            },
+            "broader_progress": {
+                "current": len(broad_records),
+                "required": broad_min_trades,
+                "label": f"{len(broad_records)} of {broad_min_trades}",
+            },
             "thresholds": {"exact_min_trades": exact_min_trades, "broad_min_trades": broad_min_trades},
         }
     metrics = group_metrics(selected)

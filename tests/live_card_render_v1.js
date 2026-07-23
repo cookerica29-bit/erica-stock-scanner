@@ -329,8 +329,10 @@ const tradeIntelEmpty = context.renderTradeIntelligenceInsight({
   thresholds: { exact_min_trades: 30, broad_min_trades: 100 },
 });
 assert.ok(tradeIntelEmpty.includes('Not enough verified historical data yet.'));
-assert.ok(tradeIntelEmpty.includes('Exact matches: 2 / 30'));
-assert.ok(tradeIntelEmpty.includes('Broader matches: 14 / 100'));
+assert.ok(tradeIntelEmpty.includes('2 of the 30 verified similar trades required for this exact group.'));
+assert.ok(tradeIntelEmpty.includes('Exact group: 2 of 30'));
+assert.ok(tradeIntelEmpty.includes('Broader comparison: 14 of 100'));
+assert.ok(!tradeIntelEmpty.includes('TP1 Success'), 'insufficient Trade Intelligence should not show premature rates');
 
 const tradeIntelReady = context.renderTradeIntelligenceInsight({
   available: true,
@@ -366,6 +368,57 @@ assert.strictEqual(tradeIntelPayload.ticker, 'OXY');
 assert.strictEqual(tradeIntelPayload.direction, 'SHORT');
 assert.strictEqual(tradeIntelPayload.grade, 'A');
 assert.strictEqual(tradeIntelPayload.scanner_timeframe, '4H');
+
+const tradeIntelDashboard = elementStub();
+const tradeIntelDiag = elementStub();
+const previousTradeIntelGetElementById = context.document.getElementById;
+storage.stock_scanner_journal_server_authoritative = 'true';
+storage.kairos_journal_admin_token = 'secret';
+context.document.getElementById = id => {
+  if (id === 'tradeIntelligenceDashboard') return tradeIntelDashboard;
+  if (id === 'tradeIntelligenceDiagnostics') return tradeIntelDiag;
+  return previousTradeIntelGetElementById(id);
+};
+context.renderTradeIntelligenceDashboard({
+  version: 'trade-intelligence-v1',
+  verified_trade_count: 7,
+  message: 'Not enough verified historical data yet.',
+  thresholds: { exact_min_trades: 30, broad_min_trades: 100 },
+  knowledge_growth: {
+    verified_trades_collected: 7,
+    exact_threshold_progress: { label: '7 of 30' },
+    broader_threshold_progress: { label: '7 of 100' },
+    status: 'Building verified history',
+    clarification: 'Insights unlock when enough verified trades share similar setup characteristics.',
+    closest_exact_groups: [{ label: 'OXY · Short · A Grade', verified_trades: 7, threshold: 30, progress_percent: 23.3 }],
+    closest_broader_groups: [{ label: 'Short · A Grade', verified_trades: 7, threshold: 100, progress_percent: 7 }],
+    eligible_exact_groups: 0,
+    eligible_broader_groups: 0,
+  },
+  data_quality: { eligible_verified_trades: 7, needs_review: 1, replay_pending: 3, journal_only: 2 },
+  diagnostics: {
+    cache_status: 'hit',
+    sample_sizes: { verified_records: 7, exact_groups: 1, broad_groups: 1 },
+    similarity_dimensions_used: ['symbol', 'direction'],
+  },
+  eligibility_funnel: {
+    completed_journal_count: 13,
+    replay_available_count: 10,
+    replay_data_complete_count: 8,
+    verified_match_count: 7,
+    eligible_trade_intelligence_count: 7,
+    reconciliation: { journal_records_reconciled: true, completed_records_reconciled: true },
+    exclusion_reasons: { JOURNAL_REPLAY_MISMATCH: 1 },
+  },
+});
+assert.ok(tradeIntelDashboard.innerHTML.includes('Kairos Knowledge Growth'));
+assert.ok(tradeIntelDashboard.innerHTML.includes('7 of 30'));
+assert.ok(tradeIntelDashboard.innerHTML.includes('Closest Exact Groups to Unlocking'));
+assert.ok(tradeIntelDashboard.innerHTML.includes('Trade Intelligence Data Quality'));
+assert.ok(!tradeIntelDashboard.innerHTML.includes('Most Reliable Symbols'), 'dashboard should not publish conclusion tables below thresholds');
+context.document.getElementById = previousTradeIntelGetElementById;
+delete storage.stock_scanner_journal_server_authoritative;
+delete storage.kairos_journal_admin_token;
 
 const missingPlanFallback = htmlFor(setup({ entry: null, sl: null, tp1: null }));
 assert.ok(!missingPlanFallback.includes('data-plan-visual="risk-reward"'));

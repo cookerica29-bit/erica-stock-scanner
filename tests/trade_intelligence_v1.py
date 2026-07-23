@@ -13,7 +13,9 @@ from trade_intelligence import (
     TRADE_INTELLIGENCE_VERSION,
     build_trade_intelligence_snapshot,
     build_verified_trade_records,
+    group_metrics,
     similar_trade_insight,
+    trade_intelligence_eligibility_funnel,
 )
 
 
@@ -71,6 +73,27 @@ def analytics_record(index=0, status="VERIFIED"):
     return {
         "position_id": f"p-{index}",
         "analytics_verification": {"status": status},
+    }
+
+
+def independent_metrics(records):
+    total = len(records)
+    tp1_count = sum(1 for item in records if item["replay"].get("tp1_timestamp"))
+    tp2_count = sum(1 for item in records if item["replay"].get("tp2_timestamp"))
+    tp3_count = sum(1 for item in records if item["replay"].get("tp3_timestamp"))
+    stop_count = sum(1 for item in records if item["replay"].get("stop_timestamp"))
+    final_rs = sorted(float(item["replay"]["final_r"]) for item in records)
+    mid = len(final_rs) // 2
+    median_r = final_rs[mid] if len(final_rs) % 2 else (final_rs[mid - 1] + final_rs[mid]) / 2
+    return {
+        "tp1_rate": round(tp1_count / total * 100, 1),
+        "tp2_rate": round(tp2_count / total * 100, 1),
+        "tp3_rate": round(tp3_count / total * 100, 1),
+        "stop_rate": round(stop_count / total * 100, 1),
+        "average_r": round(sum(float(item["replay"]["final_r"]) for item in records) / total, 2),
+        "median_r": round(median_r, 2),
+        "average_maximum_favorable_excursion_r": round(sum(float(item["replay"]["MFE"]) for item in records) / total, 2),
+        "average_maximum_drawdown_r": round(sum(abs(float(item["replay"]["MAE"])) for item in records) / total, 2),
     }
 
 
@@ -137,6 +160,117 @@ def test_dashboard_summaries_display_sample_sizes():
     assert first_symbol["tp1_rate"] == 100.0
 
 
+def test_eligibility_funnel_reconciles_included_and_excluded_records():
+    entries = [
+        entry(0, result="Open", outcome=""),
+        entry(1),
+        entry(2),
+        entry(3),
+        entry(4),
+    ]
+    replays = [
+        replay(1),
+        replay(2, data_complete=False),
+        replay(3, tp1_timestamp=None, stop_timestamp="2026-07-03T18:00:00Z", outcome_category="STOP_DETECTED"),
+    ]
+    analytics = [
+        analytics_record(0, "NOT_APPLICABLE"),
+        analytics_record(1, "VERIFIED"),
+        analytics_record(2, "INSUFFICIENT_REPLAY_DATA"),
+        analytics_record(3, "JOURNAL_REPLAY_MISMATCH"),
+        analytics_record(4, "REPLAY_PENDING"),
+    ]
+    funnel = trade_intelligence_eligibility_funnel(entries, replays, analytics)
+    assert funnel["completed_journal_count"] == 4
+    assert funnel["replay_available_count"] == 3
+    assert funnel["replay_data_complete_count"] == 2
+    assert funnel["eligible_trade_intelligence_count"] == 1
+    assert funnel["journal_replay_mismatch_count"] == 1
+    assert funnel["replay_pending_count"] == 1
+    assert funnel["insufficient_replay_data_count"] == 1
+    assert funnel["reconciliation"]["journal_records_reconciled"] is True
+    assert funnel["reconciliation"]["completed_records_reconciled"] is True
+    assert funnel["exclusion_reasons"]["NOT_COMPLETED"] == 1
+    assert funnel["exclusion_reasons"]["JOURNAL_REPLAY_MISMATCH"] == 1
+
+
+def test_knowledge_growth_and_group_progress_do_not_publish_below_threshold():
+    records = verified_records(7)
+    snapshot = build_trade_intelligence_snapshot(records)
+    growth = snapshot["knowledge_growth"]
+    assert growth["verified_trades_collected"] == 7
+    assert growth["exact_threshold_progress"]["label"] == "7 of 30"
+    assert growth["broader_threshold_progress"]["label"] == "7 of 100"
+    assert growth["eligible_exact_groups"] == 0
+    assert growth["eligible_broader_groups"] == 0
+    assert growth["closest_exact_groups"][0]["verified_trades"] == 7
+    assert growth["closest_exact_groups"][0]["eligible"] is False
+
+
+def test_exact_and_broader_progress_messages_are_reported_without_rates():
+    exact_records = verified_records(18)
+    exact_insight = similar_trade_insight(entry(99), exact_records)
+    assert exact_insight["available"] is False
+    assert exact_insight["exact_progress"]["label"] == "18 of 30"
+    assert "metrics" not in exact_insight
+
+    broad_records = []
+    broad_records.extend(verified_records(8, ticker="OXY"))
+    for index in range(8, 64):
+        broad_records.extend(verified_records(1, ticker=f"T{index}"))
+    broad_insight = similar_trade_insight(entry(99, ticker="OXY"), broad_records)
+    assert broad_insight["available"] is False
+    assert broad_insight["exact_progress"]["label"] == "8 of 30"
+    assert broad_insight["broader_progress"]["label"] == "64 of 100"
+    assert "metrics" not in broad_insight
+
+
+def test_eligible_exact_and_broader_thresholds_remain_unchanged():
+    exact = similar_trade_insight(entry(99), verified_records(30))
+    assert exact["available"] is True
+    assert exact["group_type"] == "exact"
+    assert exact["minimum_required"] == 30
+
+    records = []
+    records.extend(verified_records(2, ticker="OXY"))
+    for index in range(2, 100):
+        records.extend(verified_records(1, ticker=f"B{index}"))
+    broader = similar_trade_insight(entry(99, ticker="OXY"), records)
+    assert broader["available"] is True
+    assert broader["group_type"] == "broader"
+    assert broader["minimum_required"] == 100
+
+
+def test_group_progress_is_sorted_capped_and_labeled():
+    records = []
+    records.extend(verified_records(18, ticker="AAA"))
+    records.extend(verified_records(13, ticker="BBB", direction="LONG", market_regime="bullish"))
+    records.extend(verified_records(4, ticker="CCC", grade="B"))
+    snapshot = build_trade_intelligence_snapshot(records)
+    exact_rows = snapshot["knowledge_growth"]["closest_exact_groups"]
+    broad_rows = snapshot["knowledge_growth"]["closest_broader_groups"]
+    assert len(exact_rows) <= 5
+    assert len(broad_rows) <= 5
+    assert exact_rows[0]["verified_trades"] == 18
+    assert "AAA" in exact_rows[0]["label"]
+    assert "|" not in exact_rows[0]["label"]
+
+
+def test_independent_metric_validation_matches_group_metrics():
+    records = verified_records(4)
+    records[1]["replay"]["tp2_timestamp"] = "2026-07-02T20:00:00Z"
+    records[2]["replay"]["tp1_timestamp"] = None
+    records[2]["replay"]["stop_timestamp"] = "2026-07-03T18:00:00Z"
+    records[2]["replay"]["final_r"] = -1.0
+    records[2]["replay"]["MFE"] = 0.2
+    records[2]["replay"]["MAE"] = -1.0
+    records[3]["replay"]["tp3_timestamp"] = "2026-07-04T22:00:00Z"
+    expected = independent_metrics(records)
+    actual = group_metrics(records)
+    for key, value in expected.items():
+        assert actual[key] == value, f"{key}: {actual[key]} != {value}"
+
+
 def test_protected_endpoint_uses_verified_analytics_and_replay():
     tmp = tempfile.TemporaryDirectory()
     previous_repo = main._journal_repository
@@ -158,12 +292,19 @@ def test_protected_endpoint_uses_verified_analytics_and_replay():
         main._trade_intelligence_cache.update({"signature": None, "snapshot": None, "verified_records": []})
         client = TestClient(main.app)
         assert client.get("/api/dev/trade-intelligence").status_code == 403
+        assert client.get("/api/dev/trade-intelligence", headers={"X-Kairos-Admin-Token": "wrong"}).status_code == 403
         payload = client.get("/api/dev/trade-intelligence", headers={"X-Kairos-Admin-Token": TOKEN}).json()
         assert payload["version"] == TRADE_INTELLIGENCE_VERSION
         assert payload["verified_trade_count"] == 3
+        assert payload["cache_signature"]
+        assert payload["eligibility_funnel"]["eligible_trade_intelligence_count"] == 3
+        assert payload["eligibility_funnel"]["reconciliation"]["journal_records_reconciled"] is True
+        assert payload["data_quality"]["eligible_verified_trades"] == 3
+        assert payload["knowledge_growth"]["exact_threshold_progress"]["label"] == "3 of 30"
         assert replay_calls["count"] == 1
         cached = client.get("/api/dev/trade-intelligence", headers={"X-Kairos-Admin-Token": TOKEN}).json()
         assert cached["diagnostics"]["cache_status"] == "hit"
+        assert cached["cache_signature"] == payload["cache_signature"]
         assert replay_calls["count"] == 1
         similar = client.post(
             "/api/dev/trade-intelligence/similar?exact_min_trades=3&broad_min_trades=3",
@@ -193,5 +334,11 @@ if __name__ == "__main__":
     test_broader_group_used_when_exact_group_is_too_small()
     test_journal_only_and_mismatched_outcomes_are_excluded()
     test_dashboard_summaries_display_sample_sizes()
+    test_eligibility_funnel_reconciles_included_and_excluded_records()
+    test_knowledge_growth_and_group_progress_do_not_publish_below_threshold()
+    test_exact_and_broader_progress_messages_are_reported_without_rates()
+    test_eligible_exact_and_broader_thresholds_remain_unchanged()
+    test_group_progress_is_sorted_capped_and_labeled()
+    test_independent_metric_validation_matches_group_metrics()
     test_protected_endpoint_uses_verified_analytics_and_replay()
     print("Trade Intelligence v1 tests passed")

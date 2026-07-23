@@ -60,6 +60,7 @@ from trade_intelligence import (
     build_trade_intelligence_snapshot,
     build_verified_trade_records,
     similar_trade_insight,
+    trade_intelligence_eligibility_funnel,
 )
 
 app = FastAPI(title="Stock Options Scanner")
@@ -1090,6 +1091,10 @@ def _trade_intelligence_signature(entries: list[dict]) -> tuple:
     return (len(entries), newest_update, newest_replay, version_sum)
 
 
+def _trade_intelligence_signature_label(signature: tuple) -> str:
+    return "|".join(str(part) for part in signature)
+
+
 def _trade_intelligence_dataset(force: bool = False) -> dict:
     entries = _journal_repository.list_entries({"status": "all", "limit": 5000, "offset": 0})
     signature = _trade_intelligence_signature(entries)
@@ -1103,6 +1108,7 @@ def _trade_intelligence_dataset(force: bool = False) -> dict:
             snapshot = dict(_trade_intelligence_cache["snapshot"])
             diagnostics = dict(snapshot.get("diagnostics") or {})
             diagnostics["cache_status"] = "hit"
+            diagnostics["cache_signature"] = _trade_intelligence_signature_label(signature)
             snapshot["diagnostics"] = diagnostics
             return {
                 "entries": entries,
@@ -1111,23 +1117,41 @@ def _trade_intelligence_dataset(force: bool = False) -> dict:
                 "verified_records": list(_trade_intelligence_cache.get("verified_records") or []),
                 "snapshot": snapshot,
                 "cache_status": "hit",
+                "signature": signature,
             }
 
     replays = _replay_positions(entries, summary_only=True) if entries else []
     analytics = verified_analytics_snapshot(entries, replays)
     verified_records = build_verified_trade_records(entries, replays, analytics.get("records") or [])
+    eligibility = trade_intelligence_eligibility_funnel(entries, replays, analytics.get("records") or [])
     snapshot = build_trade_intelligence_snapshot(verified_records)
     diagnostics = dict(snapshot.get("diagnostics") or {})
     diagnostics.update({
         "cache_status": "rebuilt",
+        "cache_signature": _trade_intelligence_signature_label(signature),
+        "cache_generated_at": snapshot.get("generated_at"),
         "excluded_trades": max(0, len(entries) - len(verified_records)),
-        "journal_only_counts": sum(
-            1 for record in analytics.get("records") or []
-            if (record.get("analytics_verification") or {}).get("status") != "VERIFIED"
-        ),
+        "journal_only_counts": eligibility.get("journal_only_count", 0),
+        "mismatch_records_excluded": eligibility.get("journal_replay_mismatch_count", 0),
+        "replay_pending_count": eligibility.get("replay_pending_count", 0),
+        "insufficient_replay_data_count": eligibility.get("insufficient_replay_data_count", 0),
         "replay_only_counts": len(verified_records),
+        "eligible_exact_groups": (snapshot.get("knowledge_growth") or {}).get("eligible_exact_groups", 0),
+        "eligible_broader_groups": (snapshot.get("knowledge_growth") or {}).get("eligible_broader_groups", 0),
+        "insufficient_data_groups": (
+            (snapshot.get("knowledge_growth") or {}).get("insufficient_exact_groups", 0)
+            + (snapshot.get("knowledge_growth") or {}).get("insufficient_broader_groups", 0)
+        ),
     })
     snapshot["diagnostics"] = diagnostics
+    snapshot["eligibility_funnel"] = eligibility
+    snapshot["data_quality"] = {
+        "eligible_verified_trades": eligibility.get("eligible_trade_intelligence_count", 0),
+        "needs_review": eligibility.get("journal_replay_mismatch_count", 0),
+        "replay_pending": eligibility.get("replay_pending_count", 0),
+        "journal_only": eligibility.get("journal_only_count", 0),
+        "insufficient_replay_data": eligibility.get("insufficient_replay_data_count", 0),
+    }
     with _trade_intelligence_lock:
         _trade_intelligence_cache.update({
             "signature": signature,
@@ -1141,6 +1165,7 @@ def _trade_intelligence_dataset(force: bool = False) -> dict:
         "verified_records": verified_records,
         "snapshot": snapshot,
         "cache_status": "rebuilt",
+        "signature": signature,
     }
 
 
@@ -1152,14 +1177,17 @@ def api_dev_trade_intelligence(
     _require_journal_admin_token(x_kairos_admin_token)
     dataset = _trade_intelligence_dataset(force=force)
     snapshot = dict(dataset["snapshot"])
-    snapshot["status"] = "ready" if snapshot.get("verified_trade_count") else "not_ready"
-    snapshot["ready"] = bool(snapshot.get("verified_trade_count"))
+    growth = snapshot.get("knowledge_growth") or {}
+    has_eligible_groups = bool((growth.get("eligible_exact_groups") or 0) or (growth.get("eligible_broader_groups") or 0))
+    snapshot["status"] = "ready" if has_eligible_groups else "not_ready"
+    snapshot["ready"] = has_eligible_groups
     snapshot["message"] = (
         "Trade Intelligence uses replay-verified completed trades only."
-        if snapshot.get("verified_trade_count")
+        if has_eligible_groups
         else "Not enough verified historical data yet."
     )
     snapshot["journal_entry_count"] = len(dataset.get("entries") or [])
+    snapshot["cache_signature"] = _trade_intelligence_signature_label(dataset.get("signature") or _trade_intelligence_signature(dataset.get("entries") or []))
     return snapshot
 
 

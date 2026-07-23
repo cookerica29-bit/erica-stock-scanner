@@ -6489,12 +6489,15 @@ function renderTradeIntelligenceInsight(payload = null) {
   }
   if (!payload.available) {
     const thresholds = payload.thresholds || {};
+    const exactProgress = payload.exact_progress || { current: payload.exact_match_count || 0, required: thresholds.exact_min_trades || 30 };
+    const broaderProgress = payload.broader_progress || { current: payload.broader_match_count || 0, required: thresholds.broad_min_trades || 100 };
     return `
       <div class="guided-explain-title">Historical Intelligence</div>
       <div class="guided-explain-list">
         <div>${escapeHtml(payload.message || 'Not enough verified historical data yet.')}</div>
-        <div>Exact matches: ${escapeHtml(String(payload.exact_match_count || 0))} / ${escapeHtml(String(thresholds.exact_min_trades || 30))}</div>
-        <div>Broader matches: ${escapeHtml(String(payload.broader_match_count || 0))} / ${escapeHtml(String(thresholds.broad_min_trades || 100))}</div>
+        <div>Kairos currently has ${escapeHtml(String(exactProgress.current || 0))} of the ${escapeHtml(String(exactProgress.required || 30))} verified similar trades required for this exact group.</div>
+        <div>Exact group: ${escapeHtml(exactProgress.label || `${exactProgress.current || 0} of ${exactProgress.required || 30}`)}</div>
+        <div>Broader comparison: ${escapeHtml(broaderProgress.label || `${broaderProgress.current || 0} of ${broaderProgress.required || 100}`)}</div>
       </div>`;
   }
   const metrics = payload.metrics || {};
@@ -12243,6 +12246,19 @@ function renderTradeIntelligenceRows(rows = [], label = 'Group') {
     </table>`;
 }
 
+function renderTradeIntelligenceProgressRows(rows = []) {
+  if (!rows.length) return '<div class="analytics-empty">No verified groups have started accumulating evidence yet.</div>';
+  return `
+    <div class="trade-intelligence-list">
+      ${rows.map(row => `
+        <div class="trade-intelligence-row">
+          <span>${escapeHtml(row.label || 'Similarity group')}</span>
+          <div class="trade-intelligence-bar"><span style="width:${Math.max(0, Math.min(100, Number(row.progress_percent || 0)))}%"></span></div>
+          <strong>${escapeHtml(String(row.verified_trades || 0))} of ${escapeHtml(String(row.threshold || 0))}</strong>
+        </div>`).join('')}
+    </div>`;
+}
+
 function renderTradeIntelligenceDashboard(payload = null) {
   const el = document.getElementById('tradeIntelligenceDashboard');
   const diag = document.getElementById('tradeIntelligenceDiagnostics');
@@ -12263,16 +12279,38 @@ function renderTradeIntelligenceDashboard(payload = null) {
   }
   const dashboard = payload.dashboard || {};
   const thresholds = payload.thresholds || {};
+  const growth = payload.knowledge_growth || {};
+  const quality = payload.data_quality || {};
+  const hasEligibleGroups = Boolean((growth.eligible_exact_groups || 0) || (growth.eligible_broader_groups || 0));
   el.innerHTML = `
     <h3>Trade Intelligence</h3>
     <div class="trend-note" style="margin-bottom:10px;">Uses completed replay-verified trades only. Journal-only and mismatched outcomes are excluded.</div>
+    <div class="analytics-subdetails-body" style="padding:0;">
+      <h3 style="margin-top:0;">Kairos Knowledge Growth</h3>
+      <div class="trade-intelligence-metrics">
+        ${renderTradeIntelligenceMetric('Verified Trades Collected', growth.verified_trades_collected ?? payload.verified_trade_count ?? 0)}
+        ${renderTradeIntelligenceMetric('Exact Insight Threshold', growth.exact_threshold_progress?.label || `0 of ${thresholds.exact_min_trades || 30}`)}
+        ${renderTradeIntelligenceMetric('Broader Insight Threshold', growth.broader_threshold_progress?.label || `0 of ${thresholds.broad_min_trades || 100}`)}
+        ${renderTradeIntelligenceMetric('Current Status', growth.status || 'Building verified history')}
+      </div>
+      <div class="trend-note">${escapeHtml(growth.clarification || 'Insights unlock when enough verified trades share similar setup characteristics.')}</div>
+    </div>
+    <div class="analytics-subdetails-body" style="padding:10px 0 0;">
+      <h3>Trade Intelligence Data Quality</h3>
+      <div class="trade-intelligence-metrics">
+        ${renderTradeIntelligenceMetric('Eligible Verified Trades', quality.eligible_verified_trades ?? payload.verified_trade_count ?? 0)}
+        ${renderTradeIntelligenceMetric('Needs Review', quality.needs_review ?? 0)}
+        ${renderTradeIntelligenceMetric('Replay Pending', quality.replay_pending ?? 0)}
+        ${renderTradeIntelligenceMetric('Journal Only', quality.journal_only ?? 0)}
+      </div>
+    </div>
     <div class="trade-intelligence-metrics">
       ${renderTradeIntelligenceMetric('Verified Trades', payload.verified_trade_count || 0)}
       ${renderTradeIntelligenceMetric('Exact Threshold', thresholds.exact_min_trades || 30)}
       ${renderTradeIntelligenceMetric('Broader Threshold', thresholds.broad_min_trades || 100)}
-      ${renderTradeIntelligenceMetric('Status', payload.ready ? 'Ready' : 'Building knowledge')}
+      ${renderTradeIntelligenceMetric('Status', hasEligibleGroups ? 'Eligible groups available' : 'Building knowledge')}
     </div>
-    ${payload.ready ? `
+    ${hasEligibleGroups ? `
       <details class="analytics-subdetails" open>
         <summary>Most Reliable Symbols</summary>
         <div class="analytics-subdetails-body">${renderTradeIntelligenceRows(dashboard.most_reliable_symbols || [], 'Symbol')}</div>
@@ -12284,10 +12322,20 @@ function renderTradeIntelligenceDashboard(payload = null) {
       <details class="analytics-subdetails">
         <summary>Best Weekday</summary>
         <div class="analytics-subdetails-body">${renderTradeIntelligenceRows(dashboard.best_weekdays || [], 'Weekday')}</div>
-      </details>` : `<div class="analytics-empty">${escapeHtml(payload.message || 'Not enough verified historical data yet.')}</div>`}
+      </details>` : `
+      <div class="analytics-empty">${escapeHtml(payload.message || 'Not enough verified historical data yet.')}</div>
+      <details class="analytics-subdetails" open>
+        <summary>Closest Exact Groups to Unlocking</summary>
+        <div class="analytics-subdetails-body">${renderTradeIntelligenceProgressRows(growth.closest_exact_groups || [])}</div>
+      </details>
+      <details class="analytics-subdetails">
+        <summary>Closest Broader Groups to Unlocking</summary>
+        <div class="analytics-subdetails-body">${renderTradeIntelligenceProgressRows(growth.closest_broader_groups || [])}</div>
+      </details>`}
   `;
   if (diag) {
     const d = payload.diagnostics || {};
+    const funnel = payload.eligibility_funnel || {};
     diag.innerHTML = `
       <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
         Developer-only diagnostics. Trade Intelligence is analytics-only and does not change scanner, ranking, replay, journal, Option Plan, alerts, or Position Intelligence.
@@ -12302,8 +12350,20 @@ function renderTradeIntelligenceDashboard(payload = null) {
         ${renderReplayStat('Replay-Verified Count', d.replay_only_counts ?? 0)}
         ${renderReplayStat('Journal-Only/Mismatch Count', d.journal_only_counts ?? 0)}
         ${renderReplayStat('Cache Rebuild Time', `${fmtNumber(d.cache_rebuild_time_ms || 0)} ms`)}
+        ${renderReplayStat('Eligible Exact Groups', d.eligible_exact_groups ?? 0)}
+        ${renderReplayStat('Eligible Broader Groups', d.eligible_broader_groups ?? 0)}
+        ${renderReplayStat('Cache Signature', d.cache_signature ? 'Present' : '—')}
       </div>
-      <div class="analytics-empty" style="text-align:left;">Similarity dimensions: ${escapeHtml((d.similarity_dimensions_used || []).join(', ') || '—')}</div>`;
+      <div class="analytics-empty" style="text-align:left;">
+        Similarity dimensions: ${escapeHtml((d.similarity_dimensions_used || []).join(', ') || '—')}
+        <br>Eligibility funnel: completed ${escapeHtml(String(funnel.completed_journal_count || 0))}
+        · replay available ${escapeHtml(String(funnel.replay_available_count || 0))}
+        · replay complete ${escapeHtml(String(funnel.replay_data_complete_count || 0))}
+        · verified ${escapeHtml(String(funnel.verified_match_count || 0))}
+        · eligible ${escapeHtml(String(funnel.eligible_trade_intelligence_count || 0))}
+        · reconciled ${escapeHtml(String(funnel.reconciliation?.journal_records_reconciled && funnel.reconciliation?.completed_records_reconciled))}
+        <br>Exclusions: ${escapeHtml(Object.entries(funnel.exclusion_reasons || {}).map(([key, value]) => `${key}: ${value}`).join(' · ') || 'None')}
+      </div>`;
   }
 }
 
