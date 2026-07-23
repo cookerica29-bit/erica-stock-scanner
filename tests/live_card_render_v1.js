@@ -240,6 +240,85 @@ const riskAxisY = Number(closeEntryNowHtml.match(/<text class="rr-axis-label" x=
 const closeEntryLabelY = Number(closeEntryNowHtml.match(/<text class="rr-point-label" x="[^"]+" y="([^"]+)" text-anchor="middle">Entry<\/text>/)[1]);
 assert.ok(closeEntryLabelY - riskAxisY >= 12, 'close Entry label must clear the Risk/Reward axis row');
 
+assert.ok(enterWaiting.includes('View Trade Chart'), 'Scanner setup cards should expose the guided trade chart expander');
+assert.ok(enterWaiting.includes('Planned Entry'));
+assert.ok(enterWaiting.includes('Stop Loss'));
+assert.ok(enterWaiting.includes('First Target'));
+assert.ok(enterWaiting.includes('Price has not reached the planned entry yet.'));
+assert.ok(enterWaiting.includes('Set an alert at the planned entry and wait.'));
+assert.ok(enterWaiting.includes('Why Kairos Likes This Trade'));
+
+const guidedLongPlan = context.guidedChartPlan(setup({
+  ticker: 'LONG',
+  direction: 'LONG',
+  price: 101,
+  entry: 100,
+  sl: 95,
+  tp1: 110,
+  tp2: 115,
+  tp3: 120,
+}));
+assert.strictEqual(guidedLongPlan.direction, 'LONG');
+assert.ok(guidedLongPlan.stop < guidedLongPlan.entry, 'Long guided chart must keep stop below entry');
+assert.ok(guidedLongPlan.targets.every(([, value]) => value > guidedLongPlan.entry), 'Long guided chart must keep targets above entry');
+const guidedLongSvg = context.renderGuidedTradeChartSvg(guidedLongPlan, [
+  { timestamp: '2026-07-20T14:00:00Z', open: 98, high: 102, low: 97, close: 101 },
+  { timestamp: '2026-07-20T18:00:00Z', open: 101, high: 104, low: 100, close: 103 },
+]);
+assert.ok(guidedLongSvg.includes('Planned Entry'));
+assert.ok(guidedLongSvg.includes('Current Price'));
+assert.ok(guidedLongSvg.includes('guided-risk-zone'));
+assert.ok(guidedLongSvg.includes('guided-reward-zone'));
+assert.ok(!guidedLongSvg.includes('NaN'), 'Guided chart SVG should not emit NaN coordinates');
+
+const guidedShortPlan = context.guidedChartPlan(setup({
+  ticker: 'SHORT',
+  direction: 'SHORT',
+  price: 99,
+  entry: 100,
+  sl: 105,
+  tp1: 90,
+  tp2: 85,
+  tp3: 80,
+}));
+assert.strictEqual(guidedShortPlan.direction, 'SHORT');
+assert.ok(guidedShortPlan.stop > guidedShortPlan.entry, 'Short guided chart must keep stop above entry');
+assert.ok(guidedShortPlan.targets.every(([, value]) => value < guidedShortPlan.entry), 'Short guided chart must keep targets below entry');
+assert.ok(context.guidedPriceContext(guidedShortPlan).includes('moving toward TP1'));
+
+const guidedMissingTargets = context.renderGuidedTradeChartBlock(setup({ tp1: 44, tp2: null, tp3: null }), 'setup');
+assert.ok(guidedMissingTargets.includes('First Target'));
+assert.ok(!guidedMissingTargets.includes('TP2'));
+assert.ok(!guidedMissingTargets.includes('TP3'));
+assert.ok(!guidedMissingTargets.includes('null'));
+assert.ok(!guidedMissingTargets.includes('NaN'));
+
+const guidedWaiting = context.renderGuidedTradeChartBlock(setup({
+  trade_eval: { trade_stage: 'BUILDING / WATCHLIST' },
+  confirmationStarted: false,
+  entryStatus: 'Waiting',
+  guided_status: 'Waiting for Planned Entry',
+}), 'setup');
+assert.ok(guidedWaiting.includes('Wait for the planned entry or confirmation.'));
+assert.ok(!guidedWaiting.includes('Review the option plan before executing.'));
+
+const guidedMismatch = context.renderGuidedTradeChartBlock(setup({
+  result: 'Win',
+  outcome: 'TP1',
+  analytics_verification: {
+    status: 'JOURNAL_REPLAY_MISMATCH',
+    journal_result: 'Win',
+    journal_outcome: 'TP1',
+    replay_result: 'Loss',
+    replay_outcome: 'STOP_DETECTED',
+  },
+}), 'completed');
+assert.ok(guidedMismatch.includes('Completed'));
+assert.ok(guidedMismatch.includes('Review the trade outcome.'));
+assert.ok(guidedMismatch.includes('Needs Review: journal outcome and replay evidence do not agree.'));
+assert.ok(!guidedMismatch.includes('Verified by replay'));
+assert.ok(context.formatSignalTimestamp('2026-07-20T14:08:00Z').includes('2026') === false);
+
 const missingPlanFallback = htmlFor(setup({ entry: null, sl: null, tp1: null }));
 assert.ok(!missingPlanFallback.includes('data-plan-visual="risk-reward"'));
 assert.ok(missingPlanFallback.includes('<div class="index-plan-row current-price"><span>Current Price</span>'));

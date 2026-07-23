@@ -1421,6 +1421,165 @@
   .level-entry { color: var(--warn); }
   .rr { color: var(--muted); font-size: 11px; }
 
+  .guided-chart {
+    background: rgba(2,6,23,0.18);
+    border: 1px solid rgba(148,163,184,0.12);
+    border-radius: 10px;
+    margin: 10px 0 12px;
+    padding: 0;
+  }
+  .guided-chart > summary {
+    align-items: center;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    list-style: none;
+    min-height: 40px;
+    padding: 10px 12px;
+  }
+  .guided-chart > summary::-webkit-details-marker { display: none; }
+  .guided-chart-title {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 800;
+  }
+  .guided-chart-summary {
+    color: var(--muted);
+    font-size: 11px;
+    text-align: right;
+  }
+  .guided-chart-body {
+    border-top: 1px solid rgba(148,163,184,0.08);
+    padding: 12px;
+  }
+  .guided-chart-head {
+    align-items: flex-start;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .guided-chart-status {
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 900;
+  }
+  .guided-chart-next {
+    color: #bfdbfe;
+    font-size: 12px;
+    line-height: 1.45;
+    margin-top: 4px;
+  }
+  .guided-timeframes {
+    display: inline-flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .guided-timeframes button {
+    background: rgba(148,163,184,0.08);
+    border: 1px solid rgba(148,163,184,0.18);
+    border-radius: 6px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 11px;
+    min-height: 30px;
+    padding: 6px 9px;
+  }
+  .guided-timeframes button.active {
+    background: rgba(59,130,246,0.14);
+    border-color: rgba(96,165,250,0.5);
+    color: #bfdbfe;
+  }
+  .guided-chart-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: minmax(0, 1.5fr) minmax(220px, 0.8fr);
+  }
+  .guided-chart-canvas {
+    background: rgba(15,23,42,0.45);
+    border: 1px solid rgba(148,163,184,0.1);
+    border-radius: 8px;
+    min-height: 260px;
+    overflow: hidden;
+    position: relative;
+  }
+  .guided-chart-svg {
+    display: block;
+    height: 260px;
+    width: 100%;
+  }
+  .guided-candle-wick,
+  .guided-candle-body {
+    vector-effect: non-scaling-stroke;
+  }
+  .guided-candle-up { stroke: rgba(34,197,94,0.72); fill: rgba(34,197,94,0.36); }
+  .guided-candle-down { stroke: rgba(248,113,113,0.72); fill: rgba(248,113,113,0.34); }
+  .guided-risk-zone { fill: rgba(153,83,68,0.18); }
+  .guided-reward-zone { fill: rgba(22,101,52,0.18); }
+  .guided-level-line { stroke-width: 1.4; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+  .guided-level-entry { stroke: #facc15; }
+  .guided-level-current { stroke: #93c5fd; stroke-width: 2; stroke-dasharray: none; }
+  .guided-level-stop { stroke: #f87171; }
+  .guided-level-target { stroke: #4ade80; }
+  .guided-level-label {
+    fill: #e5e7eb;
+    font-size: 11px;
+    font-weight: 800;
+  }
+  .guided-level-price {
+    fill: #cbd5e1;
+    font-size: 10px;
+  }
+  .guided-plan-list,
+  .guided-explain-list {
+    display: grid;
+    gap: 7px;
+  }
+  .guided-plan-row {
+    align-items: center;
+    background: rgba(148,163,184,0.055);
+    border-radius: 7px;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 9px;
+  }
+  .guided-plan-row span:first-child,
+  .guided-explain-title {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+  .guided-plan-row strong {
+    color: var(--text);
+    font-size: 12px;
+  }
+  .guided-explain {
+    background: rgba(148,163,184,0.05);
+    border-radius: 8px;
+    margin-top: 10px;
+    padding: 10px;
+  }
+  .guided-explain-list div {
+    color: #cbd5e1;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .guided-chart-message {
+    color: var(--muted);
+    font-size: 12px;
+    padding: 28px 12px;
+    text-align: center;
+  }
+  .guided-chart-diag {
+    color: var(--muted);
+    font-size: 10px;
+    margin-top: 8px;
+  }
+
   .option-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
   .option-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
   .option-symbol { font-size: 14px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 4px; }
@@ -1687,8 +1846,21 @@
     .card-section,
     .option-box,
     .coach-box,
-    .stage-box {
+    .stage-box,
+    .guided-chart-body {
       padding: 10px;
+    }
+    .guided-chart-grid,
+    .guided-chart-head {
+      grid-template-columns: 1fr;
+      flex-direction: column;
+    }
+    .guided-timeframes {
+      justify-content: flex-start;
+      width: 100%;
+    }
+    .guided-chart-svg {
+      height: 240px;
     }
     .price-row,
     .coach-head,
@@ -1841,6 +2013,13 @@
     }
     .card-footer button {
       width: 100%;
+    }
+    .guided-chart > summary {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+    .guided-chart-summary {
+      text-align: left;
     }
     .empty {
       padding: 36px 12px;
@@ -5802,7 +5981,382 @@ function renderRiskRewardBar(setup) {
             <div class="rr-value-price">${fmtMoney(value)}</div>
           </div>`).join('')}
       </div>
+	    </div>`;
+}
+
+const GUIDED_TRADE_CHART_VERSION = 'guided-trade-chart-v1';
+const guidedTradeChartRegistry = new Map();
+const guidedTradeChartRequests = new Map();
+
+function guidedChartKey(subject = {}, context = 'setup') {
+  return [context, subject.position_id, subject.journal_id, subject.setup_id, subject.ticker, subject.direction]
+    .filter(Boolean)
+    .join('-')
+    .replace(/[^a-zA-Z0-9_-]/g, '') || `guided-${Date.now()}`;
+}
+
+function chartNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function guidedChartPlan(subject = {}) {
+  const direction = normalizePlanDirection(subject);
+  const current = chartNumber(currentDisplayPrice(subject));
+  const entry = chartNumber(firstPresent(subject.entry, subject.entry_price, subject.planned_underlying_entry, subject.actual_underlying_entry));
+  const stop = chartNumber(firstPresent(subject.sl, subject.stop, subject.stop_price, subject.plannedStop, subject.original_stop));
+  const targets = [
+    ['TP1', chartNumber(firstPresent(subject.tp1, subject.target, subject.target_price, subject.plannedTp1, subject.original_tp1))],
+    ['TP2', chartNumber(firstPresent(subject.tp2, subject.target2, subject.target_2, subject.plannedTp2, subject.original_tp2))],
+    ['TP3', chartNumber(firstPresent(subject.tp3, subject.target3, subject.target_3, subject.plannedTp3, subject.original_tp3))],
+  ].filter(([, value]) => value !== null);
+  const status = firstPresent(
+    subject.guided_status,
+    subject.status_label,
+    subject.scanner_status_normalized,
+    subject.scanner_status,
+    subject.scannerStatus,
+    setupProgressState(subject).label,
+    subject.result,
+    'Waiting'
+  );
+  return {
+    symbol: String(subject.ticker || '').toUpperCase(),
+    direction,
+    current,
+    entry,
+    stop,
+    targets,
+    status,
+    signalTimestamp: firstPresent(subject.signal_timestamp, subject.tracking_started_at, subject.created_at, subject.createdAt, null),
+    rr: firstPresent(subject.rr, subject.riskReward, subject.reward_risk, subject.target_distance_atr, null),
+    grade: setupGradeValue(subject),
+  };
+}
+
+function guidedPriceContext(plan = {}) {
+  if (!plan.direction || plan.current === null || plan.entry === null) return 'Current price context is unavailable.';
+  if (plan.stop !== null) {
+    if (plan.direction === 'LONG' && plan.current <= plan.stop) return 'Price crossed the stop level.';
+    if (plan.direction === 'SHORT' && plan.current >= plan.stop) return 'Price crossed the stop level.';
+  }
+  const tp1 = plan.targets.find(([label]) => label === 'TP1')?.[1];
+  if (tp1 !== undefined) {
+    if (plan.direction === 'LONG' && plan.current >= tp1) return 'Price reached or moved beyond the first target.';
+    if (plan.direction === 'SHORT' && plan.current <= tp1) return 'Price reached or moved beyond the first target.';
+    if (plan.direction === 'LONG' && plan.current > plan.entry) return 'Price is moving toward TP1.';
+    if (plan.direction === 'SHORT' && plan.current < plan.entry) return 'Price is moving toward TP1.';
+  }
+  if (Math.abs(plan.current - plan.entry) <= Math.max(0.01, plan.entry * 0.001)) return 'Price is at the planned entry level.';
+  const waiting = plan.direction === 'LONG' ? plan.current < plan.entry : plan.current > plan.entry;
+  return waiting ? 'Price has not reached the planned entry yet.' : 'Price has moved beyond the planned entry.';
+}
+
+function guidedNextStep(subject = {}, context = 'setup') {
+  const plan = guidedChartPlan(subject);
+  const statusText = String(plan.status || '').toUpperCase();
+  if (context === 'position') return 'Monitor progress toward TP1 and the stop.';
+  if (context === 'completed') return 'Review the trade outcome.';
+  if (statusText.includes('ENTER')) {
+    return guidedPriceContext(plan).includes('not reached')
+      ? 'Set an alert at the planned entry and wait.'
+      : 'Review the option plan before executing.';
+  }
+  if (statusText.includes('ALMOST')) return 'Wait for confirmation.';
+  if (statusText.includes('WAIT')) return 'Wait for the planned entry or confirmation.';
+  if (statusText.includes('INVALID') || statusText.includes('STOP')) return 'Do not act unless the setup becomes valid again.';
+  return 'Review the plan and wait for Kairos status to become actionable.';
+}
+
+function guidedWhyItems(subject = {}, context = 'setup') {
+  const items = [];
+  const direction = renderDirectionText(subject.direction);
+  const trend = firstPresent(subject.stockTrend, subject.trendDirection, subject.trend_state, subject.trend, null);
+  const location = firstPresent(subject.stockLocation, subject.setupLocation, subject.trade_eval?.location, null);
+  const phase = firstPresent(subject.stockPhase, subject.phase, null);
+  const confirmation = firstPresent(subject.confirmationReason, subject.confirmation_reason, null);
+  const rankingReasons = subject.ranking?.positive_reasons || [];
+  if (direction && direction !== 'N/A') items.push(`Trade direction is ${direction}.`);
+  if (trend) items.push(`Trend context: ${formatDisplayLabel(trend)}.`);
+  if (location) items.push(`Location: ${formatDisplayLabel(String(location).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim())}.`);
+  if (phase) items.push(`Phase: ${formatDisplayLabel(phase)}.`);
+  if (confirmation) items.push(`Confirmation: ${confirmation}.`);
+  if (subject.rr != null || subject.riskReward != null || subject.reward_risk != null) items.push(`Planned risk-to-reward: ${fmtNumber(firstPresent(subject.rr, subject.riskReward, subject.reward_risk), 1)}:1.`);
+  rankingReasons.slice(0, 2).forEach(reason => items.push(reason));
+  if (context === 'position') items.push('This view uses the original journaled plan levels.');
+  return items.slice(0, 5);
+}
+
+function guidedMissingItems(subject = {}) {
+  const missing = [];
+  const state = setupProgressState(subject);
+  if (String(subject.entryStatus || '').toUpperCase().includes('WAIT')) missing.push('Price has not reached the planned entry.');
+  if (!subject.confirmationStarted) missing.push('Confirmation is not complete.');
+  const blockers = subject.trade_eval?.no_trade_reasons || [];
+  blockers.slice(0, 3).forEach(reason => missing.push(String(reason).replace(/_/g, ' ').toLowerCase()));
+  if (state.bucket === 'ENTER_NOW' && !missing.length) return [];
+  return missing.slice(0, 4);
+}
+
+function signalAgeLabel(timestamp) {
+  const parsed = timestamp ? Date.parse(timestamp) : NaN;
+  if (!Number.isFinite(parsed)) return '';
+  const diff = Math.max(0, Date.now() - parsed);
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (hours < 48) return `${hours}h ${mins}m`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+function formatSignalTimestamp(timestamp) {
+  const parsed = timestamp ? Date.parse(timestamp) : NaN;
+  if (!Number.isFinite(parsed)) return '';
+  return new Date(parsed).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+}
+
+function guidedVerificationNote(subject = {}, context = 'setup') {
+  if (context !== 'completed') return '';
+  const verification = subject.analytics_verification || subject.verification || {};
+  const status = String(verification.status || '').toUpperCase();
+  if (status === 'VERIFIED') return 'Verified by replay.';
+  if (status === 'JOURNAL_REPLAY_MISMATCH') {
+    return 'Needs Review: journal outcome and replay evidence do not agree.';
+  }
+  if (status === 'INSUFFICIENT_REPLAY_DATA') return 'Could not verify: historical coverage is incomplete.';
+  if (status === 'REPLAY_PENDING') return 'Replay verification is pending.';
+  return '';
+}
+
+function renderGuidedTradeChartBlock(subject = {}, context = 'setup') {
+  const chartSubject = context === 'completed' && !subject.guided_status
+    ? { ...subject, guided_status: 'Completed' }
+    : subject;
+  const plan = guidedChartPlan(chartSubject);
+  if (!plan.symbol || !plan.direction || plan.entry === null || plan.stop === null || !plan.targets.length) return '';
+  const key = guidedChartKey(subject, context);
+  guidedTradeChartRegistry.set(key, { subject: chartSubject, context });
+  const signalAge = signalAgeLabel(plan.signalTimestamp);
+  return `
+    <details class="guided-chart" data-guided-chart-key="${escapeHtml(key)}" ontoggle="handleGuidedChartToggle(this)">
+      <summary aria-label="Open guided trade chart for ${escapeHtml(plan.symbol)}">
+        <span class="guided-chart-title">View Trade Chart</span>
+        <span class="guided-chart-summary">${escapeHtml(renderDirectionText(plan.direction))} · ${escapeHtml(plan.status)} · Entry ${escapeHtml(fmtMoney(plan.entry))}</span>
+      </summary>
+      <div class="guided-chart-body" id="guidedChart-${escapeHtml(key)}">
+        ${renderGuidedChartShell(key, plan, subject, context, signalAge)}
+      </div>
+    </details>`;
+}
+
+function guidedSubjectFromPositionModel(model = {}) {
+  const plan = model.plan || {};
+  const live = model.live || {};
+  const entry = model.entry || {};
+  const intel = model.position_intelligence || {};
+  return {
+    ...entry,
+    ticker: plan.ticker,
+    direction: plan.direction,
+    current_quote_price: firstPresent(live.currentPrice, intel.current_price),
+    entry: plan.entryPrice,
+    entry_price: plan.entryPrice,
+    planned_underlying_entry: plan.entryPrice,
+    stop: plan.stopPrice,
+    sl: plan.stopPrice,
+    stop_price: plan.stopPrice,
+    plannedStop: plan.stopPrice,
+    tp1: plan.tp1,
+    plannedTp1: plan.tp1,
+    target_price: plan.tp1,
+    tp2: plan.tp2,
+    plannedTp2: plan.tp2,
+    tp3: plan.tp3,
+    plannedTp3: plan.tp3,
+    scanner_timeframe: firstPresent(plan.timeframe, entry.scanner_timeframe, entry.timeframe),
+    timeframe: firstPresent(plan.timeframe, entry.scanner_timeframe, entry.timeframe),
+    guided_status: intel.state_label || positionUrgency(model).label,
+    signal_timestamp: plan.signalTimestamp || entry.signal_timestamp || entry.tracking_started_at,
+    setupGrade: plan.setupGrade,
+    setupGradeReason: plan.setupGradeReason,
+    confirmationReason: plan.confirmationReason,
+    confirmationStarted: Boolean(plan.confirmationStatus || plan.confirmationReason),
+    sector: plan.sector,
+  };
+}
+
+function renderGuidedChartShell(key, plan, subject, context, signalAge = '') {
+  const signalTime = formatSignalTimestamp(plan.signalTimestamp);
+  return `
+    <div class="guided-chart-head">
+      <div>
+        <div class="guided-chart-status">${escapeHtml(plan.symbol)} — ${escapeHtml(renderDirectionText(plan.direction))} · ${escapeHtml(plan.status)}</div>
+        <div class="guided-chart-next"><strong>What happens next:</strong> ${escapeHtml(guidedNextStep(subject, context))}</div>
+        <div class="guided-chart-next">${escapeHtml(guidedPriceContext(plan))}</div>
+        ${guidedVerificationNote(subject, context) ? `<div class="guided-chart-next">${escapeHtml(guidedVerificationNote(subject, context))}</div>` : ''}
+        ${plan.signalTimestamp ? `<div class="guided-chart-diag">Setup detected: ${escapeHtml(signalTime || plan.signalTimestamp)}${signalAge ? ` · Signal age: ${escapeHtml(signalAge)}` : ''}</div>` : ''}
+      </div>
+      <div class="guided-timeframes" role="group" aria-label="Guided chart timeframe">
+        ${['4H','1D','30M'].map(tf => `<button type="button" data-timeframe="${tf}" class="${tf === '4H' ? 'active' : ''}" onclick="event.preventDefault(); loadGuidedTradeChart('${escapeHtml(key)}', '${tf}')">${tf === '1D' ? 'Daily' : tf}</button>`).join('')}
+      </div>
+    </div>
+    <div class="guided-chart-grid">
+      <div class="guided-chart-canvas" id="guidedChartCanvas-${escapeHtml(key)}">
+        <div class="guided-chart-message">Open chart loading...</div>
+      </div>
+      <div>
+        <div class="guided-plan-list">${renderGuidedPlanRows(plan)}</div>
+        <div class="guided-explain">
+          <div class="guided-explain-title">${context === 'position' ? 'Trade Plan' : 'Why Kairos Likes This Trade'}</div>
+          <div class="guided-explain-list">
+            ${guidedWhyItems(subject, context).map(item => `<div>✓ ${escapeHtml(item)}</div>`).join('') || '<div>Trade-plan context is unavailable.</div>'}
+          </div>
+        </div>
+        ${guidedMissingItems(subject).length ? `<div class="guided-explain">
+          <div class="guided-explain-title">What Is Still Missing</div>
+          <div class="guided-explain-list">${guidedMissingItems(subject).map(item => `<div>○ ${escapeHtml(item)}</div>`).join('')}</div>
+        </div>` : ''}
+      </div>
     </div>`;
+}
+
+function renderGuidedPlanRows(plan = {}) {
+  const rows = [
+    ['Current Price', plan.current],
+    ['Planned Entry', plan.entry],
+    ['Stop Loss', plan.stop],
+    ...plan.targets.map(([label, value]) => [label === 'TP1' ? 'First Target' : label, value]),
+  ].filter(([, value]) => value !== null && value !== undefined);
+  return rows.map(([label, value]) => `
+    <div class="guided-plan-row">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(fmtMoney(value))}</strong>
+    </div>`).join('');
+}
+
+function handleGuidedChartToggle(details) {
+  if (!details?.open || details.dataset.loaded === 'true') return;
+  details.dataset.loaded = 'true';
+  loadGuidedTradeChart(details.dataset.guidedChartKey || '', '4H');
+}
+
+async function loadGuidedTradeChart(key, timeframe = '4H') {
+  const registered = guidedTradeChartRegistry.get(key);
+  const canvas = document.getElementById(`guidedChartCanvas-${key}`);
+  const body = document.getElementById(`guidedChart-${key}`);
+  if (!registered || !canvas || !body) return;
+  body.querySelectorAll('.guided-timeframes button').forEach(button => {
+    button.classList.toggle('active', button.dataset.timeframe === timeframe);
+  });
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  guidedTradeChartRequests.set(key, requestId);
+  canvas.innerHTML = '<div class="guided-chart-message">Loading chart...</div>';
+  const started = performance.now();
+  try {
+    const plan = guidedChartPlan(registered.subject);
+    const params = new URLSearchParams({ symbol: plan.symbol, timeframe, limit: '120' });
+    const response = await fetchWithTimeout(`${API}/api/chart/candles?${params.toString()}`);
+    if (guidedTradeChartRequests.get(key) !== requestId) return;
+    if (!response.ok) throw new Error(`Chart request failed: ${response.status}`);
+    const payload = await response.json();
+    if (!payload.candles?.length) throw new Error('No chart candles returned');
+    canvas.innerHTML = renderGuidedTradeChartSvg(plan, payload.candles, {
+      timeframe: payload.timeframe || timeframe,
+      provider: payload.provider || 'provider',
+      loadMs: payload.chart_load_duration_ms,
+      renderMs: performance.now() - started,
+    });
+  } catch (error) {
+    if (guidedTradeChartRequests.get(key) !== requestId) return;
+    const plan = guidedChartPlan(registered.subject);
+    canvas.innerHTML = `
+      <div class="guided-chart-message">
+        Chart data is temporarily unavailable.<br>
+        The trade plan remains available beside the chart.
+        <div class="guided-chart-diag">Chart error: ${escapeHtml(error.message || String(error))}</div>
+      </div>
+      ${renderGuidedTradeChartSvg(plan, [], { error: true })}`;
+  }
+}
+
+function renderGuidedTradeChartSvg(plan = {}, candles = [], meta = {}) {
+  const width = 720;
+  const height = 260;
+  const left = 46;
+  const right = 132;
+  const top = 18;
+  const bottom = 28;
+  const plotW = width - left - right;
+  const plotH = height - top - bottom;
+  const levelValues = [plan.current, plan.entry, plan.stop, ...plan.targets.map(([, value]) => value)].filter(value => value !== null);
+  const candleValues = candles.flatMap(c => [chartNumber(c.high), chartNumber(c.low)]).filter(value => value !== null);
+  const allValues = [...levelValues, ...candleValues];
+  if (!allValues.length) return '<div class="guided-chart-message">No chartable price levels available.</div>';
+  let min = Math.min(...allValues);
+  let max = Math.max(...allValues);
+  const pad = Math.max((max - min) * 0.12, Math.max(0.05, (plan.entry || max || 1) * 0.01));
+  min -= pad;
+  max += pad;
+  const y = value => top + ((max - value) / (max - min || 1)) * plotH;
+  const x = index => left + (candles.length <= 1 ? plotW / 2 : (index / (candles.length - 1)) * plotW);
+  const riskY1 = y(plan.entry);
+  const riskY2 = y(plan.stop);
+  const tp1 = plan.targets.find(([label]) => label === 'TP1')?.[1];
+  const rewardY = tp1 == null ? null : y(tp1);
+  const candleW = Math.max(3, Math.min(9, plotW / Math.max(1, candles.length) * 0.48));
+  const candleSvg = candles.map((c, i) => {
+    const open = chartNumber(c.open);
+    const high = chartNumber(c.high);
+    const low = chartNumber(c.low);
+    const close = chartNumber(c.close);
+    if ([open, high, low, close].some(value => value === null)) return '';
+    const cx = x(i);
+    const up = close >= open;
+    const bodyTop = Math.min(y(open), y(close));
+    const bodyH = Math.max(2, Math.abs(y(open) - y(close)));
+    return `
+      <line class="guided-candle-wick ${up ? 'guided-candle-up' : 'guided-candle-down'}" x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${y(high).toFixed(1)}" y2="${y(low).toFixed(1)}"></line>
+      <rect class="guided-candle-body ${up ? 'guided-candle-up' : 'guided-candle-down'}" x="${(cx - candleW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="1"></rect>`;
+  }).join('');
+  const labelRows = [
+    ['Current Price', plan.current, 'guided-level-current'],
+    ['Planned Entry', plan.entry, 'guided-level-entry'],
+    ['Stop Loss', plan.stop, 'guided-level-stop'],
+    ...plan.targets.map(([label, value]) => [label === 'TP1' ? 'First Target' : label, value, 'guided-level-target']),
+  ].filter(([, value]) => value !== null && value !== undefined)
+    .sort((a, b) => y(a[1]) - y(b[1]))
+    .map((row, index, arr) => {
+      let labelY = y(row[1]);
+      if (index > 0 && labelY - Number(arr[index - 1].labelY || y(arr[index - 1][1])) < 15) labelY = Number(arr[index - 1].labelY || y(arr[index - 1][1])) + 15;
+      const adjustedLabelY = Math.min(height - 16, Math.max(14, labelY));
+      row.labelY = adjustedLabelY;
+      return [...row, adjustedLabelY];
+    });
+  const levelSvg = labelRows.map(([label, value, cls, labelY]) => `
+    <line class="guided-level-line ${cls}" x1="${left}" x2="${width - 12}" y1="${y(value).toFixed(1)}" y2="${y(value).toFixed(1)}"></line>
+    <text class="guided-level-label" x="${width - right + 10}" y="${Number(labelY).toFixed(1)}">${escapeHtml(label)}</text>
+    <text class="guided-level-price" x="${width - right + 10}" y="${(Number(labelY) + 11).toFixed(1)}">${escapeHtml(fmtMoney(value))}</text>`).join('');
+  const riskRectY = Math.min(riskY1, riskY2);
+  const riskRectH = Math.max(2, Math.abs(riskY2 - riskY1));
+  const rewardRect = rewardY == null ? '' : `<rect class="guided-reward-zone" x="${left}" y="${Math.min(riskY1, rewardY).toFixed(1)}" width="${plotW}" height="${Math.max(2, Math.abs(rewardY - riskY1)).toFixed(1)}"></rect>`;
+  return `
+    <svg class="guided-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(plan.symbol)} ${escapeHtml(renderDirectionText(plan.direction))} guided trade chart with planned entry, stop loss, targets, and current price">
+      <rect x="0" y="0" width="${width}" height="${height}" fill="rgba(15,23,42,0.2)"></rect>
+      ${rewardRect}
+      <rect class="guided-risk-zone" x="${left}" y="${riskRectY.toFixed(1)}" width="${plotW}" height="${riskRectH.toFixed(1)}"></rect>
+      ${candleSvg}
+      ${levelSvg}
+      <text class="guided-level-price" x="${left}" y="${height - 8}">${escapeHtml(meta.timeframe || '')} ${escapeHtml(meta.provider ? `· ${meta.provider}` : '')}</text>
+      <text class="guided-level-price" x="${width - 12}" y="${height - 8}" text-anchor="end">${meta.loadMs != null ? `Loaded ${escapeHtml(String(meta.candles_loaded || candles.length))} candles` : ''}</text>
+    </svg>
+    <div class="guided-chart-diag">Chart component ${GUIDED_TRADE_CHART_VERSION}; ${escapeHtml(String(candles.length))} candles rendered; ${meta.renderMs != null ? `request/render ${fmtNumber(meta.loadMs || 0, 1)} ms / ${fmtNumber(meta.renderMs, 1)} ms` : 'plan levels rendered without candles'}.</div>`;
 }
 
 function renderNextStepBlock(setup) {
@@ -6544,6 +7098,7 @@ function renderExecutionTab() {
           </div>
           <div id="executionRisk-${idx}" class="execution-risk">${executionContractCostText(setup, 1)}</div>
         </div>
+        ${renderGuidedTradeChartBlock(setup, 'execution')}
         <div class="execution-actions">
           <button onclick="copyExecutionTradePlan(${idx})">Copy Execution Plan</button>
           <button class="btn-secondary" onclick="openRobinhood()">Execute Trade</button>
@@ -6837,6 +7392,7 @@ function renderPositionsTab() {
           <div class="position-urgency ${urgency.className}">${escapeHtml(urgency.label)}</div>
         </div>
         ${renderPositionManagerBlock(model)}
+        ${renderGuidedTradeChartBlock(guidedSubjectFromPositionModel(model), 'position')}
         <div class="position-card-grid">
           <div class="execution-section position-section plan">
             <div class="execution-section-title">Plan</div>
@@ -7117,6 +7673,7 @@ function renderCard(s) {
       ${renderTradeReadinessTimeline(s)}
       ${renderOpportunityRemainingBlock(s)}
       ${renderTradePlanBlock(s)}
+      ${renderGuidedTradeChartBlock(s, 'setup')}
       ${renderPositionManagement(s)}
       ${renderOptionPlanBlock(s)}
       ${renderEarningsBlock(s)}

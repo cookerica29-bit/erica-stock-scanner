@@ -665,6 +665,53 @@ def _replay_period_interval(timeframe: str) -> tuple[str, str]:
     return "60d", "4h"
 
 
+def _chart_period_interval(timeframe: str) -> tuple[str, str, str]:
+    normalized = str(timeframe or "").strip().upper()
+    if normalized in {"1D", "D", "DAILY"}:
+        return "1D", "1y", "1d"
+    if normalized in {"30M", "30MIN", "30", "30 MIN"}:
+        return "30M", "60d", "30m"
+    return "4H", "60d", "4h"
+
+
+def _chart_candle_records(candles, limit: int = 120) -> list[dict]:
+    records = []
+    if candles is None or not hasattr(candles, "iterrows"):
+        return records
+    sliced = candles.tail(limit) if hasattr(candles, "tail") else candles
+    for ts, row in sliced.iterrows():
+        try:
+            stamp = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+            if getattr(stamp, "tzinfo", None) is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            stamp = stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except Exception:
+            stamp = str(ts)
+        record = {
+            "timestamp": stamp,
+            "open": _safe_float(row.get("Open") if hasattr(row, "get") else None),
+            "high": _safe_float(row.get("High") if hasattr(row, "get") else None),
+            "low": _safe_float(row.get("Low") if hasattr(row, "get") else None),
+            "close": _safe_float(row.get("Close") if hasattr(row, "get") else None),
+            "volume": _safe_float(row.get("Volume") if hasattr(row, "get") else None),
+        }
+        if any(record.get(key) is not None for key in ("open", "high", "low", "close")):
+            records.append(record)
+    return records
+
+
+def _safe_float(value):
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+        if numeric != numeric:
+            return None
+        return numeric
+    except Exception:
+        return None
+
+
 def _fetch_replay_candles(position: dict) -> tuple[object, dict]:
     ticker = str(position.get("ticker") or "").strip().upper()
     timeframe, timeframe_source = _replay_timeframe(position)
@@ -912,6 +959,52 @@ def api_dev_verified_analytics(
     snapshot["ready"] = bool(entries)
     snapshot["message"] = "Verified analytics distinguish journal-recorded outcomes from replay-supported evidence."
     return snapshot
+
+
+@app.get("/api/chart/candles")
+def api_chart_candles(
+    symbol: str = Query(..., min_length=1, max_length=16),
+    timeframe: str = Query(default="4H"),
+    limit: int = Query(default=120, ge=20, le=240),
+):
+    started = time.perf_counter()
+    ticker = str(symbol or "").strip().upper()
+    normalized_tf, period, interval = _chart_period_interval(timeframe)
+    provider_name = provider_name_for_timeframe(normalized_tf)
+    provider = build_market_data_provider(provider_name)
+    try:
+        candles = provider.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True, group_by="ticker")
+        records = _chart_candle_records(candles, limit=limit)
+        return {
+            "status": "ready" if records else "unavailable",
+            "chart_component_version": "guided-trade-chart-v1",
+            "symbol": ticker,
+            "timeframe": normalized_tf,
+            "period": period,
+            "interval": interval,
+            "provider": provider.name,
+            "candles": records,
+            "candles_loaded": len(records),
+            "data_source": provider.name,
+            "cache_status": "provider_fetch",
+            "chart_load_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "chart_component_version": "guided-trade-chart-v1",
+            "symbol": ticker,
+            "timeframe": normalized_tf,
+            "period": period,
+            "interval": interval,
+            "provider": provider.name,
+            "candles": [],
+            "candles_loaded": 0,
+            "data_source": provider.name,
+            "cache_status": "provider_error",
+            "chart_load_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "error": exc.__class__.__name__,
+        }
 
 
 def _cached_scan_snapshot_for_shadow(universe: str) -> tuple[Optional[dict], dict]:
