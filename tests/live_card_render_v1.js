@@ -56,6 +56,7 @@ const context = {
   document: {
     body: { appendChild() {} },
     getElementById: () => elementStub(),
+    querySelector: () => null,
     querySelectorAll: () => [],
     createElement: () => elementStub(),
   },
@@ -293,6 +294,7 @@ const snapshotElements = {
   qualityFilter: elementStub(),
   directionFilter: elementStub(),
   contractTypeFilter: elementStub(),
+  sortFilter: elementStub(),
 };
 snapshotElements.statusFilter.value = 'ACTIONABLE';
 snapshotElements.qualityFilter.value = 'all';
@@ -342,6 +344,8 @@ const scannerRenderElements = {
   contractTypeFilter: elementStub(),
   tickerInput: elementStub(),
   marketCoverage: elementStub(),
+  topOpportunities: elementStub(),
+  sortFilter: elementStub(),
   'near-miss-section': elementStub(),
   'near-miss-results': elementStub(),
   'near-miss-header': elementStub(),
@@ -354,6 +358,8 @@ scannerRenderElements.directionFilter.value = 'all';
 scannerRenderElements.directionFilter.selectedOptions = [{ textContent: 'All Directions' }];
 scannerRenderElements.contractTypeFilter.value = 'all';
 scannerRenderElements.contractTypeFilter.selectedOptions = [{ textContent: 'All Contracts' }];
+scannerRenderElements.sortFilter.value = 'RANK';
+scannerRenderElements.sortFilter.selectedOptions = [{ textContent: 'Opportunity Rank' }];
 scannerRenderElements.tickerInput.value = '';
 scannerRenderElements.universeFilter = elementStub();
 scannerRenderElements.universeFilter.value = 'default';
@@ -366,6 +372,13 @@ const snapshotFullA = setup({
   entryStatus: 'Near Entry',
   option: { type: 'CALL' },
   trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true, no_trade_reasons: [] },
+  ranking: {
+    rank: 1,
+    tier: 'TOP_OPPORTUNITY',
+    score: 86.4,
+    positive_reasons: ['A-grade setup', 'Near planned entry', 'Clean structure'],
+    cautions: [],
+  },
 });
 const snapshotFullB = setup({
   ticker: 'STRONG',
@@ -374,6 +387,13 @@ const snapshotFullB = setup({
   entryStatus: 'Near Entry',
   option: { type: 'PUT' },
   trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true, no_trade_reasons: ['RR < 1.5:1'] },
+  ranking: {
+    rank: 2,
+    tier: 'HIGH_PRIORITY',
+    score: 74.2,
+    positive_reasons: ['B-grade setup', 'Near planned entry'],
+    cautions: ['RR < 1.5:1'],
+  },
 });
 context.__scannerRenderRows = [snapshotFullA, snapshotFullB];
 vm.runInContext(`scannerRows = __scannerRenderRows; scannerNearMiss = []; latestScannerMeta = {
@@ -418,12 +438,18 @@ assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('67.9s'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('10.5/s'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Cache Hit Rate'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Complete'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Opportunity Ranking'));
 assert.ok(!scannerRenderElements.marketCoverage.innerHTML.includes('35 symbol returned no setup'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('256.4 MB'));
 assert.ok(scannerRenderElements.results.innerHTML.includes('STRONG'));
 assert.ok(!scannerRenderElements.results.innerHTML.includes('TOP'));
+assert.ok(scannerRenderElements.topOpportunities.innerHTML.includes('Top Opportunities'));
+assert.ok(scannerRenderElements.topOpportunities.innerHTML.includes('#2'));
+assert.ok(scannerRenderElements.topOpportunities.innerHTML.includes('STRONG'));
+assert.ok(!scannerRenderElements.topOpportunities.innerHTML.includes('TOP'));
 assert.ok(scannerRenderElements.summary.innerHTML.includes('1 qualified setup'));
 assert.ok(scannerRenderElements.summary.innerHTML.includes('Showing 1 of 2 setups'));
+assert.ok(scannerRenderElements.summary.innerHTML.includes('Opportunity Rank'));
 assert.ok(
   scannerRenderElements.marketSnapshot.innerHTML.includes(
     '<span class="label">Top Setup</span><span class="count">1</span>'
@@ -448,7 +474,9 @@ const warmingElements = {
   qualityFilter: elementStub(),
   directionFilter: elementStub(),
   contractTypeFilter: elementStub(),
+  sortFilter: elementStub(),
   tickerInput: elementStub(),
+  topOpportunities: elementStub(),
   'near-miss-section': elementStub(),
   'near-miss-results': elementStub(),
   'near-miss-header': elementStub(),
@@ -481,11 +509,13 @@ const pollElements = {
   qualityFilter: elementStub(),
   directionFilter: elementStub(),
   contractTypeFilter: elementStub(),
+  sortFilter: elementStub(),
   tickerInput: elementStub(),
   results: elementStub(),
   summary: elementStub(),
   marketCoverage: elementStub(),
   marketSnapshot: elementStub(),
+  topOpportunities: elementStub(),
   dataStatus: elementStub(),
   'near-miss-section': elementStub(),
   'near-miss-results': elementStub(),

@@ -141,7 +141,7 @@
     font-size: 9px;
     margin-top: 2px;
   }
-  #universeFilter, #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter { min-width: 150px; }
+  #universeFilter, #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter, #sortFilter { min-width: 150px; }
 
   button {
     background: var(--accent);
@@ -478,6 +478,73 @@
   .priority-yellow { color: #fbbf24; }
   .priority-red { color: var(--short); }
   .priority-muted { color: var(--muted); }
+  .top-opportunities {
+    max-width: 1400px;
+    margin: 14px auto 0;
+    padding: 0 24px;
+  }
+  .top-opportunity-card {
+    background: rgba(53,66,88,0.86);
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
+    box-shadow: var(--card-shadow);
+    padding: 14px 16px;
+  }
+  .top-opportunity-list {
+    display: grid;
+    gap: 8px;
+  }
+  .top-opportunity-row {
+    appearance: none;
+    align-items: center;
+    background: rgba(65,80,106,0.42);
+    border: 1px solid rgba(148,163,184,0.16);
+    border-radius: 8px;
+    color: inherit;
+    cursor: pointer;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: 48px minmax(140px, 1fr) minmax(180px, 1.4fr) minmax(120px, 0.8fr);
+    padding: 10px 12px;
+    text-align: left;
+  }
+  .top-opportunity-row:hover {
+    background: rgba(148,163,184,0.14);
+    border-color: rgba(125,211,252,0.44);
+  }
+  .top-rank {
+    color: var(--accent-strong);
+    font-size: 13px;
+    font-weight: 950;
+  }
+  .top-main {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    align-items: center;
+  }
+  .top-ticker {
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 950;
+    letter-spacing: 0.04em;
+  }
+  .top-meta,
+  .top-reasons,
+  .top-plan {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .top-reasons strong,
+  .top-plan strong {
+    color: var(--text);
+  }
+  .top-caution {
+    color: var(--warn);
+    font-size: 11px;
+    margin-top: 2px;
+  }
   .index-watchlist .priority-list {
     display: grid;
     gap: 10px;
@@ -1383,6 +1450,18 @@
       margin-top: 10px;
       padding: 0 12px;
       max-width: 100%;
+    }
+    .top-opportunities {
+      margin-top: 10px;
+      padding: 0 12px;
+      max-width: 100%;
+    }
+    .top-opportunity-card {
+      border-radius: 9px;
+      padding: 10px;
+    }
+    .top-opportunity-row {
+      grid-template-columns: 1fr;
     }
     .snapshot-card,
     .priority-watchlist {
@@ -2391,6 +2470,14 @@
       <option value="CALL">Calls</option>
       <option value="PUT">Puts</option>
     </select>
+    <select id="sortFilter" onchange="renderScannerResults()">
+      <option value="RANK" selected>Opportunity Rank</option>
+      <option value="STATUS">Status</option>
+      <option value="GRADE">Grade</option>
+      <option value="TICKER">Ticker</option>
+      <option value="RR">R:R</option>
+      <option value="OPPORTUNITY">Opportunity Remaining</option>
+    </select>
     <button id="scanBtn" onclick="runScan()">Scan</button>
     <button id="autoScanBtn" onclick="toggleAutoScan()" class="btn-secondary">Auto Scan: OFF</button>
     <button class="btn-secondary" onclick="clearResults()">Clear</button>
@@ -2406,6 +2493,7 @@
   </div>
   <div id="marketCoverage" class="market-snapshot"></div>
   <div id="marketSnapshot" class="market-snapshot"></div>
+  <div id="topOpportunities" class="top-opportunities"></div>
   <main>
     <div id="summary"></div>
     <div id="results"></div>
@@ -4252,14 +4340,129 @@ function phaseRank(phase) {
   return { 'Trend Move': 0, 'Pullback': 1, 'Recovery': 2, 'Transition': 3 }[phase] ?? 4;
 }
 
-function sortScannerCardsForDisplay(rows) {
+function opportunityRankValue(row) {
+  const rank = Number(row?.ranking?.rank);
+  return Number.isFinite(rank) ? rank : 999999;
+}
+
+function rrValue(row) {
+  const direct = Number(row?.rr ?? row?.riskReward ?? row?.reward_risk ?? row?.room_to_target?.estimated_rr ?? row?.quality?.rr);
+  if (Number.isFinite(direct)) return direct;
+  const entry = Number(row?.entry);
+  const stop = Number(row?.sl);
+  const target = Number(row?.tp1);
+  if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return -1;
+  const risk = Math.abs(entry - stop);
+  const reward = Math.abs(target - entry);
+  return risk > 0 ? reward / risk : -1;
+}
+
+function opportunityRemainingValue(row) {
+  const value = Number(firstPresent(
+    row?.opportunity_remaining_percent,
+    row?.opportunityRemaining,
+    row?.opportunity_remaining,
+    row?.opportunity_remaining_shadow?.remaining_percent
+  ));
+  return Number.isFinite(value) ? value : -1;
+}
+
+function sortScannerCardsForDisplay(rows, sortMode = 'RANK') {
   return rows.slice().sort((a, b) => {
+    if (sortMode === 'RANK') {
+      const rankDiff = opportunityRankValue(a) - opportunityRankValue(b);
+      if (rankDiff) return rankDiff;
+    }
+    if (sortMode === 'STATUS') {
+      const statusDiff = setupProgressState(b).stage - setupProgressState(a).stage;
+      if (statusDiff) return statusDiff;
+    }
+    if (sortMode === 'GRADE') {
+      const gradeDiff = gradeRank(setupGradeValue(b)) - gradeRank(setupGradeValue(a));
+      if (gradeDiff) return gradeDiff;
+    }
+    if (sortMode === 'TICKER') {
+      return String(a.ticker || '').localeCompare(String(b.ticker || ''));
+    }
+    if (sortMode === 'RR') {
+      const rrDiff = rrValue(b) - rrValue(a);
+      if (rrDiff) return rrDiff;
+    }
+    if (sortMode === 'OPPORTUNITY') {
+      const oppDiff = opportunityRemainingValue(b) - opportunityRemainingValue(a);
+      if (oppDiff) return oppDiff;
+    }
     const entryDiff = entryStatusRank(a.entryStatus) - entryStatusRank(b.entryStatus);
     if (entryDiff) return entryDiff;
     const phaseDiff = phaseRank(a.stockPhase || a.phase) - phaseRank(b.stockPhase || b.phase);
     if (phaseDiff) return phaseDiff;
     return String(a.ticker || '').localeCompare(String(b.ticker || ''));
   });
+}
+
+function humanRankingTier(tier) {
+  return {
+    TOP_OPPORTUNITY: 'Top Opportunity',
+    HIGH_PRIORITY: 'High Priority',
+    REVIEW: 'Review',
+    MONITOR: 'Monitor',
+    LOW_PRIORITY: 'Low Priority',
+  }[String(tier || '').toUpperCase()] || 'Review';
+}
+
+function focusSetupCard(ticker) {
+  const safeTicker = String(ticker || '').replace(/"/g, '\\"');
+  const card = document.querySelector(`[data-ticker="${safeTicker}"]`);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  card.classList.add('a-plus-alert');
+  setTimeout(() => card.classList.remove('a-plus-alert'), 1600);
+}
+
+function renderTopOpportunities(rows = []) {
+  const el = document.getElementById('topOpportunities');
+  if (!el) return;
+  const ranked = rows
+    .filter(row => row?.ranking && row.ranking.tier !== 'LOW_PRIORITY')
+    .slice()
+    .sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b))
+    .slice(0, 5);
+  if (!ranked.length) {
+    el.innerHTML = '';
+    return;
+  }
+  const items = ranked.map(row => {
+    const ranking = row.ranking || {};
+    const reasons = (ranking.positive_reasons || []).slice(0, 3).join(' · ') || humanRankingTier(ranking.tier);
+    const caution = (ranking.cautions || [])[0];
+    const status = setupProgressState(row).label;
+    return `
+      <button type="button" class="top-opportunity-row" onclick="focusSetupCard('${escapeHtml(String(row.ticker || ''))}')">
+        <div class="top-rank">#${escapeHtml(String(ranking.rank || '—'))}</div>
+        <div>
+          <div class="top-main">
+            <span class="top-ticker">${escapeHtml(row.ticker || '—')}</span>
+            <span class="direction-value ${directionClass(row.direction)}">${renderDirectionText(row.direction)}</span>
+            ${renderSetupGradePill(setupGradeValue(row))}
+          </div>
+          <div class="top-meta">${escapeHtml(status)} · ${escapeHtml(humanRankingTier(ranking.tier))} · Score ${escapeHtml(String(ranking.score ?? '—'))}</div>
+        </div>
+        <div>
+          <div class="top-reasons"><strong>Why:</strong> ${escapeHtml(reasons)}</div>
+          ${caution ? `<div class="top-caution">${escapeHtml(caution)}</div>` : ''}
+        </div>
+        <div class="top-plan">
+          <div><strong>Entry</strong> ${escapeHtml(fmtMoney(row.entry))}</div>
+          <div><strong>Now</strong> ${escapeHtml(fmtMoney(currentDisplayPrice(row)))}</div>
+          <div><strong>R:R</strong> ${escapeHtml(rrValue(row) >= 0 ? rrValue(row).toFixed(1) : '—')}</div>
+        </div>
+      </button>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="top-opportunity-card">
+      <div class="snapshot-title">Top Opportunities</div>
+      <div class="top-opportunity-list">${items}</div>
+    </div>`;
 }
 
 function simpleStatusSummary(rows) {
@@ -4346,6 +4549,12 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
   const performance = meta.performance || {};
   const marketDataEngine = performance.market_data_engine || {};
   const cacheStats = meta.cache_stats || {};
+  const rankingDiag = meta.ranking_diagnostics || {};
+  const rankingTop = Array.isArray(rankingDiag.top_20) ? rankingDiag.top_20.slice(0, 5) : [];
+  const rankingTopText = rankingTop.map(item => `#${item.rank} ${item.ticker} ${item.status_bucket || ''} ${item.grade || ''} ${item.score}`).join(' · ') || '—';
+  const rankingBucketText = Object.entries(rankingDiag.bucket_counts || {})
+    .map(([key, value]) => `${key}: ${value}`)
+    .join(' · ') || '—';
   const attempted = meta.symbols_attempted ?? meta.configured_universe_count ?? allRows.length;
   const processed = meta.symbols_successfully_processed ?? allRows.length;
   const terminallyEvaluated = meta.symbols_terminally_evaluated ?? processed;
@@ -4452,6 +4661,11 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
         avg fetch ${escapeHtml(formatScanSeconds(marketDataEngine.average_fetch_time_ms ?? performance.average_fetch_time_ms))},
         duplicate requests eliminated ${escapeHtml(String(marketDataEngine.duplicate_requests_eliminated ?? performance.duplicate_requests_eliminated ?? 0))},
         earnings deferred during scan ${escapeHtml(String(marketDataEngine.earnings_requests_deferred_during_scan ?? performance.earnings_requests_deferred_during_scan ?? 0))}.
+        Opportunity Ranking: ${escapeHtml(meta.ranking_version || '—')},
+        ranked ${escapeHtml(String(meta.ranked_setup_count ?? allRows.length))},
+        generated in ${escapeHtml(formatScanSeconds(meta.ranking_duration_ms))},
+        top ${escapeHtml(rankingTopText)}.
+        Buckets: ${escapeHtml(rankingBucketText)}.
         Largest blockers: ${escapeHtml(topReasons)}.
         Multi-session p95 requires runtime sampling and is not inferred from a single scan response.
       </div>
@@ -4515,19 +4729,21 @@ function renderScannerResults() {
     direction: document.getElementById('directionFilter')?.value || 'all',
     quality: document.getElementById('qualityFilter')?.value || 'all',
     contractType: document.getElementById('contractTypeFilter')?.value || 'all',
+    sort: document.getElementById('sortFilter')?.value || 'RANK',
     tickerSearch: tickerQueryParts(document.getElementById('tickerInput')?.value || ''),
   };
 
   const allRows = scannerRows.slice();
   const allNearMiss = scannerNearMiss.slice();
-  const rows = sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, filters)));
-  const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, filters)));
+  const rows = sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, filters)), filters.sort);
+  const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, filters)), filters.sort);
   const totalVisible = rows.length + nearMiss.length;
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
   const snapshotSetups = [...allRows, ...allNearMiss];
   const visibleSetups = [...rows, ...nearMiss];
   renderMarketCoveragePanel(snapshotSetups, latestScannerMeta || {});
   renderMarketSnapshot(snapshotSetups);
+  renderTopOpportunities(visibleSetups);
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
@@ -4544,6 +4760,7 @@ function renderScannerResults() {
     document.getElementById('directionFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('qualityFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('contractTypeFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('sortFilter')?.selectedOptions?.[0]?.textContent,
     filters.tickerSearch.length ? `Ticker: ${filters.tickerSearch.join(',')}` : '',
   ].filter(Boolean).join(' · ');
   const showingLabel = totalBeforeLocFilter !== totalVisible
@@ -6438,7 +6655,7 @@ function renderCard(s) {
     : 'No entry distance available yet';
 
   return `
-  <div class="card" data-normalized-status="${escapeHtml(String(cardStatus.label || state.bucket).toUpperCase().replace(/\s+/g, '_'))}" data-execution-state="${escapeHtml(executionState)}" data-execute-visual-state="${escapeHtml(executeVisualState)}">
+  <div class="card" data-ticker="${escapeHtml(String(s.ticker || ''))}" data-opportunity-rank="${escapeHtml(String(s.ranking?.rank || ''))}" data-normalized-status="${escapeHtml(String(cardStatus.label || state.bucket).toUpperCase().replace(/\s+/g, '_'))}" data-execution-state="${escapeHtml(executionState)}" data-execute-visual-state="${escapeHtml(executeVisualState)}">
     <div class="card-header">
       <div class="ticker-wrap">
         <span class="ticker ticker-with-direction">${escapeHtml(s.ticker)} ${renderDirectionMarker(directionLabel)}</span>

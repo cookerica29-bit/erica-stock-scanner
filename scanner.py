@@ -29,6 +29,7 @@ yf = MarketDataFacade()
 STOCK_SCANNER_STRATEGY_VERSION = "v1.0"
 STOCK_SCANNER_STRATEGY_BASELINE_COMMIT = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
 VERBOSE_SYMBOL_LOGS = str(os.getenv("KAIROS_VERBOSE_SYMBOL_LOGS") or "").strip().lower() in {"1", "true", "yes", "on"}
+OPPORTUNITY_RANKING_VERSION = "opportunity-ranking-v1"
 
 
 @contextlib.contextmanager
@@ -890,6 +891,12 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "scan_duration_ms": scan_meta.get("scan_duration_ms"),
         "scan_started_at": scan_meta.get("scan_started_at"),
         "scan_completed_at": scan_meta.get("scan_completed_at"),
+        "ranking_version": scan_meta.get("ranking_version"),
+        "ranking_generated_at": scan_meta.get("ranking_generated_at"),
+        "ranked_setup_count": scan_meta.get("ranked_setup_count"),
+        "top_opportunity_count": scan_meta.get("top_opportunity_count"),
+        "ranking_duration_ms": scan_meta.get("ranking_duration_ms"),
+        "ranking_diagnostics": scan_meta.get("ranking_diagnostics", {}),
         "symbols_per_second": (scan_meta.get("performance") or {}).get("symbols_per_second"),
         "provider_metrics": scan_meta.get("provider_metrics", {}),
         "cache_stats": scan_meta.get("cache_stats", {}),
@@ -5032,6 +5039,411 @@ def _result_direction(result: Optional[dict], fallback_df: Optional[pd.DataFrame
     return _trend_from_ohlc(fallback_df)
 
 
+def _ranking_grade(row: dict) -> str:
+    raw = str(row.get("setupGrade") or (row.get("quality") or {}).get("grade") or "").strip().upper()
+    if raw.startswith("A"):
+        return "A"
+    if raw.startswith("B"):
+        return "B"
+    if raw.startswith("C"):
+        return "C"
+    return "C"
+
+
+def _has_ranking_trade_plan(row: dict) -> bool:
+    return all(_safe_float(row.get(key)) is not None for key in ("entry", "sl", "tp1"))
+
+
+def _ranking_status_bucket(row: dict) -> str:
+    grade = _ranking_grade(row)
+    ev = row.get("trade_eval") or {}
+    trade_stage = str(ev.get("trade_stage") or "").upper()
+    entry_status = str(row.get("entryStatus") or "").strip()
+    setup_status = str(row.get("setup_status") or "").upper()
+    stock_status = str(row.get("setupStatus") or row.get("stockSetupStatus") or "").upper()
+    has_direction = bool(row.get("direction"))
+    has_plan = _has_ranking_trade_plan(row)
+    trigger_confirmed = bool(ev.get("trigger_confirmed") or ev.get("a_plus_ready"))
+    b_plus_tradeable = bool(ev.get("b_plus_tradeable"))
+
+    if (
+        not has_direction
+        or grade == "C"
+        or setup_status == "SKIPPED"
+        or "RANGE" in trade_stage
+        or "NO TRADE" in trade_stage
+        or "RANGE" in stock_status
+        or "CHOPPY" in stock_status
+    ):
+        return "SKIP"
+    if entry_status == "Too Far":
+        return "SKIP"
+    if has_plan and trigger_confirmed:
+        return "ENTER_NOW"
+    if has_plan and b_plus_tradeable and entry_status == "Tradeable":
+        return "EARLY_ENTRY"
+    if has_plan and entry_status in {"Tradeable", "Near Entry"}:
+        return "ALMOST_READY"
+    return "WAITING"
+
+
+_RANKING_BUCKET_ORDER = {
+    ("ENTER_NOW", "A"): 1,
+    ("ENTER_NOW", "B"): 2,
+    ("EARLY_ENTRY", "A"): 3,
+    ("ALMOST_READY", "A"): 4,
+    ("EARLY_ENTRY", "B"): 5,
+    ("ALMOST_READY", "B"): 6,
+    ("WAITING", "A"): 7,
+    ("WAITING", "B"): 8,
+}
+
+
+def _ranking_bucket_order(status_bucket: str, grade: str) -> int:
+    return _RANKING_BUCKET_ORDER.get((status_bucket, grade), 10 if status_bucket == "SKIP" else 9)
+
+
+def _ranking_rr(row: dict) -> Optional[float]:
+    for value in (
+        row.get("rr"),
+        row.get("riskReward"),
+        row.get("reward_risk"),
+        (row.get("room_to_target") or {}).get("estimated_rr"),
+        (row.get("quality") or {}).get("rr"),
+    ):
+        parsed = _safe_float(value)
+        if parsed is not None:
+            return parsed
+    entry = _safe_float(row.get("entry"))
+    stop = _safe_float(row.get("sl"))
+    tp1 = _safe_float(row.get("tp1"))
+    if entry is None or stop is None or tp1 is None:
+        return None
+    risk = abs(entry - stop)
+    reward = abs(tp1 - entry)
+    if risk <= 0:
+        return None
+    return reward / risk
+
+
+def _ranking_opportunity_remaining(row: dict) -> Optional[float]:
+    for value in (
+        row.get("opportunity_remaining_percent"),
+        row.get("opportunityRemaining"),
+        row.get("opportunity_remaining"),
+        (row.get("opportunity_remaining_shadow") or {}).get("remaining_percent"),
+    ):
+        parsed = _safe_float(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _ranking_confirmation_time(row: dict) -> str:
+    for key in ("confirmation_timestamp", "signal_timestamp", "timestamp", "generated_at"):
+        value = row.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _ranking_earnings_days(row: dict) -> Optional[int]:
+    earnings = row.get("earnings") if isinstance(row.get("earnings"), dict) else {}
+    for value in (
+        earnings.get("days_until"),
+        row.get("daysUntilEarnings"),
+        row.get("days_until_earnings"),
+    ):
+        parsed = _safe_int(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _ranking_component_model(row: dict) -> tuple[dict, list[str], list[str], dict]:
+    ev = row.get("trade_eval") or {}
+    grade = _ranking_grade(row)
+    status_bucket = _ranking_status_bucket(row)
+    components = {
+        "status_priority": max(0, 42 - (_ranking_bucket_order(status_bucket, grade) - 1) * 4),
+        "grade_quality": {"A": 20, "B": 14, "C": 4}.get(grade, 0),
+        "confirmation_quality": 0,
+        "structure_quality": 0,
+        "htf_alignment": 0,
+        "location_quality": 0,
+        "rr_quality": 0,
+        "freshness": 0,
+        "entry_proximity": 0,
+        "earnings": 0,
+        "option_plan": 0,
+    }
+    reasons = [f"{grade}-grade setup"] if grade in {"A", "B"} else []
+    cautions = []
+    missing = {}
+
+    if ev.get("trigger_confirmed") or ev.get("a_plus_ready"):
+        components["confirmation_quality"] += 10
+        reasons.append("Entry confirmation complete")
+    elif ev.get("b_plus_tradeable"):
+        components["confirmation_quality"] += 7
+        reasons.append("Tradeable confirmation forming")
+    elif row.get("confirmationStarted") or ev.get("rejection_confirmed"):
+        components["confirmation_quality"] += 4
+        reasons.append("Confirmation started")
+
+    if ev.get("htf_aligned") or ev.get("htf_bias_clear"):
+        components["htf_alignment"] += 6
+        reasons.append("Higher-timeframe trend aligned")
+
+    structure = str(ev.get("structure_quality") or row.get("structure_quality") or "").upper()
+    if "CLEAN" in structure:
+        components["structure_quality"] += 8
+        reasons.append("Clean structure")
+    elif "CHOPPY" in structure or "INTERNAL" in structure:
+        cautions.append("Choppy/internal structure")
+
+    displacement = str(ev.get("displacement") or row.get("displacement") or "").upper()
+    if displacement == "STRONG":
+        components["structure_quality"] += 3
+        reasons.append("Strong displacement")
+    elif displacement == "WEAK":
+        components["structure_quality"] += 1
+
+    if ev.get("sweep_taken"):
+        components["confirmation_quality"] += 2
+        reasons.append("Liquidity sweep taken")
+    if ev.get("rejection_confirmed"):
+        components["confirmation_quality"] += 3
+        reasons.append("Rejection confirmed")
+
+    location = str(row.get("stockLocation") or ev.get("location") or "").upper()
+    direction = str(row.get("direction") or "").upper()
+    has_zone = bool(row.get("in_ob") or row.get("near_ob"))
+    good_location = (
+        (direction == "LONG" and ("DISCOUNT" in location or (has_zone and "PREMIUM" not in location)))
+        or (direction == "SHORT" and ("PREMIUM" in location or (has_zone and "DISCOUNT" not in location)))
+    )
+    if good_location:
+        components["location_quality"] += 5
+        reasons.append("Favorable location")
+    elif location:
+        cautions.append(f"Location: {location.title()}")
+
+    rr = _ranking_rr(row)
+    if rr is None:
+        missing["rr"] = missing.get("rr", 0) + 1
+    elif rr >= 2.0:
+        components["rr_quality"] += 5
+        reasons.append(f"{rr:.1f} R:R")
+    elif rr >= 1.5:
+        components["rr_quality"] += 3
+        reasons.append(f"{rr:.1f} R:R")
+    else:
+        cautions.append(f"{rr:.1f} R:R")
+
+    quality = row.get("quality") or {}
+    freshness = str(quality.get("freshness") or row.get("freshness") or "").upper()
+    if "FRESH" in freshness:
+        components["freshness"] += 4
+        reasons.append("Fresh order block")
+    elif not freshness:
+        missing["freshness"] = missing.get("freshness", 0) + 1
+
+    entry_status = str(row.get("entryStatus") or "")
+    if entry_status == "Tradeable":
+        components["entry_proximity"] += 2
+        reasons.append("At planned entry")
+    elif entry_status == "Near Entry":
+        components["entry_proximity"] += 1
+        reasons.append("Near planned entry")
+    elif entry_status == "Too Far":
+        cautions.append("Too far from entry")
+
+    earnings_days = _ranking_earnings_days(row)
+    if earnings_days is None:
+        missing["earnings"] = missing.get("earnings", 0) + 1
+    elif 0 <= earnings_days <= 7:
+        components["earnings"] -= 5
+        cautions.append(f"Earnings in {earnings_days} days")
+    elif 8 <= earnings_days <= 14:
+        components["earnings"] -= 2
+        cautions.append(f"Earnings in {earnings_days} days")
+
+    option_plan = row.get("option_plan") or {}
+    if option_plan.get("available") is True:
+        components["option_plan"] += 1
+    else:
+        cautions.append("Option Plan unavailable")
+
+    for reason in ev.get("no_trade_reasons") or []:
+        if reason:
+            cautions.append(str(reason))
+
+    def unique(items: list[str]) -> list[str]:
+        seen = set()
+        output = []
+        for item in items:
+            normalized = str(item or "").strip()
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(normalized)
+        return output
+
+    return components, unique(reasons)[:6], unique(cautions)[:6], missing
+
+
+def _ranking_tier(bucket_order: int, score: float) -> str:
+    if bucket_order <= 3 and score >= 70:
+        return "TOP_OPPORTUNITY"
+    if bucket_order <= 6:
+        return "HIGH_PRIORITY"
+    if bucket_order <= 8:
+        return "REVIEW"
+    if bucket_order == 9:
+        return "MONITOR"
+    return "LOW_PRIORITY"
+
+
+def _score_distribution(scores: list[float]) -> dict:
+    if not scores:
+        return {"min": None, "median": None, "max": None}
+    values = sorted(scores)
+    return {
+        "min": round(values[0], 1),
+        "median": round(_percentile(values, 0.5) or 0, 1),
+        "max": round(values[-1], 1),
+    }
+
+
+def apply_opportunity_ranking(rows: list, near_miss: Optional[list] = None, *, generated_at: Optional[datetime] = None) -> dict:
+    started = time.perf_counter()
+    all_rows = [*(rows or []), *((near_miss or []))]
+    generated = generated_at or _utc_now()
+    ranked = []
+    missing_counts = Counter()
+    earnings_penalties = 0
+    freshness_penalties = 0
+
+    for index, row in enumerate(all_rows):
+        grade = _ranking_grade(row)
+        status_bucket = _ranking_status_bucket(row)
+        bucket_order = _ranking_bucket_order(status_bucket, grade)
+        components, positive_reasons, cautions, missing = _ranking_component_model(row)
+        for key, count in missing.items():
+            missing_counts[key] += count
+        if components.get("earnings", 0) < 0:
+            earnings_penalties += 1
+        if missing.get("freshness"):
+            freshness_penalties += 1
+        score = max(0.0, min(100.0, float(sum(components.values()))))
+        rr = _ranking_rr(row)
+        opp_remaining = _ranking_opportunity_remaining(row)
+        ranked.append({
+            "row": row,
+            "input_index": index,
+            "ticker": str(row.get("ticker") or ""),
+            "status_bucket": status_bucket,
+            "grade": grade,
+            "bucket_order": bucket_order,
+            "score": round(score, 1),
+            "rr": rr if rr is not None else -1,
+            "opportunity_remaining": opp_remaining if opp_remaining is not None else -1,
+            "confirmation_time": _ranking_confirmation_time(row),
+            "components": components,
+            "positive_reasons": positive_reasons,
+            "cautions": cautions,
+        })
+
+    ranked.sort(key=lambda item: (
+        item["bucket_order"],
+        -item["score"],
+        -item["rr"],
+        -item["opportunity_remaining"],
+        str(item["ticker"]),
+        item["input_index"],
+    ))
+
+    tie_count = 0
+    previous_key = None
+    for rank, item in enumerate(ranked, start=1):
+        tie_key = (
+            item["bucket_order"],
+            item["score"],
+            round(item["rr"], 4) if isinstance(item["rr"], (int, float)) else item["rr"],
+            round(item["opportunity_remaining"], 4) if isinstance(item["opportunity_remaining"], (int, float)) else item["opportunity_remaining"],
+        )
+        if previous_key == tie_key:
+            tie_count += 1
+        previous_key = tie_key
+        item["row"]["ranking"] = {
+            "rank": rank,
+            "tier": _ranking_tier(item["bucket_order"], item["score"]),
+            "score": item["score"],
+            "status_bucket": item["status_bucket"],
+            "priority_bucket": item["bucket_order"],
+            "positive_reasons": item["positive_reasons"],
+            "cautions": item["cautions"],
+            "ranking_components": item["components"],
+            "version": OPPORTUNITY_RANKING_VERSION,
+        }
+
+    rows.sort(key=lambda row: ((row.get("ranking") or {}).get("rank", 10**9), str(row.get("ticker") or "")))
+    if near_miss is not None:
+        near_miss.sort(key=lambda row: ((row.get("ranking") or {}).get("rank", 10**9), str(row.get("ticker") or "")))
+
+    scores = [item["score"] for item in ranked]
+    bucket_counts = Counter(f"{item['status_bucket']}:{item['grade']}" for item in ranked)
+    tier_counts = Counter((item["row"].get("ranking") or {}).get("tier") or "UNKNOWN" for item in ranked)
+    top_items = [
+        {
+            "rank": (item["row"].get("ranking") or {}).get("rank"),
+            "ticker": item["ticker"],
+            "grade": item["grade"],
+            "status_bucket": item["status_bucket"],
+            "score": item["score"],
+            "tier": (item["row"].get("ranking") or {}).get("tier"),
+            "positive_reasons": item["positive_reasons"],
+            "cautions": item["cautions"],
+        }
+        for item in ranked[:20]
+    ]
+    lowest_items = [
+        {
+            "rank": (item["row"].get("ranking") or {}).get("rank"),
+            "ticker": item["ticker"],
+            "grade": item["grade"],
+            "status_bucket": item["status_bucket"],
+            "score": item["score"],
+            "tier": (item["row"].get("ranking") or {}).get("tier"),
+        }
+        for item in ranked[-20:]
+    ]
+
+    return {
+        "ranking_version": OPPORTUNITY_RANKING_VERSION,
+        "ranking_generated_at": _format_utc_timestamp(generated),
+        "ranked_setup_count": len(ranked),
+        "top_opportunity_count": min(5, len([item for item in ranked if (item["row"].get("ranking") or {}).get("tier") != "LOW_PRIORITY"])),
+        "ranking_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        "ranking_diagnostics": {
+            "bucket_counts": dict(sorted(bucket_counts.items())),
+            "tier_counts": dict(sorted(tier_counts.items())),
+            "score_distribution": _score_distribution(scores),
+            "top_20": top_items,
+            "lowest_20": lowest_items,
+            "missing_field_counts": dict(sorted(missing_counts.items())),
+            "tie_count": tie_count,
+            "earnings_penalties_applied": earnings_penalties,
+            "freshness_penalties_applied": freshness_penalties,
+            "deterministic": True,
+        },
+    }
+
+
 def _stock_phase(daily_direction: str, h4_direction: str) -> str:
     if daily_direction == "Bullish" and h4_direction == "Bullish":
         return "Trend Move"
@@ -5428,6 +5840,7 @@ def scan_all(
         option_plans_generated = sum(1 for r in all_results if (r.get("option_plan") or {}).get("available") is True)
         total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
         scan_completed_at = _utc_now()
+        ranking_meta = apply_opportunity_ranking(rows, near_miss, generated_at=scan_completed_at)
         cache_stats = _cache_snapshot()
         provider_metrics = provider_metrics_snapshot()
         attempted = len(filtered_watchlist)
@@ -5587,6 +6000,7 @@ def scan_all(
             "scan_started_at": _format_utc_timestamp(scan_started_at),
             "scan_completed_at": _format_utc_timestamp(scan_completed_at),
             "scan_duration_ms": total_ms,
+            **ranking_meta,
             "partial_result": bool(partial_reasons),
             "partial_result_reasons": partial_reasons,
             "partial_result_reason": "; ".join(
@@ -5603,6 +6017,7 @@ def scan_all(
                 "indicator_calculation_ms": price_trend_sum_ms,
                 "strategy_evaluation_ms": process_stage_ms,
                 "option_plan_ms": option_plan_ms,
+                "ranking_duration_ms": ranking_meta.get("ranking_duration_ms"),
                 "serialization_ms": None,
                 "quote_enrichment_ms": quote_stage_ms,
                 "total_scan_duration_ms": total_ms,
