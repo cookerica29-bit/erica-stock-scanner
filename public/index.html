@@ -2385,6 +2385,53 @@
     margin-bottom: 10px;
     text-transform: uppercase;
   }
+  .trade-intelligence-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+    margin: 10px 0;
+  }
+  .trade-intelligence-metric {
+    background: rgba(148,163,184,0.06);
+    border: 1px solid rgba(148,163,184,0.16);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .trade-intelligence-metric span {
+    color: var(--muted);
+    display: block;
+    font-size: 10px;
+    margin-bottom: 3px;
+    text-transform: uppercase;
+  }
+  .trade-intelligence-metric strong {
+    color: var(--text);
+    font-size: 14px;
+  }
+  .trade-intelligence-list {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .trade-intelligence-row {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+  }
+  .trade-intelligence-bar {
+    background: rgba(148,163,184,0.12);
+    border-radius: 999px;
+    flex: 1;
+    height: 6px;
+    min-width: 64px;
+    overflow: hidden;
+  }
+  .trade-intelligence-bar > span {
+    background: var(--accent);
+    display: block;
+    height: 100%;
+  }
   .analytics-table {
     width: 100%;
     border-collapse: collapse;
@@ -3093,6 +3140,7 @@
 <div id="analytics-panel" class="tab-panel">
   <div class="journal-stats" id="analyticsStats"></div>
   <div class="analytics-card" id="verifiedAnalyticsQuality"></div>
+  <div class="analytics-card" id="tradeIntelligenceDashboard"></div>
   <div class="analytics-card" id="opportunityAnalyticsSummary"></div>
   <div class="analytics-grid" id="analyticsTraderSummary"></div>
   <div class="analytics-grid">
@@ -3156,6 +3204,10 @@
   <details class="analytics-collapse">
     <summary>Smart Notifications Diagnostics</summary>
     <div class="analytics-collapse-body" id="smartNotificationDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Trade Intelligence Diagnostics</summary>
+    <div class="analytics-collapse-body" id="tradeIntelligenceDiagnostics"></div>
   </details>
 </div>
 
@@ -6083,8 +6135,11 @@ function renderRiskRewardBar(setup) {
 }
 
 const GUIDED_TRADE_CHART_VERSION = 'guided-trade-chart-v1';
+const TRADE_INTELLIGENCE_VERSION = 'trade-intelligence-v1';
 const guidedTradeChartRegistry = new Map();
 const guidedTradeChartRequests = new Map();
+const tradeIntelligenceInsightCache = new Map();
+let tradeIntelligenceState = { loading: false, payload: null, error: null, token: '' };
 
 function guidedChartKey(subject = {}, context = 'setup') {
   return [context, subject.position_id, subject.journal_id, subject.setup_id, subject.ticker, subject.direction]
@@ -6321,6 +6376,9 @@ function renderGuidedChartShell(key, plan, subject, context, signalAge = '') {
           <div class="guided-explain-title">What Is Still Missing</div>
           <div class="guided-explain-list">${guidedMissingItems(subject).map(item => `<div>○ ${escapeHtml(item)}</div>`).join('')}</div>
         </div>` : ''}
+        <div class="guided-explain trade-intelligence-panel" id="tradeIntelligence-${escapeHtml(key)}">
+          ${renderTradeIntelligenceInsight()}
+        </div>
       </div>
     </div>`;
 }
@@ -6343,6 +6401,7 @@ function handleGuidedChartToggle(details) {
   if (!details?.open || details.dataset.loaded === 'true') return;
   details.dataset.loaded = 'true';
   loadGuidedTradeChart(details.dataset.guidedChartKey || '', '4H');
+  loadTradeIntelligenceForChart(details.dataset.guidedChartKey || '');
 }
 
 async function loadGuidedTradeChart(key, timeframe = '4H') {
@@ -6381,6 +6440,127 @@ async function loadGuidedTradeChart(key, timeframe = '4H') {
         <div class="guided-chart-diag">Chart error: ${escapeHtml(error.message || String(error))}</div>
       </div>
       ${renderGuidedTradeChartSvg(plan, [], { error: true })}`;
+  }
+}
+
+function tradeIntelligenceSubjectPayload(subject = {}) {
+  return {
+    ticker: String(subject.ticker || '').toUpperCase(),
+    sector: firstPresent(subject.sector, subject.stock_sector, subject.market_sector, null),
+    direction: firstPresent(subject.direction, subject.option_type, subject.optionType, null),
+    grade: firstPresent(subject.setup_grade, subject.setupGrade, subject.grade, null),
+    scanner_status_normalized: firstPresent(subject.scanner_status_normalized, subject.scanner_status, subject.scannerStatus, subject.status, null),
+    scanner_timeframe: firstPresent(subject.scanner_timeframe, subject.timeframe, subject.setupTf, null),
+    htf_alignment: firstPresent(subject.htf_alignment, subject.trend_state, subject.trend, subject.daily_market_regime, null),
+    setupLocation: firstPresent(subject.setupLocation, subject.stockLocation, subject.trade_eval?.location, null),
+    confirmation_status: firstPresent(subject.confirmation_status, subject.confirmationStarted ? 'confirmed' : null, null),
+    opportunity_remaining: firstPresent(subject.opportunity_remaining, subject.opportunityRemaining, subject.position_opportunity_remaining, null),
+    days_until_earnings: firstPresent(subject.days_until_earnings, subject.earnings_days_until, null),
+    signal_timestamp: firstPresent(subject.signal_timestamp, subject.entry_timestamp, subject.created_at, subject.createdAt, null),
+    atr_expansion: firstPresent(subject.atr_expansion, subject.relative_volume, subject.atr_at_signal, null),
+    market_regime: firstPresent(subject.market_regime, subject.daily_market_regime, subject.h4_market_regime, null),
+  };
+}
+
+function renderTradeIntelligenceMetric(label, value) {
+  return `
+    <div class="trade-intelligence-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value == null || value === '' ? '—' : String(value))}</strong>
+    </div>`;
+}
+
+function renderTradeIntelligenceInsight(payload = null) {
+  if (!payload) {
+    return `
+      <div class="guided-explain-title">Historical Intelligence</div>
+      <div class="guided-explain-list">
+        <div>Building knowledge...</div>
+        <div>Verified history is still being collected.</div>
+      </div>`;
+  }
+  if (payload.error) {
+    return `
+      <div class="guided-explain-title">Historical Intelligence</div>
+      <div class="guided-explain-list">
+        <div>Historical insight is unavailable right now.</div>
+        <div>${escapeHtml(payload.error)}</div>
+      </div>`;
+  }
+  if (!payload.available) {
+    const thresholds = payload.thresholds || {};
+    return `
+      <div class="guided-explain-title">Historical Intelligence</div>
+      <div class="guided-explain-list">
+        <div>${escapeHtml(payload.message || 'Not enough verified historical data yet.')}</div>
+        <div>Exact matches: ${escapeHtml(String(payload.exact_match_count || 0))} / ${escapeHtml(String(thresholds.exact_min_trades || 30))}</div>
+        <div>Broader matches: ${escapeHtml(String(payload.broader_match_count || 0))} / ${escapeHtml(String(thresholds.broad_min_trades || 100))}</div>
+      </div>`;
+  }
+  const metrics = payload.metrics || {};
+  const outcomes = payload.what_usually_happens || [];
+  const drivers = payload.confidence_drivers || [];
+  return `
+    <div class="guided-explain-title">Historical Intelligence</div>
+    <div class="guided-explain-list">
+      <div>Verified Similar Trades: ${escapeHtml(String(payload.verified_trades || payload.sample_size || 0))}</div>
+      <div>Sample Size: ${escapeHtml(String(payload.sample_size || 0))} verified trades</div>
+    </div>
+    <div class="trade-intelligence-metrics">
+      ${renderTradeIntelligenceMetric('TP1 Success', metrics.tp1_rate == null ? 'Not available' : `${metrics.tp1_rate}%`)}
+      ${renderTradeIntelligenceMetric('Avg Time to TP1', metrics.average_time_to_tp1_trading_days == null ? '—' : `${metrics.average_time_to_tp1_trading_days} trading days`)}
+      ${renderTradeIntelligenceMetric('Avg Drawdown', metrics.average_maximum_drawdown_r == null ? '—' : `${metrics.average_maximum_drawdown_r}R`)}
+      ${renderTradeIntelligenceMetric('Avg R', metrics.average_r == null ? '—' : `${metrics.average_r}R`)}
+    </div>
+    ${outcomes.length ? `<div class="guided-explain-list">
+      ${outcomes.map(item => `
+        <div class="trade-intelligence-row">
+          <span>${escapeHtml(item.label)}</span>
+          <div class="trade-intelligence-bar"><span style="width:${Math.max(0, Math.min(100, Number(item.percent || 0)))}%"></span></div>
+          <strong>${escapeHtml(item.percent == null ? '—' : `${item.percent}%`)}</strong>
+        </div>`).join('')}
+    </div>` : ''}
+    ${drivers.length ? `<div class="guided-explain-list">${drivers.map(item => `<div>✓ ${escapeHtml(item)}</div>`).join('')}</div>` : ''}`;
+}
+
+async function loadTradeIntelligenceForChart(key) {
+  const registered = guidedTradeChartRegistry.get(key);
+  const target = document.getElementById(`tradeIntelligence-${key}`);
+  if (!registered || !target) return;
+  if (!journalServerSyncEnabled() || !journalServerAuthoritative()) {
+    target.innerHTML = renderTradeIntelligenceInsight({
+      available: false,
+      message: 'Not enough verified historical data yet.',
+      exact_match_count: 0,
+      broader_match_count: 0,
+      thresholds: { exact_min_trades: 30, broad_min_trades: 100 },
+    });
+    return;
+  }
+  const setup = tradeIntelligenceSubjectPayload(registered.subject);
+  const cacheKey = JSON.stringify(setup);
+  if (tradeIntelligenceInsightCache.has(cacheKey)) {
+    target.innerHTML = renderTradeIntelligenceInsight(tradeIntelligenceInsightCache.get(cacheKey));
+    return;
+  }
+  target.innerHTML = renderTradeIntelligenceInsight();
+  try {
+    const response = await fetchWithTimeout(`${API}/api/dev/trade-intelligence/similar`, {
+      method: 'POST',
+      headers: journalAuthHeaders(),
+      body: JSON.stringify({ setup }),
+    });
+    if (response.status === 403) {
+      setJournalAuthStatus('invalid');
+      throw new Error('Invalid journal admin token');
+    }
+    if (!response.ok) throw new Error(`Trade Intelligence failed: ${response.status}`);
+    const payload = await response.json();
+    tradeIntelligenceInsightCache.set(cacheKey, payload);
+    target.innerHTML = renderTradeIntelligenceInsight(payload);
+    setJournalAuthStatus('authenticated');
+  } catch (error) {
+    target.innerHTML = renderTradeIntelligenceInsight({ error: String(error.message || error) });
   }
 }
 
@@ -10066,6 +10246,7 @@ async function connectJournalAdminToken() {
     setJournalAuthStatus('authenticated');
     await initializeJournalServerSync();
     loadVerifiedAnalytics(true);
+    loadTradeIntelligenceDashboard(true);
     loadNotifications(true);
     await loadPositionReplay();
     return { authenticated: true };
@@ -10081,7 +10262,10 @@ function clearJournalAdminToken() {
   if (input) input.value = '';
   setJournalAuthStatus('missing');
   verifiedAnalyticsState = { loading: false, payload: null, error: null, token: '' };
+  tradeIntelligenceState = { loading: false, payload: null, error: null, token: '' };
+  tradeIntelligenceInsightCache.clear();
   renderVerifiedAnalyticsFromCache();
+  renderTradeIntelligenceDashboard(null);
   updateDeveloperReplayAccess();
   notificationState = { events: [], unread_count: 0, preferences: null, diagnostics: null, error: null, loading: false };
   renderNotificationCenter();
@@ -12042,6 +12226,120 @@ async function loadVerifiedAnalytics(force = false) {
   }
 }
 
+function renderTradeIntelligenceRows(rows = [], label = 'Group') {
+  if (!rows.length) return '<div class="analytics-empty">No verified Trade Intelligence groups yet.</div>';
+  const body = rows.slice(0, 8).map(row => `
+    <tr>
+      <td><strong>${escapeHtml(row.key || '—')}</strong></td>
+      <td>${escapeHtml(String(row.total_verified_trades || 0))}</td>
+      <td>${escapeHtml(row.tp1_rate == null ? '—' : `${row.tp1_rate}%`)}</td>
+      <td>${escapeHtml(row.average_r == null ? '—' : `${row.average_r}R`)}</td>
+      <td>${escapeHtml(row.average_time_to_tp1_trading_days == null ? '—' : `${row.average_time_to_tp1_trading_days}d`)}</td>
+    </tr>`).join('');
+  return `
+    <table class="analytics-table">
+      <thead><tr><th>${escapeHtml(label)}</th><th>Verified Trades</th><th>TP1 Rate</th><th>Avg R</th><th>Avg Time to TP1</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function renderTradeIntelligenceDashboard(payload = null) {
+  const el = document.getElementById('tradeIntelligenceDashboard');
+  const diag = document.getElementById('tradeIntelligenceDiagnostics');
+  if (!el) return;
+  if (!journalServerSyncEnabled() || !journalServerAuthoritative()) {
+    el.innerHTML = '<h3>Trade Intelligence</h3><div class="analytics-empty">Connect the journal admin token to load verified historical intelligence.</div>';
+    if (diag) diag.innerHTML = '<div class="analytics-empty">Trade Intelligence diagnostics require journal admin access.</div>';
+    return;
+  }
+  if (!payload) {
+    el.innerHTML = '<h3>Trade Intelligence</h3><div class="analytics-empty"><span class="spinner"></span> Loading verified history...</div>';
+    return;
+  }
+  if (payload.error) {
+    el.innerHTML = `<h3>Trade Intelligence</h3><div class="analytics-empty">Trade Intelligence unavailable: ${escapeHtml(payload.error)}</div>`;
+    if (diag) diag.innerHTML = `<div class="analytics-empty">Trade Intelligence unavailable: ${escapeHtml(payload.error)}</div>`;
+    return;
+  }
+  const dashboard = payload.dashboard || {};
+  const thresholds = payload.thresholds || {};
+  el.innerHTML = `
+    <h3>Trade Intelligence</h3>
+    <div class="trend-note" style="margin-bottom:10px;">Uses completed replay-verified trades only. Journal-only and mismatched outcomes are excluded.</div>
+    <div class="trade-intelligence-metrics">
+      ${renderTradeIntelligenceMetric('Verified Trades', payload.verified_trade_count || 0)}
+      ${renderTradeIntelligenceMetric('Exact Threshold', thresholds.exact_min_trades || 30)}
+      ${renderTradeIntelligenceMetric('Broader Threshold', thresholds.broad_min_trades || 100)}
+      ${renderTradeIntelligenceMetric('Status', payload.ready ? 'Ready' : 'Building knowledge')}
+    </div>
+    ${payload.ready ? `
+      <details class="analytics-subdetails" open>
+        <summary>Most Reliable Symbols</summary>
+        <div class="analytics-subdetails-body">${renderTradeIntelligenceRows(dashboard.most_reliable_symbols || [], 'Symbol')}</div>
+      </details>
+      <details class="analytics-subdetails">
+        <summary>Most Reliable Grades</summary>
+        <div class="analytics-subdetails-body">${renderTradeIntelligenceRows(dashboard.most_reliable_grades || [], 'Grade')}</div>
+      </details>
+      <details class="analytics-subdetails">
+        <summary>Best Weekday</summary>
+        <div class="analytics-subdetails-body">${renderTradeIntelligenceRows(dashboard.best_weekdays || [], 'Weekday')}</div>
+      </details>` : `<div class="analytics-empty">${escapeHtml(payload.message || 'Not enough verified historical data yet.')}</div>`}
+  `;
+  if (diag) {
+    const d = payload.diagnostics || {};
+    diag.innerHTML = `
+      <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+        Developer-only diagnostics. Trade Intelligence is analytics-only and does not change scanner, ranking, replay, journal, Option Plan, alerts, or Position Intelligence.
+      </div>
+      <div class="journal-stats" style="margin-bottom:12px;">
+        ${renderReplayStat('Version', payload.version || TRADE_INTELLIGENCE_VERSION)}
+        ${renderReplayStat('Cache Status', d.cache_status || '—')}
+        ${renderReplayStat('Verified Records', d.sample_sizes?.verified_records ?? payload.verified_trade_count ?? 0)}
+        ${renderReplayStat('Exact Groups', d.sample_sizes?.exact_groups ?? 0)}
+        ${renderReplayStat('Broad Groups', d.sample_sizes?.broad_groups ?? 0)}
+        ${renderReplayStat('Excluded Trades', d.excluded_trades ?? 0)}
+        ${renderReplayStat('Replay-Verified Count', d.replay_only_counts ?? 0)}
+        ${renderReplayStat('Journal-Only/Mismatch Count', d.journal_only_counts ?? 0)}
+        ${renderReplayStat('Cache Rebuild Time', `${fmtNumber(d.cache_rebuild_time_ms || 0)} ms`)}
+      </div>
+      <div class="analytics-empty" style="text-align:left;">Similarity dimensions: ${escapeHtml((d.similarity_dimensions_used || []).join(', ') || '—')}</div>`;
+  }
+}
+
+async function loadTradeIntelligenceDashboard(force = false) {
+  if (!journalServerSyncEnabled() || !journalServerAuthoritative()) {
+    tradeIntelligenceState = { loading: false, payload: null, error: null, token: '' };
+    renderTradeIntelligenceDashboard(null);
+    return null;
+  }
+  const token = journalAuthToken();
+  if (tradeIntelligenceState.loading) return tradeIntelligenceState.payload;
+  if (!force && tradeIntelligenceState.payload && tradeIntelligenceState.token === token) {
+    renderTradeIntelligenceDashboard(tradeIntelligenceState.payload);
+    return tradeIntelligenceState.payload;
+  }
+  tradeIntelligenceState = { loading: true, payload: null, error: null, token };
+  renderTradeIntelligenceDashboard(null);
+  try {
+    const response = await fetchWithTimeout(`${API}/api/dev/trade-intelligence${force ? '?force=true' : ''}`, { headers: journalAuthHeaders() });
+    if (response.status === 403) {
+      setJournalAuthStatus('invalid');
+      throw new Error('Invalid journal admin token');
+    }
+    if (!response.ok) throw new Error(`Trade Intelligence failed: ${response.status}`);
+    const payload = await response.json();
+    tradeIntelligenceState = { loading: false, payload, error: null, token };
+    setJournalAuthStatus('authenticated');
+    renderTradeIntelligenceDashboard(payload);
+    return payload;
+  } catch (error) {
+    tradeIntelligenceState = { loading: false, payload: { error: String(error.message || error) }, error: String(error.message || error), token };
+    renderTradeIntelligenceDashboard(tradeIntelligenceState.payload);
+    return null;
+  }
+}
+
 function expectedMoveDiagnostics(entries = []) {
   const contractGuidance = window.KairosContractGuidance
     ? window.KairosContractGuidance.diagnostics(
@@ -13167,6 +13465,8 @@ function renderAnalytics() {
   `;
   renderVerifiedAnalyticsFromCache();
   loadVerifiedAnalytics(false);
+  renderTradeIntelligenceDashboard(tradeIntelligenceState.payload);
+  loadTradeIntelligenceDashboard(false);
 
   document.getElementById('analyticsByEntryStatus').innerHTML = renderAnalyticsTable(entryStatusRows, 'Entry Status');
   document.getElementById('analyticsByDirection').innerHTML = renderAnalyticsTable(directionRows, 'Direction');

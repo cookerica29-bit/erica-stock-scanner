@@ -55,6 +55,12 @@ from position_intelligence import (
 )
 from verified_analytics import verified_analytics_snapshot
 from smart_notifications import SQLiteNotificationRepository, SMART_NOTIFICATION_VERSION, stable_event_id
+from trade_intelligence import (
+    TRADE_INTELLIGENCE_VERSION,
+    build_trade_intelligence_snapshot,
+    build_verified_trade_records,
+    similar_trade_insight,
+)
 
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
@@ -84,6 +90,12 @@ _discovery_universe_lock = threading.RLock()
 _discovery_universe_executor = ThreadPoolExecutor(max_workers=1)
 _journal_repository = SQLiteJournalRepository(default_journal_db_path())
 _notification_repository = SQLiteNotificationRepository(default_journal_db_path())
+_trade_intelligence_cache = {
+    "signature": None,
+    "snapshot": None,
+    "verified_records": [],
+}
+_trade_intelligence_lock = threading.RLock()
 
 NO_STORE_HEADERS = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -1067,6 +1079,109 @@ def _replay_response(entries: list[dict], replays: list[dict], limit=None, offse
         **({"limit": limit} if limit is not None else {}),
         **({"offset": offset} if offset is not None else {}),
     }
+
+
+def _trade_intelligence_signature(entries: list[dict]) -> tuple:
+    if not entries:
+        return (0, None, None, None)
+    newest_update = max(str(entry.get("updated_at") or "") for entry in entries)
+    newest_replay = max(str(entry.get("replay_cache_generated_at") or "") for entry in entries)
+    version_sum = sum(int(entry.get("record_version") or 0) for entry in entries)
+    return (len(entries), newest_update, newest_replay, version_sum)
+
+
+def _trade_intelligence_dataset(force: bool = False) -> dict:
+    entries = _journal_repository.list_entries({"status": "all", "limit": 5000, "offset": 0})
+    signature = _trade_intelligence_signature(entries)
+    with _trade_intelligence_lock:
+        cached = (
+            not force
+            and _trade_intelligence_cache.get("signature") == signature
+            and _trade_intelligence_cache.get("snapshot") is not None
+        )
+        if cached:
+            snapshot = dict(_trade_intelligence_cache["snapshot"])
+            diagnostics = dict(snapshot.get("diagnostics") or {})
+            diagnostics["cache_status"] = "hit"
+            snapshot["diagnostics"] = diagnostics
+            return {
+                "entries": entries,
+                "replays": [],
+                "analytics": None,
+                "verified_records": list(_trade_intelligence_cache.get("verified_records") or []),
+                "snapshot": snapshot,
+                "cache_status": "hit",
+            }
+
+    replays = _replay_positions(entries, summary_only=True) if entries else []
+    analytics = verified_analytics_snapshot(entries, replays)
+    verified_records = build_verified_trade_records(entries, replays, analytics.get("records") or [])
+    snapshot = build_trade_intelligence_snapshot(verified_records)
+    diagnostics = dict(snapshot.get("diagnostics") or {})
+    diagnostics.update({
+        "cache_status": "rebuilt",
+        "excluded_trades": max(0, len(entries) - len(verified_records)),
+        "journal_only_counts": sum(
+            1 for record in analytics.get("records") or []
+            if (record.get("analytics_verification") or {}).get("status") != "VERIFIED"
+        ),
+        "replay_only_counts": len(verified_records),
+    })
+    snapshot["diagnostics"] = diagnostics
+    with _trade_intelligence_lock:
+        _trade_intelligence_cache.update({
+            "signature": signature,
+            "snapshot": snapshot,
+            "verified_records": verified_records,
+        })
+    return {
+        "entries": entries,
+        "replays": replays,
+        "analytics": analytics,
+        "verified_records": verified_records,
+        "snapshot": snapshot,
+        "cache_status": "rebuilt",
+    }
+
+
+@app.get("/api/dev/trade-intelligence")
+def api_dev_trade_intelligence(
+    force: bool = Query(default=False),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    dataset = _trade_intelligence_dataset(force=force)
+    snapshot = dict(dataset["snapshot"])
+    snapshot["status"] = "ready" if snapshot.get("verified_trade_count") else "not_ready"
+    snapshot["ready"] = bool(snapshot.get("verified_trade_count"))
+    snapshot["message"] = (
+        "Trade Intelligence uses replay-verified completed trades only."
+        if snapshot.get("verified_trade_count")
+        else "Not enough verified historical data yet."
+    )
+    snapshot["journal_entry_count"] = len(dataset.get("entries") or [])
+    return snapshot
+
+
+@app.post("/api/dev/trade-intelligence/similar")
+def api_dev_trade_intelligence_similar(
+    payload: dict = Body(default_factory=dict),
+    exact_min_trades: int = Query(default=30, ge=1, le=10000),
+    broad_min_trades: int = Query(default=100, ge=1, le=10000),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    dataset = _trade_intelligence_dataset(force=False)
+    setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else payload
+    insight = similar_trade_insight(
+        setup or {},
+        dataset.get("verified_records") or [],
+        exact_min_trades=exact_min_trades,
+        broad_min_trades=broad_min_trades,
+    )
+    insight["status"] = "ready" if insight.get("available") else "not_ready"
+    insight["source"] = "verified_replay_history"
+    return insight
 
 
 @app.get("/api/dev/position-replay")

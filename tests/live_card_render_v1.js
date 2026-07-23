@@ -319,6 +319,53 @@ assert.ok(guidedMismatch.includes('Review the trade outcome.'));
 assert.ok(guidedMismatch.includes('Needs Review: journal outcome and replay evidence do not agree.'));
 assert.ok(!guidedMismatch.includes('Verified by replay'));
 assert.ok(context.formatSignalTimestamp('2026-07-20T14:08:00Z').includes('2026') === false);
+assert.ok(guidedMismatch.includes('Historical Intelligence'));
+
+const tradeIntelEmpty = context.renderTradeIntelligenceInsight({
+  available: false,
+  message: 'Not enough verified historical data yet.',
+  exact_match_count: 2,
+  broader_match_count: 14,
+  thresholds: { exact_min_trades: 30, broad_min_trades: 100 },
+});
+assert.ok(tradeIntelEmpty.includes('Not enough verified historical data yet.'));
+assert.ok(tradeIntelEmpty.includes('Exact matches: 2 / 30'));
+assert.ok(tradeIntelEmpty.includes('Broader matches: 14 / 100'));
+
+const tradeIntelReady = context.renderTradeIntelligenceInsight({
+  available: true,
+  sample_size: 84,
+  verified_trades: 84,
+  metrics: {
+    tp1_rate: 76,
+    average_time_to_tp1_trading_days: 2.4,
+    average_maximum_drawdown_r: 0.58,
+    average_r: 1.82,
+  },
+  what_usually_happens: [
+    { label: 'Reached TP1 before meaningful pullback', percent: 68, count: 57 },
+    { label: 'Stopped before TP1', percent: 13, count: 11 },
+  ],
+  confidence_drivers: ['A-grade setups outperformed the verified baseline.'],
+});
+assert.ok(tradeIntelReady.includes('Verified Similar Trades: 84'));
+assert.ok(tradeIntelReady.includes('TP1 Success'));
+assert.ok(tradeIntelReady.includes('76%'));
+assert.ok(tradeIntelReady.includes('Sample Size: 84 verified trades'));
+
+const tradeIntelPayload = context.tradeIntelligenceSubjectPayload(setup({
+  ticker: 'OXY',
+  direction: 'SHORT',
+  setupGrade: 'A',
+  scanner_status_normalized: 'ENTER_NOW',
+  scanner_timeframe: '4H',
+  setupLocation: 'premium',
+  confirmationStarted: true,
+}));
+assert.strictEqual(tradeIntelPayload.ticker, 'OXY');
+assert.strictEqual(tradeIntelPayload.direction, 'SHORT');
+assert.strictEqual(tradeIntelPayload.grade, 'A');
+assert.strictEqual(tradeIntelPayload.scanner_timeframe, '4H');
 
 const missingPlanFallback = htmlFor(setup({ entry: null, sl: null, tp1: null }));
 assert.ok(!missingPlanFallback.includes('data-plan-visual="risk-reward"'));
