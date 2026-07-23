@@ -16,7 +16,16 @@ if str(ROOT) not in sys.path:
 
 import journal_store  # noqa: E402
 import main  # noqa: E402
-from position_intelligence import build_position_intelligence, replay_position_intelligence, aggregate_replays  # noqa: E402
+from position_intelligence import (  # noqa: E402
+    RANGE_BOUND_ONLY,
+    RECOMPUTE_CHRONOLOGICALLY,
+    SAFE_STATIC_INPUT,
+    STRIP_FROM_REPLAY,
+    aggregate_replays,
+    build_position_intelligence,
+    replay_position_intelligence,
+    REPLAY_FIELD_CLASSIFICATION,
+)
 
 
 TOKEN = "journal-secret"
@@ -104,6 +113,43 @@ def test_no_lookahead_best_price_and_state_transitions():
     assert replay["time_in_each_state"]["WATCH"]["candle_count"] == 2
 
 
+def test_replay_field_classification_documents_no_lookahead_inputs():
+    expected = {
+        "entry_timestamp": SAFE_STATIC_INPUT,
+        "planned_underlying_entry": SAFE_STATIC_INPUT,
+        "actual_underlying_entry": SAFE_STATIC_INPUT,
+        "original_stop": SAFE_STATIC_INPUT,
+        "original_tp1": SAFE_STATIC_INPUT,
+        "exit_timestamp": RANGE_BOUND_ONLY,
+        "tracking_completed_at": RANGE_BOUND_ONLY,
+        "first_target_touch_at": RECOMPUTE_CHRONOLOGICALLY,
+        "second_target_touch_at": RECOMPUTE_CHRONOLOGICALLY,
+        "third_target_touch_at": RECOMPUTE_CHRONOLOGICALLY,
+        "target_hit_at": RECOMPUTE_CHRONOLOGICALLY,
+        "stop_hit_at": RECOMPUTE_CHRONOLOGICALLY,
+        "position_best_price": RECOMPUTE_CHRONOLOGICALLY,
+        "position_max_progress_percent": RECOMPUTE_CHRONOLOGICALLY,
+        "position_tp1_reached": RECOMPUTE_CHRONOLOGICALLY,
+        "maximum_favorable_excursion": RECOMPUTE_CHRONOLOGICALLY,
+        "maximum_adverse_excursion": RECOMPUTE_CHRONOLOGICALLY,
+        "mfe": RECOMPUTE_CHRONOLOGICALLY,
+        "mae": RECOMPUTE_CHRONOLOGICALLY,
+        "best_price": RECOMPUTE_CHRONOLOGICALLY,
+        "best_progress": RECOMPUTE_CHRONOLOGICALLY,
+        "current_progress": RECOMPUTE_CHRONOLOGICALLY,
+        "current_r": RECOMPUTE_CHRONOLOGICALLY,
+        "last_market_price": RECOMPUTE_CHRONOLOGICALLY,
+        "last_evaluated_at": RECOMPUTE_CHRONOLOGICALLY,
+        "position_last_state": STRIP_FROM_REPLAY,
+        "position_state_history": STRIP_FROM_REPLAY,
+        "exit_price": STRIP_FROM_REPLAY,
+        "recorded_outcome": STRIP_FROM_REPLAY,
+        "closed_reason": STRIP_FROM_REPLAY,
+    }
+    for field, classification in expected.items():
+        assert REPLAY_FIELD_CLASSIFICATION[field] == classification
+
+
 def test_replay_ignores_final_journal_target_touch_state_until_reached_chronologically():
     replay = replay_position_intelligence(position(
         ticker="OXY",
@@ -129,6 +175,95 @@ def test_replay_ignores_final_journal_target_touch_state_until_reached_chronolog
     assert replay["final_state"] == "WATCH"
     assert replay["time_in_each_state"]["PROTECT"]["candle_count"] == 0
     assert replay["time_in_each_state"]["WATCH"]["candle_count"] == 2
+
+
+def test_replay_output_ignores_misleading_final_values_for_long_and_short():
+    final_values = {
+        "position_last_state": "EXIT",
+        "position_best_price": 999,
+        "best_price": 999,
+        "position_max_progress_percent": 999,
+        "best_progress": 999,
+        "current_progress": 999,
+        "current_r": -99,
+        "position_tp1_reached": True,
+        "tp1_reached": True,
+        "first_target_touch_at": "2026-07-10T14:00:00Z",
+        "tp1_reached_at": "2026-07-10T14:00:00Z",
+        "second_target_touch_at": "2026-07-10T14:00:00Z",
+        "third_target_touch_at": "2026-07-10T14:00:00Z",
+        "target_hit_at": "2026-07-10T14:00:00Z",
+        "first_stop_touch_at": "2026-07-10T14:00:00Z",
+        "stop_hit_at": "2026-07-10T14:00:00Z",
+        "position_state_history": [{"event_id": "future-state"}],
+        "maximum_favorable_excursion": 999,
+        "maximum_adverse_excursion": -999,
+        "maximum_favorable_excursion_r": 999,
+        "maximum_adverse_excursion_r": -999,
+        "mfe": 999,
+        "mae": -999,
+        "last_market_price": 1,
+        "last_evaluated_at": "2026-07-10T14:00:00Z",
+        "exit_price": 1,
+        "recorded_outcome": "Win",
+        "result": "Win",
+        "outcome": "TP3",
+        "completion_reason": "target",
+        "closed_reason": "target",
+        "reviewResult": "Winner",
+    }
+
+    long_candles = [
+        candle("2026-07-01T14:00:00Z", 101, 99, 100),
+        candle("2026-07-02T14:00:00Z", 103, 97, 98),
+    ]
+    clean_long = replay_position_intelligence(position(position_best_price=None), long_candles)
+    polluted_long = replay_position_intelligence(position(position_best_price=None, **final_values), long_candles)
+    assert polluted_long["final_state"] == clean_long["final_state"]
+    assert polluted_long["maximum_progress"] == clean_long["maximum_progress"]
+    assert polluted_long["maximum_r"] == clean_long["maximum_r"]
+    assert polluted_long["tp1_timestamp"] == clean_long["tp1_timestamp"]
+    assert polluted_long["stop_timestamp"] == clean_long["stop_timestamp"]
+    assert all(event.get("event_id") != "future-state" for event in polluted_long["timeline"])
+
+    short_position = position(
+        direction="SHORT",
+        actual_underlying_entry=100,
+        original_stop=105,
+        original_tp1=90,
+        original_tp2=85,
+        original_tp3=80,
+        position_best_price=None,
+    )
+    short_candles = [
+        candle("2026-07-01T14:00:00Z", 101, 99, 100),
+        candle("2026-07-02T14:00:00Z", 103, 97, 102),
+    ]
+    clean_short = replay_position_intelligence(short_position, short_candles)
+    polluted_short = replay_position_intelligence({**short_position, **final_values}, short_candles)
+    assert polluted_short["final_state"] == clean_short["final_state"]
+    assert polluted_short["maximum_progress"] == clean_short["maximum_progress"]
+    assert polluted_short["maximum_r"] == clean_short["maximum_r"]
+    assert polluted_short["tp1_timestamp"] == clean_short["tp1_timestamp"]
+    assert polluted_short["stop_timestamp"] == clean_short["stop_timestamp"]
+
+
+def test_recorded_exit_timestamp_only_bounds_replay_range():
+    replay = replay_position_intelligence(position(
+        exit_timestamp="2026-07-02T14:00:00Z",
+        result="Win",
+        outcome="TP3",
+        completion_reason="target",
+        first_target_touch_at="2026-07-03T14:00:00Z",
+    ), [
+        candle("2026-07-01T14:00:00Z", 101, 99, 100),
+        candle("2026-07-02T14:00:00Z", 102, 99, 101),
+        candle("2026-07-03T14:00:00Z", 120, 99, 115),
+    ])
+    assert replay["candles_evaluated"] == 2
+    assert replay["recorded_outcome"] == "Win"
+    assert replay["tp1_timestamp"] is None
+    assert replay["final_state"] == "HEALTHY"
 
 
 def test_watch_recovery_protect_exit_and_churn_metrics():
