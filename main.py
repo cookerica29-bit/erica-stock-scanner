@@ -51,6 +51,7 @@ from position_intelligence import (
     replay_position_intelligence,
     replay_readiness,
 )
+from verified_analytics import verified_analytics_snapshot
 
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
@@ -895,6 +896,22 @@ def api_dev_position_replay_one(
         raise HTTPException(status_code=404, detail="Position not found")
     replays = _replay_positions(entries, summary_only=summary_only)
     return _replay_response(entries, replays)
+
+
+@app.get("/api/dev/verified-analytics")
+def api_dev_verified_analytics(
+    limit: int = Query(default=1000, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entries = _journal_repository.list_entries({"status": "all", "limit": limit, "offset": offset})
+    replays = _replay_positions(entries, summary_only=True) if entries else []
+    snapshot = verified_analytics_snapshot(entries, replays)
+    snapshot["status"] = "ready" if entries else "not_ready"
+    snapshot["ready"] = bool(entries)
+    snapshot["message"] = "Verified analytics distinguish journal-recorded outcomes from replay-supported evidence."
+    return snapshot
 
 
 def _cached_scan_snapshot_for_shadow(universe: str) -> tuple[Optional[dict], dict]:

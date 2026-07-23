@@ -2824,6 +2824,7 @@
 <!-- ── Analytics Tab ─────────────────────────────────────────────────────── -->
 <div id="analytics-panel" class="tab-panel">
   <div class="journal-stats" id="analyticsStats"></div>
+  <div class="analytics-card" id="verifiedAnalyticsQuality"></div>
   <div class="analytics-card" id="opportunityAnalyticsSummary"></div>
   <div class="analytics-grid" id="analyticsTraderSummary"></div>
   <div class="analytics-grid">
@@ -2879,6 +2880,10 @@
   <details class="analytics-collapse">
     <summary>Contract Candidate Audit</summary>
     <div class="analytics-collapse-body" id="contractCandidateAuditDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Verified Analytics Diagnostics</summary>
+    <div class="analytics-collapse-body" id="verifiedAnalyticsDiagnostics"></div>
   </details>
 </div>
 
@@ -9405,6 +9410,7 @@ async function connectJournalAdminToken() {
     await response.json();
     setJournalAuthStatus('authenticated');
     await initializeJournalServerSync();
+    loadVerifiedAnalytics(true);
     await loadPositionReplay();
     return { authenticated: true };
   } catch (error) {
@@ -9418,6 +9424,8 @@ function clearJournalAdminToken() {
   const input = document.getElementById('journalAdminTokenInput');
   if (input) input.value = '';
   setJournalAuthStatus('missing');
+  verifiedAnalyticsState = { loading: false, payload: null, error: null, token: '' };
+  renderVerifiedAnalyticsFromCache();
   updateDeveloperReplayAccess();
 }
 
@@ -10893,8 +10901,8 @@ function renderJournal() {
     <div class="stat-card"><div class="stat-label">Total Trades</div><div class="stat-value">${all.length}</div></div>
     <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value ${closed ? (wins/closed >= 0.5 ? 'green' : 'red') : 'muted'}">${winRate}${closed ? '%' : ''}</div></div>
     <div class="stat-card"><div class="stat-label">Wins / Losses</div><div class="stat-value">${wins} / ${losses}</div></div>
-    <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value ${totalPnl >= 0 ? 'green' : 'red'}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(0)}</div></div>
-    <div class="stat-card"><div class="stat-label">Avg P&amp;L</div><div class="stat-value ${avgPnl >= 0 ? 'green' : 'red'}">${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-label">Journal-Level P&amp;L</div><div class="stat-value ${totalPnl >= 0 ? 'green' : 'red'}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(0)}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg Journal-Level P&amp;L</div><div class="stat-value ${avgPnl >= 0 ? 'green' : 'red'}">${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(0)}</div></div>
     <div class="stat-card"><div class="stat-label">Reviewed</div><div class="stat-value muted">${reviewed}</div></div>
   `;
 
@@ -10958,6 +10966,16 @@ function money(n) {
   return `${n >= 0 ? '+' : ''}$${Number(n || 0).toFixed(0)}`;
 }
 
+function moneyOrUnavailable(n) {
+  return n == null || Number.isNaN(Number(n)) ? 'Unavailable' : money(n);
+}
+
+function rateOrUnavailable(n) {
+  return n == null ? 'Not available' : `${n}%`;
+}
+
+let verifiedAnalyticsState = { loading: false, payload: null, error: null, token: '' };
+
 function calcStats(entries) {
   const wins = entries.filter(e => e.result === 'Win').length;
   const losses = entries.filter(e => e.result === 'Loss').length;
@@ -11015,10 +11033,173 @@ function renderAnalyticsTable(rows, label = 'Group') {
   return `
     <table class="analytics-table">
       <thead>
-        <tr><th>${label}</th><th>Total</th><th>Closed</th><th>Win %</th><th>P&amp;L</th><th>Avg</th></tr>
+        <tr><th>${label}</th><th>Total</th><th>Closed</th><th>Journal Win %</th><th>Journal-Level P&amp;L</th><th>Avg</th></tr>
       </thead>
       <tbody>${body}</tbody>
     </table>`;
+}
+
+function verificationLabel(status) {
+  return ({
+    VERIFIED: 'Verified',
+    JOURNAL_REPLAY_MISMATCH: 'Needs Review',
+    REPLAY_PENDING: 'Replay Pending',
+    INSUFFICIENT_REPLAY_DATA: 'Not Enough Data',
+    JOURNAL_ONLY: 'Journal Only',
+    NOT_APPLICABLE: 'Not Applicable',
+  })[status] || status || 'Replay Pending';
+}
+
+function renderVerifiedGroupTable(rows = [], label = 'Ticker') {
+  if (!rows.length) return '<div class="analytics-empty">No verified analytics groups yet.</div>';
+  const body = rows.map(row => {
+    const actual = row.actual_option_pnl_total == null ? 'Unavailable' : money(row.actual_option_pnl_total);
+    const underlying = row.underlying_plan_result_total == null ? 'Unavailable' : money(row.underlying_plan_result_total);
+    return `
+      <tr>
+        <td><strong>${escapeHtml(row.key || '—')}</strong></td>
+        <td>${escapeHtml(String(row.trades || 0))}</td>
+        <td>${escapeHtml(String(row.completed || 0))}</td>
+        <td>${escapeHtml(String(row.verified || 0))}</td>
+        <td>${escapeHtml(String(row.needs_review || 0))}</td>
+        <td>${escapeHtml(rateOrUnavailable(row.verified_win_rate))}</td>
+        <td>${escapeHtml(rateOrUnavailable(row.journal_win_rate))}</td>
+        <td>${escapeHtml(actual)}</td>
+        <td>${escapeHtml(underlying)}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <table class="analytics-table">
+      <thead><tr><th>${escapeHtml(label)}</th><th>Trades</th><th>Completed</th><th>Verified</th><th>Needs Review</th><th>Verified Win %</th><th>Journal Win %</th><th>Actual Option P&amp;L</th><th>Underlying Plan Result</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function renderVerificationRecords(records = []) {
+  const completed = records.filter(record => record.analytics_verification?.status !== 'NOT_APPLICABLE');
+  if (!completed.length) return '<div class="analytics-empty">No completed trades to verify yet.</div>';
+  return `
+    <table class="analytics-table">
+      <thead><tr><th>Ticker</th><th>Journal</th><th>Replay</th><th>Status</th><th>Actual Option P&amp;L</th><th>Underlying Plan Result</th></tr></thead>
+      <tbody>
+        ${completed.map(record => {
+          const v = record.analytics_verification || {};
+          const pnl = record.pnl || {};
+          const replay = record.replay_summary || {};
+          const replayText = `${v.replay_result || '—'} — ${v.replay_outcome || replay.outcome_category || '—'}`;
+          const underlying = pnl.underlying_plan_pnl == null
+            ? 'Unavailable'
+            : `${money(pnl.underlying_plan_pnl)} based on stored journal levels${v.status === 'JOURNAL_REPLAY_MISMATCH' ? ', unsupported' : ''}`;
+          return `<tr>
+            <td><strong>${escapeHtml(record.ticker || '—')}</strong></td>
+            <td>${escapeHtml(`${v.journal_result || '—'} — ${v.journal_outcome || '—'}`)}</td>
+            <td>${escapeHtml(replayText)}</td>
+            <td>${escapeHtml(verificationLabel(v.status))}</td>
+            <td>${escapeHtml(moneyOrUnavailable(pnl.actual_option_pnl))}</td>
+            <td>${escapeHtml(underlying)}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+function renderVerifiedAnalyticsPayload(payload = {}) {
+  const summary = payload.summary || {};
+  const el = document.getElementById('verifiedAnalyticsQuality');
+  const diag = document.getElementById('verifiedAnalyticsDiagnostics');
+  if (el) {
+    el.innerHTML = `
+      <h3>Data Quality</h3>
+      <div class="journal-stats" style="margin:10px 0;">
+        ${renderReplayStat('Completed', summary.completed || 0)}
+        ${renderReplayStat('Verified', summary.verified || 0)}
+        ${renderReplayStat('Needs Review', summary.needs_review || 0)}
+        ${renderReplayStat('Replay Pending', summary.replay_pending || 0)}
+        ${renderReplayStat('Not Enough Data', summary.insufficient_data || 0)}
+        ${renderReplayStat('Verified Win Rate', rateOrUnavailable(summary.verified_win_rate))}
+        ${renderReplayStat('Journal Win Rate', rateOrUnavailable(summary.journal_win_rate))}
+      </div>
+      <div class="trend-note">Journal-recorded outcomes are separate from replay verification. Actual option P&amp;L is shown only when entry and exit premium data exist.</div>
+      <details class="analytics-subdetails" ${summary.needs_review ? 'open' : ''}>
+        <summary>Outcome Verification</summary>
+        <div class="analytics-subdetails-body">${renderVerificationRecords(payload.records || [])}</div>
+      </details>
+      <details class="analytics-subdetails">
+        <summary>Verified Top Tickers</summary>
+        <div class="analytics-subdetails-body">${renderVerifiedGroupTable(payload.top_tickers || [], 'Ticker')}</div>
+      </details>`;
+  }
+  if (diag) {
+    const d = payload.diagnostics || {};
+    diag.innerHTML = `
+      <div class="journal-stats" style="margin:10px 0;">
+        ${renderReplayStat('Version', d.version || payload.version || '—')}
+        ${renderReplayStat('Completed Journal Trades', d.completed_journal_trades || 0)}
+        ${renderReplayStat('Verified', d.verified || 0)}
+        ${renderReplayStat('Mismatches', d.mismatches || 0)}
+        ${renderReplayStat('Replay Pending', d.replay_pending || 0)}
+        ${renderReplayStat('Insufficient Data', d.insufficient_data || 0)}
+        ${renderReplayStat('Actual Option P&L Count', d.actual_option_pnl_count || 0)}
+        ${renderReplayStat('Underlying-Plan P&L Count', d.underlying_plan_pnl_count || 0)}
+        ${renderReplayStat('Missing Exit Premium', d.missing_exit_premium_count || 0)}
+        ${renderReplayStat('Duration', `${fmtNumber(d.verification_generation_duration_ms || payload.verification_duration_ms || 0)} ms`)}
+      </div>
+      <div class="analytics-empty" style="text-align:left;">Affected tickers: ${escapeHtml((d.affected_tickers || []).join(', ') || 'None')}</div>
+      ${renderVerificationRecords(payload.records || [])}`;
+  }
+}
+
+function renderVerifiedAnalyticsFromCache() {
+  const el = document.getElementById('verifiedAnalyticsQuality');
+  const diag = document.getElementById('verifiedAnalyticsDiagnostics');
+  if (!el) return;
+  if (!journalServerSyncEnabled() || !journalServerAuthoritative()) {
+    el.innerHTML = '<h3>Data Quality</h3><div class="analytics-empty">Server-backed verified analytics become available after journal migration is confirmed.</div>';
+    if (diag) diag.innerHTML = '<div class="analytics-empty">Verified analytics diagnostics require a confirmed server-backed journal.</div>';
+    return;
+  }
+  if (verifiedAnalyticsState.payload) {
+    renderVerifiedAnalyticsPayload(verifiedAnalyticsState.payload);
+    return;
+  }
+  if (verifiedAnalyticsState.error) {
+    el.innerHTML = `<h3>Data Quality</h3><div class="analytics-empty">Verified analytics unavailable: ${escapeHtml(verifiedAnalyticsState.error)}</div>`;
+    if (diag) diag.innerHTML = `<div class="analytics-empty">Verified analytics unavailable: ${escapeHtml(verifiedAnalyticsState.error)}</div>`;
+    return;
+  }
+  el.innerHTML = '<h3>Data Quality</h3><div class="analytics-empty"><span class="spinner"></span> Loading replay verification...</div>';
+}
+
+async function loadVerifiedAnalytics(force = false) {
+  if (!journalServerSyncEnabled() || !journalServerAuthoritative()) {
+    renderVerifiedAnalyticsFromCache();
+    return null;
+  }
+  const token = journalAuthToken();
+  if (verifiedAnalyticsState.loading) return verifiedAnalyticsState.payload;
+  if (!force && verifiedAnalyticsState.payload && verifiedAnalyticsState.token === token) {
+    renderVerifiedAnalyticsFromCache();
+    return verifiedAnalyticsState.payload;
+  }
+  verifiedAnalyticsState = { loading: true, payload: null, error: null, token };
+  renderVerifiedAnalyticsFromCache();
+  try {
+    const response = await fetchWithTimeout(`${API}/api/dev/verified-analytics`, { headers: journalAuthHeaders() });
+    if (response.status === 403) {
+      setJournalAuthStatus('invalid');
+      throw new Error('Invalid journal admin token');
+    }
+    if (!response.ok) throw new Error(`Verified analytics failed: ${response.status}`);
+    const payload = await response.json();
+    verifiedAnalyticsState = { loading: false, payload, error: null, token };
+    setJournalAuthStatus('authenticated');
+    renderVerifiedAnalyticsPayload(payload);
+    return payload;
+  } catch (error) {
+    verifiedAnalyticsState = { loading: false, payload: null, error: String(error.message || error), token };
+    renderVerifiedAnalyticsFromCache();
+    return null;
+  }
 }
 
 function expectedMoveDiagnostics(entries = []) {
@@ -12111,10 +12292,12 @@ function renderAnalytics() {
     <div class="stat-card"><div class="stat-label">Logged Trades</div><div class="stat-value">${all.length}</div></div>
     <div class="stat-card"><div class="stat-label">Closed Trades</div><div class="stat-value">${closed.length}</div></div>
     <div class="stat-card"><div class="stat-label">Tradeable Logged</div><div class="stat-value">${all.filter(e => e.entryStatus === 'Tradeable').length}</div></div>
-    <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value ${stats.winRate == null ? 'muted' : stats.winRate >= 50 ? 'green' : 'red'}">${stats.winRate == null ? '—' : stats.winRate + '%'}</div></div>
-    <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value ${stats.totalPnl >= 0 ? 'green' : 'red'}">${money(stats.totalPnl)}</div></div>
-    <div class="stat-card"><div class="stat-label">Avg Closed P&amp;L</div><div class="stat-value ${stats.avgPnl >= 0 ? 'green' : 'red'}">${money(stats.avgPnl)}</div></div>
+    <div class="stat-card"><div class="stat-label">Journal Win Rate</div><div class="stat-value ${stats.winRate == null ? 'muted' : stats.winRate >= 50 ? 'green' : 'red'}">${stats.winRate == null ? '—' : stats.winRate + '%'}</div></div>
+    <div class="stat-card"><div class="stat-label">Journal-Level P&amp;L</div><div class="stat-value ${stats.totalPnl >= 0 ? 'green' : 'red'}">${money(stats.totalPnl)}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg Journal-Level P&amp;L</div><div class="stat-value ${stats.avgPnl >= 0 ? 'green' : 'red'}">${money(stats.avgPnl)}</div></div>
   `;
+  renderVerifiedAnalyticsFromCache();
+  loadVerifiedAnalytics(false);
 
   document.getElementById('analyticsByEntryStatus').innerHTML = renderAnalyticsTable(entryStatusRows, 'Entry Status');
   document.getElementById('analyticsByDirection').innerHTML = renderAnalyticsTable(directionRows, 'Direction');
