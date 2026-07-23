@@ -344,6 +344,7 @@ const scannerRenderElements = {
   contractTypeFilter: elementStub(),
   tickerInput: elementStub(),
   marketCoverage: elementStub(),
+  marketIntelligence: elementStub(),
   topOpportunities: elementStub(),
   sortFilter: elementStub(),
   'near-miss-section': elementStub(),
@@ -441,6 +442,12 @@ assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Complete'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Opportunity Ranking'));
 assert.ok(!scannerRenderElements.marketCoverage.innerHTML.includes('35 symbol returned no setup'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('256.4 MB'));
+assert.ok(scannerRenderElements.marketIntelligence.innerHTML.includes('Market Intelligence'));
+assert.ok(scannerRenderElements.marketIntelligence.innerHTML.includes('2 Ranked Opportunities'));
+assert.ok(scannerRenderElements.marketIntelligence.innerHTML.includes('Top Opportunity'));
+assert.ok(scannerRenderElements.marketIntelligence.innerHTML.includes('Direction Bias'));
+assert.ok(scannerRenderElements.marketIntelligence.innerHTML.includes('Market Breadth'));
+assert.ok(scannerRenderElements.marketIntelligence.innerHTML.includes('Market Intelligence Diagnostics'));
 assert.ok(scannerRenderElements.results.innerHTML.includes('STRONG'));
 assert.ok(!scannerRenderElements.results.innerHTML.includes('TOP'));
 assert.ok(scannerRenderElements.topOpportunities.innerHTML.includes('Top Opportunities'));
@@ -469,6 +476,7 @@ const warmingElements = {
   summary: elementStub(),
   marketCoverage: elementStub(),
   marketSnapshot: elementStub(),
+  marketIntelligence: elementStub(),
   dataStatus: { ...elementStub(), textContent: '🟡 Warming Building market cache' },
   statusFilter: elementStub(),
   qualityFilter: elementStub(),
@@ -515,6 +523,7 @@ const pollElements = {
   summary: elementStub(),
   marketCoverage: elementStub(),
   marketSnapshot: elementStub(),
+  marketIntelligence: elementStub(),
   topOpportunities: elementStub(),
   dataStatus: elementStub(),
   'near-miss-section': elementStub(),

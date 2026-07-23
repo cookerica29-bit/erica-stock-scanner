@@ -483,6 +483,94 @@
     margin: 14px auto 0;
     padding: 0 24px;
   }
+  .market-intelligence {
+    max-width: 1400px;
+    margin: 14px auto 0;
+    padding: 0 24px;
+  }
+  .market-intelligence-card {
+    background: rgba(53,66,88,0.9);
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
+    box-shadow: var(--card-shadow);
+    padding: 14px 16px;
+  }
+  .intelligence-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 10px;
+  }
+  .intelligence-panel {
+    background: rgba(65,80,106,0.42);
+    border: 1px solid rgba(148,163,184,0.14);
+    border-radius: 8px;
+    padding: 10px;
+  }
+  .intelligence-panel-title {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+  }
+  .intelligence-main {
+    color: var(--text);
+    font-size: 18px;
+    font-weight: 950;
+    line-height: 1.2;
+  }
+  .intelligence-sub {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+    margin-top: 5px;
+  }
+  .intelligence-bars {
+    display: grid;
+    gap: 7px;
+  }
+  .intelligence-bar-row {
+    display: grid;
+    grid-template-columns: 86px 1fr 42px;
+    gap: 8px;
+    align-items: center;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .intelligence-bar-track {
+    background: rgba(15,23,42,0.36);
+    border-radius: 999px;
+    height: 6px;
+    overflow: hidden;
+  }
+  .intelligence-bar-fill {
+    background: #60a5fa;
+    height: 100%;
+  }
+  .intelligence-bar-fill.long { background: var(--long); }
+  .intelligence-bar-fill.short { background: #ff2d55; }
+  .intelligence-bar-fill.warn { background: var(--warn); }
+  .intelligence-list {
+    color: var(--muted);
+    display: grid;
+    gap: 5px;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .intelligence-list strong {
+    color: var(--text);
+  }
+  .todays-take {
+    border-top: 1px solid rgba(148,163,184,0.16);
+    color: var(--text);
+    display: grid;
+    gap: 5px;
+    font-size: 12px;
+    line-height: 1.4;
+    margin-top: 12px;
+    padding-top: 10px;
+  }
   .top-opportunity-card {
     background: rgba(53,66,88,0.86);
     border: 1px solid var(--border-soft);
@@ -1450,6 +1538,18 @@
       margin-top: 10px;
       padding: 0 12px;
       max-width: 100%;
+    }
+    .market-intelligence {
+      margin-top: 10px;
+      padding: 0 12px;
+      max-width: 100%;
+    }
+    .market-intelligence-card {
+      border-radius: 9px;
+      padding: 10px;
+    }
+    .intelligence-bar-row {
+      grid-template-columns: 74px 1fr 38px;
     }
     .top-opportunities {
       margin-top: 10px;
@@ -2493,6 +2593,7 @@
   </div>
   <div id="marketCoverage" class="market-snapshot"></div>
   <div id="marketSnapshot" class="market-snapshot"></div>
+  <div id="marketIntelligence" class="market-intelligence"></div>
   <div id="topOpportunities" class="top-opportunities"></div>
   <main>
     <div id="summary"></div>
@@ -4465,6 +4566,206 @@ function renderTopOpportunities(rows = []) {
     </div>`;
 }
 
+function distributionCount(distribution = {}, key) {
+  return Number(distribution?.[key]?.count || 0);
+}
+
+function distributionPercent(distribution = {}, key) {
+  const pct = Number(distribution?.[key]?.percent);
+  return Number.isFinite(pct) ? pct : 0;
+}
+
+function topDistributionLabel(distribution = {}) {
+  const entries = Object.entries(distribution || {})
+    .map(([label, data]) => ({ label, count: Number(data?.count || 0), percent: Number(data?.percent || 0) }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  return entries[0] || null;
+}
+
+function marketIntelligenceFallback(rows = [], meta = {}) {
+  const allRows = Array.isArray(rows) ? rows : [];
+  const total = allRows.length;
+  const counterToDistribution = counter => Object.fromEntries(Object.entries(counter).map(([key, count]) => [
+    key,
+    { count, percent: total > 0 ? Math.round((count / total) * 1000) / 10 : null },
+  ]));
+  const count = (resolver) => allRows.reduce((acc, row) => {
+    const key = resolver(row);
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const directionDistribution = counterToDistribution(count(row => String(row.direction || 'UNKNOWN').toUpperCase()));
+  const statusDistribution = counterToDistribution(count(row => row?.ranking?.status_bucket || setupProgressState(row).bucket || 'LOW_PRIORITY'));
+  const gradeDistribution = counterToDistribution(count(setupGradeValue));
+  const sectorDistribution = counterToDistribution(count(row => row.sector || 'Unknown'));
+  const ranked = allRows.slice().sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b));
+  const top = ranked[0] || null;
+  const top10 = ranked.slice(0, 10);
+  const topTotal = top10.length;
+  const topCounterToDistribution = counter => Object.fromEntries(Object.entries(counter).map(([key, count]) => [
+    key,
+    { count, percent: topTotal > 0 ? Math.round((count / topTotal) * 1000) / 10 : null },
+  ]));
+  const topCount = (resolver) => top10.reduce((acc, row) => {
+    const key = resolver(row);
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const longPct = distributionPercent(directionDistribution, 'LONG');
+  const shortPct = distributionPercent(directionDistribution, 'SHORT');
+  const marketTone = shortPct >= 55 ? 'Bearish Lean' : longPct >= 55 ? 'Bullish Lean' : 'Mixed';
+  return {
+    version: 'market-intelligence-v1',
+    ranked_opportunities: total,
+    market_tone: marketTone,
+    top_opportunity: top ? {
+      ticker: top.ticker,
+      direction: top.direction,
+      grade: top.setupGrade,
+      status: top.ranking?.status_bucket || setupProgressState(top).bucket,
+      rank: top.ranking?.rank,
+      score: top.ranking?.score,
+    } : null,
+    most_common_status: topDistributionLabel(statusDistribution),
+    most_common_grade: topDistributionLabel(gradeDistribution),
+    highest_ranked_direction: top?.direction || null,
+    direction_distribution: directionDistribution,
+    status_distribution: statusDistribution,
+    grade_distribution: gradeDistribution,
+    sector_distribution: sectorDistribution,
+    coverage: {
+      symbols_attempted: meta.symbols_attempted,
+      symbols_terminally_evaluated: meta.symbols_terminally_evaluated,
+      symbols_with_setup: meta.symbols_with_setup,
+      symbols_without_setup: meta.symbols_without_setup,
+      symbols_operationally_failed: meta.symbols_operationally_failed,
+      evaluation_coverage_percent: meta.evaluation_coverage_percent,
+      result_yield_percent: meta.result_yield_percent,
+    },
+    earnings_summary: { within_7_days: 0, within_14_days: 0, no_earnings_risk: total },
+    top_concentration: {
+      sample_size: topTotal,
+      direction_distribution: topCounterToDistribution(topCount(row => String(row.direction || 'UNKNOWN').toUpperCase())),
+      sector_distribution: topCounterToDistribution(topCount(row => row.sector || 'Unknown')),
+      note: null,
+    },
+    todays_take: total ? [`${total} ranked opportunities are available.`] : ['No ranked opportunities are available yet.'],
+  };
+}
+
+function renderDistributionBars(distribution = {}, keys = [], classes = {}) {
+  const rows = keys.map(key => {
+    const count = distributionCount(distribution, key);
+    const pct = distributionPercent(distribution, key);
+    return `
+      <div class="intelligence-bar-row">
+        <span>${escapeHtml(key.replace(/_/g, ' '))}</span>
+        <span class="intelligence-bar-track"><span class="intelligence-bar-fill ${classes[key] || ''}" style="width:${Math.max(0, Math.min(100, pct))}%"></span></span>
+        <span>${escapeHtml(String(count))}</span>
+      </div>`;
+  }).join('');
+  return `<div class="intelligence-bars">${rows}</div>`;
+}
+
+function renderTopDistribution(distribution = {}, limit = 5) {
+  const rows = Object.entries(distribution || {})
+    .map(([label, data]) => ({ label, count: Number(data?.count || 0), percent: Number(data?.percent || 0) }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+    .slice(0, limit)
+    .map(item => `<div><strong>${escapeHtml(item.label)}</strong> ${escapeHtml(String(item.count))} · ${escapeHtml(Number.isFinite(item.percent) ? `${item.percent}%` : '—')}</div>`)
+    .join('');
+  return `<div class="intelligence-list">${rows || '<div>—</div>'}</div>`;
+}
+
+function renderMarketIntelligencePanel(rows = [], meta = {}) {
+  const el = document.getElementById('marketIntelligence');
+  if (!el) return;
+  const allRows = Array.isArray(rows) ? rows : [];
+  const intel = meta.market_intelligence && Object.keys(meta.market_intelligence).length
+    ? meta.market_intelligence
+    : marketIntelligenceFallback(allRows, meta);
+  const diag = meta.market_intelligence_diagnostics || {};
+  const top = intel.top_opportunity || {};
+  const status = intel.most_common_status || topDistributionLabel(intel.status_distribution || {});
+  const grade = intel.most_common_grade || topDistributionLabel(intel.grade_distribution || {});
+  const topDirection = intel.highest_ranked_direction || top.direction || '—';
+  const coverage = intel.coverage || {};
+  const take = (intel.todays_take || []).slice(0, 5);
+  const earnings = intel.earnings_summary || {};
+  const concentration = intel.top_concentration || {};
+
+  el.innerHTML = `
+    <div class="market-intelligence-card">
+      <div class="snapshot-title">📊 Market Intelligence</div>
+      <div class="intelligence-grid">
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Market Pulse</div>
+          <div class="intelligence-main">${escapeHtml(String(intel.ranked_opportunities ?? allRows.length))} Ranked Opportunities</div>
+          <div class="intelligence-sub">
+            Top Opportunity: ${top.ticker ? `${escapeHtml(top.ticker)} ${escapeHtml(top.direction || '')}` : '—'}<br>
+            Most Common Status: ${escapeHtml(String(status?.label || '—').replace(/_/g, ' '))}<br>
+            Most Common Grade: ${escapeHtml(String(grade?.label || '—'))}<br>
+            Highest Ranked Direction: ${escapeHtml(topDirection || '—')}<br>
+            Overall Tone: ${escapeHtml(intel.market_tone || 'Mixed')}
+          </div>
+        </div>
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Opportunity Distribution</div>
+          ${renderDistributionBars(intel.status_distribution || {}, ['ENTER_NOW', 'EARLY_ENTRY', 'ALMOST_READY', 'WAITING', 'LOW_PRIORITY'], {
+            ENTER_NOW: 'long',
+            EARLY_ENTRY: 'warn',
+            ALMOST_READY: 'warn',
+          })}
+        </div>
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Direction Bias</div>
+          ${renderDistributionBars(intel.direction_distribution || {}, ['LONG', 'SHORT'], { LONG: 'long', SHORT: 'short' })}
+        </div>
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Sector Heat</div>
+          ${renderTopDistribution(intel.sector_distribution || {}, 5)}
+        </div>
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Grade Mix</div>
+          ${renderDistributionBars(intel.grade_distribution || {}, ['A', 'B', 'C'], { A: 'long', B: 'warn' })}
+        </div>
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Opportunity Concentration</div>
+          ${renderTopDistribution(concentration.direction_distribution || {}, 3)}
+          <div class="intelligence-sub">${escapeHtml(concentration.note || 'Top opportunities are shown without forced diversification.')}</div>
+        </div>
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Earnings Watch</div>
+          <div class="intelligence-list">
+            <div><strong>Within 7 days</strong> ${escapeHtml(String(earnings.within_7_days ?? 0))}</div>
+            <div><strong>Within 14 days</strong> ${escapeHtml(String(earnings.within_14_days ?? 0))}</div>
+            <div><strong>No earnings risk</strong> ${escapeHtml(String(earnings.no_earnings_risk ?? 0))}</div>
+          </div>
+        </div>
+        <div class="intelligence-panel">
+          <div class="intelligence-panel-title">Market Breadth</div>
+          <div class="intelligence-list">
+            <div><strong>Evaluated</strong> ${escapeHtml(String(coverage.symbols_terminally_evaluated ?? '—'))}</div>
+            <div><strong>Setups Returned</strong> ${escapeHtml(String(coverage.symbols_with_setup ?? allRows.length))}</div>
+            <div><strong>No Setup</strong> ${escapeHtml(String(coverage.symbols_without_setup ?? '—'))}</div>
+            <div><strong>Operational Failures</strong> ${escapeHtml(String(coverage.symbols_operationally_failed ?? 0))}</div>
+            <div><strong>Evaluation Coverage</strong> ${escapeHtml(coverage.evaluation_coverage_percent != null ? `${coverage.evaluation_coverage_percent}%` : '—')}</div>
+            <div><strong>Result Yield</strong> ${escapeHtml(coverage.result_yield_percent != null ? `${coverage.result_yield_percent}%` : '—')}</div>
+          </div>
+        </div>
+      </div>
+      <div class="todays-take">
+        ${take.map(item => `<div>${escapeHtml(item)}</div>`).join('')}
+      </div>
+      <div class="intelligence-sub">
+        Market Intelligence Diagnostics: ${escapeHtml(meta.market_intelligence_version || intel.version || '—')};
+        generated in ${escapeHtml(formatScanSeconds(meta.market_intelligence_duration_ms ?? diag.generation_time_ms))};
+        input rows ${escapeHtml(String(diag.input_rows ?? allRows.length))};
+        sector coverage ${escapeHtml(diag.sector_coverage != null ? `${Math.round(Number(diag.sector_coverage) * 100)}%` : '—')}.
+      </div>
+    </div>`;
+}
+
 function simpleStatusSummary(rows) {
   const counts = rows.reduce((acc, row) => {
     const status = setupProgressState(row).bucket;
@@ -4743,6 +5044,7 @@ function renderScannerResults() {
   const visibleSetups = [...rows, ...nearMiss];
   renderMarketCoveragePanel(snapshotSetups, latestScannerMeta || {});
   renderMarketSnapshot(snapshotSetups);
+  renderMarketIntelligencePanel(snapshotSetups, latestScannerMeta || {});
   renderTopOpportunities(visibleSetups);
 
   if (rows.length === 0) {

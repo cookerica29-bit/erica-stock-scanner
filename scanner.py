@@ -30,6 +30,7 @@ STOCK_SCANNER_STRATEGY_VERSION = "v1.0"
 STOCK_SCANNER_STRATEGY_BASELINE_COMMIT = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
 VERBOSE_SYMBOL_LOGS = str(os.getenv("KAIROS_VERBOSE_SYMBOL_LOGS") or "").strip().lower() in {"1", "true", "yes", "on"}
 OPPORTUNITY_RANKING_VERSION = "opportunity-ranking-v1"
+MARKET_INTELLIGENCE_VERSION = "market-intelligence-v1"
 
 
 @contextlib.contextmanager
@@ -897,6 +898,11 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "top_opportunity_count": scan_meta.get("top_opportunity_count"),
         "ranking_duration_ms": scan_meta.get("ranking_duration_ms"),
         "ranking_diagnostics": scan_meta.get("ranking_diagnostics", {}),
+        "market_intelligence": scan_meta.get("market_intelligence", {}),
+        "market_intelligence_version": scan_meta.get("market_intelligence_version"),
+        "market_intelligence_generated_at": scan_meta.get("market_intelligence_generated_at"),
+        "market_intelligence_duration_ms": scan_meta.get("market_intelligence_duration_ms"),
+        "market_intelligence_diagnostics": scan_meta.get("market_intelligence_diagnostics", {}),
         "symbols_per_second": (scan_meta.get("performance") or {}).get("symbols_per_second"),
         "provider_metrics": scan_meta.get("provider_metrics", {}),
         "cache_stats": scan_meta.get("cache_stats", {}),
@@ -5444,6 +5450,209 @@ def apply_opportunity_ranking(rows: list, near_miss: Optional[list] = None, *, g
     }
 
 
+def _counter_percentages(counter: Counter, total: int) -> dict:
+    return {
+        str(key): {
+            "count": int(value),
+            "percent": round((int(value) / total) * 100, 1) if total > 0 else None,
+        }
+        for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))
+    }
+
+
+def _top_counter_items(counter: Counter, limit: int = 5) -> list[dict]:
+    return [
+        {"label": str(key), "count": int(value)}
+        for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))[:limit]
+    ]
+
+
+def _market_intelligence_status(row: dict) -> str:
+    ranking = row.get("ranking") or {}
+    bucket = str(ranking.get("status_bucket") or _ranking_status_bucket(row) or "UNKNOWN").upper()
+    if bucket in {"ENTER_NOW", "EARLY_ENTRY", "ALMOST_READY", "WAITING"}:
+        return bucket
+    return "LOW_PRIORITY"
+
+
+def _market_intelligence_time_value(row: dict) -> Optional[datetime]:
+    for key in ("confirmation_timestamp", "signal_timestamp", "timestamp", "generated_at"):
+        parsed = _coerce_utc_datetime(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _market_intelligence_earnings_bucket(row: dict) -> str:
+    days = _ranking_earnings_days(row)
+    if days is None or days < 0:
+        return "NO_EARNINGS_RISK"
+    if days <= 7:
+        return "WITHIN_7_DAYS"
+    if days <= 14:
+        return "WITHIN_14_DAYS"
+    return "NO_EARNINGS_RISK"
+
+
+def build_market_intelligence(rows: list, scan_meta: Optional[dict] = None, *, generated_at: Optional[datetime] = None) -> dict:
+    started = time.perf_counter()
+    scan_meta = scan_meta or {}
+    generated = generated_at or _utc_now()
+    all_rows = list(rows or [])
+    ranked_rows = sorted(
+        all_rows,
+        key=lambda row: ((row.get("ranking") or {}).get("rank", 10**9), str(row.get("ticker") or "")),
+    )
+    total = len(all_rows)
+    status_counter = Counter(_market_intelligence_status(row) for row in all_rows)
+    direction_counter = Counter(str(row.get("direction") or "UNKNOWN").upper() for row in all_rows)
+    sector_counter = Counter(str(row.get("sector") or "Unknown") for row in all_rows)
+    grade_counter = Counter(_ranking_grade(row) for row in all_rows)
+    earnings_counter = Counter(_market_intelligence_earnings_bucket(row) for row in all_rows)
+    top_10 = ranked_rows[:10]
+    top_direction_counter = Counter(str(row.get("direction") or "UNKNOWN").upper() for row in top_10)
+    top_sector_counter = Counter(str(row.get("sector") or "Unknown") for row in top_10)
+    missing_fields = Counter()
+    for row in all_rows:
+        if not row.get("sector"):
+            missing_fields["sector"] += 1
+        if not row.get("direction"):
+            missing_fields["direction"] += 1
+        if not row.get("setupGrade"):
+            missing_fields["grade"] += 1
+        if not row.get("ranking"):
+            missing_fields["ranking"] += 1
+        if _ranking_earnings_days(row) is None:
+            missing_fields["earnings"] += 1
+
+    top_opportunity = None
+    if ranked_rows:
+        first = ranked_rows[0]
+        rank = first.get("ranking") or {}
+        top_opportunity = {
+            "ticker": first.get("ticker"),
+            "direction": first.get("direction"),
+            "grade": first.get("setupGrade"),
+            "status": rank.get("status_bucket") or _market_intelligence_status(first),
+            "rank": rank.get("rank"),
+            "score": rank.get("score"),
+        }
+
+    most_common_status = _top_counter_items(status_counter, 1)[0] if status_counter else None
+    most_common_grade = _top_counter_items(grade_counter, 1)[0] if grade_counter else None
+    highest_ranked_direction = top_opportunity.get("direction") if top_opportunity else None
+    long_count = int(direction_counter.get("LONG", 0))
+    short_count = int(direction_counter.get("SHORT", 0))
+    market_tone = "Mixed"
+    if total > 0:
+        if short_count / total >= 0.55:
+            market_tone = "Bearish Lean"
+        elif long_count / total >= 0.55:
+            market_tone = "Bullish Lean"
+
+    coverage = {
+        "configured_universe_count": scan_meta.get("configured_universe_count"),
+        "symbols_attempted": scan_meta.get("symbols_attempted"),
+        "symbols_terminally_evaluated": scan_meta.get("symbols_terminally_evaluated"),
+        "symbols_with_setup": scan_meta.get("symbols_with_setup"),
+        "symbols_without_setup": scan_meta.get("symbols_without_setup"),
+        "symbols_operationally_failed": scan_meta.get("symbols_operationally_failed"),
+        "evaluation_coverage": scan_meta.get("evaluation_coverage"),
+        "evaluation_coverage_percent": scan_meta.get("evaluation_coverage_percent"),
+        "result_yield": scan_meta.get("result_yield"),
+        "result_yield_percent": scan_meta.get("result_yield_percent"),
+        "partial_result": scan_meta.get("partial_result"),
+        "partial_result_reasons": scan_meta.get("partial_result_reasons", []),
+    }
+
+    timestamps = [value for value in (_market_intelligence_time_value(row) for row in all_rows) if value]
+    freshness = {}
+    if timestamps:
+        newest = max(timestamps)
+        oldest = min(timestamps)
+        ages = [max(0.0, (generated - ts).total_seconds()) for ts in timestamps]
+        freshness = {
+            "newest_confirmation": _format_utc_timestamp(newest),
+            "oldest_active_setup": _format_utc_timestamp(oldest),
+            "average_setup_age_seconds": round(sum(ages) / len(ages), 1) if ages else None,
+        }
+
+    concentration_note = None
+    if top_10:
+        top_total = len(top_10)
+        top_dir = top_direction_counter.most_common(1)[0]
+        top_sector = top_sector_counter.most_common(1)[0]
+        if top_dir[1] / top_total >= 0.7 or top_sector[1] / top_total >= 0.4:
+            concentration_note = "Several top opportunities share similar market exposure."
+
+    take = []
+    if total:
+        take.append(f"{total} ranked opportunities are available.")
+    if most_common_status:
+        take.append(f"Most opportunities are {str(most_common_status['label']).replace('_', ' ').title()}.")
+    if market_tone != "Mixed":
+        take.append(f"{market_tone} across returned setups.")
+    if sector_counter:
+        top_sector = _top_counter_items(sector_counter, 1)[0]
+        take.append(f"{top_sector['label']} has the greatest setup concentration.")
+    if scan_meta.get("symbols_operationally_failed") in {0, None} and scan_meta.get("partial_result") is False:
+        take.append("No operational scan issues detected.")
+    elif scan_meta.get("symbols_operationally_failed"):
+        take.append(f"{scan_meta.get('symbols_operationally_failed')} operational scan issue(s) detected.")
+    if not take and not total:
+        take.append("No ranked opportunities are available yet.")
+    take = take[:5]
+
+    duration_ms = round((time.perf_counter() - started) * 1000, 1)
+    intelligence = {
+        "version": MARKET_INTELLIGENCE_VERSION,
+        "generated_at": _format_utc_timestamp(generated),
+        "market_tone": market_tone,
+        "ranked_opportunities": total,
+        "top_opportunity": top_opportunity,
+        "most_common_status": most_common_status,
+        "most_common_grade": most_common_grade,
+        "highest_ranked_direction": highest_ranked_direction,
+        "direction_distribution": _counter_percentages(direction_counter, total),
+        "sector_distribution": _counter_percentages(sector_counter, total),
+        "grade_distribution": _counter_percentages(grade_counter, total),
+        "status_distribution": _counter_percentages(status_counter, total),
+        "coverage": coverage,
+        "earnings_summary": {
+            "distribution": _counter_percentages(earnings_counter, total),
+            "within_7_days": int(earnings_counter.get("WITHIN_7_DAYS", 0)),
+            "within_14_days": int(earnings_counter.get("WITHIN_14_DAYS", 0)),
+            "no_earnings_risk": int(earnings_counter.get("NO_EARNINGS_RISK", 0)),
+        },
+        "top_concentration": {
+            "sample_size": len(top_10),
+            "direction_distribution": _counter_percentages(top_direction_counter, len(top_10)),
+            "sector_distribution": _counter_percentages(top_sector_counter, len(top_10)),
+            "note": concentration_note,
+        },
+        "freshness": freshness,
+        "todays_take": take,
+    }
+    diagnostics = {
+        "version": MARKET_INTELLIGENCE_VERSION,
+        "generation_time_ms": duration_ms,
+        "input_rows": total,
+        "aggregation_duration_ms": duration_ms,
+        "missing_fields": dict(sorted(missing_fields.items())),
+        "sector_coverage": round((total - missing_fields.get("sector", 0)) / total, 4) if total > 0 else None,
+        "direction_totals": dict(sorted(direction_counter.items())),
+        "status_totals": dict(sorted(status_counter.items())),
+        "grade_totals": dict(sorted(grade_counter.items())),
+    }
+    return {
+        "market_intelligence": intelligence,
+        "market_intelligence_version": MARKET_INTELLIGENCE_VERSION,
+        "market_intelligence_generated_at": intelligence["generated_at"],
+        "market_intelligence_duration_ms": duration_ms,
+        "market_intelligence_diagnostics": diagnostics,
+    }
+
+
 def _stock_phase(daily_direction: str, h4_direction: str) -> str:
     if daily_direction == "Bullish" and h4_direction == "Bullish":
         return "Trend Move"
@@ -6057,6 +6266,9 @@ def scan_all(
                 "failure_breakdown_by_stage": partial_reasons,
             },
         }
+        intelligence_meta = build_market_intelligence(all_results, scan_meta, generated_at=scan_completed_at)
+        scan_meta.update(intelligence_meta)
+        scan_meta["performance"]["market_intelligence_duration_ms"] = intelligence_meta.get("market_intelligence_duration_ms")
         return rows, near_miss, scan_meta
     finally:
         _scan_activity_finished()
