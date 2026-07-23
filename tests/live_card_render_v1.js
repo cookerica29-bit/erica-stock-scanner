@@ -38,6 +38,7 @@ const context = {
   Object,
   JSON,
   RegExp,
+  performance: { now: () => 100 },
   URLSearchParams,
   encodeURIComponent,
   decodeURIComponent,
@@ -1171,6 +1172,74 @@ context.fetch = (url, options = {}) => {
 };
 
 (async () => {
+const staleKey = 'setup-STALE-LONG';
+context.renderGuidedTradeChartBlock(setup({ ticker: 'STALE', direction: 'LONG', price: 101, entry: 100, sl: 95, tp1: 110 }), 'setup');
+const chartCanvas = elementStub();
+const chartBody = elementStub();
+const chartButtons = ['4H', '1D', '30M'].map(tf => ({
+  dataset: { timeframe: tf },
+  active: false,
+  classList: {
+    toggle(cls, value) {
+      if (cls === 'active') this.active = Boolean(value);
+    },
+  },
+}));
+chartBody.querySelectorAll = selector => selector === '.guided-timeframes button' ? chartButtons : [];
+const previousGuidedGetElementById = context.document.getElementById;
+const previousGuidedFetchWithTimeout = context.fetchWithTimeout;
+context.document.getElementById = id => {
+  if (id === `guidedChartCanvas-${staleKey}`) return chartCanvas;
+  if (id === `guidedChart-${staleKey}`) return chartBody;
+  return previousGuidedGetElementById(id);
+};
+let resolveFirstChart;
+let resolveSecondChart;
+const chartRequests = [];
+context.fetchWithTimeout = url => {
+  chartRequests.push(String(url));
+  return new Promise(resolve => {
+    if (chartRequests.length === 1) resolveFirstChart = resolve;
+    else resolveSecondChart = resolve;
+  });
+};
+const firstChartLoad = context.loadGuidedTradeChart(staleKey, '4H');
+const secondChartLoad = context.loadGuidedTradeChart(staleKey, '1D');
+resolveSecondChart({
+  ok: true,
+  json: () => Promise.resolve({
+    timeframe: '1D',
+    provider: 'alpaca',
+    chart_load_duration_ms: 12,
+    candles: [
+      { open: 100, high: 104, low: 98, close: 103 },
+      { open: 103, high: 106, low: 102, close: 105 },
+    ],
+  }),
+});
+await secondChartLoad;
+const afterDaily = chartCanvas.innerHTML;
+assert.ok(afterDaily.includes('1D'));
+resolveFirstChart({
+  ok: true,
+  json: () => Promise.resolve({
+    timeframe: '4H',
+    provider: 'yahoo',
+    chart_load_duration_ms: 40,
+    candles: [
+      { open: 98, high: 99, low: 95, close: 96 },
+      { open: 96, high: 97, low: 94, close: 95 },
+    ],
+  }),
+});
+await firstChartLoad;
+assert.strictEqual(chartCanvas.innerHTML, afterDaily, 'stale guided chart response must not overwrite latest timeframe selection');
+assert.ok(chartRequests[0].includes('timeframe=4H'));
+assert.ok(chartRequests[1].includes('timeframe=1D'));
+assert.ok(chartButtons.find(button => button.dataset.timeframe === '1D').classList.active);
+context.fetchWithTimeout = previousGuidedFetchWithTimeout;
+context.document.getElementById = previousGuidedGetElementById;
+
 const scannerLifecycleElements = {
   scanBtn: elementStub(),
   status: elementStub(),

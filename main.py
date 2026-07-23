@@ -27,6 +27,8 @@ from scanner import (
 )
 from discovery import build_ranked_discovery_universe
 from market_data import (
+    ALPACA_PROVIDER_NAME,
+    YAHOO_PROVIDER_NAME,
     alpaca_credentials_configured,
     comparison_diagnostics,
     configured_provider_name,
@@ -712,6 +714,57 @@ def _safe_float(value):
         return None
 
 
+def _chart_provider_candidates(timeframe: str) -> list[str]:
+    configured = provider_name_for_timeframe(timeframe)
+    candidates = [configured]
+    if ALPACA_PROVIDER_NAME not in candidates:
+        candidates.append(ALPACA_PROVIDER_NAME)
+    if YAHOO_PROVIDER_NAME not in candidates:
+        candidates.append(YAHOO_PROVIDER_NAME)
+    return candidates
+
+
+def _download_chart_candles(ticker: str, period: str, interval: str, limit: int, providers: list[str]) -> tuple[list[dict], dict]:
+    attempts = []
+    for provider_name in providers:
+        attempt_started = time.perf_counter()
+        try:
+            provider = build_market_data_provider(provider_name)
+            candles = provider.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True, group_by="ticker")
+            records = _chart_candle_records(candles, limit=limit)
+            attempt = {
+                "provider": provider.name,
+                "status": "ready" if records else "unavailable",
+                "candles_loaded": len(records),
+                "duration_ms": round((time.perf_counter() - attempt_started) * 1000, 1),
+            }
+            if not records:
+                attempt["failure_reason"] = "no_candles"
+            attempts.append(attempt)
+            if records:
+                return records, {
+                    "provider": provider.name,
+                    "provider_attempts": attempts,
+                    "fallback_used": len(attempts) > 1,
+                    "failure_reason": None,
+                }
+        except Exception as exc:
+            attempts.append({
+                "provider": provider_name,
+                "status": "error",
+                "candles_loaded": 0,
+                "duration_ms": round((time.perf_counter() - attempt_started) * 1000, 1),
+                "failure_reason": exc.__class__.__name__,
+            })
+    failure_reason = attempts[-1].get("failure_reason") if attempts else "no_provider_attempted"
+    return [], {
+        "provider": attempts[-1].get("provider") if attempts else None,
+        "provider_attempts": attempts,
+        "fallback_used": len(attempts) > 1,
+        "failure_reason": failure_reason,
+    }
+
+
 def _fetch_replay_candles(position: dict) -> tuple[object, dict]:
     ticker = str(position.get("ticker") or "").strip().upper()
     timeframe, timeframe_source = _replay_timeframe(position)
@@ -970,41 +1023,30 @@ def api_chart_candles(
     started = time.perf_counter()
     ticker = str(symbol or "").strip().upper()
     normalized_tf, period, interval = _chart_period_interval(timeframe)
-    provider_name = provider_name_for_timeframe(normalized_tf)
-    provider = build_market_data_provider(provider_name)
-    try:
-        candles = provider.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True, group_by="ticker")
-        records = _chart_candle_records(candles, limit=limit)
-        return {
-            "status": "ready" if records else "unavailable",
-            "chart_component_version": "guided-trade-chart-v1",
-            "symbol": ticker,
-            "timeframe": normalized_tf,
-            "period": period,
-            "interval": interval,
-            "provider": provider.name,
-            "candles": records,
-            "candles_loaded": len(records),
-            "data_source": provider.name,
-            "cache_status": "provider_fetch",
-            "chart_load_duration_ms": round((time.perf_counter() - started) * 1000, 1),
-        }
-    except Exception as exc:
-        return {
-            "status": "error",
-            "chart_component_version": "guided-trade-chart-v1",
-            "symbol": ticker,
-            "timeframe": normalized_tf,
-            "period": period,
-            "interval": interval,
-            "provider": provider.name,
-            "candles": [],
-            "candles_loaded": 0,
-            "data_source": provider.name,
-            "cache_status": "provider_error",
-            "chart_load_duration_ms": round((time.perf_counter() - started) * 1000, 1),
-            "error": exc.__class__.__name__,
-        }
+    providers = _chart_provider_candidates(normalized_tf)
+    records, diagnostics = _download_chart_candles(ticker, period, interval, limit, providers)
+    selected_provider = diagnostics.get("provider") or providers[-1]
+    failure_reason = diagnostics.get("failure_reason")
+    return {
+        "status": "ready" if records else "unavailable",
+        "chart_component_version": "guided-trade-chart-v1",
+        "symbol": ticker,
+        "requested_timeframe": timeframe,
+        "normalized_timeframe": normalized_tf,
+        "timeframe": normalized_tf,
+        "period": period,
+        "interval": interval,
+        "provider": selected_provider,
+        "selected_provider": selected_provider,
+        "provider_attempts": diagnostics.get("provider_attempts") or [],
+        "fallback_used": bool(diagnostics.get("fallback_used")),
+        "failure_reason": failure_reason,
+        "candles": records,
+        "candles_loaded": len(records),
+        "data_source": selected_provider,
+        "cache_status": "provider_fetch" if records else "provider_unavailable",
+        "chart_load_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+    }
 
 
 def _cached_scan_snapshot_for_shadow(universe: str) -> tuple[Optional[dict], dict]:
