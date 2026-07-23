@@ -53,7 +53,7 @@ from position_intelligence import (
     replay_position_intelligence,
     replay_readiness,
 )
-from verified_analytics import verified_analytics_snapshot
+from verified_analytics import analytics_verification, verified_analytics_snapshot
 from smart_notifications import SQLiteNotificationRepository, SMART_NOTIFICATION_VERSION, stable_event_id
 from trade_intelligence import (
     TRADE_INTELLIGENCE_VERSION,
@@ -62,6 +62,20 @@ from trade_intelligence import (
     similar_trade_insight,
     trade_intelligence_eligibility_funnel,
 )
+from verified_history import (
+    MAX_REPLAY_ATTEMPTS,
+    REPLAY_JOB_VERSION,
+    VERIFIED_HISTORY_PIPELINE_VERSION,
+    backfill_preview,
+    build_verified_history_snapshot,
+    classify_pipeline_record,
+    completion_readiness,
+    replay_dedupe_key,
+    replay_input_signature,
+    retryable_error,
+    verification_to_pipeline_status,
+)
+from verified_history_store import SQLiteVerifiedHistoryRepository
 
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
@@ -91,12 +105,18 @@ _discovery_universe_lock = threading.RLock()
 _discovery_universe_executor = ThreadPoolExecutor(max_workers=1)
 _journal_repository = SQLiteJournalRepository(default_journal_db_path())
 _notification_repository = SQLiteNotificationRepository(default_journal_db_path())
+_verified_history_repository = SQLiteVerifiedHistoryRepository(default_journal_db_path())
 _trade_intelligence_cache = {
     "signature": None,
     "snapshot": None,
     "verified_records": [],
 }
 _trade_intelligence_lock = threading.RLock()
+_verified_history_cache = {
+    "signature": None,
+    "snapshot": None,
+}
+_verified_history_lock = threading.RLock()
 
 NO_STORE_HEADERS = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -782,7 +802,9 @@ def api_journal_create(
 ):
     _require_journal_admin_token(x_kairos_admin_token)
     try:
-        return _journal_repository.create_entry(entry)
+        created = _journal_repository.create_entry(entry)
+        created["verified_history"] = _maybe_queue_verified_history_job(created, "journal_create")
+        return created
     except JournalValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -797,6 +819,7 @@ def api_journal_update(
     try:
         before = _journal_repository.get_entry(journal_id)
         updated = _journal_repository.update_entry(journal_id, patch)
+        updated["verified_history"] = _maybe_queue_verified_history_job(updated, "journal_update")
         notifications = _create_journal_notification_events(before, updated)
         if notifications.get("events_created") or notifications.get("events_deduplicated"):
             updated["smart_notifications"] = {key: value for key, value in notifications.items() if key != "created_events"}
@@ -1082,6 +1105,201 @@ def _replay_response(entries: list[dict], replays: list[dict], limit=None, offse
     }
 
 
+def _completed_job_replays(jobs: list[dict]) -> list[dict]:
+    replays = []
+    for job in jobs or []:
+        payload = job.get("payload") or {}
+        replay = payload.get("replay")
+        if isinstance(replay, dict):
+            replays.append(replay)
+    return replays
+
+
+def _verified_history_replays(entries: list[dict], jobs: list[dict]) -> list[dict]:
+    stored = _completed_job_replays(jobs)
+    stored_by_position = {str(replay.get("position_id")): replay for replay in stored}
+    missing_entries = [
+        entry for entry in entries
+        if completion_readiness(entry).get("ready") and str(entry.get("position_id")) not in stored_by_position
+    ]
+    derived = _replay_positions(missing_entries, summary_only=True) if missing_entries else []
+    return [*stored, *derived]
+
+
+def _verified_history_records_snapshot(force_replay: bool = False) -> dict:
+    started = time.perf_counter()
+    entries = _journal_repository.list_entries({"status": "all", "limit": 5000, "offset": 0})
+    jobs = _verified_history_repository.list_jobs(limit=5000)
+    signature = (
+        len(entries),
+        max([str(entry.get("updated_at") or "") for entry in entries], default=""),
+        len(jobs),
+        max([str(job.get("updated_at") or "") for job in jobs], default=""),
+        bool(force_replay),
+    )
+    with _verified_history_lock:
+        if not force_replay and _verified_history_cache.get("signature") == signature and _verified_history_cache.get("snapshot"):
+            cached = dict(_verified_history_cache["snapshot"])
+            diagnostics = dict(cached.get("diagnostics") or {})
+            diagnostics["cache_status"] = "hit"
+            cached["diagnostics"] = diagnostics
+            return cached
+    replays = _replay_positions(entries, summary_only=True) if force_replay else _verified_history_replays(entries, jobs)
+    analytics = verified_analytics_snapshot(entries, replays)
+    snapshot = build_verified_history_snapshot(entries, replays, analytics.get("records") or [], jobs)
+    snapshot["status"] = "ready"
+    snapshot["ready"] = True
+    snapshot["message"] = "Verified History tracks how completed journal records move through replay, verification, and Trade Intelligence eligibility."
+    diagnostics = dict(snapshot.get("diagnostics") or {})
+    diagnostics.update({
+        "queue_evaluation_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        "journal_records_inspected": len(entries),
+        "replay_records_found": len(replays),
+        "verification_records_loaded": len(analytics.get("records") or []),
+        "last_successful_worker_run": max([job.get("completed_at") or "" for job in jobs], default=None),
+        "last_error": next((job.get("last_error_code") for job in jobs if job.get("last_error_code")), None),
+    })
+    snapshot["diagnostics"] = diagnostics
+    with _verified_history_lock:
+        _verified_history_cache.update({"signature": signature, "snapshot": snapshot})
+    return snapshot
+
+
+def _queue_verified_history_job(entry: dict, source: str) -> tuple[Optional[dict], bool]:
+    readiness = completion_readiness(entry)
+    if not readiness.get("ready"):
+        return None, False
+    signature = replay_input_signature(entry)
+    return _verified_history_repository.create_job_if_absent(
+        str(entry.get("journal_id")),
+        signature,
+        replay_dedupe_key(entry),
+        REPLAY_JOB_VERSION,
+        {
+            "source": source,
+            "ticker": entry.get("ticker"),
+            "position_id": entry.get("position_id"),
+            "readiness": readiness,
+        },
+    )
+
+
+def _maybe_queue_verified_history_job(entry: dict, source: str) -> dict:
+    job, created = _queue_verified_history_job(entry, source)
+    return {
+        "queued": bool(created),
+        "job_id": (job or {}).get("job_id") if job else None,
+        "pipeline_status": (job or {}).get("status") if job else completion_readiness(entry).get("pipeline_status"),
+    }
+
+
+def _create_history_notification(record: dict) -> None:
+    status = record.get("pipeline_status")
+    if status not in {"NEEDS_REVIEW", "REPLAY_FAILED", "COMPLETION_PENDING"}:
+        return
+    ticker = record.get("ticker") or "UNKNOWN"
+    event_type = {
+        "NEEDS_REVIEW": "VERIFIED_HISTORY_NEEDS_REVIEW",
+        "REPLAY_FAILED": "VERIFIED_HISTORY_REPLAY_FAILED",
+        "COMPLETION_PENDING": "VERIFIED_HISTORY_COMPLETION_PENDING",
+    }[status]
+    dedupe_key = "|".join([str(record.get("journal_id") or ""), event_type, str(record.get("verification_status") or status)])
+    event = {
+        "event_id": stable_event_id(dedupe_key),
+        "version": VERIFIED_HISTORY_PIPELINE_VERSION,
+        "symbol": ticker,
+        "direction": None,
+        "event_type": event_type,
+        "priority": "HIGH" if status in {"NEEDS_REVIEW", "REPLAY_FAILED"} else "MEDIUM",
+        "title": f"{ticker} history needs review" if status == "NEEDS_REVIEW" else f"{ticker} history pipeline update",
+        "message": record.get("explanation") or "Verified History needs attention.",
+        "next_step": record.get("next_step") or "Open Verified History.",
+        "previous_state": None,
+        "current_state": status,
+        "entity_type": "journal",
+        "entity_id": record.get("journal_id"),
+        "deep_link": f"journal:{record.get('journal_id')}",
+        "event_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source_event_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "detected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "dedupe_key": dedupe_key,
+        "source": "verified-history",
+        "delivery_status": "pending",
+        "external_delivery_status": "suppressed_by_preference",
+        "metadata": {"pipeline_status": status},
+    }
+    _notification_repository.create_event(event)
+
+
+def _process_verified_history_jobs(max_jobs: int = 2) -> dict:
+    started = time.perf_counter()
+    worker_id = f"worker:{os.getpid()}:{int(time.time() * 1000)}"
+    processed = []
+    failures = []
+    for _ in range(max(1, min(int(max_jobs), 10))):
+        job_claim_started = time.perf_counter()
+        job = _verified_history_repository.claim_next_job(worker_id)
+        claim_duration_ms = round((time.perf_counter() - job_claim_started) * 1000, 1)
+        if not job:
+            break
+        entry = _journal_repository.get_entry(str(job.get("journal_id")))
+        if not entry:
+            failed = _verified_history_repository.fail_job(
+                str(job.get("job_id")),
+                "missing_journal_record",
+                "Journal record no longer exists.",
+                retryable=False,
+                max_attempts=MAX_REPLAY_ATTEMPTS,
+            )
+            failures.append(failed)
+            continue
+        readiness = completion_readiness(entry)
+        if not readiness.get("ready"):
+            failed = _verified_history_repository.fail_job(
+                str(job.get("job_id")),
+                "completion_not_ready",
+                "Journal record is missing replay-required fields.",
+                retryable=False,
+                max_attempts=MAX_REPLAY_ATTEMPTS,
+            )
+            failures.append(failed)
+            continue
+        try:
+            replay_started = time.perf_counter()
+            replay = _replay_positions([entry], summary_only=False)[0]
+            verification = analytics_verification(entry, replay, verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+            pipeline_status = verification_to_pipeline_status(verification, replay)
+            completed = _verified_history_repository.complete_job(str(job.get("job_id")), replay, verification, pipeline_status)
+            record = classify_pipeline_record(entry, replay=replay, verification=verification, job=completed)
+            _create_history_notification(record)
+            processed.append({
+                "job_id": job.get("job_id"),
+                "journal_id": entry.get("journal_id"),
+                "ticker": entry.get("ticker"),
+                "pipeline_status": pipeline_status,
+                "verification_status": verification.get("status"),
+                "replay_duration_ms": round((time.perf_counter() - replay_started) * 1000, 1),
+                "job_claim_duration_ms": claim_duration_ms,
+            })
+        except Exception as exc:
+            failed = _verified_history_repository.fail_job(
+                str(job.get("job_id")),
+                exc.__class__.__name__,
+                str(exc),
+                retryable=retryable_error(exc.__class__.__name__),
+                max_attempts=MAX_REPLAY_ATTEMPTS,
+            )
+            failures.append(failed)
+    return {
+        "version": VERIFIED_HISTORY_PIPELINE_VERSION,
+        "worker_id": worker_id,
+        "jobs_processed": len(processed),
+        "processed": processed,
+        "failures": [item for item in failures if item],
+        "worker_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+
+
 def _trade_intelligence_signature(entries: list[dict]) -> tuple:
     if not entries:
         return (0, None, None, None)
@@ -1332,6 +1550,160 @@ def api_dev_verified_analytics(
     snapshot["ready"] = bool(entries)
     snapshot["message"] = "Verified analytics distinguish journal-recorded outcomes from replay-supported evidence."
     return snapshot
+
+
+@app.get("/api/dev/verified-history")
+def api_dev_verified_history(
+    force_replay: bool = Query(default=False),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _verified_history_records_snapshot(force_replay=force_replay)
+
+
+@app.get("/api/dev/verified-history/records")
+def api_dev_verified_history_records(
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    snapshot = _verified_history_records_snapshot(force_replay=False)
+    return {
+        "version": snapshot.get("version"),
+        "records": snapshot.get("records") or [],
+        "summary": snapshot.get("summary") or {},
+        "reconciliation": snapshot.get("reconciliation") or {},
+    }
+
+
+@app.get("/api/verified-history/summary")
+def api_verified_history_summary(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    snapshot = _verified_history_records_snapshot(force_replay=False)
+    return {
+        "version": snapshot.get("version"),
+        "generated_at": snapshot.get("generated_at"),
+        "summary": snapshot.get("summary") or {},
+        "reconciliation": snapshot.get("reconciliation") or {},
+    }
+
+
+@app.post("/api/dev/verified-history/replay/{journal_id}")
+def api_dev_verified_history_replay(
+    journal_id: str,
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.get_entry(journal_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    readiness = completion_readiness(entry)
+    if not readiness.get("ready"):
+        raise HTTPException(status_code=422, detail={"message": "Journal entry is not replay-ready", "readiness": readiness})
+    job, created = _queue_verified_history_job(entry, "manual_replay")
+    return {"queued": bool(created), "job": job}
+
+
+@app.post("/api/dev/verified-history/retry/{journal_id}")
+def api_dev_verified_history_retry(
+    journal_id: str,
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.get_entry(journal_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    job, created = _queue_verified_history_job(entry, "manual_retry")
+    return {"queued": bool(created), "job": job}
+
+
+@app.post("/api/dev/verified-history/backfill-preview")
+def api_dev_verified_history_backfill_preview(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entries = _journal_repository.list_entries({"status": "all", "limit": 5000, "offset": 0})
+    jobs = _verified_history_repository.list_jobs(limit=5000)
+    return backfill_preview(entries, jobs)
+
+
+@app.post("/api/dev/verified-history/backfill")
+def api_dev_verified_history_backfill(
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    requested = set(str(item) for item in ((payload or {}).get("journal_ids") or []))
+    if not requested:
+        raise HTTPException(status_code=422, detail="Explicit journal_ids are required for backfill execution")
+    entries = _journal_repository.list_entries({"status": "all", "limit": 5000, "offset": 0})
+    jobs = _verified_history_repository.list_jobs(limit=5000)
+    preview = backfill_preview(entries, jobs)
+    safe = {str(record.get("journal_id")): record for record in preview.get("records") or [] if record.get("backfill_status") == "SAFE_TO_BACKFILL"}
+    queued = []
+    skipped = []
+    by_id = {str(entry.get("journal_id")): entry for entry in entries}
+    for journal_id in sorted(requested):
+        if journal_id not in safe:
+            skipped.append({"journal_id": journal_id, "reason": "not_safe_to_backfill"})
+            continue
+        job, created = _queue_verified_history_job(by_id[journal_id], "approved_backfill")
+        queued.append({"journal_id": journal_id, "job_id": (job or {}).get("job_id"), "queued": bool(created)})
+    return {
+        "version": VERIFIED_HISTORY_PIPELINE_VERSION,
+        "queued": queued,
+        "skipped": skipped,
+        "jobs_created": sum(1 for item in queued if item.get("queued")),
+    }
+
+
+@app.post("/api/dev/verified-history/worker/run")
+def api_dev_verified_history_worker_run(
+    max_jobs: int = Query(default=2, ge=1, le=10),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _process_verified_history_jobs(max_jobs=max_jobs)
+
+
+@app.post("/api/verified-history/{journal_id}/review-note")
+def api_verified_history_review_note(
+    journal_id: str,
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.get_entry(journal_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    note = str((payload or {}).get("note") or "")[:2000]
+    patch = {
+        "record_version": entry.get("record_version"),
+        "verified_history_review_note": note,
+        "verified_history_reviewed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        updated = _journal_repository.update_entry(journal_id, patch)
+    except JournalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"updated": True, "journal_id": journal_id, "verified_history_review_note": updated.get("verified_history_review_note")}
+
+
+@app.post("/api/verified-history/{journal_id}/acknowledge")
+def api_verified_history_acknowledge(
+    journal_id: str,
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.get_entry(journal_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Journal entry not found")
+    patch = {
+        "record_version": entry.get("record_version"),
+        "verified_history_acknowledged_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        updated = _journal_repository.update_entry(journal_id, patch)
+    except JournalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"acknowledged": True, "journal_id": journal_id, "verified_history_acknowledged_at": updated.get("verified_history_acknowledged_at")}
 
 
 @app.get("/api/chart/candles")

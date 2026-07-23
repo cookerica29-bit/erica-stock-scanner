@@ -3140,6 +3140,7 @@
 <div id="analytics-panel" class="tab-panel">
   <div class="journal-stats" id="analyticsStats"></div>
   <div class="analytics-card" id="verifiedAnalyticsQuality"></div>
+  <div class="analytics-card" id="verifiedHistorySummary"></div>
   <div class="analytics-card" id="tradeIntelligenceDashboard"></div>
   <div class="analytics-card" id="opportunityAnalyticsSummary"></div>
   <div class="analytics-grid" id="analyticsTraderSummary"></div>
@@ -3208,6 +3209,10 @@
   <details class="analytics-collapse">
     <summary>Trade Intelligence Diagnostics</summary>
     <div class="analytics-collapse-body" id="tradeIntelligenceDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Verified History Diagnostics</summary>
+    <div class="analytics-collapse-body" id="verifiedHistoryDiagnostics"></div>
   </details>
 </div>
 
@@ -12002,6 +12007,7 @@ function rateOrUnavailable(n) {
 }
 
 let verifiedAnalyticsState = { loading: false, payload: null, error: null, token: '' };
+let verifiedHistoryState = { loading: false, payload: null, error: null, token: '' };
 
 function calcStats(entries) {
   const wins = entries.filter(e => e.result === 'Win').length;
@@ -12225,6 +12231,155 @@ async function loadVerifiedAnalytics(force = false) {
   } catch (error) {
     verifiedAnalyticsState = { loading: false, payload: null, error: String(error.message || error), token };
     renderVerifiedAnalyticsFromCache();
+    return null;
+  }
+}
+
+function historyStatusLabel(status) {
+  return ({
+    OPEN: 'Still Open',
+    COMPLETION_PENDING: 'Awaiting Completion Details',
+    COMPLETED_AWAITING_REPLAY: 'Waiting for Replay',
+    REPLAY_QUEUED: 'Replay Queued',
+    REPLAY_RUNNING: 'Replay In Progress',
+    REPLAY_RETRY_PENDING: 'Replay Needs Retry',
+    REPLAY_FAILED: 'Replay Failed',
+    REPLAY_DATA_INCOMPLETE: 'Replay Data Incomplete',
+    VERIFICATION_PENDING: 'Verification Pending',
+    VERIFIED: 'Verified',
+    NEEDS_REVIEW: 'Needs Review',
+    NOT_APPLICABLE: 'Not Applicable',
+  })[status] || status || 'Unknown';
+}
+
+function renderVerifiedHistoryRecords(records = []) {
+  if (!records.length) return '<div class="analytics-empty">No durable journal records found.</div>';
+  const rows = records.slice(0, 20).map(record => {
+    const missing = [...(record.missing_fields || []), ...(record.invalid_fields || [])].join(', ');
+    const verification = record.verification || {};
+    const replay = record.replay_summary || {};
+    const review = record.pipeline_status === 'NEEDS_REVIEW'
+      ? `<br>Journal: ${escapeHtml(`${verification.journal_result || '—'} — ${verification.journal_outcome || '—'}`)}
+         <br>Replay: ${escapeHtml(`${verification.replay_result || '—'} — ${verification.replay_outcome || replay.outcome_category || '—'}`)}`
+      : '';
+    return `
+      <tr>
+        <td><strong>${escapeHtml(record.ticker || '—')}</strong></td>
+        <td>${escapeHtml(historyStatusLabel(record.pipeline_status))}</td>
+        <td>${escapeHtml(record.explanation || '—')}${review}</td>
+        <td>${missing ? escapeHtml(missing) : '—'}</td>
+        <td>${escapeHtml(record.next_step || '—')}</td>
+        <td>${record.trade_intelligence_eligible ? 'Yes' : 'No'}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <table class="analytics-table">
+      <thead><tr><th>Ticker</th><th>History Status</th><th>Evidence</th><th>Missing/Invalid</th><th>Next Step</th><th>TI Eligible</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderVerifiedHistoryPayload(payload = {}) {
+  const el = document.getElementById('verifiedHistorySummary');
+  const diag = document.getElementById('verifiedHistoryDiagnostics');
+  const summary = payload.summary || {};
+  const reconciliation = payload.reconciliation || {};
+  if (el) {
+    el.innerHTML = `
+      <h3>Verified History</h3>
+      <div class="trend-note" style="margin-bottom:10px;">Complete trades become Trade Intelligence evidence only after replay verification. Mismatches and incomplete data stay out of learning.</div>
+      <div class="journal-stats" style="margin:10px 0;">
+        ${renderReplayStat('Open', summary.open_bucket || summary.open || 0)}
+        ${renderReplayStat('Processing', summary.processing_bucket || 0)}
+        ${renderReplayStat('Needs Attention', summary.needs_attention_bucket || 0)}
+        ${renderReplayStat('Verified', summary.verified || 0)}
+        ${renderReplayStat('TI Eligible', summary.trade_intelligence_eligible || 0)}
+      </div>
+      <details class="analytics-subdetails" ${(summary.needs_attention_bucket || summary.needs_review) ? 'open' : ''}>
+        <summary>Record-Level History Status</summary>
+        <div class="analytics-subdetails-body">${renderVerifiedHistoryRecords(payload.records || [])}</div>
+      </details>`;
+  }
+  if (diag) {
+    const d = payload.diagnostics || {};
+    diag.innerHTML = `
+      <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+        Developer-only diagnostics. Verified History orchestrates existing replay and verification logic; it does not rewrite journal outcomes or trading decisions.
+      </div>
+      <div class="journal-stats" style="margin:10px 0;">
+        ${renderReplayStat('Version', payload.version || 'verified-history-v1')}
+        ${renderReplayStat('Journal Records', summary.journal_records_inspected || 0)}
+        ${renderReplayStat('Completion Pending', summary.completion_pending || 0)}
+        ${renderReplayStat('Awaiting Replay', summary.completed_awaiting_replay || 0)}
+        ${renderReplayStat('Queued', summary.queued || 0)}
+        ${renderReplayStat('Running', summary.running || 0)}
+        ${renderReplayStat('Retry Pending', summary.retry_pending || 0)}
+        ${renderReplayStat('Replay Failed', summary.failed || 0)}
+        ${renderReplayStat('Replay Incomplete', summary.replay_incomplete || 0)}
+        ${renderReplayStat('Verification Pending', summary.verification_pending || 0)}
+        ${renderReplayStat('Needs Review', summary.needs_review || 0)}
+        ${renderReplayStat('Verified', summary.verified || 0)}
+        ${renderReplayStat('TI Eligible', summary.trade_intelligence_eligible || 0)}
+      </div>
+      <div class="analytics-empty" style="text-align:left;">
+        Reconciled: ${escapeHtml(String(reconciliation.journal_reconciled && reconciliation.completed_reconciled))}
+        · Unclassified: ${escapeHtml(String(reconciliation.unclassified_record_count || 0))}
+        · Duplicate active jobs: ${escapeHtml(String(d.duplicate_active_job_count || 0))}
+        · Jobs by status: ${escapeHtml(Object.entries(d.replay_jobs_by_status || {}).map(([key, value]) => `${key}: ${value}`).join(' · ') || 'None')}
+      </div>
+      ${renderVerifiedHistoryRecords(payload.records || [])}`;
+  }
+}
+
+function renderVerifiedHistoryFromCache() {
+  const el = document.getElementById('verifiedHistorySummary');
+  const diag = document.getElementById('verifiedHistoryDiagnostics');
+  if (!el) return;
+  if (!journalServerSyncEnabled() || !journalServerAuthoritative()) {
+    el.innerHTML = '<h3>Verified History</h3><div class="analytics-empty">Server-backed verified history becomes available after journal migration is confirmed.</div>';
+    if (diag) diag.innerHTML = '<div class="analytics-empty">Verified History diagnostics require journal admin access.</div>';
+    return;
+  }
+  if (verifiedHistoryState.payload) {
+    renderVerifiedHistoryPayload(verifiedHistoryState.payload);
+    return;
+  }
+  if (verifiedHistoryState.error) {
+    el.innerHTML = `<h3>Verified History</h3><div class="analytics-empty">Verified History unavailable: ${escapeHtml(verifiedHistoryState.error)}</div>`;
+    if (diag) diag.innerHTML = `<div class="analytics-empty">Verified History unavailable: ${escapeHtml(verifiedHistoryState.error)}</div>`;
+    return;
+  }
+  el.innerHTML = '<h3>Verified History</h3><div class="analytics-empty"><span class="spinner"></span> Loading history pipeline...</div>';
+}
+
+async function loadVerifiedHistory(force = false) {
+  if (!journalServerSyncEnabled() || !journalServerAuthoritative()) {
+    renderVerifiedHistoryFromCache();
+    return null;
+  }
+  const token = journalAuthToken();
+  if (verifiedHistoryState.loading) return verifiedHistoryState.payload;
+  if (!force && verifiedHistoryState.payload && verifiedHistoryState.token === token) {
+    renderVerifiedHistoryFromCache();
+    return verifiedHistoryState.payload;
+  }
+  verifiedHistoryState = { loading: true, payload: null, error: null, token };
+  renderVerifiedHistoryFromCache();
+  try {
+    const response = await fetchWithTimeout(`${API}/api/dev/verified-history`, { headers: journalAuthHeaders() });
+    if (response.status === 403) {
+      setJournalAuthStatus('invalid');
+      throw new Error('Invalid journal admin token');
+    }
+    if (!response.ok) throw new Error(`Verified History failed: ${response.status}`);
+    const payload = await response.json();
+    verifiedHistoryState = { loading: false, payload, error: null, token };
+    setJournalAuthStatus('authenticated');
+    renderVerifiedHistoryPayload(payload);
+    return payload;
+  } catch (error) {
+    verifiedHistoryState = { loading: false, payload: null, error: String(error.message || error), token };
+    renderVerifiedHistoryFromCache();
     return null;
   }
 }
@@ -13525,6 +13680,8 @@ function renderAnalytics() {
   `;
   renderVerifiedAnalyticsFromCache();
   loadVerifiedAnalytics(false);
+  renderVerifiedHistoryFromCache();
+  loadVerifiedHistory(false);
   renderTradeIntelligenceDashboard(tradeIntelligenceState.payload);
   loadTradeIntelligenceDashboard(false);
 
@@ -13545,6 +13702,7 @@ function renderAnalytics() {
   renderOpportunityPriceMixDiagnostics();
   renderContractCandidateAuditDiagnostics();
   renderSmartNotificationDiagnostics();
+  renderVerifiedHistoryFromCache();
 }
 
 // ── Developer Position Replay ───────────────────────────────────────────────

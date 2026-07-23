@@ -155,6 +155,44 @@ assert.strictEqual(context.currentScannerUniverse(), 'default');
 assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=default');
 assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?universe=default&refresh=true');
 context.document.getElementById = originalGetElementByIdForUniverse;
+assert.ok(html.includes('id="verifiedHistorySummary"'), 'Analytics should include Verified History summary panel');
+assert.ok(html.includes('Verified History Diagnostics'), 'Diagnostics should include Verified History diagnostics');
+const verifiedHistoryEl = elementStub();
+const verifiedHistoryDiag = elementStub();
+const originalGetElementByIdForHistory = context.document.getElementById;
+context.document.getElementById = id => ({
+  verifiedHistorySummary: verifiedHistoryEl,
+  verifiedHistoryDiagnostics: verifiedHistoryDiag,
+}[id] || elementStub());
+context.renderVerifiedHistoryPayload({
+  version: 'verified-history-v1',
+  summary: {
+    open_bucket: 4,
+    processing_bucket: 0,
+    needs_attention_bucket: 1,
+    needs_review: 1,
+    verified: 0,
+    trade_intelligence_eligible: 0,
+  },
+  reconciliation: { journal_reconciled: true, completed_reconciled: true, unclassified_record_count: 0 },
+  diagnostics: { replay_jobs_by_status: {}, duplicate_active_job_count: 0 },
+  records: [{
+    ticker: 'OXY',
+    pipeline_status: 'NEEDS_REVIEW',
+    explanation: 'Journal and replay disagree.',
+    next_step: 'Review the journal result against replay evidence.',
+    verification: { journal_result: 'Win', journal_outcome: 'TP1', replay_result: 'Loss', replay_outcome: 'STOP_DETECTED' },
+    replay_summary: { outcome_category: 'STOP_DETECTED' },
+    trade_intelligence_eligible: false,
+  }],
+});
+assert.ok(verifiedHistoryEl.innerHTML.includes('Verified History'));
+assert.ok(verifiedHistoryEl.innerHTML.includes('Needs Attention'));
+assert.ok(verifiedHistoryEl.innerHTML.includes('OXY'));
+assert.ok(verifiedHistoryEl.innerHTML.includes('Needs Review'));
+assert.ok(verifiedHistoryEl.innerHTML.includes('Journal and replay disagree.'));
+assert.ok(verifiedHistoryDiag.innerHTML.includes('Duplicate active jobs'));
+context.document.getElementById = originalGetElementByIdForHistory;
 assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
