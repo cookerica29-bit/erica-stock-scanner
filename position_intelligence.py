@@ -189,6 +189,50 @@ def next_action(state: str) -> tuple[str, str]:
     }.get(state, ("REVIEW_POSITION", "Review Position"))
 
 
+REPLAY_FINAL_STATE_FIELDS = {
+    "position_last_state",
+    "position_last_evaluated_at",
+    "position_best_price",
+    "position_max_progress_percent",
+    "position_tp1_reached",
+    "position_state_history",
+    "tp1_reached",
+    "tp1_reached_at",
+    "first_target_touch_at",
+    "first_stop_touch_at",
+    "highest_price_reached",
+    "lowest_price_reached",
+    "maximum_favorable_excursion",
+    "maximum_favorable_excursion_atr",
+    "maximum_favorable_excursion_percent",
+    "maximum_favorable_excursion_r",
+    "maximum_adverse_excursion",
+    "maximum_adverse_excursion_atr",
+    "maximum_adverse_excursion_percent",
+    "maximum_adverse_excursion_r",
+    "reached_0_5r",
+    "reached_1r",
+    "reached_2r",
+    "time_to_0_5r",
+    "time_to_1r",
+    "time_to_2r",
+    "bars_to_entry",
+    "bars_to_stop",
+    "bars_to_target",
+    "trading_days_to_entry",
+    "trading_days_to_stop",
+    "trading_days_to_target",
+}
+
+
+def _point_in_time_replay_position(original: dict[str, Any], best_price: float | None, tp1_reached: bool) -> dict[str, Any]:
+    replay_position = {key: value for key, value in original.items() if key not in REPLAY_FINAL_STATE_FIELDS}
+    replay_position["position_best_price"] = best_price
+    replay_position["position_tp1_reached"] = tp1_reached
+    replay_position["tp1_reached"] = tp1_reached
+    return replay_position
+
+
 def build_position_intelligence(position: dict[str, Any], market_snapshot: dict[str, Any]) -> dict[str, Any]:
     current_price = coerce_number(first_present(market_snapshot.get("current_price"), market_snapshot.get("price")))
     direction = normalize_direction(first_present(position.get("direction"), position.get("option_type"), position.get("optionType")))
@@ -237,7 +281,13 @@ def build_position_intelligence(position: dict[str, Any], market_snapshot: dict[
     best_progress = progress_to_tp1(direction, entry, tp1, best)
     max_progress = (best_progress or progress)["raw_percent"]
     pullback = max(0, max_progress - progress["raw_percent"])
-    tp1_reached = bool(position.get("tp1_reached") or position.get("first_target_touch_at") or progress["raw_percent"] >= 100 or max_progress >= 100)
+    tp1_reached = bool(
+        position.get("tp1_reached")
+        or position.get("position_tp1_reached")
+        or position.get("first_target_touch_at")
+        or progress["raw_percent"] >= 100
+        or max_progress >= 100
+    )
     stop_invalidated = current_price >= stop if direction == "SHORT" else current_price <= stop
     scanner_invalidated = bool(market_snapshot.get("strategy_invalidated") and normalize_direction(market_snapshot.get("direction")) == direction)
 
@@ -413,7 +463,7 @@ def replay_position_intelligence(position: dict[str, Any], candles: Any, provide
         favorable = low if direction == "SHORT" else high
         adverse = high if direction == "SHORT" else low
         best_price = favorable if best_price is None else (min(best_price, favorable) if direction == "SHORT" else max(best_price, favorable))
-        replay_position = {**original, "position_best_price": best_price, "position_tp1_reached": bool(target_timestamps[1])}
+        replay_position = _point_in_time_replay_position(original, best_price, bool(target_timestamps[1]))
         intel = build_position_intelligence(replay_position, {"current_price": close, "timestamp": timestamp})
         state = intel.get("state") or "DATA_NEEDED"
         states_seen.append(state)

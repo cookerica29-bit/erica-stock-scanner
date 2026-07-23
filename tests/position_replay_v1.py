@@ -104,6 +104,33 @@ def test_no_lookahead_best_price_and_state_transitions():
     assert replay["time_in_each_state"]["WATCH"]["candle_count"] == 2
 
 
+def test_replay_ignores_final_journal_target_touch_state_until_reached_chronologically():
+    replay = replay_position_intelligence(position(
+        ticker="OXY",
+        direction="SHORT",
+        entry_timestamp="2026-07-16T16:13:17.667006Z",
+        exit_timestamp="2026-07-21T00:29:30.725000Z",
+        actual_underlying_entry=54.28,
+        original_stop=55.9,
+        original_tp1=51.04,
+        original_tp2=49.42,
+        original_tp3=47.8,
+        position_last_state="PROTECT",
+        position_best_price=51.04,
+        position_tp1_reached=True,
+        first_target_touch_at="2026-07-21T00:29:30.724Z",
+    ), [
+        candle("2026-07-17T04:00:00Z", 55.17, 54.005, 54.86),
+        candle("2026-07-20T04:00:00Z", 55.6699, 54.0, 55.19),
+    ])
+    assert replay["tp1_timestamp"] is None
+    assert round(replay["maximum_progress"], 2) == 8.64
+    assert round(replay["maximum_r"], 2) == 0.17
+    assert replay["final_state"] == "WATCH"
+    assert replay["time_in_each_state"]["PROTECT"]["candle_count"] == 0
+    assert replay["time_in_each_state"]["WATCH"]["candle_count"] == 2
+
+
 def test_watch_recovery_protect_exit_and_churn_metrics():
     replay = replay_position_intelligence(position(position_best_price=None), [
         candle("2026-07-01T14:00:00Z", 101, 99, 100),
