@@ -330,7 +330,11 @@ def _scan_partial_reasons(
 ) -> list[dict]:
     reasons = []
     failures = list(processing_failures or [])
-    failure_counts = Counter(str(item.get("reason") or "symbol_processing_failed") for item in failures if isinstance(item, dict))
+    operational_failures = [
+        item for item in failures
+        if isinstance(item, dict) and str(item.get("reason") or "") != "symbol returned no setup"
+    ]
+    failure_counts = Counter(str(item.get("reason") or "symbol_processing_failed") for item in operational_failures)
     for reason, count in sorted(failure_counts.items()):
         reasons.append({
             "stage": "strategy_evaluation",
@@ -354,11 +358,18 @@ def _scan_partial_reasons(
             "count": max_pages,
         })
 
-    unaccounted = max(0, int(attempted or 0) - int(processed or 0) - int(tradeability_skipped or 0) - len(failures))
+    unaccounted = max(
+        0,
+        int(attempted or 0)
+        - int(processed or 0)
+        - int(tradeability_skipped or 0)
+        - len(failures)
+        - provider_failed,
+    )
     if unaccounted > 0:
         reasons.append({
             "stage": "strategy_evaluation",
-            "reason": "symbol_returned_no_setup",
+            "reason": "symbol_not_evaluated",
             "count": unaccounted,
         })
     return reasons
@@ -675,10 +686,18 @@ def build_discovered_scan_coverage_snapshot(
 
     requested = scan_meta.get("configured_universe_count")
     processed = scan_meta.get("symbols_successfully_processed", len(all_rows))
+    with_setup = scan_meta.get("symbols_with_setup", processed)
+    without_setup = scan_meta.get("symbols_without_setup")
+    if without_setup is None:
+        without_setup = max(0, int(scan_meta.get("no_setup_or_failed_count", 0) or 0) - int(scan_meta.get("symbols_operationally_failed", 0) or 0))
     skipped = scan_meta.get("tradeability_skipped", scan_meta.get("symbols_skipped", 0))
-    failed = scan_meta.get("symbols_failed")
+    failed = scan_meta.get("symbols_operationally_failed")
     if failed is None:
-        failed = scan_meta.get("no_setup_or_failed_count", 0)
+        failed = scan_meta.get("symbols_failed", 0)
+    not_evaluated = scan_meta.get("symbols_not_evaluated", 0)
+    terminally_evaluated = scan_meta.get("symbols_terminally_evaluated")
+    if terminally_evaluated is None:
+        terminally_evaluated = int(processed or 0) + int(without_setup or 0) + int(skipped or 0)
     returned = len(all_rows)
     cache_stats = scan_meta.get("cache_stats") or {}
     partial_reasons = list(scan_meta.get("partial_result_reasons") or [])
@@ -700,6 +719,16 @@ def build_discovered_scan_coverage_snapshot(
             "symbols_requested": requested,
             "symbols_processed": processed,
             "symbols_returned": returned,
+            "symbols_terminally_evaluated": terminally_evaluated,
+            "symbols_with_setup": with_setup,
+            "symbols_without_setup": without_setup,
+            "symbols_intentionally_rejected": scan_meta.get("symbols_intentionally_rejected", skipped),
+            "symbols_operationally_failed": failed,
+            "symbols_not_evaluated": not_evaluated,
+            "evaluation_coverage": scan_meta.get("evaluation_coverage"),
+            "evaluation_coverage_percent": scan_meta.get("evaluation_coverage_percent"),
+            "result_yield": scan_meta.get("result_yield"),
+            "result_yield_percent": scan_meta.get("result_yield_percent"),
             "symbols_failed": failed,
             "symbols_skipped": skipped,
             "scan_started_at": _format_utc_timestamp(scan_meta.get("scan_started_at")),
@@ -840,6 +869,16 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "configured_universe_count": scan_meta.get("configured_universe_count"),
         "symbols_attempted": scan_meta.get("symbols_attempted"),
         "symbols_successfully_processed": scan_meta.get("symbols_successfully_processed", len(rows) + len(near_miss)),
+        "symbols_terminally_evaluated": scan_meta.get("symbols_terminally_evaluated"),
+        "symbols_with_setup": scan_meta.get("symbols_with_setup"),
+        "symbols_without_setup": scan_meta.get("symbols_without_setup"),
+        "symbols_intentionally_rejected": scan_meta.get("symbols_intentionally_rejected"),
+        "symbols_operationally_failed": scan_meta.get("symbols_operationally_failed"),
+        "symbols_not_evaluated": scan_meta.get("symbols_not_evaluated"),
+        "evaluation_coverage": scan_meta.get("evaluation_coverage"),
+        "evaluation_coverage_percent": scan_meta.get("evaluation_coverage_percent"),
+        "result_yield": scan_meta.get("result_yield"),
+        "result_yield_percent": scan_meta.get("result_yield_percent"),
         "symbols_omitted_or_rejected": scan_meta.get("symbols_omitted_or_rejected"),
         "symbols_failed": scan_meta.get("symbols_failed"),
         "symbols_skipped": scan_meta.get("symbols_skipped"),
@@ -5393,6 +5432,14 @@ def scan_all(
         provider_metrics = provider_metrics_snapshot()
         attempted = len(filtered_watchlist)
         processed = len(all_results)
+        raw_no_setup_count = sum(
+            1 for item in processing_failures
+            if isinstance(item, dict) and str(item.get("reason") or "") == "symbol returned no setup"
+        )
+        internal_failure_count = sum(
+            1 for item in processing_failures
+            if isinstance(item, dict) and str(item.get("reason") or "") != "symbol returned no setup"
+        )
         partial_reasons = _scan_partial_reasons(
             attempted=attempted,
             processed=processed,
@@ -5400,7 +5447,23 @@ def scan_all(
             processing_failures=processing_failures,
             provider_metrics=provider_metrics,
         )
-        failed_count = sum(int(reason.get("count") or 0) for reason in partial_reasons if reason.get("stage") != "tradeability_filter")
+        provider_failed_count = int(provider_metrics.get("alpaca_bar_symbols_failed", 0) or 0)
+        operational_failed_count = sum(int(reason.get("count") or 0) for reason in partial_reasons)
+        no_setup_count = min(
+            raw_no_setup_count,
+            max(0, original_count - processed - len(skipped_symbols) - operational_failed_count),
+        )
+        not_evaluated_count = sum(
+            int(reason.get("count") or 0)
+            for reason in partial_reasons
+            if reason.get("reason") == "symbol_not_evaluated"
+        )
+        terminally_evaluated = max(
+            0,
+            processed + no_setup_count + len(skipped_symbols),
+        )
+        evaluation_coverage = round(terminally_evaluated / original_count, 4) if original_count > 0 else None
+        result_yield = round(processed / original_count, 4) if original_count > 0 else None
         symbols_per_second = round(processed / (total_ms / 1000), 2) if total_ms > 0 else None
         cache_hit_rate = _cache_hit_rate(cache_stats)
         candle_cache_requests = sum(
@@ -5498,12 +5561,25 @@ def scan_all(
             "configured_universe_count": original_count,
             "symbols_attempted": attempted,
             "symbols_successfully_processed": processed,
+            "symbols_terminally_evaluated": terminally_evaluated,
+            "symbols_with_setup": processed,
+            "symbols_without_setup": no_setup_count,
+            "symbols_intentionally_rejected": len(skipped_symbols),
+            "symbols_operationally_failed": operational_failed_count,
+            "symbols_not_evaluated": not_evaluated_count,
+            "evaluation_coverage": evaluation_coverage,
+            "evaluation_coverage_percent": round(evaluation_coverage * 100, 2) if evaluation_coverage is not None else None,
+            "result_yield": result_yield,
+            "result_yield_percent": round(result_yield * 100, 2) if result_yield is not None else None,
             "symbols_omitted_or_rejected": max(0, original_count - processed),
-            "symbols_failed": failed_count,
+            "symbols_failed": operational_failed_count,
             "symbols_skipped": len(skipped_symbols),
             "tradeability_skipped": len(skipped_symbols),
             "tradeability_skip_reasons": skip_counts,
             "no_setup_or_failed_count": max(0, attempted - processed),
+            "processing_no_setup_count": no_setup_count,
+            "processing_internal_failure_count": internal_failure_count,
+            "provider_symbol_failure_count": provider_failed_count,
             "processing_failures": processing_failures[:50],
             "contract_evaluated": evaluated_contracts,
             "contract_evaluation_pool": len(all_results),

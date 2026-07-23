@@ -57,6 +57,15 @@ def main() -> int:
     assert meta["configured_universe_count"] == len(scanner.WATCHLIST)
     assert meta["partial_result"] is False
     assert meta["partial_result_reasons"] == []
+    assert meta["symbols_successfully_processed"] == 0
+    assert meta["symbols_terminally_evaluated"] == len(scanner.WATCHLIST)
+    assert meta["symbols_with_setup"] == 0
+    assert meta["symbols_without_setup"] == 0
+    assert meta["symbols_intentionally_rejected"] == len(scanner.WATCHLIST)
+    assert meta["symbols_operationally_failed"] == 0
+    assert meta["symbols_not_evaluated"] == 0
+    assert meta["evaluation_coverage_percent"] == 100.0
+    assert meta["result_yield_percent"] == 0.0
     assert "performance" in meta
     assert meta["performance"]["peak_worker_count"] == 12
     assert meta["performance"]["market_data_engine"]["requests"] == 0

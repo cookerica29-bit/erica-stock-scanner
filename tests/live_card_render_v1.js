@@ -380,10 +380,16 @@ vm.runInContext(`scannerRows = __scannerRenderRows; scannerNearMiss = []; latest
   configured_universe_count: 750,
   symbols_attempted: 750,
   symbols_successfully_processed: 715,
-  symbols_failed: 35,
+  symbols_terminally_evaluated: 750,
+  symbols_with_setup: 715,
+  symbols_without_setup: 35,
+  symbols_operationally_failed: 0,
+  evaluation_coverage: 1,
+  result_yield: 0.9533,
+  symbols_failed: 0,
   scan_duration_ms: 67869,
-  partial_result: true,
-  partial_result_reasons: [{ stage: 'strategy_evaluation', reason: 'symbol returned no setup', count: 35 }],
+  partial_result: false,
+  partial_result_reasons: [],
   provider_metrics: { alpaca_bar_symbols_requested: 1278, alpaca_bar_symbols_succeeded: 1278, alpaca_bar_symbols_failed: 0 },
   cache_stats: { prices_hit: 10, prices_miss: 30 },
   performance: {
@@ -404,11 +410,15 @@ assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Market Covera
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Coverage Diagnostics'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('715'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('95%'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Evaluation Coverage'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('100%'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('No Setup'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Operational Failures'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('67.9s'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('10.5/s'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Cache Hit Rate'));
-assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Partial'));
-assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('35 symbol returned no setup'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Complete'));
+assert.ok(!scannerRenderElements.marketCoverage.innerHTML.includes('35 symbol returned no setup'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('256.4 MB'));
 assert.ok(scannerRenderElements.results.innerHTML.includes('STRONG'));
 assert.ok(!scannerRenderElements.results.innerHTML.includes('TOP'));

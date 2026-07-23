@@ -4348,6 +4348,16 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
   const cacheStats = meta.cache_stats || {};
   const attempted = meta.symbols_attempted ?? meta.configured_universe_count ?? allRows.length;
   const processed = meta.symbols_successfully_processed ?? allRows.length;
+  const terminallyEvaluated = meta.symbols_terminally_evaluated ?? processed;
+  const withSetup = meta.symbols_with_setup ?? processed;
+  const withoutSetup = meta.symbols_without_setup ?? Math.max(0, Number(attempted || 0) - Number(processed || 0));
+  const operationalFailures = meta.symbols_operationally_failed ?? meta.symbols_failed ?? 0;
+  const evaluationCoverageValue = meta.evaluation_coverage ?? (
+    Number(attempted || 0) > 0 ? Number(terminallyEvaluated || 0) / Number(attempted || 0) : null
+  );
+  const resultYieldValue = meta.result_yield ?? (
+    Number(attempted || 0) > 0 ? Number(withSetup || 0) / Number(attempted || 0) : null
+  );
   const skipped = meta.tradeability_skipped ?? 0;
   const failed = meta.symbols_failed ?? meta.no_setup_or_failed_count ?? meta.symbols_omitted_or_rejected ?? 0;
   const providerMetrics = meta.provider_metrics || {};
@@ -4388,8 +4398,10 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
           <div class="snapshot-badges">
             ${renderSnapshotBadge('Universe', escapeHtml(universeLabel))}
             ${renderSnapshotBadge('Attempted', escapeHtml(String(attempted)))}
-            ${renderSnapshotBadge('Processed', escapeHtml(String(processed)))}
-            ${renderSnapshotBadge('Coverage', escapeHtml(formatCoveragePercent(processed, attempted)))}
+            ${renderSnapshotBadge('Evaluation Coverage', escapeHtml(formatTelemetryPercent(evaluationCoverageValue)))}
+            ${renderSnapshotBadge('Setups Returned', escapeHtml(String(withSetup)))}
+            ${renderSnapshotBadge('No Setup', escapeHtml(String(withoutSetup)))}
+            ${renderSnapshotBadge('Result Yield', escapeHtml(formatTelemetryPercent(resultYieldValue)))}
           </div>
         </div>
         <div>
@@ -4400,6 +4412,7 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
             ${renderSnapshotBadge('Throughput', escapeHtml(Number.isFinite(throughput) ? `${throughput.toFixed(1)}/s` : '—'))}
             ${renderSnapshotBadge('Cache Hit Rate', escapeHtml(formatTelemetryPercent(cacheHitRate)))}
             ${renderSnapshotBadge('Result', escapeHtml(meta.partial_result ? 'Partial' : 'Complete'), meta.partial_result ? 'timing-not-ready' : 'status-ready')}
+            ${renderSnapshotBadge('Operational Failures', escapeHtml(String(operationalFailures)))}
             ${renderSnapshotBadge('Skipped', escapeHtml(String(skipped)))}
             ${renderSnapshotBadge('Failed', escapeHtml(String(failed)))}
           </div>
