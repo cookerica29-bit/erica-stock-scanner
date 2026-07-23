@@ -2572,6 +2572,15 @@
       </div>
       <button class="btn-secondary" onclick="loadPositionReplay()">Run Replay</button>
     </div>
+    <div class="analytics-card" id="positionReplayAuthCard">
+      <h3>Developer Authentication</h3>
+      <div class="journal-controls" style="margin:10px 0;">
+        <input type="password" id="journalAdminTokenInput" placeholder="Journal Admin Token" autocomplete="off" style="min-width:280px;" oninput="syncJournalTokenInputState()" />
+        <button class="btn-secondary" onclick="connectJournalAdminToken()">Connect</button>
+        <button class="btn-secondary" onclick="clearJournalAdminToken()">Clear Token</button>
+      </div>
+      <div id="journalAuthStatus" class="execution-subtitle">🔴 Not Authenticated</div>
+    </div>
     <div class="journal-controls" style="margin-bottom:12px;">
       <select id="positionReplayStatus" onchange="loadPositionReplay()">
         <option value="all">All Positions</option>
@@ -8540,6 +8549,75 @@ function journalServerAuthoritative() {
   return localStorage.getItem(JOURNAL_SERVER_AUTHORITATIVE_KEY) === 'true';
 }
 
+function setJournalAuthStatus(status, message = '') {
+  const el = document.getElementById('journalAuthStatus');
+  if (!el) return;
+  if (status === 'authenticated') {
+    el.textContent = '🟢 Authenticated';
+  } else if (status === 'invalid') {
+    el.textContent = '🔴 Invalid token';
+  } else if (status === 'checking') {
+    el.textContent = '🟡 Checking token...';
+  } else {
+    el.textContent = message || '🔴 Not Authenticated';
+  }
+}
+
+function syncJournalTokenInputState() {
+  const input = document.getElementById('journalAdminTokenInput');
+  if (!input) return;
+  const value = input.value || '';
+  if (value) localStorage.setItem(JOURNAL_AUTH_TOKEN_KEY, value);
+  else localStorage.removeItem(JOURNAL_AUTH_TOKEN_KEY);
+  setJournalAuthStatus(value ? 'checking' : 'missing');
+}
+
+function initializeJournalAdminTokenInput() {
+  const input = document.getElementById('journalAdminTokenInput');
+  if (!input) return;
+  input.value = journalAuthToken();
+  setJournalAuthStatus(journalAuthToken() ? 'checking' : 'missing');
+}
+
+async function connectJournalAdminToken() {
+  const input = document.getElementById('journalAdminTokenInput');
+  const token = String(input?.value || '').trim();
+  if (!token) {
+    localStorage.removeItem(JOURNAL_AUTH_TOKEN_KEY);
+    setJournalAuthStatus('missing');
+    return { authenticated: false, reason: 'missing token' };
+  }
+  localStorage.setItem(JOURNAL_AUTH_TOKEN_KEY, token);
+  setJournalAuthStatus('checking');
+  try {
+    const response = await fetchWithTimeout(`${API}/api/journal/diagnostics`, { headers: journalAuthHeaders() });
+    if (response.status === 403) {
+      setJournalAuthStatus('invalid');
+      return { authenticated: false, status: 403 };
+    }
+    if (!response.ok) {
+      setJournalAuthStatus('missing', `🔴 Authentication check failed (${response.status})`);
+      return { authenticated: false, status: response.status };
+    }
+    await response.json();
+    setJournalAuthStatus('authenticated');
+    await initializeJournalServerSync();
+    await loadPositionReplay();
+    return { authenticated: true };
+  } catch (error) {
+    setJournalAuthStatus('missing', `🔴 Server unavailable: ${error.message || error}`);
+    return { authenticated: false, error: String(error) };
+  }
+}
+
+function clearJournalAdminToken() {
+  localStorage.removeItem(JOURNAL_AUTH_TOKEN_KEY);
+  const input = document.getElementById('journalAdminTokenInput');
+  if (input) input.value = '';
+  setJournalAuthStatus('missing');
+  updateDeveloperReplayAccess();
+}
+
 function ensureJournalStableIds(entry = {}) {
   const next = { ...entry };
   const existing = firstPresent(next.journal_id, next.id, null);
@@ -8666,6 +8744,7 @@ async function fetchServerJournalEntries(filters = {}) {
   if (filters.direction) params.set('direction', filters.direction);
   if (filters.position_id) params.set('position_id', filters.position_id);
   const response = await fetchWithTimeout(`${API}/api/journal?${params.toString()}`, { headers: journalAuthHeaders() });
+  if (response.status === 403) setJournalAuthStatus('invalid');
   if (!response.ok) throw new Error(`Journal fetch failed: ${response.status}`);
   const payload = await response.json();
   localStorage.setItem(JOURNAL_SERVER_CACHE_KEY, JSON.stringify(payload.entries || []));
@@ -11277,6 +11356,7 @@ function positionReplayQuery() {
 
 async function loadPositionReplay() {
   updateDeveloperReplayAccess();
+  initializeJournalAdminTokenInput();
   const body = document.getElementById('positionReplayBody');
   const summary = document.getElementById('positionReplaySummary');
   if (!body || !summary) return;
@@ -11288,7 +11368,15 @@ async function loadPositionReplay() {
   body.innerHTML = '<div class="analytics-empty"><span class="spinner"></span> Running replay...</div>';
   try {
     const response = await fetchWithTimeout(`${API}/api/dev/position-replay?${positionReplayQuery().toString()}`, { headers: journalAuthHeaders() });
+    if (response.status === 403) {
+      setJournalAuthStatus('invalid');
+      summary.innerHTML = '';
+      body.innerHTML = '<div class="analytics-empty">Invalid journal admin token. Check the token and click Connect again.</div>';
+      return;
+    }
+    if (!response.ok) throw new Error(`Replay failed: ${response.status}`);
     const payload = await response.json();
+    setJournalAuthStatus('authenticated');
     renderPositionReplay(payload);
   } catch (error) {
     summary.innerHTML = '';

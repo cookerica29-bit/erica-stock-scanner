@@ -963,14 +963,22 @@ assert.ok(blockedHtml.includes('disabled'));
 
 assert.ok(html.includes('positionReplayTabButton'));
 assert.ok(html.includes('Position Intelligence Replay'));
+assert.ok(html.includes('Developer Authentication'));
+assert.ok(html.includes('journalAdminTokenInput'));
+assert.ok(html.includes('Connect'));
+assert.ok(html.includes('Clear Token'));
 const replaySummary = elementStub();
 const replayBody = elementStub();
 const replayButton = elementStub();
+const replayTokenInput = elementStub();
+const replayAuthStatus = elementStub();
 const previousGetElementById = context.document.getElementById;
 context.document.getElementById = id => ({
   positionReplaySummary: replaySummary,
   positionReplayBody: replayBody,
   positionReplayTabButton: replayButton,
+  journalAdminTokenInput: replayTokenInput,
+  journalAuthStatus: replayAuthStatus,
 }[id] || elementStub());
 delete storage.kairos_journal_admin_token;
 context.updateDeveloperReplayAccess();
@@ -978,6 +986,36 @@ assert.strictEqual(replayButton.style.display, '');
 storage.kairos_journal_admin_token = 'secret';
 context.updateDeveloperReplayAccess();
 assert.strictEqual(replayButton.style.display, '');
+context.initializeJournalAdminTokenInput();
+assert.strictEqual(replayTokenInput.value, 'secret');
+assert.strictEqual(replayAuthStatus.textContent, '🟡 Checking token...');
+replayTokenInput.value = 'new-secret';
+context.syncJournalTokenInputState();
+assert.strictEqual(storage.kairos_journal_admin_token, 'new-secret');
+assert.strictEqual(replayAuthStatus.textContent, '🟡 Checking token...');
+context.clearJournalAdminToken();
+assert.strictEqual(storage.kairos_journal_admin_token, undefined);
+assert.strictEqual(replayTokenInput.value, '');
+assert.strictEqual(replayAuthStatus.textContent, '🔴 Not Authenticated');
+
+replayTokenInput.value = 'bad-token';
+let authCalls = [];
+const previousAuthFetch = context.fetch;
+context.fetch = (url, options = {}) => {
+  authCalls.push({ url, options });
+  return Promise.resolve({ status: 403, ok: false, json: () => Promise.resolve({}), text: () => Promise.resolve('forbidden') });
+};
+
+(async () => {
+const result = await context.connectJournalAdminToken();
+assert.strictEqual(result.authenticated, false);
+assert.strictEqual(result.status, 403);
+assert.strictEqual(storage.kairos_journal_admin_token, 'bad-token');
+assert.strictEqual(replayTokenInput.value, 'bad-token');
+assert.strictEqual(replayAuthStatus.textContent, '🔴 Invalid token');
+assert.ok(authCalls[0].url.includes('/api/journal/diagnostics'));
+assert.strictEqual(authCalls[0].options.headers['X-Kairos-Admin-Token'], 'bad-token');
+context.fetch = previousAuthFetch;
 
 context.renderPositionReplay({
   ready: false,
@@ -1022,3 +1060,7 @@ assert.ok(replayBody.innerHTML.includes('State Duration'));
 context.document.getElementById = previousGetElementById;
 
 console.log('Live card render v1 tests passed');
+})().catch(error => {
+  console.error(error);
+  process.exit(1);
+});
