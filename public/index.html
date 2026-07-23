@@ -4344,6 +4344,7 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
   if (!el) return;
   const allRows = Array.isArray(rows) ? rows : [];
   const performance = meta.performance || {};
+  const marketDataEngine = performance.market_data_engine || {};
   const cacheStats = meta.cache_stats || {};
   const attempted = meta.symbols_attempted ?? meta.configured_universe_count ?? allRows.length;
   const processed = meta.symbols_successfully_processed ?? allRows.length;
@@ -4433,6 +4434,11 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
         p95 ${escapeHtml(formatScanSeconds(performance.p95_symbol_duration_ms))};
         peak workers ${escapeHtml(String(performance.peak_worker_count ?? '—'))};
         memory ${escapeHtml(Number.isFinite(Number(performance.memory_rss_mb)) ? `${Number(performance.memory_rss_mb).toFixed(1)} MB` : '—')}.
+        Market Data Engine: ${escapeHtml(String(marketDataEngine.requests ?? performance.candle_cache_requests ?? '—'))} candle requests,
+        ${escapeHtml(formatTelemetryPercent(marketDataEngine.hit_rate ?? performance.candle_cache_hit_rate ?? cacheHitRate))} cache hit rate,
+        avg fetch ${escapeHtml(formatScanSeconds(marketDataEngine.average_fetch_time_ms ?? performance.average_fetch_time_ms))},
+        duplicate requests eliminated ${escapeHtml(String(marketDataEngine.duplicate_requests_eliminated ?? performance.duplicate_requests_eliminated ?? 0))},
+        earnings deferred during scan ${escapeHtml(String(marketDataEngine.earnings_requests_deferred_during_scan ?? performance.earnings_requests_deferred_during_scan ?? 0))}.
         Largest blockers: ${escapeHtml(topReasons)}.
         Multi-session p95 requires runtime sampling and is not inferred from a single scan response.
       </div>

@@ -57,6 +57,8 @@ def main() -> int:
     assert meta["partial_result_reasons"] == []
     assert "performance" in meta
     assert meta["performance"]["peak_worker_count"] == 12
+    assert meta["performance"]["market_data_engine"]["requests"] == 0
+    assert meta["performance"]["market_data_engine"]["incremental_updates_used"] == 0
     assert [item[1:] for item in calls["batch_downloads"]] == [("1y", "1d")]
 
     calls, rows, near_miss, meta = run_with_stubs(discover=True)
@@ -82,6 +84,27 @@ def main() -> int:
     discovered_key = scanner._analysis_cache_key(["AAPL", "MSFT"], universe="discovered")
     assert discovered_key == ("universe", "discovered", ("AAPL", "MSFT"))
     assert discovered_key != scanner._analysis_cache_key(["AAPL", "MSFT"])
+
+    original_raw = scanner._download_price_batch_raw
+    try:
+        raw_calls = []
+
+        def fake_raw(tickers, period, interval, provider=None):
+            raw_calls.append((list(tickers), period, interval, getattr(provider, "name", None)))
+            return {}
+
+        scanner._download_price_batch_raw = fake_raw
+        scanner._cache_snapshot(reset=True)
+        result = scanner._batch_download(["AAPL", "AAPL", "MSFT", "MSFT"], period="1y", interval="1d")
+        stats = scanner._cache_snapshot(reset=True)
+        assert result == {}
+        assert raw_calls and raw_calls[0][0] == ["AAPL", "MSFT"]
+        assert stats["prices_duplicate_symbols_eliminated"] == 2
+        assert stats["prices_request_1d_count"] == 1
+        assert stats["prices_request_1d_symbols"] == 2
+        assert stats["prices_miss"] == 2
+    finally:
+        scanner._download_price_batch_raw = original_raw
 
     print("Default scan universe v1 tests passed")
     return 0

@@ -166,6 +166,7 @@ _earnings_cache = {}
 EARNINGS_CACHE_TTL = timedelta(hours=12)
 EARNINGS_UNAVAILABLE_CACHE_TTL = timedelta(hours=1)
 EARNINGS_FAILURE_PRESERVE_TTL = timedelta(days=1)
+EARNINGS_SCAN_DEFER_TTL = timedelta(minutes=10)
 _cache_lock = threading.RLock()
 _cache_stats = Counter()
 _background_executor = ThreadPoolExecutor(max_workers=3)
@@ -173,6 +174,7 @@ _background_jobs = set()
 _background_jobs_lock = threading.Lock()
 _background_refresh_started = False
 _background_last_refresh = {}
+_earnings_deferred_until = {}
 _background_periodic_tasks = {}
 _active_scan_count = 0
 _analysis_cache = {}
@@ -245,12 +247,26 @@ def _cache_record(name: str, outcome: str) -> None:
     logger.debug("[cache] %s %s", name, outcome)
 
 
+def _cache_record_value(name: str, value: float) -> None:
+    with _cache_lock:
+        _cache_stats[f"{name}_sum"] += float(value)
+        _cache_stats[f"{name}_count"] += 1
+
+
 def _cache_snapshot(reset: bool = True) -> dict:
     with _cache_lock:
         snapshot = dict(_cache_stats)
         if reset:
             _cache_stats.clear()
     return snapshot
+
+
+def _cache_average(stats: Optional[dict], name: str) -> Optional[float]:
+    stats = stats or {}
+    count = float(stats.get(f"{name}_count", 0) or 0)
+    if count <= 0:
+        return None
+    return round(float(stats.get(f"{name}_sum", 0) or 0) / count, 1)
 
 
 def _cache_hit_rate(cache_stats: Optional[dict]) -> Optional[float]:
@@ -1461,6 +1477,24 @@ def _earnings_is_loading(data: Optional[dict]) -> bool:
     return bool(data.get("loading")) or status in {"loading", "pending", "refreshing"} or source == "background_refresh"
 
 
+def _submit_earnings_refresh_if_safe(ticker: str, *, reason: str = "miss") -> bool:
+    ticker = str(ticker or "").upper()
+    if not ticker or ticker in NO_EARNINGS_SYMBOLS:
+        return False
+    now = datetime.utcnow()
+    if _scan_is_active():
+        with _cache_lock:
+            deferred_until = _earnings_deferred_until.get(ticker)
+            if not deferred_until or now >= deferred_until:
+                _earnings_deferred_until[ticker] = now + EARNINGS_SCAN_DEFER_TTL
+                _cache_record("earnings", "deferred_scan")
+        return False
+    submitted = _submit_background_job(("earnings", ticker), _refresh_earnings, ticker)
+    if submitted:
+        _cache_record("earnings", f"submitted_{reason}")
+    return submitted
+
+
 def _earnings_for_ticker(ticker: str, *, allow_fetch: bool = True) -> dict:
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
@@ -1474,12 +1508,12 @@ def _earnings_for_ticker(ticker: str, *, allow_fetch: bool = True) -> dict:
                 return dict(cached_data)
             if cached_data:
                 _cache_record("earnings", "stale")
-                _submit_background_job(("earnings", ticker), _refresh_earnings, ticker)
+                _submit_earnings_refresh_if_safe(ticker, reason="stale")
                 return dict(cached_data)
         _cache_record("earnings", "miss")
 
     if not allow_fetch:
-        _submit_background_job(("earnings", ticker), _refresh_earnings, ticker)
+        _submit_earnings_refresh_if_safe(ticker, reason="miss")
         return _earnings_loading_result()
 
     return _fetch_earnings_for_ticker(ticker)
@@ -3934,6 +3968,7 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str, provide
     if not tickers:
         return {}
     active_provider = provider or _price_provider_for_interval(interval)
+    fetch_start = time.perf_counter()
     try:
         _cache_record("api_prices", "call")
         raw = active_provider.download(
@@ -3941,8 +3976,11 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str, provide
             progress=False, auto_adjust=True, group_by="ticker",
         )
     except Exception as e:
-        print(f"[batch_download] error: {e}")
+        _cache_record("api_prices", "error")
+        _cache_record_value("api_prices_duration_ms", round((time.perf_counter() - fetch_start) * 1000, 1))
+        logger.warning("[batch_download] provider=%s period=%s interval=%s symbols=%s error=%s", active_provider.name, period, interval, len(tickers), e)
         return {}
+    _cache_record_value("api_prices_duration_ms", round((time.perf_counter() - fetch_start) * 1000, 1))
 
     result: dict = {}
     single = len(tickers) == 1
@@ -3994,6 +4032,13 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
     if not tickers:
         return {}
     symbols = list(dict.fromkeys([str(t).strip().upper() for t in tickers if str(t).strip()]))
+    duplicate_count = max(0, len([t for t in tickers if str(t).strip()]) - len(symbols))
+    if duplicate_count:
+        with _cache_lock:
+            _cache_stats["prices_duplicate_symbols_eliminated"] += duplicate_count
+    with _cache_lock:
+        _cache_stats[f"prices_request_{interval}_count"] += 1
+        _cache_stats[f"prices_request_{interval}_symbols"] += len(symbols)
     provider = _price_provider_for_interval(interval)
     provider_name = provider.name
     now = datetime.utcnow()
@@ -4016,6 +4061,13 @@ def _batch_download(tickers: list, period: str, interval: str) -> dict:
                 _cache_record("prices", "miss")
                 continue
             result[ticker] = data.copy()
+            age_seconds = max(0.0, age.total_seconds())
+            _cache_record_value("prices_age_seconds", age_seconds)
+            with _cache_lock:
+                _cache_stats["prices_oldest_age_seconds"] = max(
+                    float(_cache_stats.get("prices_oldest_age_seconds", 0) or 0),
+                    age_seconds,
+                )
             if age <= PRICE_CACHE_TTL:
                 _cache_record("prices", "hit")
             else:
@@ -4107,7 +4159,7 @@ def _background_refresh_loop() -> None:
 
             if _periodic_refresh_due("earnings", 6 * 60 * 60):
                 for ticker in [s for s in symbols if s not in NO_EARNINGS_SYMBOLS][:40]:
-                    _submit_background_job(("earnings_periodic", ticker), _refresh_earnings, ticker)
+                    _submit_earnings_refresh_if_safe(ticker, reason="periodic")
 
             with _background_jobs_lock:
                 periodic_tasks = list(_background_periodic_tasks.items())
@@ -4326,7 +4378,7 @@ def analyze_trend_ticker(ticker: str, h4_df: Optional[pd.DataFrame] = None, dail
             "debug_warning": debug_warning,
         }
     except Exception as e:
-        print(f"[trends] {ticker} error: {e}")
+        logger.warning("[trends] ticker=%s error=%s", ticker, e)
         return None
 
 
@@ -5338,6 +5390,48 @@ def scan_all(
         failed_count = sum(int(reason.get("count") or 0) for reason in partial_reasons if reason.get("stage") != "tradeability_filter")
         symbols_per_second = round(processed / (total_ms / 1000), 2) if total_ms > 0 else None
         cache_hit_rate = _cache_hit_rate(cache_stats)
+        candle_cache_requests = sum(
+            int(cache_stats.get(f"prices_request_{interval}_count", 0) or 0)
+            for interval in ("1d", "1wk", "4h")
+        )
+        candle_cache_symbols_requested = sum(
+            int(cache_stats.get(f"prices_request_{interval}_symbols", 0) or 0)
+            for interval in ("1d", "1wk", "4h")
+        )
+        market_data_engine = {
+            "requests": candle_cache_requests,
+            "symbols_requested": candle_cache_symbols_requested,
+            "hits": int(cache_stats.get("prices_hit", 0) or 0),
+            "misses": int(cache_stats.get("prices_miss", 0) or 0),
+            "stale": int(cache_stats.get("prices_stale", 0) or 0),
+            "hit_rate": cache_hit_rate,
+            "average_cache_age_seconds": _cache_average(cache_stats, "prices_age_seconds"),
+            "oldest_cache_age_seconds": round(float(cache_stats.get("prices_oldest_age_seconds", 0) or 0), 1),
+            "duplicate_requests_eliminated": int(cache_stats.get("prices_duplicate_symbols_eliminated", 0) or 0),
+            "average_fetch_time_ms": _cache_average(cache_stats, "api_prices_duration_ms"),
+            "incremental_updates_used": 0,
+            "http_retries": 0,
+            "rate_limits": 0,
+            "provider_errors": int(cache_stats.get("api_prices_error", 0) or 0),
+            "earnings_requests_deferred_during_scan": int(cache_stats.get("earnings_deferred_scan", 0) or 0),
+            "request_breakdown": {
+                "daily": {
+                    "requests": int(cache_stats.get("prices_request_1d_count", 0) or 0),
+                    "symbols": int(cache_stats.get("prices_request_1d_symbols", 0) or 0),
+                    "duration_ms": daily_fetch_ms,
+                },
+                "weekly": {
+                    "requests": int(cache_stats.get("prices_request_1wk_count", 0) or 0),
+                    "symbols": int(cache_stats.get("prices_request_1wk_symbols", 0) or 0),
+                    "duration_ms": weekly_fetch_ms,
+                },
+                "h4": {
+                    "requests": int(cache_stats.get("prices_request_4h_count", 0) or 0),
+                    "symbols": int(cache_stats.get("prices_request_4h_symbols", 0) or 0),
+                    "duration_ms": h4_fetch_ms,
+                },
+            },
+        }
         slow_symbols = sorted(
             [
                 {
@@ -5436,6 +5530,21 @@ def scan_all(
                 "cache_hit_count": int(cache_stats.get("prices_hit", 0) or 0),
                 "cache_miss_count": int(cache_stats.get("prices_miss", 0) or 0),
                 "cache_hit_rate": cache_hit_rate,
+                "candle_cache_requests": candle_cache_requests,
+                "candle_cache_hits": int(cache_stats.get("prices_hit", 0) or 0),
+                "candle_cache_misses": int(cache_stats.get("prices_miss", 0) or 0),
+                "candle_cache_stale": int(cache_stats.get("prices_stale", 0) or 0),
+                "candle_cache_hit_rate": cache_hit_rate,
+                "candle_cache_average_age_seconds": market_data_engine["average_cache_age_seconds"],
+                "candle_cache_oldest_age_seconds": market_data_engine["oldest_cache_age_seconds"],
+                "duplicate_requests_eliminated": market_data_engine["duplicate_requests_eliminated"],
+                "average_fetch_time_ms": market_data_engine["average_fetch_time_ms"],
+                "incremental_updates_used": 0,
+                "http_retries": 0,
+                "rate_limits": 0,
+                "provider_errors": market_data_engine["provider_errors"],
+                "earnings_requests_deferred_during_scan": market_data_engine["earnings_requests_deferred_during_scan"],
+                "market_data_engine": market_data_engine,
                 "peak_worker_count": max_workers,
                 "memory_rss_mb": _process_memory_mb(),
                 "median_symbol_duration_ms": _percentile(symbol_durations, 0.5),

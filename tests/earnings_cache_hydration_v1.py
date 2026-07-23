@@ -16,9 +16,11 @@ import scanner  # noqa: E402
 
 def main() -> int:
     original_ticker = scanner.yf.Ticker
+    original_submit = scanner._submit_background_job
     try:
         with scanner._cache_lock:
             scanner._earnings_cache.clear()
+            scanner._earnings_deferred_until.clear()
 
         dated = {
             "loaded": True,
@@ -66,6 +68,14 @@ def main() -> int:
         cached = scanner._earnings_for_ticker("AAPL", allow_fetch=False)
         assert cached.get("source") == "unavailable"
 
+        submit_calls = []
+
+        def fake_submit(key, callback, *args, **kwargs):
+            submit_calls.append((key, args))
+            return True
+
+        scanner._submit_background_job = fake_submit
+
         with scanner._cache_lock:
             scanner._earnings_cache["AAPL"] = {
                 "fetched_at": datetime.utcnow() - scanner.EARNINGS_UNAVAILABLE_CACHE_TTL - timedelta(seconds=1),
@@ -73,6 +83,27 @@ def main() -> int:
             }
         stale = scanner._earnings_for_ticker("AAPL", allow_fetch=False)
         assert stale.get("source") == "unavailable"
+        assert submit_calls and submit_calls[-1][0] == ("earnings", "AAPL")
+        submit_calls.clear()
+
+        with scanner._cache_lock:
+            scanner._earnings_cache.clear()
+            scanner._earnings_deferred_until.clear()
+            scanner._cache_stats.clear()
+        scanner._scan_activity_started()
+        try:
+            deferred = scanner._earnings_for_ticker("NVDA", allow_fetch=False)
+        finally:
+            scanner._scan_activity_finished()
+        assert deferred.get("loading") is True
+        assert submit_calls == []
+        with scanner._cache_lock:
+            assert scanner._earnings_deferred_until.get("NVDA") is not None
+            assert scanner._cache_stats.get("earnings_deferred_scan") == 1
+
+        submitted = scanner._earnings_for_ticker("NVDA", allow_fetch=False)
+        assert submitted.get("loading") is True
+        assert submit_calls and submit_calls[-1][0] == ("earnings", "NVDA")
 
         with scanner._cache_lock:
             scanner._earnings_cache.clear()
@@ -119,8 +150,10 @@ def main() -> int:
         return 0
     finally:
         scanner.yf.Ticker = original_ticker
+        scanner._submit_background_job = original_submit
         with scanner._cache_lock:
             scanner._earnings_cache.clear()
+            scanner._earnings_deferred_until.clear()
 
 
 if __name__ == "__main__":
