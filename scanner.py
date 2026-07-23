@@ -755,6 +755,21 @@ def analysis_cache_status(watchlist: Optional[list] = None, *, discover: bool = 
     }
 
 
+def analysis_cache_snapshot(watchlist: Optional[list] = None, *, discover: bool = False, universe: str = "default") -> Optional[dict]:
+    key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
+    with _cache_lock:
+        cached = _analysis_cache.get(key)
+        if not cached:
+            return None
+        return {
+            "key": key,
+            "rows": [dict(row) for row in cached.get("rows") or [] if isinstance(row, dict)],
+            "near_miss": [dict(row) for row in cached.get("near_miss") or [] if isinstance(row, dict)],
+            "generated_at": cached.get("generated_at"),
+            "scan_meta": dict(cached.get("scan_meta") or {}),
+        }
+
+
 def _store_analysis_cache(key: tuple, rows: list, near_miss: list, scan_meta: Optional[dict] = None) -> dict:
     cached = {
         "rows": rows,
@@ -2759,6 +2774,526 @@ def detect_displacement(df: pd.DataFrame, atr: float, direction: str, bos_confir
     if avg_body_atr >= 0.35 or last_range_atr >= 0.75:
         return "WEAK", round(max(avg_body_atr, last_range_atr), 2)
     return "NONE", round(max(avg_body_atr, last_range_atr), 2)
+
+
+def _timestamp_at(df: pd.DataFrame, index: int) -> Optional[str]:
+    try:
+        value = df.index[int(index)]
+    except Exception:
+        return None
+    if hasattr(value, "tz_convert") and getattr(value, "tzinfo", None) is not None:
+        return value.tz_convert("UTC").isoformat().replace("+00:00", "Z")
+    if hasattr(value, "isoformat"):
+        return value.isoformat() + ("Z" if getattr(value, "tzinfo", None) is None else "")
+    return str(value)
+
+
+def _atr_series_atr_context(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    highs = df["High"].astype(float)
+    lows = df["Low"].astype(float)
+    closes = df["Close"].astype(float)
+    prev_close = closes.shift(1)
+    tr = pd.concat([
+        highs - lows,
+        (highs - prev_close).abs(),
+        (lows - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+
+def _candle_closes_in_direction(df: pd.DataFrame, index: int, direction: str) -> bool:
+    if index < 0 or index >= len(df):
+        return False
+    open_ = float(df["Open"].iloc[index])
+    close = float(df["Close"].iloc[index])
+    if direction == "LONG":
+        return close > open_
+    if direction == "SHORT":
+        return close < open_
+    return False
+
+
+def _bos_event_level_for_candle(df: pd.DataFrame, swings: list, index: int, direction: str) -> Optional[float]:
+    if index <= 0 or direction not in ("LONG", "SHORT"):
+        return None
+    prior_swings = [
+        s for s in swings
+        if s.get("index", -1) < index and s.get("type") == ("high" if direction == "LONG" else "low")
+    ]
+    if len(prior_swings) < 2:
+        return None
+    level = float(prior_swings[-2]["price"])
+    close = float(df["Close"].iloc[index])
+    prior_close = float(df["Close"].iloc[index - 1])
+    if direction == "LONG" and close > level and prior_close <= level and _candle_closes_in_direction(df, index, direction):
+        return level
+    if direction == "SHORT" and close < level and prior_close >= level and _candle_closes_in_direction(df, index, direction):
+        return level
+    return None
+
+
+def _bos_impulse_window_indices(df: pd.DataFrame, bos_index: int, direction: str, evaluation_index: int) -> list[int]:
+    start = int(bos_index)
+    for i in range(bos_index - 1, max(-1, bos_index - 3), -1):
+        if not _candle_closes_in_direction(df, i, direction):
+            break
+        start = i
+
+    end = int(bos_index)
+    max_follow = min(int(evaluation_index), bos_index + 2, len(df) - 1)
+    for i in range(bos_index + 1, max_follow + 1):
+        if not _candle_closes_in_direction(df, i, direction):
+            break
+        end = i
+    return list(range(start, end + 1))
+
+
+def _displacement_strength_for_indices(
+    df: pd.DataFrame,
+    indices: list[int],
+    direction: str,
+    atr: float,
+    *,
+    require_majority_for_strong: bool,
+) -> dict:
+    if not indices or direction not in ("LONG", "SHORT") or atr is None or not math.isfinite(float(atr)) or float(atr) <= 0:
+        return {
+            "displacement": "UNKNOWN",
+            "score": 0.0,
+            "avg_body_atr": None,
+            "range_atr": None,
+            "directional_count": 0,
+        }
+    directional = [i for i in indices if _candle_closes_in_direction(df, i, direction)]
+    if not directional:
+        return {
+            "displacement": "NONE",
+            "score": 0.0,
+            "avg_body_atr": 0.0,
+            "range_atr": 0.0,
+            "directional_count": 0,
+        }
+    bodies = [
+        abs(float(df["Close"].iloc[i]) - float(df["Open"].iloc[i]))
+        for i in directional
+    ]
+    avg_body_atr = float(np.mean(bodies) / float(atr))
+    last_directional = directional[-1]
+    latest_range_atr = float((float(df["High"].iloc[last_directional]) - float(df["Low"].iloc[last_directional])) / float(atr))
+    score = max(avg_body_atr, latest_range_atr)
+    majority_ok = len(directional) >= 2 or not require_majority_for_strong
+    if majority_ok and (avg_body_atr >= 0.70 or latest_range_atr >= 1.20):
+        displacement = "STRONG"
+    elif avg_body_atr >= 0.35 or latest_range_atr >= 0.75:
+        displacement = "WEAK"
+    else:
+        displacement = "NONE"
+    return {
+        "displacement": displacement,
+        "score": round(score, 2),
+        "avg_body_atr": round(avg_body_atr, 2),
+        "range_atr": round(latest_range_atr, 2),
+        "directional_count": len(directional),
+    }
+
+
+def _linked_ob_for_bos_impulse(df: pd.DataFrame, direction: str, window_start: int) -> dict:
+    opposing = []
+    for i in range(int(window_start) - 1, -1, -1):
+        if direction == "LONG" and float(df["Close"].iloc[i]) < float(df["Open"].iloc[i]):
+            opposing.append(i)
+            break
+        if direction == "SHORT" and float(df["Close"].iloc[i]) > float(df["Open"].iloc[i]):
+            opposing.append(i)
+            break
+    if not opposing:
+        return {
+            "linked_ob_low": None,
+            "linked_ob_high": None,
+            "linked_ob_candle_index": None,
+            "linked_ob_timestamp": None,
+            "linked_ob_method": "none_found",
+            "linked_ob_ambiguous": True,
+        }
+    index = opposing[0]
+    return {
+        "linked_ob_low": round(float(df["Low"].iloc[index]), 2),
+        "linked_ob_high": round(float(df["High"].iloc[index]), 2),
+        "linked_ob_candle_index": index,
+        "linked_ob_timestamp": _timestamp_at(df, index),
+        "linked_ob_method": "preceding_opposing_candle",
+        "linked_ob_ambiguous": False,
+    }
+
+
+def _bos_event_invalidations(df: pd.DataFrame, event: dict, all_events: list[dict], evaluation_index: int) -> tuple[str, Optional[str], Optional[int]]:
+    direction = event.get("direction")
+    bos_index = int(event.get("bos_candle_index"))
+    candidates = []
+
+    for other in all_events:
+        other_index = int(other.get("bos_candle_index"))
+        if other_index <= bos_index or other_index > evaluation_index:
+            continue
+        if other.get("direction") == direction:
+            candidates.append((other_index, "SUPERSEDED_BY_NEWER_SAME_DIRECTION_BOS", other_index))
+        else:
+            candidates.append((other_index, "OPPOSITE_BOS", other_index))
+
+    low = event.get("linked_ob_low")
+    high = event.get("linked_ob_high")
+    if low is not None and high is not None:
+        for i in range(bos_index + 1, min(evaluation_index, len(df) - 1) + 1):
+            close = float(df["Close"].iloc[i])
+            if direction == "LONG" and close < float(low):
+                candidates.append((i, "OB_INVALIDATED", None))
+                break
+            if direction == "SHORT" and close > float(high):
+                candidates.append((i, "OB_INVALIDATED", None))
+                break
+            touches = (
+                float(df["High"].iloc[i]) >= float(low)
+                and float(df["Low"].iloc[i]) <= float(high)
+            )
+            if touches and i > bos_index:
+                prior_touches = sum(
+                    1
+                    for j in range(bos_index + 1, i + 1)
+                    if float(df["High"].iloc[j]) >= float(low) and float(df["Low"].iloc[j]) <= float(high)
+                )
+                if prior_touches >= 3:
+                    candidates.append((i, "EXISTING_OB_FRESHNESS_INVALIDATION", None))
+                    break
+
+    if not candidates:
+        return "VALID", None, None
+    invalid_index, reason, superseded_by = min(candidates, key=lambda item: item[0])
+    return "INVALID", reason, superseded_by
+
+
+def detect_bos_events_with_displacement(
+    df: pd.DataFrame,
+    direction: Optional[str] = None,
+    evaluation_index: Optional[int] = None,
+) -> list[dict]:
+    """Developer-only BOS-linked displacement study; does not affect live strategy."""
+    if df is None or getattr(df, "empty", True):
+        return []
+    clean_df = _flatten_columns(df.copy()).dropna()
+    if len(clean_df) < 5:
+        return []
+    evaluation_index = len(clean_df) - 1 if evaluation_index is None else min(int(evaluation_index), len(clean_df) - 1)
+    if evaluation_index < 0:
+        return []
+    study_df = clean_df.iloc[:evaluation_index + 1].copy()
+    swings = _find_swings(study_df, margin=2)
+    atr_values = _atr_series_atr_context(study_df)
+    directions = [direction] if direction in ("LONG", "SHORT") else ["LONG", "SHORT"]
+    events = []
+    seen = set()
+
+    for bos_direction in directions:
+        for i in range(1, len(study_df)):
+            level = _bos_event_level_for_candle(study_df, swings, i, bos_direction)
+            if level is None:
+                continue
+            key = (bos_direction, i, round(level, 6))
+            if key in seen:
+                continue
+            seen.add(key)
+            atr_at_bos = float(atr_values.iloc[i]) if i < len(atr_values) else float("nan")
+            if i < 14 or not math.isfinite(atr_at_bos) or atr_at_bos <= 0:
+                candle_strength = _displacement_strength_for_indices(study_df, [i], bos_direction, 0.0, require_majority_for_strong=False)
+                impulse_indices = _bos_impulse_window_indices(study_df, i, bos_direction, evaluation_index)
+                impulse_strength = _displacement_strength_for_indices(study_df, impulse_indices, bos_direction, 0.0, require_majority_for_strong=True)
+            else:
+                candle_strength = _displacement_strength_for_indices(study_df, [i], bos_direction, atr_at_bos, require_majority_for_strong=False)
+                impulse_indices = _bos_impulse_window_indices(study_df, i, bos_direction, evaluation_index)
+                impulse_strength = _displacement_strength_for_indices(study_df, impulse_indices, bos_direction, atr_at_bos, require_majority_for_strong=True)
+            ob = _linked_ob_for_bos_impulse(study_df, bos_direction, impulse_indices[0] if impulse_indices else i)
+            event = {
+                "direction": bos_direction,
+                "bos_level": round(float(level), 2),
+                "bos_candle_index": i,
+                "bos_timestamp": _timestamp_at(study_df, i),
+                "bos_displacement": impulse_strength["displacement"],
+                "bos_displacement_score": impulse_strength["score"],
+                "bos_displacement_candle_index": i,
+                "bos_displacement_timestamp": _timestamp_at(study_df, i),
+                "displacement_window_start": impulse_indices[0] if impulse_indices else i,
+                "displacement_window_end": impulse_indices[-1] if impulse_indices else i,
+                "bos_candle_only_strength": candle_strength,
+                "bos_impulse_window_strength": impulse_strength,
+                "atr_period": 14,
+                "atr_source": "bos_candle_close",
+                "atr_at_bos": round(atr_at_bos, 4) if math.isfinite(atr_at_bos) else None,
+                "linked_order_block": {
+                    "low": ob.get("linked_ob_low"),
+                    "high": ob.get("linked_ob_high"),
+                    "index": ob.get("linked_ob_candle_index"),
+                    "timestamp": ob.get("linked_ob_timestamp"),
+                    "method": ob.get("linked_ob_method"),
+                    "ambiguous": ob.get("linked_ob_ambiguous"),
+                },
+                **ob,
+                "invalidation_state": "VALID",
+                "invalidation_reason": None,
+                "superseded_by_bos_index": None,
+            }
+            events.append(event)
+
+    events.sort(key=lambda item: int(item.get("bos_candle_index", -1)))
+    for event in events:
+        state, reason, superseded_by = _bos_event_invalidations(study_df, event, events, evaluation_index)
+        event["invalidation_state"] = state
+        event["invalidation_reason"] = reason
+        event["superseded_by_bos_index"] = superseded_by
+    return events
+
+
+def _select_active_bos_event(events: list[dict], row: dict) -> tuple[Optional[dict], str]:
+    direction = str(row.get("direction") or row.get("trend") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return None, "no_setup_direction"
+    valid = [
+        event for event in events
+        if event.get("direction") == direction and event.get("invalidation_state") == "VALID"
+    ]
+    if not valid:
+        return None, "no_valid_bos_in_setup_direction"
+    row_ob_low = row.get("ob_low")
+    row_ob_high = row.get("ob_high")
+    if row_ob_low is not None and row_ob_high is not None:
+        linked = [
+            event for event in valid
+            if event.get("linked_ob_low") is not None
+            and abs(float(event.get("linked_ob_low")) - float(row_ob_low)) <= max(0.05, abs(float(row_ob_low)) * 0.002)
+            and abs(float(event.get("linked_ob_high")) - float(row_ob_high)) <= max(0.05, abs(float(row_ob_high)) * 0.002)
+        ]
+        if linked:
+            return linked[-1], "most_recent_valid_bos_linked_to_active_ob"
+    return valid[-1], "most_recent_valid_bos_in_setup_direction"
+
+
+def _shadow_status_from_trade_eval(row: dict, shadow_eval: dict) -> str:
+    grade = str(row.get("setupGrade") or "").upper()
+    direction = str(row.get("direction") or row.get("trend") or "").upper()
+    setup_status = str(row.get("setupStatus") or row.get("setup_status") or "").upper()
+    trade_stage = str(shadow_eval.get("trade_stage") or "").upper()
+    entry_status = str(row.get("entryStatus") or "").strip()
+    has_plan = row.get("entry") is not None and row.get("sl") is not None and row.get("tp1") is not None
+    if direction not in ("LONG", "SHORT") or grade == "C" or setup_status == "SKIPPED":
+        return "SKIP"
+    if "NO TRADE" in trade_stage:
+        return "SKIP"
+    if entry_status == "Too Far":
+        return "SKIP"
+    if has_plan and (shadow_eval.get("trigger_confirmed") or shadow_eval.get("a_plus_ready")):
+        return "ENTER_NOW"
+    if has_plan and shadow_eval.get("b_plus_tradeable") and entry_status == "Tradeable":
+        return "EARLY_ENTRY"
+    if has_plan and entry_status in {"Tradeable", "Near Entry"}:
+        return "ALMOST_READY"
+    return "WAITING"
+
+
+def _simulate_bos_displacement_status(row: dict, active_event: Optional[dict]) -> dict:
+    live_eval = row.get("trade_eval") or {}
+    current_displacement = str(live_eval.get("displacement") or "UNKNOWN").upper()
+    bos_displacement = str((active_event or {}).get("bos_displacement") or "UNKNOWN").upper()
+    bos_valid = bool(active_event and active_event.get("invalidation_state") == "VALID")
+    would_recover = current_displacement != "STRONG" and bos_displacement == "STRONG" and bos_valid
+    shadow_eval = dict(live_eval)
+    live_missing = list(live_eval.get("missing_for_a_plus") or [])
+    shadow_missing = list(live_missing)
+
+    if would_recover:
+        shadow_eval["displacement"] = "STRONG"
+        shadow_eval["displacement_score"] = (active_event or {}).get("bos_displacement_score")
+        shadow_missing = [item for item in shadow_missing if item != "Needs strong displacement"]
+        shadow_eval["missing_for_a_plus"] = shadow_missing
+        trigger_confirmed = bool(
+            shadow_eval.get("sweep_taken")
+            and shadow_eval.get("rejection_confirmed")
+            and row.get("bos_confirmed")
+        )
+        shadow_eval["trigger_confirmed"] = trigger_confirmed
+        room = shadow_eval.get("room_to_target") or {}
+        rr_ok = room.get("estimated_rr") is not None and room.get("estimated_rr") >= 2.0
+        room_clear = room.get("clear") is True and not room.get("blocked")
+        a_plus_ready = bool(
+            shadow_eval.get("htf_aligned")
+            and shadow_eval.get("valid_zone")
+            and shadow_eval.get("structure_quality") == "CLEAN BOS"
+            and shadow_eval.get("sweep_taken")
+            and shadow_eval.get("rejection_confirmed")
+            and shadow_eval.get("setup_type") in ("CONTINUATION: BOS + retest", "REVERSAL: sweep + rejection + displacement")
+            and room_clear
+            and rr_ok
+            and trigger_confirmed
+        )
+        shadow_eval["a_plus_ready"] = a_plus_ready
+        if a_plus_ready:
+            shadow_eval["trade_stage"] = "A+ READY"
+        elif shadow_eval.get("b_plus_tradeable"):
+            shadow_eval["trade_stage"] = "B+ TRADEABLE"
+    else:
+        shadow_eval["missing_for_a_plus"] = shadow_missing
+
+    live_status = _shadow_status_from_trade_eval(row, live_eval)
+    shadow_status = _shadow_status_from_trade_eval(row, shadow_eval)
+    return {
+        "current_displacement": current_displacement,
+        "current_displacement_score": live_eval.get("displacement_score"),
+        "bos_linked_displacement": bos_displacement,
+        "bos_linked_displacement_score": (active_event or {}).get("bos_displacement_score"),
+        "bos_linked_displacement_valid": bos_valid,
+        "bos_linked_displacement_age_bars": (
+            None if not active_event else max(0, int(row.get("_shadow_eval_index", 0)) - int(active_event.get("bos_candle_index", 0)))
+        ),
+        "bos_linked_displacement_source": "bos_impulse_window_at_bos_atr",
+        "bos_linked_displacement_invalidation_reason": (active_event or {}).get("invalidation_reason"),
+        "would_recover_strong_displacement": would_recover,
+        "live_status": live_status,
+        "shadow_status_if_bos_displacement_used": shadow_status,
+        "live_missing_requirements": live_missing,
+        "shadow_missing_requirements": shadow_missing,
+        "would_change_status": live_status != shadow_status,
+        "status_change_reason": (
+            "BOS-linked STRONG displacement replaces only the current displacement input."
+            if live_status != shadow_status else "No status change; other production requirements still control."
+        ),
+        "shadow_trade_eval": shadow_eval,
+    }
+
+
+def bos_displacement_shadow_for_setup(row: dict, df: pd.DataFrame) -> dict:
+    clean_df = _flatten_columns(df.copy()).dropna() if df is not None and not getattr(df, "empty", True) else pd.DataFrame()
+    if clean_df.empty:
+        return {
+            "ticker": row.get("ticker"),
+            "error": "missing_candles",
+            "current_displacement": str((row.get("trade_eval") or {}).get("displacement") or "UNKNOWN").upper(),
+            "bos_linked_displacement": "UNKNOWN",
+            "would_recover_strong_displacement": False,
+            "would_change_status": False,
+        }
+    eval_index = len(clean_df) - 1
+    shadow_row = dict(row)
+    shadow_row["_shadow_eval_index"] = eval_index
+    events = detect_bos_events_with_displacement(
+        clean_df,
+        direction=str(row.get("direction") or row.get("trend") or "").upper(),
+        evaluation_index=eval_index,
+    )
+    active_event, selection_reason = _select_active_bos_event(events, row)
+    simulation = _simulate_bos_displacement_status(shadow_row, active_event)
+    active = active_event or {}
+    return {
+        "ticker": row.get("ticker"),
+        "direction": row.get("direction") or row.get("trend"),
+        "timeframe": row.get("timeframe"),
+        "grade": row.get("setupGrade"),
+        "live_trade_stage": (row.get("trade_eval") or {}).get("trade_stage"),
+        "active_bos_index": active.get("bos_candle_index"),
+        "active_bos_timestamp": active.get("bos_timestamp"),
+        "active_bos_level": active.get("bos_level"),
+        "active_bos_selection_reason": selection_reason,
+        "bos_candle_displacement": (active.get("bos_candle_only_strength") or {}).get("displacement"),
+        "bos_impulse_displacement": (active.get("bos_impulse_window_strength") or {}).get("displacement"),
+        "linked_ob_low": active.get("linked_ob_low"),
+        "linked_ob_high": active.get("linked_ob_high"),
+        "linked_ob_ambiguous": active.get("linked_ob_ambiguous"),
+        "bos_events": events,
+        **simulation,
+    }
+
+
+def build_bos_displacement_shadow_report(rows: list, candle_data_by_symbol: dict) -> dict:
+    traces = []
+    current_counts = Counter()
+    bos_counts = Counter()
+    invalidation_counts = Counter()
+    recovered_breakdown = {
+        "by_grade": Counter(),
+        "by_direction": Counter(),
+        "by_timeframe": Counter(),
+        "by_location_quality": Counter(),
+        "by_structure_quality": Counter(),
+        "by_no_trade_reason": Counter(),
+        "by_option_plan_available": Counter(),
+    }
+    status_changes = Counter()
+    ages = []
+
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        trace = bos_displacement_shadow_for_setup(row, candle_data_by_symbol.get(ticker, pd.DataFrame()))
+        traces.append(trace)
+        current_counts[trace.get("current_displacement") or "UNKNOWN"] += 1
+        bos_counts[trace.get("bos_linked_displacement") or "UNKNOWN"] += 1
+        for event in trace.get("bos_events") or []:
+            reason = event.get("invalidation_reason")
+            if reason:
+                invalidation_counts[reason] += 1
+        if trace.get("would_change_status"):
+            status_changes[f"{trace.get('live_status')} -> {trace.get('shadow_status_if_bos_displacement_used')}"] += 1
+        if trace.get("would_recover_strong_displacement"):
+            ev = row.get("trade_eval") or {}
+            recovered_breakdown["by_grade"][row.get("setupGrade") or "unknown"] += 1
+            recovered_breakdown["by_direction"][row.get("direction") or "unknown"] += 1
+            recovered_breakdown["by_timeframe"][row.get("timeframe") or "unknown"] += 1
+            recovered_breakdown["by_location_quality"][ev.get("location") or "unknown"] += 1
+            recovered_breakdown["by_structure_quality"][ev.get("structure_quality") or "unknown"] += 1
+            recovered_breakdown["by_option_plan_available"][str((row.get("option_plan") or {}).get("available") is True)] += 1
+            reasons = ev.get("no_trade_reasons") or ["none"]
+            for reason in reasons:
+                recovered_breakdown["by_no_trade_reason"][reason] += 1
+            age = trace.get("bos_linked_displacement_age_bars")
+            if isinstance(age, (int, float)):
+                ages.append(age)
+
+    recovered = [trace for trace in traces if trace.get("would_recover_strong_displacement")]
+    changed = [trace for trace in traces if trace.get("would_change_status")]
+    shadow_enter_now = [trace for trace in changed if trace.get("shadow_status_if_bos_displacement_used") == "ENTER_NOW"]
+    shadow_early = [trace for trace in changed if trace.get("shadow_status_if_bos_displacement_used") == "EARLY_ENTRY"]
+    shadow_almost = [trace for trace in changed if trace.get("shadow_status_if_bos_displacement_used") == "ALMOST_READY"]
+    ages_sorted = sorted(ages)
+    p75_index = int(math.ceil(len(ages_sorted) * 0.75) - 1) if ages_sorted else None
+    median = ages_sorted[len(ages_sorted) // 2] if ages_sorted else None
+    p75 = ages_sorted[p75_index] if p75_index is not None and p75_index >= 0 else None
+
+    return {
+        "status": "ready",
+        "message": "Shadow study only. Live strategy unchanged.",
+        "processed_setups": len(traces),
+        "current_displacement_distribution": dict(sorted(current_counts.items())),
+        "bos_linked_displacement_distribution": dict(sorted(bos_counts.items())),
+        "recovered_strong_displacement_setups": len(recovered),
+        "status_changes": sum(status_changes.values()),
+        "status_change_distribution": dict(sorted(status_changes.items())),
+        "enter_now_recoveries": len(shadow_enter_now),
+        "early_entry_recoveries": len(shadow_early),
+        "almost_ready_recoveries": len(shadow_almost),
+        "unchanged_setups": len(traces) - len(changed),
+        "invalidated_bos_evidence": sum(invalidation_counts.values()),
+        "invalidation_counts": dict(sorted(invalidation_counts.items())),
+        "ambiguous_bos_to_ob_links": sum(1 for trace in traces if trace.get("linked_ob_ambiguous")),
+        "median_bos_age_bars": median,
+        "p75_bos_age_bars": p75,
+        "recovered_breakdown": {
+            key: dict(sorted(counter.items()))
+            for key, counter in recovered_breakdown.items()
+        },
+        "evidence_guard": (
+            "Insufficient evidence to replace the current displacement model."
+            if len(recovered) < 20 else "Shadow study only. Live strategy unchanged."
+        ),
+        "representative_traces": recovered[:25],
+        "all_traces": traces,
+    }
 
 
 def _displacement_read(df: pd.DataFrame, atr: float, bos_confirmed: bool, direction: str = "NEUTRAL") -> tuple:

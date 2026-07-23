@@ -5,13 +5,17 @@ import logging
 import os
 import threading
 import time
+from typing import Optional
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from scanner import (
+    analysis_cache_snapshot,
     analysis_cache_status,
+    build_bos_displacement_shadow_report,
+    _batch_download,
     scan_cached,
     scan_ticker,
     debug_ticker,
@@ -871,6 +875,81 @@ def api_dev_position_replay_one(
         raise HTTPException(status_code=404, detail="Position not found")
     replays = _replay_positions(entries, summary_only=summary_only)
     return _replay_response(entries, replays)
+
+
+def _cached_scan_snapshot_for_shadow(universe: str) -> tuple[Optional[dict], dict]:
+    universe = str(universe or "default").strip().lower()
+    if universe == "discovered":
+        with _discovery_universe_lock:
+            symbols = list(_discovery_universe_cache.get("symbols") or [])
+        if not symbols:
+            return None, {
+                "status": "not_ready",
+                "message": "Discovered universe cache is not ready. Shadow study does not trigger discovery or scanning.",
+            }
+        snapshot = analysis_cache_snapshot(symbols, universe="discovered")
+        if not snapshot:
+            return None, {
+                "status": "not_ready",
+                "message": "No completed discovered-universe scan cache is available. Shadow study does not trigger scanning.",
+            }
+        return snapshot, {}
+    snapshot = analysis_cache_snapshot()
+    if not snapshot:
+        return None, {
+            "status": "not_ready",
+            "message": "No completed default scan cache is available. Shadow study does not trigger scanning.",
+        }
+    return snapshot, {}
+
+
+def _shadow_candle_data_for_rows(rows: list[dict], limit: int) -> dict:
+    selected = [row for row in rows[:limit] if isinstance(row, dict) and row.get("ticker")]
+    by_interval = {}
+    for row in selected:
+        timeframe = str(row.get("timeframe") or "1D").upper()
+        if timeframe == "4H":
+            request = ("60d", "4h")
+        else:
+            request = ("1y", "1d")
+        by_interval.setdefault(request, []).append(str(row.get("ticker")).upper())
+    candle_data = {}
+    for (period, interval), symbols in by_interval.items():
+        fetched = _batch_download(list(dict.fromkeys(symbols)), period=period, interval=interval)
+        candle_data.update({str(symbol).upper(): df for symbol, df in fetched.items()})
+    return candle_data
+
+
+@app.get("/api/dev/bos-displacement-shadow")
+def api_dev_bos_displacement_shadow(
+    universe: str = Query(default="default"),
+    include_all_traces: bool = Query(default=False),
+    limit: int = Query(default=250, ge=1, le=1000),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    snapshot, not_ready = _cached_scan_snapshot_for_shadow(universe)
+    if not snapshot:
+        return {
+            **not_ready,
+            "ready": False,
+            "message_guard": "Shadow study only. Live strategy unchanged.",
+        }
+    rows = [*(snapshot.get("rows") or []), *(snapshot.get("near_miss") or [])]
+    candle_data = _shadow_candle_data_for_rows(rows, limit)
+    report = build_bos_displacement_shadow_report(rows[:limit], candle_data)
+    if not include_all_traces:
+        report.pop("all_traces", None)
+    return {
+        **report,
+        "ready": True,
+        "universe": str(universe or "default").strip().lower(),
+        "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+        "scan_cache_meta": snapshot.get("scan_meta") or {},
+        "candle_symbols_requested": min(len(rows), limit),
+        "candle_symbols_returned": len(candle_data),
+        "live_strategy_changed": False,
+    }
 
 
 @app.get("/api/data-provider/status")
