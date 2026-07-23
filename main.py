@@ -54,6 +54,7 @@ from position_intelligence import (
     replay_readiness,
 )
 from verified_analytics import verified_analytics_snapshot
+from smart_notifications import SQLiteNotificationRepository, SMART_NOTIFICATION_VERSION, stable_event_id
 
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ _discovery_universe_cache = {
 _discovery_universe_lock = threading.RLock()
 _discovery_universe_executor = ThreadPoolExecutor(max_workers=1)
 _journal_repository = SQLiteJournalRepository(default_journal_db_path())
+_notification_repository = SQLiteNotificationRepository(default_journal_db_path())
 
 NO_STORE_HEADERS = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -407,6 +409,128 @@ def _discovery_scan_not_ready_response(status: dict) -> dict:
     }
 
 
+def _attach_notification_metrics(result: dict) -> dict:
+    if not isinstance(result, dict):
+        return result
+    meta = result.get("meta") or {}
+    if meta.get("status") == "warming":
+        return result
+    rows = [*(result.get("rows") or []), *(result.get("near_miss") or [])]
+    try:
+        notification_metrics = _notification_repository.evaluate_scan(rows, meta)
+    except Exception as exc:
+        notification_metrics = {
+            "version": "smart-notifications-v1",
+            "events_evaluated": len(rows),
+            "events_created": 0,
+            "events_deduplicated": 0,
+            "external_delivery_failures": 0,
+            "notification_error": exc.__class__.__name__,
+        }
+        logger.warning("smart_notifications.evaluate_failed error=%s", exc.__class__.__name__)
+    result["meta"] = {
+        **meta,
+        "smart_notifications": {key: value for key, value in notification_metrics.items() if key != "created_events"},
+    }
+    return result
+
+
+def _first_present(*values):
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _notification_price(value):
+    try:
+        if value in (None, ""):
+            return None
+        number = float(value)
+        return number if number == number else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _journal_notification_event(event_type: str, entry: dict, previous_state=None, current_state=None, source_time=None) -> dict:
+    symbol = str(entry.get("ticker") or "UNKNOWN").upper()
+    direction = str(_first_present(entry.get("direction"), entry.get("actual_option_type"), "") or "").upper()
+    position_id = str(_first_present(entry.get("position_id"), entry.get("journal_id"), symbol))
+    source_event_time = str(source_time or _first_present(entry.get("updated_at"), entry.get("tracking_completed_at"), _format_timestamp(_utc_now())))
+    level = None
+    level_name = None
+    if event_type == "TP1_REACHED":
+        level = _notification_price(_first_present(entry.get("original_tp1"), entry.get("target_price"), entry.get("plannedTp1"), entry.get("tp1")))
+        level_name = "TP1"
+        title = f"{symbol} reached TP1"
+        message = f"{symbol} reached TP1. TP1: {'unavailable' if level is None else f'${level:.2f}'}."
+        next_step = "Review the position and follow your management plan."
+    elif event_type == "STOP_REACHED":
+        level = _notification_price(_first_present(entry.get("original_stop"), entry.get("stop_price"), entry.get("plannedStop")))
+        level_name = "Stop Loss"
+        title = f"{symbol} crossed the planned stop"
+        message = f"{symbol} crossed the planned stop. Stop Loss: {'unavailable' if level is None else f'${level:.2f}'}."
+        next_step = "Review the position and journal the outcome."
+    else:
+        title = f"{symbol} position needs review"
+        message = f"{symbol} position status changed: {previous_state or 'Unknown'} to {current_state or 'Unknown'}."
+        next_step = "Open Position Intelligence and review the latest evidence."
+    dedupe_key = "|".join([symbol, position_id, event_type, source_event_time, str(level if level is not None else current_state or "NA")])
+    return {
+        "event_id": stable_event_id(dedupe_key),
+        "version": SMART_NOTIFICATION_VERSION,
+        "symbol": symbol,
+        "direction": direction,
+        "event_type": event_type,
+        "priority": "HIGH" if event_type == "STOP_REACHED" else "MEDIUM",
+        "title": title,
+        "message": message,
+        "next_step": next_step,
+        "previous_state": previous_state,
+        "current_state": current_state,
+        "setup_id": entry.get("setup_id"),
+        "position_id": position_id,
+        "entity_type": "position",
+        "entity_id": position_id,
+        "deep_link": f"position:{position_id}",
+        "event_time": source_event_time,
+        "source_event_time": source_event_time,
+        "detected_at": _format_timestamp(_utc_now()),
+        "current_price": _notification_price(_first_present(entry.get("current_price"), entry.get("exit_price"), entry.get("underlying_price_at_signal"))),
+        "relevant_level": level,
+        "level_name": level_name,
+        "grade": _first_present(entry.get("setup_grade"), entry.get("setupGrade"), entry.get("grade")),
+        "status": current_state,
+        "dedupe_key": dedupe_key,
+        "source": "journal-position",
+        "delivery_status": "pending",
+        "external_delivery_status": "not_configured",
+        "metadata": {"journal_id": entry.get("journal_id")},
+    }
+
+
+def _create_journal_notification_events(before: Optional[dict], after: dict) -> dict:
+    created = []
+    deduped = 0
+    before = before or {}
+    candidates = []
+    if not before.get("first_target_touch_at") and after.get("first_target_touch_at"):
+        candidates.append(_journal_notification_event("TP1_REACHED", after, source_time=after.get("first_target_touch_at")))
+    if not before.get("first_stop_touch_at") and after.get("first_stop_touch_at"):
+        candidates.append(_journal_notification_event("STOP_REACHED", after, source_time=after.get("first_stop_touch_at")))
+    previous_state = before.get("position_last_state")
+    current_state = after.get("position_last_state")
+    if previous_state and current_state and previous_state != current_state and current_state in {"WATCH", "PROTECT", "EXIT"}:
+        candidates.append(_journal_notification_event("POSITION_STATUS_CHANGE", after, previous_state, current_state, after.get("last_evaluated_at") or after.get("updated_at")))
+    for event in candidates:
+        saved, inserted = _notification_repository.create_event(event)
+        if inserted and saved:
+            created.append(saved)
+        else:
+            deduped += 1
+    return {"events_created": len(created), "events_deduplicated": deduped, "created_events": created}
+
+
 @app.get("/api/scan")
 def api_scan(
     tickers: str = Query(default=""),
@@ -417,7 +541,7 @@ def api_scan(
     """Scan the full watchlist or a custom comma-separated list of tickers."""
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-        return scan_cached(watchlist, force_refresh=refresh)
+        return _attach_notification_metrics(scan_cached(watchlist, force_refresh=refresh))
 
     selected_universe = str(universe or "discovered").strip().lower()
     if discover:
@@ -439,7 +563,55 @@ def api_scan(
     else:
         use_finviz = selected_universe == "finviz"
         result = scan_cached(force_refresh=refresh, discover=use_finviz)
-    return result
+    return _attach_notification_metrics(result)
+
+
+@app.get("/api/notifications")
+def api_notifications(
+    unread_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _notification_repository.list_events(unread_only=unread_only, limit=limit, offset=offset)
+
+
+@app.post("/api/notifications/{event_id}/read")
+def api_notification_mark_read(event_id: str, x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    event = _notification_repository.mark_read(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return event
+
+
+@app.post("/api/notifications/read-all")
+def api_notifications_mark_all_read(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _notification_repository.mark_all_read()
+
+
+@app.get("/api/notifications/preferences")
+def api_notification_preferences(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return {"version": "smart-notifications-v1", "preferences": _notification_repository.get_preferences()}
+
+
+@app.patch("/api/notifications/preferences")
+def api_notification_preferences_update(
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    preferences = payload.get("preferences") if isinstance(payload, dict) else {}
+    return {"version": "smart-notifications-v1", "preferences": _notification_repository.update_preferences(preferences or {})}
+
+
+@app.get("/api/dev/smart-notifications/diagnostics")
+def api_smart_notification_diagnostics(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _notification_repository.diagnostics()
 
 
 @app.get("/api/scan/{ticker}")
@@ -610,7 +782,12 @@ def api_journal_update(
 ):
     _require_journal_admin_token(x_kairos_admin_token)
     try:
-        return _journal_repository.update_entry(journal_id, patch)
+        before = _journal_repository.get_entry(journal_id)
+        updated = _journal_repository.update_entry(journal_id, patch)
+        notifications = _create_journal_notification_events(before, updated)
+        if notifications.get("events_created") or notifications.get("events_deduplicated"):
+            updated["smart_notifications"] = {key: value for key, value in notifications.items() if key != "created_events"}
+        return updated
     except KeyError:
         raise HTTPException(status_code=404, detail="Journal entry not found")
     except JournalConflictError as exc:

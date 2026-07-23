@@ -105,8 +105,7 @@ const tpMessage = alerts.tp1Message({
   plannedTp3: 173.4,
 }, { price: 176.08 });
 assert.ok(tpMessage.includes('KAIROS TP1 REACHED'));
-assert.ok(tpMessage.includes('Consider taking partial profits.'));
-assert.ok(tpMessage.includes('Manage the remainder according to your plan.'));
+assert.ok(tpMessage.includes('Review the position and follow your management plan.'));
 assert.ok(!tpMessage.includes('Sell now'));
 assert.ok(!tpMessage.includes('Close the trade'));
 

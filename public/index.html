@@ -54,6 +54,75 @@
   }
   header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.05em; flex: 1; }
   .header-meta { color: var(--muted); font-size: 11px; }
+  .notification-shell { position: relative; margin-left: auto; }
+  .notification-bell {
+    align-items:center;
+    background:rgba(15,23,42,0.55);
+    border:1px solid rgba(148,163,184,0.24);
+    border-radius:8px;
+    color:var(--text);
+    cursor:pointer;
+    display:flex;
+    gap:7px;
+    font-family:inherit;
+    font-size:12px;
+    font-weight:850;
+    padding:7px 10px;
+  }
+  .notification-count {
+    background:rgba(239,68,68,0.92);
+    border-radius:999px;
+    color:white;
+    font-size:10px;
+    font-weight:950;
+    min-width:18px;
+    padding:2px 5px;
+    text-align:center;
+  }
+  .notification-panel {
+    background:rgba(30,41,59,0.98);
+    border:1px solid var(--border);
+    border-radius:10px;
+    box-shadow:0 18px 48px rgba(0,0,0,0.35);
+    display:none;
+    position:absolute;
+    right:0;
+    top:42px;
+    width:min(380px, calc(100vw - 24px));
+    z-index:9998;
+  }
+  .notification-panel.open { display:block; }
+  .notification-panel-head {
+    align-items:center;
+    border-bottom:1px solid rgba(148,163,184,0.16);
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    padding:10px 12px;
+  }
+  .notification-panel-title { font-size:12px; font-weight:950; }
+  .notification-actions { display:flex; gap:6px; }
+  .notification-actions button { font-size:10px; padding:5px 7px; }
+  .notification-list { display:grid; gap:0; max-height:420px; overflow:auto; }
+  .notification-item {
+    border-bottom:1px solid rgba(148,163,184,0.10);
+    display:grid;
+    gap:5px;
+    padding:10px 12px;
+  }
+  .notification-item.unread { background:rgba(139,92,246,0.08); }
+  .notification-title { color:var(--text); font-size:12px; font-weight:900; }
+  .notification-meta { color:var(--muted); font-size:10.5px; line-height:1.35; }
+  .notification-next { color:#c4b5fd; font-size:11px; font-weight:850; }
+  .notification-empty { color:var(--muted); font-size:12px; padding:14px; text-align:center; }
+  .notification-preferences {
+    border-top:1px solid rgba(148,163,184,0.14);
+    display:grid;
+    gap:7px;
+    padding:10px 12px;
+  }
+  .notification-pref-row { align-items:center; display:flex; justify-content:space-between; gap:10px; color:var(--muted); font-size:10.5px; }
+  .notification-pref-row input { accent-color:var(--accent); }
 
   /* ── Tabs ──────────────────────────────────────────────────────────────── */
   .tab-bar {
@@ -1636,7 +1705,7 @@
   }
   @media (max-width: 768px) {
     html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
-    header {
+  header {
       gap: 8px;
       padding: 12px 14px;
     }
@@ -2696,6 +2765,26 @@
 <header>
   <h1>Kairos</h1>
   <span class="header-meta">BOS + Order Block · Daily · 2R+ minimum</span>
+  <div class="notification-shell">
+    <button class="notification-bell" type="button" aria-label="Open notifications" onclick="toggleNotificationCenter()">
+      <span>Notifications</span>
+      <span id="notificationUnreadCount" class="notification-count">0</span>
+    </button>
+    <div id="notificationPanel" class="notification-panel" aria-live="polite">
+      <div class="notification-panel-head">
+        <div>
+          <div class="notification-panel-title">Notifications</div>
+          <div id="notificationStatus" class="notification-meta">Connect journal token to sync.</div>
+        </div>
+        <div class="notification-actions">
+          <button class="btn-secondary" onclick="loadNotifications(true)">Refresh</button>
+          <button class="btn-secondary" onclick="markAllNotificationsRead()">Mark all read</button>
+        </div>
+      </div>
+      <div id="notificationList" class="notification-list"><div class="notification-empty">No notifications loaded.</div></div>
+      <div id="notificationPreferences" class="notification-preferences"></div>
+    </div>
+  </div>
 </header>
 
 <div class="tab-bar">
@@ -3063,6 +3152,10 @@
   <details class="analytics-collapse">
     <summary>Verified Analytics Diagnostics</summary>
     <div class="analytics-collapse-body" id="verifiedAnalyticsDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Smart Notifications Diagnostics</summary>
+    <div class="analytics-collapse-body" id="smartNotificationDiagnostics"></div>
   </details>
 </div>
 
@@ -3493,6 +3586,7 @@ const STOCK_ALERT_SENT_KEY = 'kairos_stock_alert_sent_v1';
 const STOCK_ALERT_ENTER_NOW_KEY = 'kairos_stock_alert_enter_now_transition_v1';
 const STOCK_ALERT_ENTRY_TOUCH_KEY = 'kairos_stock_alert_entry_touch_v1';
 const STOCK_ALERT_DIAGNOSTICS_KEY = 'kairos_stock_alert_diagnostics_v1';
+const SMART_NOTIFICATION_VERSION = 'smart-notifications-v1';
 const POSITION_INTELLIGENCE_VERSION = 1;
 const POSITION_ALERT_KEYS = {
   ENTRY_REACHED: { label: 'Entry Reached', defaultOn: false },
@@ -3581,6 +3675,8 @@ const SCANNER_WARMING_MAX_POLLS = 20;
 let indexContractRefreshTimer = null;
 let indexContractRefreshAttempts = 0;
 let indexContractPendingTimedOutKeys = new Set();
+let notificationCenterOpen = false;
+let notificationState = { events: [], unread_count: 0, preferences: null, diagnostics: null, error: null, loading: false };
 
 // ── Auto-scan ─────────────────────────────────────────────────────────────────
 const SCAN_SCHEDULE_ET = [
@@ -4448,6 +4544,7 @@ function scheduleContractRefreshPoll() {
       scannerNearMiss = nextNearMiss;
       refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
       evaluatePositionAlertNotifications();
+      loadNotifications(false);
       updateDataStatus(data.meta || {});
       renderScannerResults();
       renderExecutionTab();
@@ -4525,6 +4622,7 @@ function applyScanPayload(data = {}) {
   recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
   refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
   evaluatePositionAlertNotifications();
+  loadNotifications(false);
   renderScannerResults();
   renderExecutionTab();
   renderFurtherAnalysisTab();
@@ -9968,6 +10066,7 @@ async function connectJournalAdminToken() {
     setJournalAuthStatus('authenticated');
     await initializeJournalServerSync();
     loadVerifiedAnalytics(true);
+    loadNotifications(true);
     await loadPositionReplay();
     return { authenticated: true };
   } catch (error) {
@@ -9984,6 +10083,190 @@ function clearJournalAdminToken() {
   verifiedAnalyticsState = { loading: false, payload: null, error: null, token: '' };
   renderVerifiedAnalyticsFromCache();
   updateDeveloperReplayAccess();
+  notificationState = { events: [], unread_count: 0, preferences: null, diagnostics: null, error: null, loading: false };
+  renderNotificationCenter();
+}
+
+function notificationEventLabel(type) {
+  return {
+    NEW_ENTER_NOW: 'New Enter Now',
+    PLANNED_ENTRY_REACHED: 'Planned Entry Reached',
+    TP1_REACHED: 'TP1 Reached',
+    STOP_REACHED: 'Stop Reached',
+    SETUP_INVALIDATED: 'Setup Invalidated',
+    POSITION_STATUS_CHANGE: 'Position Status Change',
+  }[type] || formatDisplayLabel(type || 'Notification');
+}
+
+function renderNotificationPreferences(prefs = notificationState.preferences) {
+  const el = document.getElementById('notificationPreferences');
+  if (!el) return;
+  if (!journalServerSyncEnabled()) {
+    el.innerHTML = '<div class="notification-meta">Enter the journal admin token to load preferences.</div>';
+    return;
+  }
+  if (!prefs) {
+    el.innerHTML = '<div class="notification-meta">Preferences loading...</div>';
+    return;
+  }
+  el.innerHTML = `
+    <div class="notification-meta">In-app notification types</div>
+    ${Object.entries(prefs).map(([key, pref]) => `
+      <label class="notification-pref-row">
+        <span>${escapeHtml(notificationEventLabel(key))}</span>
+        <input type="checkbox" ${pref?.in_app === false ? '' : 'checked'} onchange="updateNotificationPreference('${escapeHtml(key)}', this.checked)" />
+      </label>
+    `).join('')}`;
+}
+
+function renderNotificationCenter() {
+  const count = document.getElementById('notificationUnreadCount');
+  const list = document.getElementById('notificationList');
+  const status = document.getElementById('notificationStatus');
+  if (count) count.textContent = String(notificationState.unread_count || 0);
+  if (status) {
+    if (!journalServerSyncEnabled()) status.textContent = 'Connect journal token to sync.';
+    else if (notificationState.error) status.textContent = `Unavailable: ${notificationState.error}`;
+    else if (notificationState.loading) status.textContent = 'Loading...';
+    else status.textContent = `${notificationState.unread_count || 0} unread · ${SMART_NOTIFICATION_VERSION}`;
+  }
+  if (list) {
+    const events = notificationState.events || [];
+    if (!journalServerSyncEnabled()) {
+      list.innerHTML = '<div class="notification-empty">Enter the journal admin token to load notifications.</div>';
+    } else if (notificationState.loading && !events.length) {
+      list.innerHTML = '<div class="notification-empty">Loading notifications...</div>';
+    } else if (!events.length) {
+      list.innerHTML = '<div class="notification-empty">No notifications yet.</div>';
+    } else {
+      list.innerHTML = events.map(event => {
+        const unread = !event.read_at;
+        const time = event.source_event_time || event.created_at || '';
+        const level = event.relevant_level != null ? `${event.level_name || 'Level'} ${fmtMoney(event.relevant_level)}` : '';
+        return `
+          <div class="notification-item ${unread ? 'unread' : ''}">
+            <div class="notification-title">${escapeHtml(event.title || notificationEventLabel(event.event_type))}</div>
+            <div class="notification-meta">${escapeHtml([event.direction, level, time].filter(Boolean).join(' · '))}</div>
+            <div class="notification-meta">${escapeHtml(event.message || '')}</div>
+            <div class="notification-next">${escapeHtml(event.next_step || 'Open Kairos and review the setup.')}</div>
+            <div class="notification-actions">
+              ${event.deep_link ? `<button class="btn-secondary" onclick="openNotificationDeepLink('${escapeHtml(event.deep_link)}')">Open related trade</button>` : ''}
+              ${unread ? `<button class="btn-secondary" onclick="markNotificationRead('${escapeHtml(event.event_id || event.id)}')">Mark read</button>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+    }
+  }
+  renderNotificationPreferences();
+}
+
+function toggleNotificationCenter() {
+  notificationCenterOpen = !notificationCenterOpen;
+  document.getElementById('notificationPanel')?.classList.toggle('open', notificationCenterOpen);
+  if (notificationCenterOpen) loadNotifications(true);
+}
+
+async function loadNotifications(force = false) {
+  if (!journalServerSyncEnabled()) {
+    renderNotificationCenter();
+    return null;
+  }
+  if (notificationState.loading && !force) return null;
+  notificationState = { ...notificationState, loading: true, error: null };
+  renderNotificationCenter();
+  try {
+    const [eventsRes, prefsRes, diagRes] = await Promise.all([
+      fetchWithTimeout(`${API}/api/notifications?limit=25`, { headers: journalAuthHeaders() }, 8000),
+      fetchWithTimeout(`${API}/api/notifications/preferences`, { headers: journalAuthHeaders() }, 8000),
+      fetchWithTimeout(`${API}/api/dev/smart-notifications/diagnostics`, { headers: journalAuthHeaders() }, 8000),
+    ]);
+    if (eventsRes.status === 403 || prefsRes.status === 403 || diagRes.status === 403) throw new Error('Invalid token');
+    if (!eventsRes.ok) throw new Error(`notifications ${eventsRes.status}`);
+    const payload = await eventsRes.json();
+    const prefs = prefsRes.ok ? await prefsRes.json() : {};
+    const diagnostics = diagRes.ok ? await diagRes.json() : null;
+    notificationState = {
+      events: payload.events || [],
+      unread_count: payload.unread_count || 0,
+      preferences: prefs.preferences || notificationState.preferences,
+      diagnostics,
+      error: null,
+      loading: false,
+    };
+  } catch (error) {
+    notificationState = { ...notificationState, loading: false, error: String(error.message || error) };
+  }
+  renderNotificationCenter();
+  return notificationState;
+}
+
+async function markNotificationRead(eventId) {
+  if (!eventId || !journalServerSyncEnabled()) return;
+  try {
+    await fetchWithTimeout(`${API}/api/notifications/${encodeURIComponent(eventId)}/read`, {
+      method: 'POST',
+      headers: journalAuthHeaders(),
+    }, 8000);
+    await loadNotifications(true);
+  } catch (error) {
+    notificationState = { ...notificationState, error: String(error.message || error) };
+    renderNotificationCenter();
+  }
+}
+
+async function markAllNotificationsRead() {
+  if (!journalServerSyncEnabled()) return;
+  try {
+    await fetchWithTimeout(`${API}/api/notifications/read-all`, {
+      method: 'POST',
+      headers: journalAuthHeaders(),
+    }, 8000);
+    await loadNotifications(true);
+  } catch (error) {
+    notificationState = { ...notificationState, error: String(error.message || error) };
+    renderNotificationCenter();
+  }
+}
+
+async function updateNotificationPreference(eventType, enabled) {
+  if (!journalServerSyncEnabled()) return;
+  const preferences = {
+    ...(notificationState.preferences || {}),
+    [eventType]: { ...((notificationState.preferences || {})[eventType] || {}), in_app: Boolean(enabled) },
+  };
+  notificationState.preferences = preferences;
+  renderNotificationCenter();
+  try {
+    const response = await fetchWithTimeout(`${API}/api/notifications/preferences`, {
+      method: 'PATCH',
+      headers: journalAuthHeaders(),
+      body: JSON.stringify({ preferences }),
+    }, 8000);
+    if (!response.ok) throw new Error(`preferences ${response.status}`);
+    const payload = await response.json();
+    notificationState.preferences = payload.preferences || preferences;
+  } catch (error) {
+    notificationState.error = String(error.message || error);
+  }
+  renderNotificationCenter();
+}
+
+function openNotificationDeepLink(deepLink) {
+  const [type, id] = String(deepLink || '').split(':');
+  if (type === 'setup') {
+    switchTab('scanner');
+    const setup = [...scannerRows, ...scannerNearMiss].find(row => {
+      const rowId = firstPresent(row.setup_id, row.setupId, null);
+      return rowId && String(rowId) === id;
+    });
+    if (setup?.ticker) {
+      const input = document.getElementById('tickerInput');
+      if (input) input.value = setup.ticker;
+      renderScannerResults();
+    }
+    return;
+  }
+  if (type === 'position') switchTab('positions');
 }
 
 function ensureJournalStableIds(entry = {}) {
@@ -12827,6 +13110,35 @@ function renderContractCandidateAuditDiagnostics() {
   `;
 }
 
+function renderSmartNotificationDiagnostics() {
+  const el = document.getElementById('smartNotificationDiagnostics');
+  if (!el) return;
+  const diag = notificationState.diagnostics || {};
+  const scanDiag = latestScannerMeta?.smart_notifications || {};
+  if (!journalServerSyncEnabled()) {
+    el.innerHTML = '<div class="analytics-empty">Enter the journal admin token to view notification diagnostics.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+      Developer-only notification diagnostics. Notification events do not change scanner qualification, journal outcomes, replay, alerts, or Position Intelligence.
+    </div>
+    <div class="journal-stats" style="margin-bottom:12px;">
+      ${renderReplayStat('Version', diag.version || scanDiag.version || SMART_NOTIFICATION_VERSION)}
+      ${renderReplayStat('Events Total', diag.events_total ?? '—')}
+      ${renderReplayStat('Unread', diag.unread ?? notificationState.unread_count ?? 0)}
+      ${renderReplayStat('Last Scan Created', scanDiag.events_created ?? '—')}
+      ${renderReplayStat('Deduplicated', scanDiag.events_deduplicated ?? '—')}
+      ${renderReplayStat('Suppressed Stale', scanDiag.events_suppressed_as_stale ?? '—')}
+      ${renderReplayStat('Eval Time', scanDiag.notification_evaluation_ms == null ? '—' : `${fmtNumber(scanDiag.notification_evaluation_ms)} ms`)}
+      ${renderReplayStat('External Failures', scanDiag.external_delivery_failures ?? 0)}
+    </div>
+    <table class="analytics-table">
+      <thead><tr><th>Event Type</th><th>Count</th></tr></thead>
+      <tbody>${Object.entries(diag.events_by_type || {}).map(([key, value]) => `<tr><td>${escapeHtml(notificationEventLabel(key))}</td><td>${escapeHtml(String(value))}</td></tr>`).join('') || '<tr><td colspan="2">No durable events yet.</td></tr>'}</tbody>
+    </table>`;
+}
+
 function renderAnalytics() {
   const all = loadJournal();
   const closed = all.filter(e => e.result !== 'Open');
@@ -12872,6 +13184,7 @@ function renderAnalytics() {
   renderEnterNowFunnelDiagnostics();
   renderOpportunityPriceMixDiagnostics();
   renderContractCandidateAuditDiagnostics();
+  renderSmartNotificationDiagnostics();
 }
 
 // ── Developer Position Replay ───────────────────────────────────────────────
@@ -13253,6 +13566,8 @@ function exportCSV() {
 initializeScannerDefaults();
 initializeJournalServerSync();
 updateDeveloperReplayAccess();
+renderNotificationCenter();
+loadNotifications(false);
 bindTickerSearch();
 setAutoScanButtonState();
 scheduleNextAutoScan();
