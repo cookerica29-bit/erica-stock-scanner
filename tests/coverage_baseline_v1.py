@@ -60,6 +60,17 @@ def base_meta(**overrides):
         "scan_started_at": "2026-07-22T12:00:00Z",
         "scan_completed_at": "2026-07-22T12:00:05Z",
         "scan_duration_ms": 5000.0,
+        "partial_result": True,
+        "partial_result_reasons": [
+            {"stage": "strategy_evaluation", "reason": "symbol returned no setup", "count": 1}
+        ],
+        "performance": {
+            "market_data_fetch_ms": 1200.0,
+            "strategy_evaluation_ms": 800.0,
+            "symbols_per_second": 0.8,
+            "cache_hit_rate": 0.5,
+            "peak_worker_count": 4,
+        },
     }
     meta.update(overrides)
     return meta
@@ -115,6 +126,10 @@ def test_discovered_scan_metrics_count_canonical_fields_independently():
     assert snapshot["scan"]["symbols_skipped"] == 1
     assert snapshot["scan"]["symbols_failed"] == 1
     assert snapshot["scan"]["partial_result"] is True
+    assert snapshot["scan"]["partial_result_reasons"] == [
+        {"stage": "strategy_evaluation", "reason": "symbol returned no setup", "count": 1}
+    ]
+    assert snapshot["scan"]["performance"]["symbols_per_second"] == 0.8
     assert_utc_z_timestamp(snapshot["generated_at"])
     assert_utc_z_timestamp(snapshot["scan"]["scan_started_at"])
     assert_utc_z_timestamp(snapshot["scan"]["scan_completed_at"])
@@ -136,6 +151,42 @@ def test_discovered_scan_metrics_count_canonical_fields_independently():
     assert snapshot["option_plan_diagnostics"]["strike_rounding_distribution"]["2.5"] == 4
     assert snapshot["option_plan_diagnostics"]["expiration_window_distribution"]["21–35 DTE"] == 4
     assert snapshot["option_plan_diagnostics"]["confidence_distribution"]["★★★★☆"] == 4
+
+
+def test_legitimate_tradeability_skip_does_not_make_scan_partial():
+    snapshot = scanner.build_discovered_scan_coverage_snapshot(
+        [],
+        [],
+        base_meta(
+            configured_universe_count=2,
+            symbols_successfully_processed=0,
+            tradeability_skipped=2,
+            symbols_skipped=2,
+            no_setup_or_failed_count=0,
+            symbols_failed=0,
+            symbols_omitted_or_rejected=2,
+            tradeability_skip_reasons={"no price data": 2},
+            partial_result=False,
+            partial_result_reasons=[],
+        ),
+        base_context(),
+    )
+    assert snapshot["scan"]["symbols_requested"] == 2
+    assert snapshot["scan"]["symbols_skipped"] == 2
+    assert snapshot["scan"]["symbols_failed"] == 0
+    assert snapshot["scan"]["partial_result"] is False
+    assert snapshot["scan"]["partial_result_reasons"] == []
+
+
+def test_partial_result_reason_classifies_processing_failures():
+    reasons = scanner._scan_partial_reasons(
+        attempted=4,
+        processed=2,
+        tradeability_skipped=1,
+        processing_failures=[{"ticker": "BAD", "reason": "internal exception"}],
+        provider_metrics={"alpaca_bar_symbols_failed": 0, "alpaca_max_pages_exceeded_count": 0},
+    )
+    assert reasons == [{"stage": "strategy_evaluation", "reason": "internal exception", "count": 1}]
 
 
 def test_unknown_option_data_is_not_counted_as_confirmed_no_options():
@@ -178,6 +229,8 @@ def test_coverage_snapshot_store_returns_latest_completed_snapshot():
 
 def main() -> int:
     test_discovered_scan_metrics_count_canonical_fields_independently()
+    test_legitimate_tradeability_skip_does_not_make_scan_partial()
+    test_partial_result_reason_classifies_processing_failures()
     test_unknown_option_data_is_not_counted_as_confirmed_no_options()
     test_coverage_snapshot_store_returns_latest_completed_snapshot()
     print("Coverage baseline v1 tests passed")

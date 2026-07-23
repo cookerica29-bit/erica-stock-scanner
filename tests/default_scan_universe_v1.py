@@ -14,7 +14,7 @@ import scanner  # noqa: E402
 
 
 def run_with_stubs(discover: bool = False, watchlist=None, max_symbols=200):
-    calls = {"finviz": 0, "prefilter_watchlist": None}
+    calls = {"finviz": 0, "prefilter_watchlist": None, "batch_downloads": []}
     original_finviz = scanner.get_finviz_watchlist
     original_batch = scanner._batch_download
     original_prefilter = scanner._prefilter_stock_universe
@@ -25,6 +25,7 @@ def run_with_stubs(discover: bool = False, watchlist=None, max_symbols=200):
         return ["DYN1", "DYN2"]
 
     def fake_batch(tickers, period, interval):
+        calls["batch_downloads"].append((tuple(tickers), period, interval))
         return {}
 
     def fake_prefilter(watchlist, daily_data, trusted_options_symbols=None):
@@ -52,6 +53,11 @@ def main() -> int:
     assert rows == []
     assert near_miss == []
     assert meta["configured_universe_count"] == len(scanner.WATCHLIST)
+    assert meta["partial_result"] is False
+    assert meta["partial_result_reasons"] == []
+    assert "performance" in meta
+    assert meta["performance"]["peak_worker_count"] == 12
+    assert [item[1:] for item in calls["batch_downloads"]] == [("1y", "1d")]
 
     calls, rows, near_miss, meta = run_with_stubs(discover=True)
     assert calls["finviz"] == 1

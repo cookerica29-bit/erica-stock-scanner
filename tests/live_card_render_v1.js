@@ -376,11 +376,40 @@ const snapshotFullB = setup({
   trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true, no_trade_reasons: ['RR < 1.5:1'] },
 });
 context.__scannerRenderRows = [snapshotFullA, snapshotFullB];
-vm.runInContext('scannerRows = __scannerRenderRows; scannerNearMiss = [];', context);
+vm.runInContext(`scannerRows = __scannerRenderRows; scannerNearMiss = []; latestScannerMeta = {
+  configured_universe_count: 750,
+  symbols_attempted: 750,
+  symbols_successfully_processed: 715,
+  symbols_failed: 35,
+  scan_duration_ms: 67869,
+  partial_result: true,
+  partial_result_reasons: [{ stage: 'strategy_evaluation', reason: 'symbol returned no setup', count: 35 }],
+  provider_metrics: { alpaca_bar_symbols_requested: 1278, alpaca_bar_symbols_succeeded: 1278, alpaca_bar_symbols_failed: 0 },
+  cache_stats: { prices_hit: 10, prices_miss: 30 },
+  performance: {
+    symbols_per_second: 10.54,
+    cache_hit_rate: 0.25,
+    market_data_fetch_ms: 42000,
+    strategy_evaluation_ms: 21000,
+    quote_enrichment_ms: 900,
+    median_symbol_duration_ms: 110,
+    p95_symbol_duration_ms: 480,
+    peak_worker_count: 4,
+    memory_rss_mb: 256.4
+  }
+};`, context);
 context.renderScannerResults();
 
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Market Coverage'));
 assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Coverage Diagnostics'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('715'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('95%'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('67.9s'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('10.5/s'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Cache Hit Rate'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Partial'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('35 symbol returned no setup'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('256.4 MB'));
 assert.ok(scannerRenderElements.results.innerHTML.includes('STRONG'));
 assert.ok(!scannerRenderElements.results.innerHTML.includes('TOP'));
 assert.ok(scannerRenderElements.summary.innerHTML.includes('1 qualified setup'));

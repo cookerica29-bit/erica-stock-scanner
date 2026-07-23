@@ -4,6 +4,7 @@ import numpy as np
 import logging
 import math
 import os
+import resource
 import threading
 import time
 from collections import Counter
@@ -250,6 +251,89 @@ def _cache_snapshot(reset: bool = True) -> dict:
         if reset:
             _cache_stats.clear()
     return snapshot
+
+
+def _cache_hit_rate(cache_stats: Optional[dict]) -> Optional[float]:
+    stats = cache_stats or {}
+    hits = int(stats.get("prices_hit", 0) or 0)
+    misses = int(stats.get("prices_miss", 0) or 0)
+    total = hits + misses
+    if total <= 0:
+        return None
+    return round(hits / total, 4)
+
+
+def _percentile(values: list[float], percentile: float) -> Optional[float]:
+    clean = sorted(float(value) for value in values if value is not None)
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return round(clean[0], 1)
+    rank = (len(clean) - 1) * float(percentile)
+    lower = int(rank)
+    upper = min(lower + 1, len(clean) - 1)
+    weight = rank - lower
+    return round(clean[lower] * (1 - weight) + clean[upper] * weight, 1)
+
+
+def _process_memory_mb() -> Optional[float]:
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        rss = float(usage.ru_maxrss)
+        if rss <= 0:
+            return None
+        # macOS reports bytes; Linux reports KiB.
+        if rss > 10_000_000:
+            rss = rss / (1024 * 1024)
+        else:
+            rss = rss / 1024
+        return round(rss, 1)
+    except Exception:
+        return None
+
+
+def _scan_partial_reasons(
+    *,
+    attempted: int,
+    processed: int,
+    tradeability_skipped: int,
+    processing_failures: Optional[list[dict]] = None,
+    provider_metrics: Optional[dict] = None,
+) -> list[dict]:
+    reasons = []
+    failures = list(processing_failures or [])
+    failure_counts = Counter(str(item.get("reason") or "symbol_processing_failed") for item in failures if isinstance(item, dict))
+    for reason, count in sorted(failure_counts.items()):
+        reasons.append({
+            "stage": "strategy_evaluation",
+            "reason": reason,
+            "count": int(count),
+        })
+
+    provider = provider_metrics or {}
+    provider_failed = int(provider.get("alpaca_bar_symbols_failed", 0) or 0)
+    if provider_failed > 0:
+        reasons.append({
+            "stage": "market_data",
+            "reason": "provider_symbol_fetch_failed",
+            "count": provider_failed,
+        })
+    max_pages = int(provider.get("alpaca_max_pages_exceeded_count", 0) or 0)
+    if max_pages > 0:
+        reasons.append({
+            "stage": "market_data",
+            "reason": "max_pages_exceeded",
+            "count": max_pages,
+        })
+
+    unaccounted = max(0, int(attempted or 0) - int(processed or 0) - int(tradeability_skipped or 0) - len(failures))
+    if unaccounted > 0:
+        reasons.append({
+            "stage": "strategy_evaluation",
+            "reason": "symbol_returned_no_setup",
+            "count": unaccounted,
+        })
+    return reasons
 
 
 def _submit_background_job(key: tuple, fn, *args, **kwargs) -> bool:
@@ -563,15 +647,20 @@ def build_discovered_scan_coverage_snapshot(
 
     requested = scan_meta.get("configured_universe_count")
     processed = scan_meta.get("symbols_successfully_processed", len(all_rows))
-    skipped = scan_meta.get("tradeability_skipped", 0)
-    failed = scan_meta.get("no_setup_or_failed_count", 0)
+    skipped = scan_meta.get("tradeability_skipped", scan_meta.get("symbols_skipped", 0))
+    failed = scan_meta.get("symbols_failed")
+    if failed is None:
+        failed = scan_meta.get("no_setup_or_failed_count", 0)
     returned = len(all_rows)
     cache_stats = scan_meta.get("cache_stats") or {}
-    partial = bool(
-        (requested is not None and (processed or 0) + (skipped or 0) + (failed or 0) < requested)
-        or scan_meta.get("partial_result")
-        or scan_meta.get("symbols_omitted_or_rejected", 0)
-    )
+    partial_reasons = list(scan_meta.get("partial_result_reasons") or [])
+    if not partial_reasons and scan_meta.get("partial_result") and failed:
+        partial_reasons = [{
+            "stage": "strategy_evaluation",
+            "reason": "symbol_processing_failed",
+            "count": int(failed or 0),
+        }]
+    partial = bool(partial_reasons or scan_meta.get("partial_result"))
     completed_at = _coerce_utc_datetime(scan_meta.get("scan_completed_at")) or _utc_now()
     snapshot = {
         "generated_at": _format_utc_timestamp(completed_at),
@@ -589,6 +678,9 @@ def build_discovered_scan_coverage_snapshot(
             "scan_completed_at": _format_utc_timestamp(completed_at),
             "scan_duration_ms": scan_meta.get("scan_duration_ms"),
             "partial_result": partial,
+            "partial_result_reasons": partial_reasons,
+            "partial_result_reason": scan_meta.get("partial_result_reason"),
+            "performance": scan_meta.get("performance") or {},
         },
         "stage_distribution": dict(sorted(stage_distribution.items())),
         "canonical_field_distributions": {
@@ -721,8 +813,20 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "symbols_attempted": scan_meta.get("symbols_attempted"),
         "symbols_successfully_processed": scan_meta.get("symbols_successfully_processed", len(rows) + len(near_miss)),
         "symbols_omitted_or_rejected": scan_meta.get("symbols_omitted_or_rejected"),
+        "symbols_failed": scan_meta.get("symbols_failed"),
+        "symbols_skipped": scan_meta.get("symbols_skipped"),
         "tradeability_skipped": scan_meta.get("tradeability_skipped"),
         "tradeability_skip_reasons": scan_meta.get("tradeability_skip_reasons", {}),
+        "partial_result": scan_meta.get("partial_result"),
+        "partial_result_reasons": scan_meta.get("partial_result_reasons", []),
+        "partial_result_reason": scan_meta.get("partial_result_reason"),
+        "scan_duration_ms": scan_meta.get("scan_duration_ms"),
+        "scan_started_at": scan_meta.get("scan_started_at"),
+        "scan_completed_at": scan_meta.get("scan_completed_at"),
+        "symbols_per_second": (scan_meta.get("performance") or {}).get("symbols_per_second"),
+        "provider_metrics": scan_meta.get("provider_metrics", {}),
+        "cache_stats": scan_meta.get("cache_stats", {}),
+        "performance": scan_meta.get("performance", {}),
         "processed_rows": len(rows) + len(near_miss),
         "qualified_rows": len(rows),
         "near_miss_rows": len(near_miss),
@@ -5095,7 +5199,9 @@ def scan_all(
 ) -> tuple:
     scan_start = time.perf_counter()
     scan_started_at = _utc_now()
+    universe_resolution_start = time.perf_counter()
     reset_provider_metrics()
+    _cache_snapshot(reset=True)
     _scan_activity_started()
     try:
         logger.info("Stock Scanner Strategy: %s", STOCK_SCANNER_STRATEGY_VERSION)
@@ -5113,6 +5219,7 @@ def scan_all(
                     watchlist = watchlist[:200]
 
         original_count = len(watchlist)
+        universe_resolution_ms = round((time.perf_counter() - universe_resolution_start) * 1000, 1)
         trusted_options_symbols = {
             str(symbol or "").strip().upper()
             for symbol in (trusted_options_symbols or set())
@@ -5121,12 +5228,16 @@ def scan_all(
 
         # ── Step 1: batch-download daily OHLCV for cheap tradeability filtering ───
         price_stage_start = time.perf_counter()
+        daily_fetch_start = time.perf_counter()
         daily_data  = _batch_download(watchlist, period="1y",  interval="1d")
+        daily_fetch_ms = round((time.perf_counter() - daily_fetch_start) * 1000, 1)
+        prefilter_start = time.perf_counter()
         filtered_watchlist, skipped_symbols = _prefilter_stock_universe(
             watchlist,
             daily_data,
             trusted_options_symbols=trusted_options_symbols,
         )
+        prefilter_ms = round((time.perf_counter() - prefilter_start) * 1000, 1)
         skip_counts = {}
         for item in skipped_symbols:
             reason = item.get("reason") or "unknown"
@@ -5139,18 +5250,25 @@ def scan_all(
                 original_count,
                 skip_counts,
                 examples,
-            )
+        )
 
         if filtered_watchlist:
+            weekly_fetch_start = time.perf_counter()
             weekly_data = _batch_download(filtered_watchlist, period="2y",  interval="1wk")
+            weekly_fetch_ms = round((time.perf_counter() - weekly_fetch_start) * 1000, 1)
+            h4_fetch_start = time.perf_counter()
             h4_data     = _batch_download(filtered_watchlist, period="60d", interval="4h")
+            h4_fetch_ms = round((time.perf_counter() - h4_fetch_start) * 1000, 1)
         else:
             weekly_data = {}
             h4_data = {}
+            weekly_fetch_ms = 0.0
+            h4_fetch_ms = 0.0
         price_stage_ms = round((time.perf_counter() - price_stage_start) * 1000, 1)
 
         # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
         rows, near_miss = [], []
+        processing_failures = []
         process_stage_start = time.perf_counter()
 
         def _process(ticker: str):
@@ -5164,8 +5282,22 @@ def scan_all(
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(_process, t): t for t in filtered_watchlist}
             for future in as_completed(futures):
-                r = future.result()
+                ticker = futures[future]
+                try:
+                    r = future.result()
+                except Exception as exc:
+                    processing_failures.append({
+                        "ticker": ticker,
+                        "reason": "internal exception",
+                        "error_type": type(exc).__name__,
+                    })
+                    logger.exception("[scan] symbol processing failed ticker=%s", ticker)
+                    continue
                 if r is None:
+                    processing_failures.append({
+                        "ticker": ticker,
+                        "reason": "symbol returned no setup",
+                    })
                     continue
                 if r.get("setup_status") == "QUALIFIED":
                     rows.append(r)
@@ -5176,14 +5308,48 @@ def scan_all(
         near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
         process_stage_ms = round((time.perf_counter() - process_stage_start) * 1000, 1)
         all_results = [*rows, *near_miss]
+        quote_stage_start = time.perf_counter()
         _attach_current_quotes(all_results)
+        quote_stage_ms = round((time.perf_counter() - quote_stage_start) * 1000, 1)
         earnings_ms = round(sum((r.get("_scan_timing") or {}).get("earnings_ms", 0) for r in all_results), 1)
         best_contract_ms = round(sum((r.get("_scan_timing") or {}).get("best_contract_ms", 0) for r in all_results), 1)
+        option_plan_ms = round(sum((r.get("_scan_timing") or {}).get("option_plan_ms", 0) for r in all_results), 1)
+        price_trend_sum_ms = round(sum((r.get("_scan_timing") or {}).get("price_trend_ms", 0) for r in all_results), 1)
+        symbol_durations = [
+            float((r.get("_scan_timing") or {}).get("total_ticker_ms", 0) or 0)
+            for r in all_results
+            if isinstance(r.get("_scan_timing"), dict)
+        ]
         evaluated_contracts = sum(1 for r in all_results if (r.get("best_contract") or {}).get("source") == "option_chain")
         option_plans_generated = sum(1 for r in all_results if (r.get("option_plan") or {}).get("available") is True)
         total_ms = round((time.perf_counter() - scan_start) * 1000, 1)
         scan_completed_at = _utc_now()
         cache_stats = _cache_snapshot()
+        provider_metrics = provider_metrics_snapshot()
+        attempted = len(filtered_watchlist)
+        processed = len(all_results)
+        partial_reasons = _scan_partial_reasons(
+            attempted=attempted,
+            processed=processed,
+            tradeability_skipped=len(skipped_symbols),
+            processing_failures=processing_failures,
+            provider_metrics=provider_metrics,
+        )
+        failed_count = sum(int(reason.get("count") or 0) for reason in partial_reasons if reason.get("stage") != "tradeability_filter")
+        symbols_per_second = round(processed / (total_ms / 1000), 2) if total_ms > 0 else None
+        cache_hit_rate = _cache_hit_rate(cache_stats)
+        slow_symbols = sorted(
+            [
+                {
+                    "ticker": r.get("ticker"),
+                    "duration_ms": round(float((r.get("_scan_timing") or {}).get("total_ticker_ms", 0) or 0), 1),
+                }
+                for r in all_results
+                if isinstance(r, dict)
+            ],
+            key=lambda item: item.get("duration_ms") or 0,
+            reverse=True,
+        )[:10]
         slow_contracts = [
             f"{r.get('ticker')}:{(r.get('_scan_timing') or {}).get('best_contract_ms', 0):.0f}ms"
             for r in all_results
@@ -5207,25 +5373,76 @@ def scan_all(
             cache_stats,
             ", ".join(slow_contracts) if slow_contracts else "none",
         )
-        provider_metrics = provider_metrics_snapshot()
+        logger.info(
+            "coverage.scan.performance total_ms=%s universe_resolution_ms=%s market_data_fetch_ms=%s strategy_evaluation_ms=%s option_plan_ms=%s quote_ms=%s symbols_per_second=%s cache_hit_rate=%s partial=%s partial_reasons=%s peak_workers=%s",
+            total_ms,
+            universe_resolution_ms,
+            price_stage_ms,
+            process_stage_ms,
+            option_plan_ms,
+            quote_stage_ms,
+            symbols_per_second,
+            cache_hit_rate,
+            bool(partial_reasons),
+            partial_reasons,
+            max_workers,
+        )
         scan_meta = {
             "configured_universe_count": original_count,
-            "symbols_attempted": len(filtered_watchlist),
-            "symbols_successfully_processed": len(all_results),
-            "symbols_omitted_or_rejected": max(0, original_count - len(all_results)),
+            "symbols_attempted": attempted,
+            "symbols_successfully_processed": processed,
+            "symbols_omitted_or_rejected": max(0, original_count - processed),
+            "symbols_failed": failed_count,
+            "symbols_skipped": len(skipped_symbols),
             "tradeability_skipped": len(skipped_symbols),
             "tradeability_skip_reasons": skip_counts,
-            "no_setup_or_failed_count": max(0, len(filtered_watchlist) - len(all_results)),
+            "no_setup_or_failed_count": max(0, attempted - processed),
+            "processing_failures": processing_failures[:50],
             "contract_evaluated": evaluated_contracts,
             "contract_evaluation_pool": len(all_results),
             "option_plans_generated": option_plans_generated,
             "scan_started_at": _format_utc_timestamp(scan_started_at),
             "scan_completed_at": _format_utc_timestamp(scan_completed_at),
             "scan_duration_ms": total_ms,
-            "partial_result": False,
+            "partial_result": bool(partial_reasons),
+            "partial_result_reasons": partial_reasons,
+            "partial_result_reason": "; ".join(
+                f"{item.get('stage')}:{item.get('reason')}={item.get('count')}"
+                for item in partial_reasons
+            ) or None,
             "option_eligibility_from_discovery": len([symbol for symbol in filtered_watchlist if symbol in trusted_options_symbols]),
             "provider_metrics": provider_metrics,
             "cache_stats": cache_stats,
+            "performance": {
+                "universe_resolution_ms": universe_resolution_ms,
+                "market_data_fetch_ms": price_stage_ms,
+                "market_data_cache_read_ms": None,
+                "indicator_calculation_ms": price_trend_sum_ms,
+                "strategy_evaluation_ms": process_stage_ms,
+                "option_plan_ms": option_plan_ms,
+                "serialization_ms": None,
+                "quote_enrichment_ms": quote_stage_ms,
+                "total_scan_duration_ms": total_ms,
+                "daily_fetch_ms": daily_fetch_ms,
+                "weekly_fetch_ms": weekly_fetch_ms,
+                "h4_fetch_ms": h4_fetch_ms,
+                "tradeability_prefilter_ms": prefilter_ms,
+                "symbols_per_second": symbols_per_second,
+                "provider_request_count": int(provider_metrics.get("alpaca_bar_requests", 0) or 0) + int(cache_stats.get("api_prices_call", 0) or 0),
+                "provider_success_count": int(provider_metrics.get("alpaca_bar_symbols_succeeded", 0) or 0),
+                "provider_failure_count": int(provider_metrics.get("alpaca_bar_symbols_failed", 0) or 0),
+                "provider_timeout_count": 0,
+                "provider_retry_count": 0,
+                "cache_hit_count": int(cache_stats.get("prices_hit", 0) or 0),
+                "cache_miss_count": int(cache_stats.get("prices_miss", 0) or 0),
+                "cache_hit_rate": cache_hit_rate,
+                "peak_worker_count": max_workers,
+                "memory_rss_mb": _process_memory_mb(),
+                "median_symbol_duration_ms": _percentile(symbol_durations, 0.5),
+                "p95_symbol_duration_ms": _percentile(symbol_durations, 0.95),
+                "slowest_symbols": slow_symbols,
+                "failure_breakdown_by_stage": partial_reasons,
+            },
         }
         return rows, near_miss, scan_meta
     finally:

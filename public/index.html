@@ -4323,14 +4323,32 @@ function formatScanSeconds(ms) {
   return `${(value / 1000).toFixed(1)}s`;
 }
 
+function formatTelemetryPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '—';
+  return `${Math.round(numeric * 100)}%`;
+}
+
+function partialResultLabel(meta = {}) {
+  if (!meta.partial_result) return 'Complete';
+  const reasons = Array.isArray(meta.partial_result_reasons) ? meta.partial_result_reasons : [];
+  if (!reasons.length) return 'Partial';
+  const top = reasons[0] || {};
+  const count = Number(top.count);
+  const reason = String(top.reason || 'partial result').replace(/_/g, ' ');
+  return `${Number.isFinite(count) ? `${count} ` : ''}${reason}`;
+}
+
 function renderMarketCoveragePanel(rows = [], meta = {}) {
   const el = document.getElementById('marketCoverage');
   if (!el) return;
   const allRows = Array.isArray(rows) ? rows : [];
+  const performance = meta.performance || {};
+  const cacheStats = meta.cache_stats || {};
   const attempted = meta.symbols_attempted ?? meta.configured_universe_count ?? allRows.length;
   const processed = meta.symbols_successfully_processed ?? allRows.length;
   const skipped = meta.tradeability_skipped ?? 0;
-  const failed = meta.no_setup_or_failed_count ?? meta.symbols_omitted_or_rejected ?? 0;
+  const failed = meta.symbols_failed ?? meta.no_setup_or_failed_count ?? meta.symbols_omitted_or_rejected ?? 0;
   const providerMetrics = meta.provider_metrics || {};
   const providerFailed = Number(providerMetrics.alpaca_bar_symbols_failed || 0);
   const providerRequested = Number(providerMetrics.alpaca_bar_symbols_requested || 0);
@@ -4338,6 +4356,12 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
   const providerSuccess = providerRequested > 0
     ? `${Math.round((providerSucceeded / providerRequested) * 100)}%`
     : '—';
+  const cacheHitRate = performance.cache_hit_rate ?? (
+    Number(cacheStats.prices_hit || 0) + Number(cacheStats.prices_miss || 0) > 0
+      ? Number(cacheStats.prices_hit || 0) / (Number(cacheStats.prices_hit || 0) + Number(cacheStats.prices_miss || 0))
+      : null
+  );
+  const throughput = Number(performance.symbols_per_second ?? meta.symbols_per_second);
   const progressCounts = countBy(allRows, ['SKIP', 'WAITING', 'ALMOST_READY', 'EARLY_ENTRY', 'ENTER_NOW'], row => setupProgressState(row).bucket);
   const gradeCounts = countBy(allRows, ['A', 'B', 'C'], setupGradeValue);
   const noTradeReasons = {};
@@ -4372,6 +4396,9 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
           <div class="snapshot-badges">
             ${renderSnapshotBadge('Provider Success', escapeHtml(providerSuccess))}
             ${renderSnapshotBadge('Scan Time', escapeHtml(formatScanSeconds(meta.scan_duration_ms)))}
+            ${renderSnapshotBadge('Throughput', escapeHtml(Number.isFinite(throughput) ? `${throughput.toFixed(1)}/s` : '—'))}
+            ${renderSnapshotBadge('Cache Hit Rate', escapeHtml(formatTelemetryPercent(cacheHitRate)))}
+            ${renderSnapshotBadge('Result', escapeHtml(meta.partial_result ? 'Partial' : 'Complete'), meta.partial_result ? 'timing-not-ready' : 'status-ready')}
             ${renderSnapshotBadge('Skipped', escapeHtml(String(skipped)))}
             ${renderSnapshotBadge('Failed', escapeHtml(String(failed)))}
           </div>
@@ -4397,7 +4424,18 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
         </div>
       </div>
       <div class="snapshot-group-title" style="margin-top:12px;">Coverage Diagnostics</div>
-      <div class="data-status-sub" style="white-space:normal;">Largest blockers: ${escapeHtml(topReasons)}. Memory usage, median duration, p95 duration, and peak concurrent requests require multi-session runtime sampling and are not inferred from a single scan response.</div>
+      <div class="data-status-sub" style="white-space:normal;">
+        Partial reason: ${escapeHtml(partialResultLabel(meta))}. Stage timing:
+        market data ${escapeHtml(formatScanSeconds(performance.market_data_fetch_ms))},
+        strategy ${escapeHtml(formatScanSeconds(performance.strategy_evaluation_ms))},
+        quotes ${escapeHtml(formatScanSeconds(performance.quote_enrichment_ms))}.
+        Median symbol ${escapeHtml(formatScanSeconds(performance.median_symbol_duration_ms))};
+        p95 ${escapeHtml(formatScanSeconds(performance.p95_symbol_duration_ms))};
+        peak workers ${escapeHtml(String(performance.peak_worker_count ?? '—'))};
+        memory ${escapeHtml(Number.isFinite(Number(performance.memory_rss_mb)) ? `${Number(performance.memory_rss_mb).toFixed(1)} MB` : '—')}.
+        Largest blockers: ${escapeHtml(topReasons)}.
+        Multi-session p95 requires runtime sampling and is not inferred from a single scan response.
+      </div>
     </div>`;
 }
 
