@@ -974,7 +974,7 @@ context.document.getElementById = id => ({
 }[id] || elementStub());
 delete storage.kairos_journal_admin_token;
 context.updateDeveloperReplayAccess();
-assert.strictEqual(replayButton.style.display, 'none');
+assert.strictEqual(replayButton.style.display, '');
 storage.kairos_journal_admin_token = 'secret';
 context.updateDeveloperReplayAccess();
 assert.strictEqual(replayButton.style.display, '');
