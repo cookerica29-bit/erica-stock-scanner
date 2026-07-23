@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 from pathlib import Path
 
@@ -105,6 +107,24 @@ def main() -> int:
         assert stats["prices_miss"] == 2
     finally:
         scanner._download_price_batch_raw = original_raw
+
+    original_verbose = scanner.VERBOSE_SYMBOL_LOGS
+    try:
+        hidden = io.StringIO()
+        scanner.VERBOSE_SYMBOL_LOGS = False
+        with contextlib.redirect_stdout(hidden):
+            with scanner._scan_symbol_stdout_context():
+                print("hidden symbol diagnostic")
+        assert hidden.getvalue() == ""
+
+        visible = io.StringIO()
+        scanner.VERBOSE_SYMBOL_LOGS = True
+        with contextlib.redirect_stdout(visible):
+            with scanner._scan_symbol_stdout_context():
+                print("visible symbol diagnostic")
+        assert "visible symbol diagnostic" in visible.getvalue()
+    finally:
+        scanner.VERBOSE_SYMBOL_LOGS = original_verbose
 
     print("Default scan universe v1 tests passed")
     return 0

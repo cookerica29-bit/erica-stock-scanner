@@ -1,6 +1,8 @@
 # v2 — BOS + Order Block strategy (replaces EMA pullback)
 import pandas as pd
 import numpy as np
+import contextlib
+import io
 import logging
 import math
 import os
@@ -26,6 +28,16 @@ yf = MarketDataFacade()
 
 STOCK_SCANNER_STRATEGY_VERSION = "v1.0"
 STOCK_SCANNER_STRATEGY_BASELINE_COMMIT = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
+VERBOSE_SYMBOL_LOGS = str(os.getenv("KAIROS_VERBOSE_SYMBOL_LOGS") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@contextlib.contextmanager
+def _scan_symbol_stdout_context():
+    if VERBOSE_SYMBOL_LOGS:
+        yield
+        return
+    with contextlib.redirect_stdout(io.StringIO()):
+        yield
 
 WATCHLIST = [
     # ── Airlines ──────────────────────────────────────────────────────────────
@@ -5331,30 +5343,31 @@ def scan_all(
                 _h4_df=h4_data.get(ticker, pd.DataFrame()),
             )
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(_process, t): t for t in filtered_watchlist}
-            for future in as_completed(futures):
-                ticker = futures[future]
-                try:
-                    r = future.result()
-                except Exception as exc:
-                    processing_failures.append({
-                        "ticker": ticker,
-                        "reason": "internal exception",
-                        "error_type": type(exc).__name__,
-                    })
-                    logger.exception("[scan] symbol processing failed ticker=%s", ticker)
-                    continue
-                if r is None:
-                    processing_failures.append({
-                        "ticker": ticker,
-                        "reason": "symbol returned no setup",
-                    })
-                    continue
-                if r.get("setup_status") == "QUALIFIED":
-                    rows.append(r)
-                else:
-                    near_miss.append(r)
+        with _scan_symbol_stdout_context():
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_process, t): t for t in filtered_watchlist}
+                for future in as_completed(futures):
+                    ticker = futures[future]
+                    try:
+                        r = future.result()
+                    except Exception as exc:
+                        processing_failures.append({
+                            "ticker": ticker,
+                            "reason": "internal exception",
+                            "error_type": type(exc).__name__,
+                        })
+                        logger.exception("[scan] symbol processing failed ticker=%s", ticker)
+                        continue
+                    if r is None:
+                        processing_failures.append({
+                            "ticker": ticker,
+                            "reason": "symbol returned no setup",
+                        })
+                        continue
+                    if r.get("setup_status") == "QUALIFIED":
+                        rows.append(r)
+                    else:
+                        near_miss.append(r)
 
         rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
         near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
