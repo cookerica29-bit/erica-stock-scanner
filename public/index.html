@@ -2362,8 +2362,8 @@
       <div class="control-hint">Scan refreshes all cards. Type AAPL or Apple here to filter the loaded cards.</div>
     </div>
     <select id="universeFilter" onchange="handleUniverseChange()">
+      <option value="discovered" selected>Discovered</option>
       <option value="default">My Watchlist</option>
-      <option value="discovered">Discovered</option>
     </select>
     <select id="statusFilter" onchange="renderScannerResults()">
       <option value="all">All Statuses</option>
@@ -2404,6 +2404,7 @@
     <span id="status"></span>
     <span id="autoScanCountdown" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>
   </div>
+  <div id="marketCoverage" class="market-snapshot"></div>
   <div id="marketSnapshot" class="market-snapshot"></div>
   <main>
     <div id="summary"></div>
@@ -3491,13 +3492,13 @@ function normalizeScanRowsForClient(rows = []) {
 }
 
 function currentScannerUniverse() {
-  return document.getElementById('universeFilter')?.value || 'default';
+  return document.getElementById('universeFilter')?.value || 'discovered';
 }
 
 function scannerScanUrl({ refresh = false } = {}) {
   const params = new URLSearchParams();
   const universe = currentScannerUniverse();
-  if (universe && universe !== 'default') params.set('universe', universe);
+  if (universe && universe !== 'discovered') params.set('universe', universe);
   if (refresh) params.set('refresh', 'true');
   const query = params.toString();
   return `${API}/api/scan${query ? `?${query}` : ''}`;
@@ -4309,6 +4310,97 @@ function renderSnapshotBadge(label, count, extraClass = '', filterType = '', fil
   return `<button type="button" class="snapshot-badge ${extraClass}${active ? ' active' : ''}" aria-pressed="${active ? 'true' : 'false'}" title="Filter by ${escapeHtml(label)}" onclick="applySnapshotFilter('${escapeHtml(filterType)}', '${escapeHtml(filterValue)}')"><span class="label">${label}</span><span class="count">${count}</span></button>`;
 }
 
+function formatCoveragePercent(processed, attempted) {
+  const p = Number(processed);
+  const a = Number(attempted);
+  if (!Number.isFinite(p) || !Number.isFinite(a) || a <= 0) return '—';
+  return `${Math.round((p / a) * 100)}%`;
+}
+
+function formatScanSeconds(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  return `${(value / 1000).toFixed(1)}s`;
+}
+
+function renderMarketCoveragePanel(rows = [], meta = {}) {
+  const el = document.getElementById('marketCoverage');
+  if (!el) return;
+  const allRows = Array.isArray(rows) ? rows : [];
+  const attempted = meta.symbols_attempted ?? meta.configured_universe_count ?? allRows.length;
+  const processed = meta.symbols_successfully_processed ?? allRows.length;
+  const skipped = meta.tradeability_skipped ?? 0;
+  const failed = meta.no_setup_or_failed_count ?? meta.symbols_omitted_or_rejected ?? 0;
+  const providerMetrics = meta.provider_metrics || {};
+  const providerFailed = Number(providerMetrics.alpaca_bar_symbols_failed || 0);
+  const providerRequested = Number(providerMetrics.alpaca_bar_symbols_requested || 0);
+  const providerSucceeded = Number(providerMetrics.alpaca_bar_symbols_succeeded || 0);
+  const providerSuccess = providerRequested > 0
+    ? `${Math.round((providerSucceeded / providerRequested) * 100)}%`
+    : '—';
+  const progressCounts = countBy(allRows, ['SKIP', 'WAITING', 'ALMOST_READY', 'EARLY_ENTRY', 'ENTER_NOW'], row => setupProgressState(row).bucket);
+  const gradeCounts = countBy(allRows, ['A', 'B', 'C'], setupGradeValue);
+  const noTradeReasons = {};
+  allRows.forEach(row => {
+    ((row.trade_eval || {}).no_trade_reasons || []).forEach(reason => {
+      const key = String(reason || 'unknown');
+      noTradeReasons[key] = (noTradeReasons[key] || 0) + 1;
+    });
+  });
+  const topReasons = Object.entries(noTradeReasons)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join(' · ') || '—';
+  const universeLabel = currentScannerUniverse() === 'default' ? 'My Watchlist' : currentScannerUniverse() === 'finviz' ? 'Finviz' : 'Discovered';
+
+  el.innerHTML = `
+    <div class="snapshot-card">
+      <div class="snapshot-title">Market Coverage</div>
+      <div class="snapshot-groups">
+        <div>
+          <div class="snapshot-group-title">Coverage</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('Universe', escapeHtml(universeLabel))}
+            ${renderSnapshotBadge('Attempted', escapeHtml(String(attempted)))}
+            ${renderSnapshotBadge('Processed', escapeHtml(String(processed)))}
+            ${renderSnapshotBadge('Coverage', escapeHtml(formatCoveragePercent(processed, attempted)))}
+          </div>
+        </div>
+        <div>
+          <div class="snapshot-group-title">Operations</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('Provider Success', escapeHtml(providerSuccess))}
+            ${renderSnapshotBadge('Scan Time', escapeHtml(formatScanSeconds(meta.scan_duration_ms)))}
+            ${renderSnapshotBadge('Skipped', escapeHtml(String(skipped)))}
+            ${renderSnapshotBadge('Failed', escapeHtml(String(failed)))}
+          </div>
+        </div>
+        <div>
+          <div class="snapshot-group-title">Opportunity Funnel</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('Enter Now', progressCounts.ENTER_NOW || 0, 'timing-entry', 'status', 'ENTER_NOW')}
+            ${renderSnapshotBadge('Early Entry', progressCounts.EARLY_ENTRY || 0, 'timing-area', 'status', 'EARLY_ENTRY')}
+            ${renderSnapshotBadge('Almost Ready', progressCounts.ALMOST_READY || 0, 'timing-area', 'status', 'ALMOST_READY')}
+            ${renderSnapshotBadge('Waiting', progressCounts.WAITING || 0, 'timing-reaction', 'status', 'WAITING')}
+            ${renderSnapshotBadge('Skip', progressCounts.SKIP || 0, 'timing-not-ready', 'status', 'SKIP')}
+          </div>
+        </div>
+        <div>
+          <div class="snapshot-group-title">Quality</div>
+          <div class="snapshot-badges">
+            ${renderSnapshotBadge('A', gradeCounts.A || 0, 'grade-a', 'quality', 'A')}
+            ${renderSnapshotBadge('B', gradeCounts.B || 0, 'grade-b', 'quality', 'B')}
+            ${renderSnapshotBadge('C', gradeCounts.C || 0, 'grade-c', 'quality', 'C')}
+            ${renderSnapshotBadge('Provider Failures', providerFailed)}
+          </div>
+        </div>
+      </div>
+      <div class="snapshot-group-title" style="margin-top:12px;">Coverage Diagnostics</div>
+      <div class="data-status-sub" style="white-space:normal;">Largest blockers: ${escapeHtml(topReasons)}. Memory usage, median duration, p95 duration, and peak concurrent requests require multi-session runtime sampling and are not inferred from a single scan response.</div>
+    </div>`;
+}
+
 function renderMarketSnapshot(rows) {
   const el = document.getElementById('marketSnapshot');
   if (!el) return;
@@ -4377,6 +4469,7 @@ function renderScannerResults() {
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
   const snapshotSetups = [...allRows, ...allNearMiss];
   const visibleSetups = [...rows, ...nearMiss];
+  renderMarketCoveragePanel(snapshotSetups, latestScannerMeta || {});
   renderMarketSnapshot(snapshotSetups);
 
   if (rows.length === 0) {

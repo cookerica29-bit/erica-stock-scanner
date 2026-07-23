@@ -396,13 +396,17 @@ def api_scan(
     tickers: str = Query(default=""),
     refresh: bool = Query(default=False),
     discover: bool = Query(default=False),
-    universe: str = Query(default="default"),
+    universe: str = Query(default="discovered"),
 ):
     """Scan the full watchlist or a custom comma-separated list of tickers."""
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-        result = scan_cached(watchlist, force_refresh=refresh)
-    elif str(universe or "").strip().lower() == "discovered":
+        return scan_cached(watchlist, force_refresh=refresh)
+
+    selected_universe = str(universe or "discovered").strip().lower()
+    if discover:
+        selected_universe = "finviz"
+    if selected_universe == "discovered":
         ready, symbols, status = _discovery_symbols_ready()
         if not ready:
             return _discovery_scan_not_ready_response(status)
@@ -414,8 +418,10 @@ def api_scan(
             coverage_context=_discovery_coverage_context(),
             trusted_options_symbols=set(symbols),
         )
+    elif selected_universe == "default":
+        result = scan_cached(force_refresh=refresh, discover=False)
     else:
-        use_finviz = bool(discover) or str(universe or "").strip().lower() == "finviz"
+        use_finviz = selected_universe == "finviz"
         result = scan_cached(force_refresh=refresh, discover=use_finviz)
     return result
 

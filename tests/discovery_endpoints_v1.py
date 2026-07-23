@@ -274,7 +274,47 @@ def test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncat
         reset_discovery_cache()
 
 
-def test_scan_default_and_finviz_modes_remain_unchanged():
+def test_scan_default_route_uses_discovered_universe_by_default():
+    original_scan_cached = main.scan_cached
+    calls = []
+    symbols = [f"T{i}" for i in range(750)]
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            "symbols": symbols,
+            "generated_at": __import__("datetime").datetime.utcnow(),
+            "expires_at": __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=1),
+            "running": False,
+            "last_error": None,
+        })
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        return {
+            "rows": [],
+            "near_miss": [],
+            "meta": {
+                "cache_key": kwargs.get("universe") or "default",
+                "configured_universe_count": len(watchlist or []),
+            },
+        }
+
+    main.scan_cached = fake_scan_cached
+    try:
+        client = TestClient(main.app)
+        response = client.get("/api/scan")
+        assert response.status_code == 200
+        assert len(calls) == 1
+        assert calls[0][0] == symbols
+        assert calls[0][1]["universe"] == "discovered"
+        assert calls[0][1]["max_symbols"] is None
+        assert calls[0][1]["coverage_context"]["universe_symbol_count"] == 750
+        assert response.json()["meta"]["configured_universe_count"] == 750
+    finally:
+        main.scan_cached = original_scan_cached
+        reset_discovery_cache()
+
+
+def test_scan_explicit_default_and_finviz_modes_remain_available():
     original_scan_cached = main.scan_cached
     calls = []
 
@@ -285,12 +325,10 @@ def test_scan_default_and_finviz_modes_remain_unchanged():
     main.scan_cached = fake_scan_cached
     try:
         client = TestClient(main.app)
-        client.get("/api/scan")
         client.get("/api/scan?universe=default")
         client.get("/api/scan?discover=true")
         client.get("/api/scan?universe=finviz")
         assert calls == [
-            (None, {"force_refresh": False, "discover": False}),
             (None, {"force_refresh": False, "discover": False}),
             (None, {"force_refresh": False, "discover": True}),
             (None, {"force_refresh": False, "discover": True}),
@@ -424,7 +462,8 @@ def main_test() -> int:
     test_scan_discovered_universe_returns_warming_when_cache_missing()
     test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz()
     test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncation()
-    test_scan_default_and_finviz_modes_remain_unchanged()
+    test_scan_default_route_uses_discovered_universe_by_default()
+    test_scan_explicit_default_and_finviz_modes_remain_available()
     test_discovery_cache_refresh_needed_for_missing_and_stale_cache()
     test_discovery_auto_submit_skips_fresh_cache_and_running_job()
     test_startup_registers_and_submits_discovery_refresh()

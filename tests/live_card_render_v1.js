@@ -142,16 +142,16 @@ assert.strictEqual(fetchOptions.cache, 'no-store');
 context.fetch = originalFetch;
 const originalGetElementByIdForUniverse = context.document.getElementById;
 const universeElements = {
-  universeFilter: { ...elementStub(), value: 'default' },
+  universeFilter: { ...elementStub(), value: 'discovered' },
 };
 context.document.getElementById = id => universeElements[id] || elementStub();
-assert.strictEqual(context.currentScannerUniverse(), 'default');
+assert.strictEqual(context.currentScannerUniverse(), 'discovered');
 assert.strictEqual(context.scannerScanUrl(), '/api/scan');
 assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?refresh=true');
-universeElements.universeFilter.value = 'discovered';
-assert.strictEqual(context.currentScannerUniverse(), 'discovered');
-assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=discovered');
-assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?universe=discovered&refresh=true');
+universeElements.universeFilter.value = 'default';
+assert.strictEqual(context.currentScannerUniverse(), 'default');
+assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=default');
+assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?universe=default&refresh=true');
 context.document.getElementById = originalGetElementByIdForUniverse;
 assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
@@ -341,6 +341,7 @@ const scannerRenderElements = {
   directionFilter: elementStub(),
   contractTypeFilter: elementStub(),
   tickerInput: elementStub(),
+  marketCoverage: elementStub(),
   'near-miss-section': elementStub(),
   'near-miss-results': elementStub(),
   'near-miss-header': elementStub(),
@@ -378,6 +379,8 @@ context.__scannerRenderRows = [snapshotFullA, snapshotFullB];
 vm.runInContext('scannerRows = __scannerRenderRows; scannerNearMiss = [];', context);
 context.renderScannerResults();
 
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Market Coverage'));
+assert.ok(scannerRenderElements.marketCoverage.innerHTML.includes('Coverage Diagnostics'));
 assert.ok(scannerRenderElements.results.innerHTML.includes('STRONG'));
 assert.ok(!scannerRenderElements.results.innerHTML.includes('TOP'));
 assert.ok(scannerRenderElements.summary.innerHTML.includes('1 qualified setup'));
@@ -399,6 +402,7 @@ context.document.getElementById = originalGetElementById;
 const warmingElements = {
   results: elementStub(),
   summary: elementStub(),
+  marketCoverage: elementStub(),
   marketSnapshot: elementStub(),
   dataStatus: { ...elementStub(), textContent: '🟡 Warming Building market cache' },
   statusFilter: elementStub(),
@@ -441,6 +445,7 @@ const pollElements = {
   tickerInput: elementStub(),
   results: elementStub(),
   summary: elementStub(),
+  marketCoverage: elementStub(),
   marketSnapshot: elementStub(),
   dataStatus: elementStub(),
   'near-miss-section': elementStub(),
@@ -466,7 +471,7 @@ vm.runInContext('scannerRows = [{ ticker: "PENDING", direction: "LONG", setupGra
 context.scheduleContractRefreshPoll();
 assert.strictEqual(typeof scheduledContractPoll, 'function');
 scheduledContractPoll();
-assert.strictEqual(contractPollUrl, '/api/scan?universe=discovered');
+assert.strictEqual(contractPollUrl, '/api/scan');
 context.fetchWithTimeout = originalFetchWithTimeoutForContractPoll;
 context.setTimeout = originalSetTimeoutForContractPoll;
 context.document.getElementById = originalGetElementById;
