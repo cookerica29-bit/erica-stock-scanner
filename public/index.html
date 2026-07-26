@@ -2841,6 +2841,7 @@
   <button class="tab-btn" data-tab="further" onclick="switchTab('further')">Further Analysis</button>
   <button class="tab-btn" data-tab="journal" onclick="switchTab('journal')">Journal</button>
   <button class="tab-btn" data-tab="positions" onclick="switchTab('positions')">Positions</button>
+  <button class="tab-btn" data-tab="activeTrades" onclick="switchTab('activeTrades')">Active Trades</button>
   <button class="tab-btn" data-tab="analytics" onclick="switchTab('analytics')">Analytics</button>
   <button class="tab-btn" data-tab="diagnostics" onclick="switchTab('diagnostics')">Diagnostics</button>
   <button class="tab-btn" id="positionReplayTabButton" data-tab="positionReplay" onclick="switchTab('positionReplay')">Position Replay</button>
@@ -3064,6 +3065,21 @@
     </div>
     <div id="positionsSummary" class="execution-subtitle"></div>
     <div id="positionsList"></div>
+  </div>
+</div>
+
+<!-- ── Active Trade Workspace Tab ────────────────────────────────────────── -->
+<div id="active-trades-panel" class="tab-panel">
+  <div class="execution-panel">
+    <div class="execution-head">
+      <div>
+        <div class="execution-title">Active Trade Workspace</div>
+        <div class="execution-subtitle">One cockpit for monitored trades, journal updates, Position Intelligence, notifications, and Verified History.</div>
+      </div>
+      <button class="btn-secondary" onclick="loadActiveTradeWorkspace(true)">Refresh Workspace</button>
+    </div>
+    <div id="activeTradesSummary" class="journal-stats"></div>
+    <div id="activeTradesBody"></div>
   </div>
 </div>
 
@@ -3913,6 +3929,7 @@ function switchTab(tab) {
     further: 'further-panel',
     journal: 'journal-panel',
     positions: 'positions-panel',
+    activeTrades: 'active-trades-panel',
     positionReplay: 'position-replay-panel',
     analytics: 'analytics-panel',
     diagnostics: 'diagnostics-panel',
@@ -3928,6 +3945,7 @@ function switchTab(tab) {
   if (tab === 'further') renderFurtherAnalysisTab();
   if (tab === 'journal') renderJournal();
   if (tab === 'positions') renderPositionsTab();
+  if (tab === 'activeTrades') loadActiveTradeWorkspace(false);
   if (tab === 'positionReplay') loadPositionReplay();
   if (tab === 'analytics' || tab === 'diagnostics') renderAnalytics();
 }
@@ -3945,6 +3963,17 @@ function returnFromTerms() {
   const target = _previousTabBeforeTerms || 'scanner';
   _previousTabBeforeTerms = null;
   switchTab(target);
+}
+
+function applyInitialRouteFromQuery() {
+  if (!window.location || !window.location.search) return;
+  const params = new URLSearchParams(window.location.search || '');
+  const tab = params.get('tab');
+  const trade = params.get('trade');
+  if (tab === 'active-trades' || tab === 'activeTrades') {
+    if (trade) activeTradeWorkspaceState.selectedId = trade;
+    switchTab('activeTrades');
+  }
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
@@ -7735,6 +7764,391 @@ function renderPositionsTab() {
         ${renderPositionAlertControls(model)}
       </div>`;
   }).join('');
+}
+
+let activeTradeWorkspaceState = { loading: false, payload: null, details: new Map(), selectedId: '', error: null, token: '' };
+
+function activeTradeStatusLabel(state) {
+  return ({
+    WATCHING_FOR_ENTRY: 'Watching for planned entry',
+    ENTERED: 'Entered',
+    TP1_REACHED: 'TP1 reached',
+    STOP_REACHED: 'Stop reached',
+    COMPLETED: 'Completed',
+    VERIFIED: 'Verified',
+    NEEDS_REVIEW: 'Needs Review',
+  })[state] || formatDisplayLabel(state || 'Unknown');
+}
+
+function activeTradeDomId(id) {
+  return String(id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+function activeTradeGuidedSubject(record = {}) {
+  const plan = record.plan || {};
+  const journal = record.journal || {};
+  return {
+    ...journal,
+    ticker: record.ticker,
+    direction: record.direction,
+    current_quote_price: record.guided_chart?.current_price || journal.current_price || journal.underlying_price_at_signal,
+    entry: plan.planned_entry,
+    entry_price: plan.planned_entry,
+    planned_underlying_entry: plan.planned_entry,
+    actual_underlying_entry: plan.actual_entry,
+    stop: plan.stop,
+    sl: plan.stop,
+    stop_price: plan.stop,
+    plannedStop: plan.stop,
+    tp1: plan.tp1,
+    plannedTp1: plan.tp1,
+    target_price: plan.tp1,
+    tp2: plan.tp2,
+    plannedTp2: plan.tp2,
+    tp3: plan.tp3,
+    plannedTp3: plan.tp3,
+    scanner_timeframe: plan.timeframe,
+    timeframe: plan.timeframe,
+    guided_status: record.status_guidance?.label || activeTradeStatusLabel(record.tracking_state),
+    signal_timestamp: firstPresent(journal.signal_timestamp, journal.tracking_started_at, journal.created_at),
+    setupGrade: record.grade || plan.grade,
+    sector: journal.sector,
+  };
+}
+
+function renderActiveTradePlan(record = {}) {
+  const plan = record.plan || {};
+  const contract = record.contract || {};
+  const rows = [
+    ['Planned Entry', fmtMoney(plan.planned_entry)],
+    ['Actual Entry', plan.actual_entry == null ? 'Unavailable' : fmtMoney(plan.actual_entry)],
+    ['Stop', fmtMoney(plan.stop)],
+    ['TP1', fmtMoney(plan.tp1)],
+    ['TP2', fmtMoney(plan.tp2)],
+    ['TP3', fmtMoney(plan.tp3)],
+    ['Initial R:R', plan.initial_rr == null ? 'Unavailable' : `${fmtNumber(plan.initial_rr, 2)}:1`],
+    ['Opportunity Remaining', plan.opportunity_remaining == null ? 'Unavailable' : `${fmtNumber(plan.opportunity_remaining, 1)}%`],
+  ];
+  const contractRows = [
+    ['Instrument', contract.instrument_type === 'option' ? 'Option' : 'Underlying / unavailable'],
+    ['Type', contract.option_type || 'Unavailable'],
+    ['Strike', contract.strike == null ? 'Unavailable' : fmtMoney(contract.strike)],
+    ['Expiration', contract.expiration || 'Unavailable'],
+    ['Quantity', contract.quantity == null ? 'Unavailable' : fmtNumber(contract.quantity, 0)],
+    ['Entry Premium', contract.entry_premium == null ? 'Unavailable' : fmtMoney(contract.entry_premium)],
+    ['Actual Option P&L', contract.actual_option_pnl == null ? 'Unavailable' : fmtMoney(contract.actual_option_pnl)],
+  ];
+  return `
+    <div class="position-card-grid">
+      <div class="execution-section position-section plan">
+        <div class="execution-section-title">Trade Plan</div>
+        ${renderPositionKvRows(rows)}
+      </div>
+      <div class="execution-section position-section contract">
+        <div class="execution-section-title">Option / Instrument</div>
+        ${renderPositionKvRows(contractRows)}
+        <div class="trend-note">Underlying plan levels and option performance are kept separate.</div>
+      </div>
+    </div>`;
+}
+
+function renderActiveTradeIntelligence(record = {}) {
+  const intel = record.position_intelligence || {};
+  const history = record.verified_history || {};
+  return `
+    <div class="position-card-grid">
+      <div class="execution-section position-section live">
+        <div class="execution-section-title">Position Intelligence</div>
+        ${renderPositionKvRows([
+          ['Last State', intel.last_state || 'Unavailable'],
+          ['Best Price', intel.best_price == null ? 'Unavailable' : fmtMoney(intel.best_price)],
+          ['Max Progress', intel.max_progress_percent == null ? 'Unavailable' : `${fmtNumber(intel.max_progress_percent, 1)}%`],
+          ['TP1 Reached', intel.tp1_reached ? 'Yes' : 'No'],
+        ])}
+        <details class="analytics-subdetails">
+          <summary>State History</summary>
+          <div class="analytics-subdetails-body">${(intel.state_history || []).length ? `<table class="analytics-table"><tbody>${(intel.state_history || []).slice(-8).map(item => `<tr><td>${escapeHtml(item.timestamp || '—')}</td><td>${escapeHtml(item.new_state || item.event_type || '—')}</td><td>${escapeHtml(item.reason_text || item.reason_code || '—')}</td></tr>`).join('')}</tbody></table>` : '<div class="analytics-empty">No Position Intelligence history events recorded.</div>'}</div>
+        </details>
+      </div>
+      <div class="execution-section position-section plan">
+        <div class="execution-section-title">Verified History Status</div>
+        ${renderPositionKvRows([
+          ['Status', historyStatusLabel(history.pipeline_status)],
+          ['Verification', verificationLabel(history.verification_status)],
+          ['Trade Intelligence Eligible', history.trade_intelligence_eligible ? 'Yes' : 'No'],
+          ['Next Step', history.next_step || 'No history action required.'],
+        ])}
+      </div>
+    </div>`;
+}
+
+function renderActiveTradeTimeline(record = {}) {
+  const timeline = record.timeline || [];
+  if (!timeline.length) return '';
+  return `
+    <div class="execution-section">
+      <div class="execution-section-title">Timeline</div>
+      <div class="setup-timeline">
+        ${timeline.map(item => `
+          <div class="timeline-step ${escapeHtml(item.state || '')}">
+            <span class="timeline-dot">${item.state === 'complete' ? '✓' : ''}</span>
+            <span class="timeline-label">${escapeHtml(item.label || '—')}</span>
+            <span class="timeline-state">${escapeHtml(item.timestamp ? formatShortDate(item.timestamp) : item.state === 'future' ? 'Not yet' : 'Current')}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+function renderActiveTradeNotifications(record = {}) {
+  const notifications = record.notifications || [];
+  if (!notifications.length) return '<div class="analytics-empty">No linked notifications for this trade.</div>';
+  return `
+    <table class="analytics-table">
+      <tbody>${notifications.map(event => `
+        <tr>
+          <td><strong>${escapeHtml(event.title || event.event_type || 'Notification')}</strong><br>${escapeHtml(event.next_step || '')}</td>
+          <td>${escapeHtml(event.read_at ? 'Read' : 'Unread')}</td>
+          <td>${event.read_at ? '' : `<button class="btn-secondary btn-sm" onclick="markNotificationRead('${escapeHtml(event.event_id || event.id)}')">Mark read</button>`}</td>
+        </tr>`).join('')}</tbody>
+    </table>`;
+}
+
+function renderActiveTradeCompletion(record = {}) {
+  const id = record.id || record.journal_id || '';
+  if (!record.entered || record.completed) {
+    return `<div class="analytics-empty">${record.completed ? 'This trade is already completed.' : 'Complete Trade is available only after entry evidence exists.'}</div>`;
+  }
+  return `
+    <details class="analytics-subdetails">
+      <summary>Complete Trade</summary>
+      <div class="analytics-subdetails-body">
+        <div class="trend-note">After completion, Kairos will replay the trade and compare the journaled result with market history.</div>
+        <div class="journal-controls">
+          <input type="datetime-local" id="completeExitTime-${escapeHtml(id)}" />
+          <input type="number" step="0.01" id="completeExitPrice-${escapeHtml(id)}" placeholder="Exit underlying price" />
+          <select id="completeExitReason-${escapeHtml(id)}">
+            <option value="">Exit reason</option>
+            <option value="TP1">TP1</option>
+            <option value="TP2">TP2</option>
+            <option value="TP3">TP3</option>
+            <option value="Stop">Stop</option>
+            <option value="Manual close">Manual close</option>
+            <option value="Expired">Expired</option>
+            <option value="Partial close">Partial close</option>
+            <option value="Other">Other</option>
+          </select>
+          <input type="number" step="0.01" id="completeOptionPnl-${escapeHtml(id)}" placeholder="Actual option P&L, if known" />
+        </div>
+        <textarea id="completeNotes-${escapeHtml(id)}" placeholder="Completion notes" style="width:100%;min-height:70px;margin-top:8px;"></textarea>
+        <div class="trend-note" id="completePreview-${escapeHtml(id)}">Preview: select exit time, price, and reason.</div>
+        <button class="btn-danger" onclick="completeActiveTrade('${escapeHtml(id)}')">Save Completion</button>
+      </div>
+    </details>`;
+}
+
+function renderHistoricalIntelligenceForWorkspace(record = {}) {
+  const insight = record.trade_intelligence || {};
+  if (!insight || insight.error) return '<div class="analytics-empty">Historical Intelligence is unavailable for this trade.</div>';
+  return renderTradeIntelligenceInsight(insight);
+}
+
+function renderActiveTradeCard(record = {}) {
+  const id = String(record.id || record.journal_id || '');
+  const detail = activeTradeWorkspaceState.details.get(id);
+  const full = detail || record;
+  const guidance = full.status_guidance || {};
+  const plan = full.plan || {};
+  const attention = full.attention_items || [];
+  return `
+    <div class="execution-card position-card" id="active-trade-${escapeHtml(activeTradeDomId(id))}" data-active-trade-id="${escapeHtml(id)}">
+      <div class="execution-card-head">
+        <div>
+          <div class="execution-ticker ticker-with-direction">${escapeHtml(full.ticker || '—')} ${renderDirectionMarker(full.direction)}</div>
+          <div class="execution-subtitle">${escapeHtml(activeTradeStatusLabel(full.tracking_state))} · ${escapeHtml(full.timeframe || 'N/A')} · Grade ${escapeHtml(full.grade || '—')}</div>
+        </div>
+        <div class="position-urgency ${attention.length ? 'attention' : 'healthy'}">${attention.length ? 'Needs Attention' : 'In Progress'}</div>
+      </div>
+      <div class="execution-section">
+        <div class="execution-section-title">Current Status</div>
+        <h3>${escapeHtml(guidance.label || activeTradeStatusLabel(full.tracking_state))}</h3>
+        <div class="trend-note"><strong>What is happening?</strong> ${escapeHtml(guidance.what_is_happening || 'Status is unavailable.')}</div>
+        <div class="trend-note"><strong>What should I watch?</strong> ${escapeHtml(guidance.what_to_watch || 'Review the stored plan.')}</div>
+        <div class="trend-note"><strong>What happens next?</strong> ${escapeHtml(guidance.what_happens_next || 'Review the trade workspace.')}</div>
+      </div>
+      ${renderActiveTradePlan(full)}
+      ${detail ? `
+        ${renderGuidedTradeChartBlock(activeTradeGuidedSubject(full), full.completed ? 'completed' : 'position')}
+        ${renderActiveTradeIntelligence(full)}
+        ${renderActiveTradeTimeline(full)}
+        <details class="analytics-subdetails" open>
+          <summary>Attention Center</summary>
+          <div class="analytics-subdetails-body">${attention.length ? attention.map(item => `<div>• ${escapeHtml(historyStatusLabel(item) || formatDisplayLabel(item))}</div>`).join('') : '<div class="analytics-empty">No outstanding attention items.</div>'}</div>
+        </details>
+        <details class="analytics-subdetails">
+          <summary>Notifications</summary>
+          <div class="analytics-subdetails-body">${renderActiveTradeNotifications(full)}</div>
+        </details>
+        <details class="analytics-subdetails">
+          <summary>Journal and Notes</summary>
+          <div class="analytics-subdetails-body">
+            <textarea id="activeTradeNote-${escapeHtml(id)}" placeholder="Add durable journal note" style="width:100%;min-height:70px;"></textarea>
+            <button class="btn-secondary" onclick="saveActiveTradeNote('${escapeHtml(id)}')">Add Note</button>
+            <button class="btn-secondary" onclick="switchTab('journal')">Open Journal</button>
+          </div>
+        </details>
+        ${renderActiveTradeCompletion(full)}
+        <details class="analytics-subdetails">
+          <summary>Historical Intelligence</summary>
+          <div class="analytics-subdetails-body">${renderHistoricalIntelligenceForWorkspace(full)}</div>
+        </details>
+      ` : `<button class="btn-secondary" onclick="openActiveTradeWorkspace('${escapeHtml(id)}')">Open Workspace</button>`}
+    </div>`;
+}
+
+function renderActiveTradeWorkspace() {
+  const summaryEl = document.getElementById('activeTradesSummary');
+  const body = document.getElementById('activeTradesBody');
+  if (!summaryEl || !body) return;
+  if (!journalServerSyncEnabled()) {
+    summaryEl.innerHTML = '';
+    body.innerHTML = '<div class="execution-empty">Enter the journal admin token to load server-backed active trades.</div>';
+    return;
+  }
+  if (activeTradeWorkspaceState.loading && !activeTradeWorkspaceState.payload) {
+    body.innerHTML = '<div class="execution-empty"><span class="spinner"></span> Loading Active Trade Workspace...</div>';
+    return;
+  }
+  if (activeTradeWorkspaceState.error) {
+    body.innerHTML = `<div class="execution-empty">Active Trade Workspace unavailable: ${escapeHtml(activeTradeWorkspaceState.error)}</div>`;
+    return;
+  }
+  const payload = activeTradeWorkspaceState.payload || {};
+  const summary = payload.summary || {};
+  const records = payload.records || [];
+  summaryEl.innerHTML = `
+    ${renderReplayStat('Open Trades', summary.active_records_found || 0)}
+    ${renderReplayStat('Entered', summary.entered_positions || 0)}
+    ${renderReplayStat('Watching', summary.tracked_but_not_entered || 0)}
+    ${renderReplayStat('Need Attention', summary.need_attention || 0)}
+    ${renderReplayStat('Awaiting Replay', summary.awaiting_replay || 0)}
+    ${renderReplayStat('Needs Review', summary.needs_review || 0)}
+  `;
+  if (!records.length) {
+    body.innerHTML = '<div class="execution-empty">No active trades right now.<br>Confirmed setups will appear here after they are entered or added to position tracking.</div>';
+    return;
+  }
+  body.innerHTML = records.map(renderActiveTradeCard).join('');
+}
+
+async function loadActiveTradeWorkspace(force = false) {
+  if (!journalServerSyncEnabled()) {
+    renderActiveTradeWorkspace();
+    return null;
+  }
+  const token = journalAuthToken();
+  if (activeTradeWorkspaceState.loading && !force) return activeTradeWorkspaceState.payload;
+  if (!force && activeTradeWorkspaceState.payload && activeTradeWorkspaceState.token === token) {
+    renderActiveTradeWorkspace();
+    return activeTradeWorkspaceState.payload;
+  }
+  activeTradeWorkspaceState = { ...activeTradeWorkspaceState, loading: true, error: null, token };
+  renderActiveTradeWorkspace();
+  try {
+    const response = await fetchWithTimeout(`${API}/api/active-trades`, { headers: journalAuthHeaders() }, 15000);
+    if (response.status === 403) {
+      setJournalAuthStatus('invalid');
+      throw new Error('Invalid journal admin token');
+    }
+    if (!response.ok) throw new Error(`Active Trades failed: ${response.status}`);
+    const payload = await response.json();
+    activeTradeWorkspaceState = { ...activeTradeWorkspaceState, loading: false, payload, error: null, token };
+    setJournalAuthStatus('authenticated');
+    renderActiveTradeWorkspace();
+    const requested = activeTradeWorkspaceState.selectedId || new URLSearchParams(window.location.search).get('trade');
+    if (requested) openActiveTradeWorkspace(requested, { updateUrl: false });
+    return payload;
+  } catch (error) {
+    activeTradeWorkspaceState = { ...activeTradeWorkspaceState, loading: false, error: String(error.message || error), token };
+    renderActiveTradeWorkspace();
+    return null;
+  }
+}
+
+async function openActiveTradeWorkspace(id, options = {}) {
+  if (!id || !journalServerSyncEnabled()) return;
+  activeTradeWorkspaceState.selectedId = id;
+  if (options.updateUrl !== false) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', 'active-trades');
+    url.searchParams.set('trade', id);
+    history.replaceState(null, '', url.toString());
+  }
+  if (activeTradeWorkspaceState.details.has(id)) {
+    renderActiveTradeWorkspace();
+    requestAnimationFrame(() => document.getElementById(`active-trade-${activeTradeDomId(id)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    return;
+  }
+  try {
+    const response = await fetchWithTimeout(`${API}/api/active-trades/${encodeURIComponent(id)}`, { headers: journalAuthHeaders() }, 20000);
+    if (!response.ok) throw new Error(`Active trade detail failed: ${response.status}`);
+    const detail = await response.json();
+    activeTradeWorkspaceState.details.set(id, detail);
+    renderActiveTradeWorkspace();
+    requestAnimationFrame(() => document.getElementById(`active-trade-${activeTradeDomId(id)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  } catch (error) {
+    showToast(`Active trade detail unavailable: ${error.message || error}`, 'error');
+  }
+}
+
+async function saveActiveTradeNote(id) {
+  const field = document.getElementById(`activeTradeNote-${id}`);
+  const note = String(field?.value || '').trim();
+  if (!note) return;
+  try {
+    const response = await fetchWithTimeout(`${API}/api/active-trades/${encodeURIComponent(id)}/notes`, {
+      method: 'POST',
+      headers: journalAuthHeaders(),
+      body: JSON.stringify({ note }),
+    }, 12000);
+    if (!response.ok) throw new Error(`note ${response.status}`);
+    if (field) field.value = '';
+    activeTradeWorkspaceState.details.delete(id);
+    await loadActiveTradeWorkspace(true);
+    await openActiveTradeWorkspace(id, { updateUrl: false });
+  } catch (error) {
+    showToast(`Could not save note: ${error.message || error}`, 'error');
+  }
+}
+
+async function completeActiveTrade(id) {
+  const exitTime = document.getElementById(`completeExitTime-${id}`)?.value;
+  const exitPrice = document.getElementById(`completeExitPrice-${id}`)?.value;
+  const exitReason = document.getElementById(`completeExitReason-${id}`)?.value;
+  const actualOptionPnl = document.getElementById(`completeOptionPnl-${id}`)?.value;
+  const notes = document.getElementById(`completeNotes-${id}`)?.value || '';
+  if (!exitTime || !exitPrice || !exitReason) {
+    showToast('Exit time, exit price, and exit reason are required.', 'error');
+    return;
+  }
+  if (!confirm('Save this trade completion? Kairos will journal the result, then replay and verify it.')) return;
+  try {
+    const response = await fetchWithTimeout(`${API}/api/active-trades/${encodeURIComponent(id)}/complete`, {
+      method: 'POST',
+      headers: journalAuthHeaders(),
+      body: JSON.stringify({
+        exit_timestamp: new Date(exitTime).toISOString(),
+        exit_price: Number(exitPrice),
+        exit_reason: exitReason,
+        actual_option_pnl: actualOptionPnl === '' ? null : Number(actualOptionPnl),
+        notes,
+      }),
+    }, 15000);
+    if (!response.ok) throw new Error(`complete ${response.status}`);
+    activeTradeWorkspaceState.details.delete(id);
+    await loadActiveTradeWorkspace(true);
+  } catch (error) {
+    showToast(`Could not complete trade: ${error.message || error}`, 'error');
+  }
 }
 
 function earningsDisplay(setup) {
@@ -14092,6 +14506,7 @@ scheduleNextAutoScan();
 autoScanCountdownTimer = setInterval(updateCountdown, 1000);
 loadCacheStatus();
 setInterval(loadCacheStatus, 30000);
+applyInitialRouteFromQuery();
 </script>
 </body>
 </html>

@@ -70,6 +70,7 @@ from verified_history import (
     build_verified_history_snapshot,
     classify_pipeline_record,
     completion_readiness,
+    is_open_entry,
     replay_dedupe_key,
     replay_input_signature,
     retryable_error,
@@ -1300,6 +1301,232 @@ def _process_verified_history_jobs(max_jobs: int = 2) -> dict:
     }
 
 
+ACTIVE_TRADE_WORKSPACE_VERSION = "active-trade-workspace-v1"
+
+
+def _number(value):
+    return _notification_price(value)
+
+
+def _trade_direction(entry: dict) -> str:
+    direction = str(_first_present(entry.get("direction"), entry.get("actual_option_type"), entry.get("option_type"), entry.get("optionType"), "") or "").upper()
+    if direction == "CALL":
+        return "LONG"
+    if direction == "PUT":
+        return "SHORT"
+    return direction
+
+
+def _active_trade_plan(entry: dict) -> dict:
+    option_plan = entry.get("option_plan") if isinstance(entry.get("option_plan"), dict) else {}
+    return {
+        "ticker": str(entry.get("ticker") or "").upper(),
+        "direction": _trade_direction(entry),
+        "timeframe": _first_present(entry.get("scanner_timeframe"), entry.get("timeframe"), entry.get("setupTf")),
+        "grade": _first_present(entry.get("setup_grade"), entry.get("setupGrade"), entry.get("grade")),
+        "planned_entry": _number(_first_present(entry.get("planned_underlying_entry"), entry.get("entry_price"), entry.get("entry"))),
+        "actual_entry": _number(_first_present(entry.get("actual_underlying_entry"), entry.get("underlying_price_at_entry"))),
+        "stop": _number(_first_present(entry.get("original_stop"), entry.get("stop_price"), entry.get("plannedStop"), entry.get("stop"))),
+        "tp1": _number(_first_present(entry.get("original_tp1"), entry.get("target_price"), entry.get("plannedTp1"), entry.get("tp1"))),
+        "tp2": _number(_first_present(entry.get("original_tp2"), entry.get("plannedTp2"), entry.get("tp2"))),
+        "tp3": _number(_first_present(entry.get("original_tp3"), entry.get("plannedTp3"), entry.get("tp3"))),
+        "opportunity_remaining": _number(_first_present(entry.get("opportunity_remaining"), entry.get("opportunityRemaining"), entry.get("original_opportunity_remaining_pct"))),
+        "initial_rr": _number(_first_present(entry.get("rr"), entry.get("riskReward"), entry.get("reward_risk"))),
+        "option_plan": option_plan,
+    }
+
+
+def _active_trade_contract(entry: dict) -> dict:
+    return {
+        "instrument_type": "option" if _first_present(entry.get("actual_strike"), entry.get("strike_price"), entry.get("actual_expiration"), entry.get("expiration_date")) else "stock_or_underlying",
+        "option_type": _first_present(entry.get("actual_option_type"), entry.get("option_type"), entry.get("optionType")),
+        "strike": _number(_first_present(entry.get("actual_strike"), entry.get("strike_price"), entry.get("strike"))),
+        "expiration": _first_present(entry.get("actual_expiration"), entry.get("expiration_date"), entry.get("expiry")),
+        "quantity": _number(_first_present(entry.get("actual_quantity"), entry.get("contracts"))),
+        "entry_premium": _number(_first_present(entry.get("actual_option_premium"), entry.get("premium_paid"), entry.get("askAtSelection"))),
+        "exit_premium": _number(_first_present(entry.get("actual_exit_premium"), entry.get("exit_option_premium"), entry.get("exit_premium"))),
+        "actual_option_pnl": _number(_first_present(entry.get("actual_option_pnl"), entry.get("manual_realized_pnl"), entry.get("realized_pnl"))),
+    }
+
+
+def _active_trade_tracking_state(entry: dict, history_record: Optional[dict] = None) -> str:
+    if not is_open_entry(entry):
+        status = (history_record or {}).get("pipeline_status")
+        if status == "VERIFIED":
+            return "VERIFIED"
+        if status == "NEEDS_REVIEW":
+            return "NEEDS_REVIEW"
+        return "COMPLETED"
+    if _first_present(entry.get("actual_underlying_entry"), entry.get("first_entry_touch_at"), entry.get("actual_entry_at"), entry.get("position_opened_at")):
+        if entry.get("first_stop_touch_at"):
+            return "STOP_REACHED"
+        if entry.get("first_target_touch_at") or entry.get("position_tp1_reached"):
+            return "TP1_REACHED"
+        return "ENTERED"
+    return "WATCHING_FOR_ENTRY"
+
+
+def _active_status_guidance(state: str, entry: dict, history_record: Optional[dict] = None) -> dict:
+    labels = {
+        "WATCHING_FOR_ENTRY": ("Watching for planned entry", "This setup is being tracked, but no position has been recorded.", "Watch for the planned entry and keep the trade plan available."),
+        "ENTERED": ("Entered", "The trade is active against the stored plan.", "Monitor progress toward TP1 and the stop."),
+        "TP1_REACHED": ("TP1 reached", "The first target has been recorded by existing tracking data.", "Review the position and follow the existing management plan."),
+        "STOP_REACHED": ("Stop reached", "The stored stop has been recorded by existing tracking data.", "Review the position and journal completion details."),
+        "COMPLETED": ("Completed", "The journal says this trade is complete.", "Wait for replay and verification before treating the result as verified."),
+        "VERIFIED": ("Verified", "Journal and replay agree.", "This record may contribute to historical knowledge."),
+        "NEEDS_REVIEW": ("Needs Review", "The journaled result and replay result do not match.", "Review the trade record. Kairos will not use it for Trade Intelligence yet."),
+    }
+    title, happening, next_step = labels.get(state, labels["ENTERED"])
+    if history_record and history_record.get("pipeline_status") in {"REPLAY_QUEUED", "REPLAY_RUNNING", "COMPLETED_AWAITING_REPLAY"}:
+        title = "Awaiting replay"
+        happening = history_record.get("explanation") or happening
+        next_step = history_record.get("next_step") or next_step
+    return {
+        "status": state,
+        "label": title,
+        "what_is_happening": happening,
+        "what_to_watch": "Use the stored entry, stop, targets, and Position Intelligence state. Do not treat journal outcomes as verified until replay agrees.",
+        "what_happens_next": next_step,
+    }
+
+
+def _active_trade_timeline(entry: dict, history_record: Optional[dict] = None) -> list[dict]:
+    items = [
+        ("Setup Found", _first_present(entry.get("signal_timestamp"), entry.get("snapshot_timestamp"), entry.get("created_at")), True),
+        ("Confirmation Started", _first_present(entry.get("confirmation_started_at"), entry.get("signal_timestamp")), bool(entry.get("confirmationStarted") or entry.get("confirmation_status"))),
+        ("Entry Reached", entry.get("first_entry_touch_at"), bool(entry.get("first_entry_touch_at"))),
+        ("Trade Entered", _first_present(entry.get("entry_timestamp"), entry.get("actual_entry_at"), entry.get("position_opened_at")), bool(_first_present(entry.get("actual_underlying_entry"), entry.get("first_entry_touch_at"), entry.get("actual_entry_at"), entry.get("position_opened_at")))),
+        ("TP1 Reached", entry.get("first_target_touch_at"), bool(entry.get("first_target_touch_at") or entry.get("position_tp1_reached"))),
+        ("Trade Completed", _first_present(entry.get("tracking_completed_at"), entry.get("exit_timestamp")), not is_open_entry(entry)),
+        ("Replay", ((history_record or {}).get("job") or {}).get("completed_at"), (history_record or {}).get("pipeline_status") in {"VERIFIED", "NEEDS_REVIEW", "REPLAY_DATA_INCOMPLETE"}),
+        ("Verification", _first_present(((history_record or {}).get("verification") or {}).get("verified_at"), ((history_record or {}).get("job") or {}).get("completed_at")), (history_record or {}).get("pipeline_status") in {"VERIFIED", "NEEDS_REVIEW"}),
+    ]
+    current_seen = False
+    timeline = []
+    for label, timestamp, complete in items:
+        state = "complete" if complete else "future"
+        if not complete and not current_seen:
+            state = "current"
+            current_seen = True
+        timeline.append({"label": label, "timestamp": timestamp, "state": state})
+    return timeline
+
+
+def _active_trade_notifications(entry: dict, all_notifications: list[dict]) -> list[dict]:
+    ids = {
+        str(entry.get("journal_id") or ""),
+        str(entry.get("position_id") or ""),
+        str(entry.get("id") or ""),
+    }
+    ticker = str(entry.get("ticker") or "").upper()
+    matched = []
+    for event in all_notifications or []:
+        entity_id = str(event.get("entity_id") or "")
+        symbol = str(event.get("symbol") or "").upper()
+        if entity_id in ids or (symbol and symbol == ticker and str(event.get("entity_type") or "") in {"position", "journal"}):
+            matched.append(event)
+    return matched[:10]
+
+
+def _active_trade_record(entry: dict, history_record: Optional[dict], notifications: list[dict], include_detail: bool = False) -> dict:
+    state = _active_trade_tracking_state(entry, history_record)
+    plan = _active_trade_plan(entry)
+    contract = _active_trade_contract(entry)
+    notification_rows = _active_trade_notifications(entry, notifications)
+    attention = []
+    if state in {"STOP_REACHED", "NEEDS_REVIEW"}:
+        attention.append(state)
+    if state == "WATCHING_FOR_ENTRY":
+        attention.append("TRACKED_NOT_ENTERED")
+    if history_record and history_record.get("pipeline_status") in {"COMPLETION_PENDING", "REPLAY_FAILED", "REPLAY_DATA_INCOMPLETE", "NEEDS_REVIEW"}:
+        attention.append(history_record.get("pipeline_status"))
+    if notification_rows:
+        attention.append("HAS_NOTIFICATIONS")
+    record = {
+        "workspace_version": ACTIVE_TRADE_WORKSPACE_VERSION,
+        "id": str(_first_present(entry.get("position_id"), entry.get("journal_id"), entry.get("id"))),
+        "journal_id": entry.get("journal_id"),
+        "position_id": entry.get("position_id"),
+        "ticker": plan["ticker"],
+        "direction": plan["direction"],
+        "tracking_state": state,
+        "status_guidance": _active_status_guidance(state, entry, history_record),
+        "grade": plan.get("grade"),
+        "timeframe": plan.get("timeframe"),
+        "plan": plan,
+        "contract": contract,
+        "verified_history": history_record,
+        "notifications": notification_rows,
+        "attention_items": sorted(set(attention)),
+        "progress_percent": _number(entry.get("position_max_progress_percent")),
+        "entered": state not in {"WATCHING_FOR_ENTRY"},
+        "completed": not is_open_entry(entry),
+        "trade_intelligence_eligible": bool((history_record or {}).get("trade_intelligence_eligible")),
+    }
+    if include_detail:
+        record.update({
+            "journal": entry,
+            "guided_chart": {
+                "symbol": plan["ticker"],
+                "direction": plan["direction"],
+                "timeframe": plan.get("timeframe") or "4H",
+                "current_price": _number(_first_present(entry.get("current_price"), entry.get("current_quote_price"), entry.get("underlying_price_at_signal"))),
+                "planned_entry": plan.get("planned_entry"),
+                "actual_entry": plan.get("actual_entry"),
+                "stop": plan.get("stop"),
+                "targets": [plan.get("tp1"), plan.get("tp2"), plan.get("tp3")],
+            },
+            "position_intelligence": {
+                "version": entry.get("position_intelligence_version"),
+                "last_state": entry.get("position_last_state"),
+                "best_price": entry.get("position_best_price"),
+                "max_progress_percent": entry.get("position_max_progress_percent"),
+                "tp1_reached": entry.get("position_tp1_reached"),
+                "state_history": entry.get("position_state_history") or [],
+            },
+            "timeline": _active_trade_timeline(entry, history_record),
+        })
+    return record
+
+
+def _active_trades_dataset(include_completed: bool = False) -> dict:
+    started = time.perf_counter()
+    entries = _journal_repository.list_entries({"status": "all", "limit": 5000, "offset": 0})
+    history = _verified_history_records_snapshot(force_replay=False)
+    history_by_journal = {str(record.get("journal_id")): record for record in history.get("records") or []}
+    notification_payload = _notification_repository.list_events(unread_only=False, limit=200, offset=0)
+    notifications = notification_payload.get("events") or []
+    active_entries = [entry for entry in entries if is_open_entry(entry)]
+    if include_completed:
+        active_entries.extend(entry for entry in entries if not is_open_entry(entry))
+    records = [_active_trade_record(entry, history_by_journal.get(str(entry.get("journal_id"))), notifications, include_detail=False) for entry in active_entries]
+    need_attention = [record for record in records if record.get("attention_items") and record.get("tracking_state") != "WATCHING_FOR_ENTRY"]
+    return {
+        "version": ACTIVE_TRADE_WORKSPACE_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "records": records,
+        "summary": {
+            "active_records_found": len(records),
+            "entered_positions": sum(1 for record in records if record.get("entered") and not record.get("completed")),
+            "tracked_but_not_entered": sum(1 for record in records if record.get("tracking_state") == "WATCHING_FOR_ENTRY"),
+            "need_attention": len(need_attention),
+            "approaching_milestone": sum(1 for record in records if _number(record.get("progress_percent")) is not None and _number(record.get("progress_percent")) >= 75),
+            "awaiting_completion": sum(1 for record in records if record.get("tracking_state") == "STOP_REACHED"),
+            "awaiting_replay": sum(1 for record in records if (record.get("verified_history") or {}).get("pipeline_status") in {"COMPLETED_AWAITING_REPLAY", "REPLAY_QUEUED", "REPLAY_RUNNING"}),
+            "needs_review": sum(1 for record in records if (record.get("verified_history") or {}).get("pipeline_status") == "NEEDS_REVIEW"),
+        },
+        "diagnostics": {
+            "workspace_version": ACTIVE_TRADE_WORKSPACE_VERSION,
+            "journal_records_inspected": len(entries),
+            "notification_links": sum(len(record.get("notifications") or []) for record in records),
+            "verified_history_links": sum(1 for record in records if record.get("verified_history")),
+            "aggregation_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "largest_payload_records": len(records),
+            "ambiguous_associations": 0,
+        },
+    }
+
+
 def _trade_intelligence_signature(entries: list[dict]) -> tuple:
     if not entries:
         return (0, None, None, None)
@@ -1704,6 +1931,143 @@ def api_verified_history_acknowledge(
     except JournalConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {"acknowledged": True, "journal_id": journal_id, "verified_history_acknowledged_at": updated.get("verified_history_acknowledged_at")}
+
+
+@app.get("/api/active-trades")
+def api_active_trades(
+    include_completed: bool = Query(default=False),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _active_trades_dataset(include_completed=include_completed)
+
+
+@app.get("/api/active-trades/{trade_id}")
+def api_active_trade_detail(
+    trade_id: str,
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entries = _journal_repository.list_entries({"status": "all", "limit": 5000, "offset": 0})
+    entry = next((
+        item for item in entries
+        if str(item.get("position_id")) == str(trade_id)
+        or str(item.get("journal_id")) == str(trade_id)
+        or str(item.get("id")) == str(trade_id)
+    ), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Active trade not found")
+    history = _verified_history_records_snapshot(force_replay=False)
+    history_by_journal = {str(record.get("journal_id")): record for record in history.get("records") or []}
+    notifications = _notification_repository.list_events(unread_only=False, limit=200, offset=0).get("events") or []
+    record = _active_trade_record(entry, history_by_journal.get(str(entry.get("journal_id"))), notifications, include_detail=True)
+    try:
+        dataset = _trade_intelligence_dataset(force=False)
+        record["trade_intelligence"] = similar_trade_insight(
+            entry,
+            dataset.get("verified_records") or [],
+        )
+    except Exception as exc:
+        record["trade_intelligence"] = {"available": False, "error": exc.__class__.__name__}
+    return record
+
+
+@app.post("/api/active-trades/{trade_id}/notes")
+def api_active_trade_notes(
+    trade_id: str,
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.get_entry(trade_id)
+    if not entry:
+        entries = _journal_repository.list_entries({"status": "all", "position_id": trade_id, "limit": 1, "offset": 0})
+        entry = entries[0] if entries else None
+    if not entry:
+        raise HTTPException(status_code=404, detail="Active trade not found")
+    note = str((payload or {}).get("note") or "")[:2000]
+    existing_notes = str(_first_present(entry.get("notes"), entry.get("reviewNotes"), "") or "")
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    combined = f"{existing_notes}\n\n[{timestamp}] {note}".strip() if existing_notes else f"[{timestamp}] {note}"
+    try:
+        updated = _journal_repository.update_entry(str(entry.get("journal_id")), {
+            "record_version": entry.get("record_version"),
+            "notes": combined,
+            "workspace_note_updated_at": timestamp,
+        })
+    except JournalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"updated": True, "journal_id": updated.get("journal_id"), "notes": updated.get("notes")}
+
+
+@app.post("/api/active-trades/{trade_id}/complete")
+def api_active_trade_complete(
+    trade_id: str,
+    payload: dict = Body(default_factory=dict),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    entry = _journal_repository.get_entry(trade_id)
+    if not entry:
+        entries = _journal_repository.list_entries({"status": "all", "position_id": trade_id, "limit": 1, "offset": 0})
+        entry = entries[0] if entries else None
+    if not entry:
+        raise HTTPException(status_code=404, detail="Active trade not found")
+    state = _active_trade_tracking_state(entry)
+    if state == "WATCHING_FOR_ENTRY":
+        raise HTTPException(status_code=422, detail="Complete Trade is only available after entry evidence exists")
+    exit_timestamp = _first_present((payload or {}).get("exit_timestamp"), (payload or {}).get("tracking_completed_at"))
+    exit_reason = str(_first_present((payload or {}).get("exit_reason"), (payload or {}).get("completion_reason"), "") or "").strip()
+    exit_price = _number(_first_present((payload or {}).get("exit_price"), (payload or {}).get("exit_underlying_price")))
+    if not exit_timestamp or not exit_reason:
+        raise HTTPException(status_code=422, detail="Exit timestamp and exit reason are required")
+    if exit_price is None:
+        raise HTTPException(status_code=422, detail="Exit underlying price is required")
+    reason_upper = exit_reason.upper().replace(" ", "_")
+    result = str((payload or {}).get("result") or "").strip()
+    if not result:
+        if reason_upper in {"TP1", "TP2", "TP3", "TARGET"}:
+            result = "Win"
+        elif reason_upper in {"STOP", "STOP_LOSS"}:
+            result = "Loss"
+        else:
+            result = "Closed"
+    patch = {
+        "record_version": entry.get("record_version"),
+        "result": result,
+        "outcome": exit_reason,
+        "completion_reason": exit_reason,
+        "tracking_status": "completed",
+        "tracking_completed_at": exit_timestamp,
+        "exit_timestamp": exit_timestamp,
+        "exit_price": exit_price,
+        "actual_exit_premium": _number(_first_present((payload or {}).get("actual_exit_premium"), (payload or {}).get("contract_exit_value"))),
+        "actual_option_pnl": _number((payload or {}).get("actual_option_pnl")),
+        "quantity_closed": _number((payload or {}).get("quantity_closed")),
+        "completion_notes": str((payload or {}).get("notes") or "")[:2000],
+    }
+    try:
+        updated = _journal_repository.update_entry(str(entry.get("journal_id")), patch)
+    except JournalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {
+        "completed": True,
+        "journal": updated,
+        "verified_history": updated.get("verified_history") or _maybe_queue_verified_history_job(updated, "active_trade_completion"),
+        "message": "Trade completion was journaled. Kairos will replay and verify the result through Verified History.",
+    }
+
+
+@app.get("/api/dev/active-trade-workspace")
+def api_dev_active_trade_workspace(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    dataset = _active_trades_dataset(include_completed=True)
+    return {
+        "version": ACTIVE_TRADE_WORKSPACE_VERSION,
+        "summary": dataset.get("summary") or {},
+        "diagnostics": dataset.get("diagnostics") or {},
+        "records": dataset.get("records") or [],
+    }
 
 
 @app.get("/api/chart/candles")

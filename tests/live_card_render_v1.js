@@ -193,6 +193,112 @@ assert.ok(verifiedHistoryEl.innerHTML.includes('Needs Review'));
 assert.ok(verifiedHistoryEl.innerHTML.includes('Journal and replay disagree.'));
 assert.ok(verifiedHistoryDiag.innerHTML.includes('Duplicate active jobs'));
 context.document.getElementById = originalGetElementByIdForHistory;
+assert.ok(html.includes('data-tab="activeTrades"'), 'Navigation should include Active Trades');
+assert.ok(html.includes('id="active-trades-panel"'), 'Active Trade Workspace panel should be present');
+const activeTradesSummary = elementStub();
+const activeTradesBody = elementStub();
+const originalGetElementByIdForActiveTrades = context.document.getElementById;
+context.document.getElementById = id => ({
+  activeTradesSummary,
+  activeTradesBody,
+}[id] || elementStub());
+delete storage.kairos_journal_admin_token;
+context.renderActiveTradeWorkspace();
+assert.ok(activeTradesBody.innerHTML.includes('Enter the journal admin token'));
+storage.kairos_journal_admin_token = 'test-token';
+context.__activeTradePayload = {
+  summary: {
+    active_records_found: 1,
+    entered_positions: 0,
+    tracked_but_not_entered: 1,
+    need_attention: 0,
+    awaiting_replay: 0,
+    needs_review: 0,
+  },
+  records: [{
+    id: 'pos-dow-1',
+    journal_id: 'journal-dow-1',
+    position_id: 'pos-dow-1',
+    ticker: 'DOW',
+    direction: 'SHORT',
+    tracking_state: 'WATCHING_FOR_ENTRY',
+    status_guidance: {
+      label: 'Watching for planned entry',
+      what_is_happening: 'This setup is being tracked, but no position has been recorded.',
+      what_to_watch: 'Use the stored entry, stop, targets, and Position Intelligence state.',
+      what_happens_next: 'Watch for the planned entry and keep the trade plan available.',
+    },
+    grade: 'A',
+    timeframe: '4H',
+    plan: {
+      ticker: 'DOW',
+      direction: 'SHORT',
+      timeframe: '4H',
+      grade: 'A',
+      planned_entry: 31.2,
+      actual_entry: null,
+      stop: 32.15,
+      tp1: 29.5,
+      tp2: 28.7,
+      tp3: 27.9,
+      opportunity_remaining: 76,
+      initial_rr: 2.4,
+    },
+    contract: {
+      instrument_type: 'option',
+      option_type: 'PUT',
+      strike: 31,
+      expiration: '2026-08-21',
+      quantity: 1,
+      entry_premium: 1.25,
+      actual_option_pnl: null,
+    },
+    attention_items: ['TRACKED_NOT_ENTERED'],
+    entered: false,
+    completed: false,
+    verified_history: { pipeline_status: 'OPEN', verification_status: 'NOT_APPLICABLE', trade_intelligence_eligible: false },
+  }],
+};
+vm.runInContext('activeTradeWorkspaceState = { loading: false, error: null, token: "test-token", payload: globalThis.__activeTradePayload, selectedId: null, details: new Map() };', context);
+context.renderActiveTradeWorkspace();
+assert.ok(activeTradesSummary.innerHTML.includes('Open Trades'));
+assert.ok(activeTradesBody.innerHTML.includes('DOW'));
+assert.ok(activeTradesBody.innerHTML.includes('Watching for planned entry'));
+context.__activeTradeDetail = {
+  ...context.__activeTradePayload.records[0],
+  guided_chart: {
+    symbol: 'DOW',
+    direction: 'SHORT',
+    timeframe: '4H',
+    current_price: 31.4,
+    planned_entry: 31.2,
+    actual_entry: null,
+    stop: 32.15,
+    targets: [29.5, 28.7, 27.9],
+  },
+  position_intelligence: {
+    last_state: 'HEALTHY',
+    best_price: 31.4,
+    max_progress_percent: 0,
+    tp1_reached: false,
+    state_history: [],
+  },
+  timeline: [{ label: 'Setup Found', timestamp: '2026-07-23T14:00:00Z', state: 'complete' }],
+  trade_intelligence: {
+    available: false,
+    message: 'Not enough verified historical data yet.',
+    exact_progress: { current: 0, required: 30, label: '0 of 30' },
+    broader_progress: { current: 0, required: 100, label: '0 of 100' },
+  },
+};
+vm.runInContext('activeTradeWorkspaceState.details.set("pos-dow-1", globalThis.__activeTradeDetail);', context);
+context.renderActiveTradeWorkspace();
+assert.ok(activeTradesBody.innerHTML.includes('View Trade Chart'));
+assert.ok(activeTradesBody.innerHTML.includes('Position Intelligence'));
+assert.ok(activeTradesBody.innerHTML.includes('Historical Intelligence'));
+assert.ok(activeTradesBody.innerHTML.includes('Underlying plan levels and option performance are kept separate.'));
+assert.ok(activeTradesBody.innerHTML.includes('Complete Trade is available only after entry evidence exists.'));
+context.document.getElementById = originalGetElementByIdForActiveTrades;
 assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
