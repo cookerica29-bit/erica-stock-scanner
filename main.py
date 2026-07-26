@@ -62,6 +62,10 @@ from trade_intelligence import (
     similar_trade_insight,
     trade_intelligence_eligibility_funnel,
 )
+from provider_migration_audit import (
+    migration_state_report,
+    provider_comparison_report,
+)
 from verified_history import (
     MAX_REPLAY_ATTEMPTS,
     REPLAY_JOB_VERSION,
@@ -2190,6 +2194,31 @@ def api_data_provider_status():
         "alpaca_configured": alpaca_credentials_configured(),
         "note": "Scanner candle routing is controlled by STOCK_DATA_PROVIDER_PROFILE. Options and earnings remain Yahoo-backed.",
     }
+
+
+@app.get("/api/dev/alpaca-migration-audit")
+def api_dev_alpaca_migration_audit(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return migration_state_report()
+
+
+@app.get("/api/dev/provider-comparison")
+def api_dev_provider_comparison(
+    symbols: str = Query(default=""),
+    timeframes: str = Query(default="4H,1D,1W"),
+    include_strategy: bool = Query(default=True),
+    limit: int = Query(default=12, ge=1, le=50),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
+    timeframe_list = [tf.strip().upper() for tf in timeframes.split(",") if tf.strip()] if timeframes else None
+    return provider_comparison_report(
+        symbols=symbol_list,
+        timeframes=timeframe_list,
+        include_strategy=include_strategy,
+        limit=limit,
+    )
 
 
 @app.get("/api/data-provider/compare")
