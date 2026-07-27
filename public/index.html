@@ -158,6 +158,11 @@
   .tab-btn:hover { background: rgba(139,92,246,0.08); color: var(--text); opacity: 1; }
   .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+  .mobile-bottom-nav,
+  .mobile-more-menu {
+    display: none;
+  }
+
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
 
@@ -211,6 +216,10 @@
     margin-top: 2px;
   }
   #universeFilter, #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter, #sortFilter { min-width: 150px; }
+  .mobile-filter-shell { display: contents; }
+  .mobile-filter-summary { display: none; }
+  .mobile-filter-content { display: contents; }
+  .scanner-primary-actions { display: contents; }
 
   button {
     background: var(--accent);
@@ -1705,6 +1714,9 @@
   }
   @media (max-width: 768px) {
     html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
+    body {
+      padding-bottom: calc(76px + env(safe-area-inset-bottom));
+    }
   header {
       gap: 8px;
       padding: 12px 14px;
@@ -1721,13 +1733,85 @@
       overflow-wrap: anywhere;
     }
     .tab-bar {
-      gap: 6px;
-      padding: 0 10px;
+      display: none;
     }
-    .tab-btn {
-      flex: 0 0 auto;
-      font-size: 11px;
-      padding: 10px 10px;
+    .mobile-bottom-nav {
+      align-items: center;
+      background: rgba(30,41,59,0.98);
+      border-top: 1px solid rgba(148,163,184,0.24);
+      bottom: 0;
+      box-shadow: 0 -12px 34px rgba(0,0,0,0.34);
+      display: grid;
+      gap: 4px;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      left: 0;
+      padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+      position: fixed;
+      right: 0;
+      z-index: 9997;
+    }
+    .mobile-nav-btn {
+      align-items: center;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      box-shadow: none;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      font-size: 10px;
+      font-weight: 850;
+      gap: 3px;
+      min-height: 48px;
+      padding: 6px 4px;
+      width: 100%;
+    }
+    .mobile-nav-btn:hover {
+      background: rgba(139,92,246,0.10);
+      box-shadow: none;
+      transform: none;
+    }
+    .mobile-nav-btn.active {
+      background: rgba(139,92,246,0.16);
+      border-color: rgba(167,139,250,0.42);
+      color: #ddd6fe;
+    }
+    .mobile-nav-icon {
+      font-size: 15px;
+      line-height: 1;
+    }
+    .mobile-more-menu {
+      background: rgba(30,41,59,0.99);
+      border: 1px solid rgba(148,163,184,0.24);
+      border-radius: 12px;
+      bottom: calc(70px + env(safe-area-inset-bottom));
+      box-shadow: 0 18px 48px rgba(0,0,0,0.42);
+      display: none;
+      gap: 6px;
+      max-height: min(420px, calc(100vh - 110px));
+      overflow-y: auto;
+      padding: 8px;
+      position: fixed;
+      right: 8px;
+      width: min(260px, calc(100vw - 16px));
+      z-index: 9998;
+    }
+    .mobile-more-menu.open {
+      display: grid;
+    }
+    .mobile-more-menu button {
+      background: rgba(65,80,106,0.42);
+      border: 1px solid rgba(148,163,184,0.12);
+      box-shadow: none;
+      color: var(--text);
+      justify-content: flex-start;
+      min-height: 40px;
+      text-align: left;
+      width: 100%;
+    }
+    .mobile-more-menu button.active {
+      background: rgba(139,92,246,0.18);
+      border-color: rgba(167,139,250,0.42);
     }
     .controls {
       align-items: stretch;
@@ -1735,6 +1819,42 @@
       grid-template-columns: 1fr 1fr;
       gap: 9px;
       padding: 10px 12px;
+    }
+    .mobile-filter-shell {
+      border: 1px solid rgba(148,163,184,0.16);
+      border-radius: 10px;
+      display: block;
+      grid-column: 1 / -1;
+      overflow: hidden;
+    }
+    .mobile-filter-summary {
+      align-items: center;
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      font-size: 11px;
+      font-weight: 900;
+      justify-content: space-between;
+      letter-spacing: 0.06em;
+      list-style: none;
+      min-height: 38px;
+      padding: 10px 12px;
+      text-transform: uppercase;
+    }
+    .mobile-filter-summary::-webkit-details-marker { display: none; }
+    .mobile-filter-summary::after {
+      color: var(--muted);
+      content: '+';
+      font-size: 16px;
+    }
+    .mobile-filter-shell[open] .mobile-filter-summary::after {
+      content: '-';
+    }
+    .mobile-filter-content {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 1fr;
+      padding: 0 10px 10px;
     }
     .control-group,
     #tickerInput,
@@ -1745,6 +1865,9 @@
     }
     .control-group {
       grid-column: 1 / -1;
+    }
+    .scanner-primary-actions {
+      display: contents;
     }
     .control-hint {
       line-height: 1.35;
@@ -1761,6 +1884,13 @@
     #dataStatus {
       justify-content: flex-start;
       width: 100%;
+    }
+    #dataStatus > div {
+      min-width: 0;
+    }
+    .data-status-main,
+    .data-status-sub {
+      white-space: normal;
     }
     .market-snapshot {
       margin-top: 10px;
@@ -1845,6 +1975,11 @@
     }
     main,
     #journal-panel,
+    #positions-panel,
+    #active-trades-panel,
+    #position-replay-panel,
+    #execution-panel,
+    #index-panel,
     #terms-panel,
     #trends-panel,
     #analytics-panel,
@@ -1852,7 +1987,7 @@
     #further-panel,
     #video-panel {
       max-width: 100%;
-      padding: 14px 12px;
+      padding: 14px 12px calc(92px + env(safe-area-inset-bottom));
       overflow-x: hidden;
     }
     #summary {
@@ -1955,10 +2090,38 @@
     }
     .journal-table-wrap,
     .trend-table-wrap,
-    .analytics-card {
+    .analytics-card,
+    .analytics-collapse,
+    .analytics-subdetails,
+    .analytics-collapse-body,
+    .analytics-subdetails-body {
       max-width: 100%;
+      min-width: 0;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
+    }
+    .journal-table-wrap {
+      border-radius: 10px;
+    }
+    .positions-list,
+    #positionsList,
+    #activeTradesList {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 1fr !important;
+      max-width: 100%;
+    }
+    .position-card,
+    .workspace-card,
+    .active-trade-card,
+    .execution-card {
+      max-width: 100%;
+      min-width: 0;
+    }
+    .position-card button,
+    .active-trade-card button,
+    .workspace-card button {
+      min-height: 38px;
     }
     .journal-controls {
       align-items: stretch;
@@ -2856,47 +3019,54 @@
       <input type="search" id="tickerInput" placeholder="Search AAPL or Apple..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
       <div class="control-hint">Scan refreshes all cards. Type AAPL or Apple here to filter the loaded cards.</div>
     </div>
-    <select id="universeFilter" onchange="handleUniverseChange()">
-      <option value="discovered" selected>Discovered</option>
-      <option value="default">My Watchlist</option>
-    </select>
-    <select id="statusFilter" onchange="renderScannerResults()">
-      <option value="all">All Statuses</option>
-      <option value="ACTIONABLE" selected>Opportunities</option>
-      <option value="ENTER_NOW">Enter Now</option>
-      <option value="EARLY_ENTRY">Early Entry</option>
-      <option value="DEVELOPING">Developing Setups</option>
-      <option value="ALMOST_READY">Almost Ready</option>
-      <option value="WAITING">Waiting</option>
-      <option value="SKIP">Skip</option>
-    </select>
-    <select id="directionFilter" onchange="renderScannerResults()">
-      <option value="all">All Directions</option>
-      <option value="LONG">Long</option>
-      <option value="SHORT">Short</option>
-    </select>
-    <select id="qualityFilter" onchange="renderScannerResults()">
-      <option value="all">All Setup Quality</option>
-      <option value="A">Top Setup</option>
-      <option value="B">Strong Setup</option>
-      <option value="C">Skip / Low Quality</option>
-    </select>
-    <select id="contractTypeFilter" onchange="renderScannerResults()">
-      <option value="all">All Contracts</option>
-      <option value="CALL">Calls</option>
-      <option value="PUT">Puts</option>
-    </select>
-    <select id="sortFilter" onchange="renderScannerResults()">
-      <option value="RANK" selected>Opportunity Rank</option>
-      <option value="STATUS">Status</option>
-      <option value="GRADE">Grade</option>
-      <option value="TICKER">Ticker</option>
-      <option value="RR">R:R</option>
-      <option value="OPPORTUNITY">Opportunity Remaining</option>
-    </select>
-    <button id="scanBtn" onclick="runScan()">Scan</button>
-    <button id="autoScanBtn" onclick="toggleAutoScan()" class="btn-secondary">Auto Scan: OFF</button>
-    <button class="btn-secondary" onclick="clearResults()">Clear</button>
+    <details id="mobileScannerFilters" class="mobile-filter-shell" open>
+      <summary class="mobile-filter-summary">Filters</summary>
+      <div class="mobile-filter-content">
+        <select id="universeFilter" onchange="handleUniverseChange()">
+          <option value="discovered" selected>Discovered</option>
+          <option value="default">My Watchlist</option>
+        </select>
+        <select id="statusFilter" onchange="renderScannerResults()">
+          <option value="all">All Statuses</option>
+          <option value="ACTIONABLE" selected>Opportunities</option>
+          <option value="ENTER_NOW">Enter Now</option>
+          <option value="EARLY_ENTRY">Early Entry</option>
+          <option value="DEVELOPING">Developing Setups</option>
+          <option value="ALMOST_READY">Almost Ready</option>
+          <option value="WAITING">Waiting</option>
+          <option value="SKIP">Skip</option>
+        </select>
+        <select id="directionFilter" onchange="renderScannerResults()">
+          <option value="all">All Directions</option>
+          <option value="LONG">Long</option>
+          <option value="SHORT">Short</option>
+        </select>
+        <select id="qualityFilter" onchange="renderScannerResults()">
+          <option value="all">All Setup Quality</option>
+          <option value="A">Top Setup</option>
+          <option value="B">Strong Setup</option>
+          <option value="C">Skip / Low Quality</option>
+        </select>
+        <select id="contractTypeFilter" onchange="renderScannerResults()">
+          <option value="all">All Contracts</option>
+          <option value="CALL">Calls</option>
+          <option value="PUT">Puts</option>
+        </select>
+        <select id="sortFilter" onchange="renderScannerResults()">
+          <option value="RANK" selected>Opportunity Rank</option>
+          <option value="STATUS">Status</option>
+          <option value="GRADE">Grade</option>
+          <option value="TICKER">Ticker</option>
+          <option value="RR">R:R</option>
+          <option value="OPPORTUNITY">Opportunity Remaining</option>
+        </select>
+      </div>
+    </details>
+    <div class="scanner-primary-actions">
+      <button id="scanBtn" onclick="runScan()">Scan</button>
+      <button id="autoScanBtn" onclick="toggleAutoScan()" class="btn-secondary">Auto Scan: OFF</button>
+      <button class="btn-secondary" onclick="clearResults()">Clear</button>
+    </div>
     <div id="dataStatus" class="data-status-card" aria-live="polite">
       <span class="data-status-dot warming"></span>
       <div>
@@ -2922,6 +3092,15 @@
     </div>
   </main>
 </div>
+
+<div id="mobileMoreMenu" class="mobile-more-menu" role="menu" aria-label="More navigation"></div>
+<nav class="mobile-bottom-nav" aria-label="Mobile primary navigation">
+  <button class="mobile-nav-btn active" type="button" data-mobile-tab="scanner" onclick="mobileNavigate('scanner')"><span class="mobile-nav-icon">⌕</span><span>Scanner</span></button>
+  <button class="mobile-nav-btn" type="button" data-mobile-tab="positions" onclick="mobileNavigate('positions')"><span class="mobile-nav-icon">▤</span><span>Positions</span></button>
+  <button class="mobile-nav-btn" type="button" data-mobile-tab="journal" onclick="mobileNavigate('journal')"><span class="mobile-nav-icon">□</span><span>Journal</span></button>
+  <button class="mobile-nav-btn" type="button" data-mobile-tab="analytics" onclick="mobileNavigate('analytics')"><span class="mobile-nav-icon">▥</span><span>Analytics</span></button>
+  <button id="mobileMoreButton" class="mobile-nav-btn" type="button" aria-haspopup="true" aria-expanded="false" onclick="toggleMobileMoreMenu(event)"><span class="mobile-nav-icon">⋯</span><span>More</span></button>
+</nav>
 
 <!-- ── Index Watchlist Tab ───────────────────────────────────────────────── -->
 <div id="index-panel" class="tab-panel">
@@ -3661,6 +3840,7 @@ const STOCK_ALERT_ENTRY_TOUCH_KEY = 'kairos_stock_alert_entry_touch_v1';
 const STOCK_ALERT_DIAGNOSTICS_KEY = 'kairos_stock_alert_diagnostics_v1';
 const SMART_NOTIFICATION_VERSION = 'smart-notifications-v1';
 const POSITION_INTELLIGENCE_VERSION = 1;
+const SELECTED_TAB_KEY = 'kairos_selected_tab';
 const POSITION_ALERT_KEYS = {
   ENTRY_REACHED: { label: 'Entry Reached', defaultOn: false },
   MOVE_STARTED: { label: 'Move Started', defaultOn: false },
@@ -3742,6 +3922,7 @@ let scannerRequestController = null;
 let scannerRequestGeneration = 0;
 let scannerWarmingPollTimer = null;
 let scannerWarmingPollAttempts = 0;
+let mobileFiltersCollapsedAfterScan = false;
 const SCANNER_SCAN_TIMEOUT_MS = 120000;
 const SCANNER_WARMING_POLL_INTERVAL_MS = 15000;
 const SCANNER_WARMING_MAX_POLLS = 20;
@@ -3865,7 +4046,11 @@ function formatScheduledScan(date) {
 function updateCountdown() {
   const el = document.getElementById('autoScanCountdown');
   if (!autoScanEnabled || !nextScanAt) { if (el) el.textContent = ''; return; }
-  if (el) el.textContent = formatScheduledScan(nextScanAt);
+  if (!el) return;
+  const scheduled = formatScheduledScan(nextScanAt);
+  el.textContent = isMarketHours()
+    ? `Waiting for next scheduled scan · ${scheduled}`
+    : `Market closed — ${scheduled}`;
 }
 
 function scheduleNextAutoScan() {
@@ -3918,11 +4103,8 @@ function toggleAutoScan() {
 
 let _previousTabBeforeTerms = null;
 
-function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach(button => {
-    button.classList.toggle('active', button.dataset.tab === tab);
-  });
-  const panels = {
+function validTabTargets() {
+  return {
     scanner: 'scanner-panel',
     index: 'index-panel',
     execution: 'execution-panel',
@@ -3934,7 +4116,88 @@ function switchTab(tab) {
     analytics: 'analytics-panel',
     diagnostics: 'diagnostics-panel',
     terms: 'terms-panel',
+    settings: 'settings-panel',
+    home: 'home-panel',
   };
+}
+
+function tabTargetExists(tab) {
+  const id = validTabTargets()[tab];
+  return Boolean(id && document.getElementById(id));
+}
+
+function closeMobileMoreMenu() {
+  const menu = document.getElementById('mobileMoreMenu');
+  const button = document.getElementById('mobileMoreButton');
+  menu?.classList.remove('open');
+  if (button) button.setAttribute('aria-expanded', 'false');
+}
+
+function toggleMobileMoreMenu(event) {
+  event?.stopPropagation?.();
+  const menu = document.getElementById('mobileMoreMenu');
+  const button = document.getElementById('mobileMoreButton');
+  if (!menu || !button) return;
+  if (!menu.innerHTML.trim()) renderMobileMoreMenu();
+  const open = !menu.classList.contains('open');
+  menu.classList.toggle('open', open);
+  button.setAttribute('aria-expanded', String(open));
+}
+
+function mobileNavigate(tab) {
+  closeMobileMoreMenu();
+  switchTab(tab);
+}
+
+function mobileMoreItems() {
+  const items = [
+    { tab: 'home', label: 'Home' },
+    { tab: 'index', label: 'Index Watchlist' },
+    { tab: 'execution', label: 'Execution' },
+    { tab: 'activeTrades', label: 'Active Trades' },
+    { tab: 'further', label: 'Further Analysis' },
+    { tab: 'diagnostics', label: 'Diagnostics' },
+    { tab: 'settings', label: 'Settings' },
+    { tab: 'positionReplay', label: 'Position Replay', developerOnly: true },
+    { tab: 'terms', label: 'Terms' },
+  ];
+  return items.filter(item => {
+    if (!tabTargetExists(item.tab)) return false;
+    if (item.developerOnly) {
+      const desktopButton = document.querySelector(`.tab-btn[data-tab="${item.tab}"]`);
+      if (!desktopButton) return false;
+      return !desktopButton.hidden
+        && desktopButton.getAttribute('aria-hidden') !== 'true'
+        && desktopButton.style.display !== 'none';
+    }
+    return true;
+  });
+}
+
+function renderMobileMoreMenu(activeTab = document.querySelector('.tab-btn.active')?.dataset?.tab || 'scanner') {
+  const menu = document.getElementById('mobileMoreMenu');
+  if (!menu) return;
+  const items = mobileMoreItems();
+  menu.innerHTML = items.length
+    ? items.map(item => `<button type="button" role="menuitem" class="${item.tab === activeTab ? 'active' : ''}" onclick="mobileNavigate('${item.tab}')">${escapeHtml(item.label)}</button>`).join('')
+    : '<div class="notification-empty">No additional pages available.</div>';
+}
+
+function syncMobileNavigation(tab) {
+  const primaryTabs = new Set(['scanner', 'positions', 'journal', 'analytics']);
+  document.querySelectorAll('.mobile-nav-btn[data-mobile-tab]').forEach(button => {
+    button.classList.toggle('active', button.dataset.mobileTab === tab);
+  });
+  const moreButton = document.getElementById('mobileMoreButton');
+  if (moreButton) moreButton.classList.toggle('active', !primaryTabs.has(tab));
+  renderMobileMoreMenu(tab);
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(button => {
+    button.classList.toggle('active', button.dataset.tab === tab);
+  });
+  const panels = validTabTargets();
   Object.entries(panels).forEach(([name, id]) => {
     document.getElementById(id)?.classList.toggle('active', name === tab);
   });
@@ -3948,6 +4211,8 @@ function switchTab(tab) {
   if (tab === 'activeTrades') loadActiveTradeWorkspace(false);
   if (tab === 'positionReplay') loadPositionReplay();
   if (tab === 'analytics' || tab === 'diagnostics') renderAnalytics();
+  syncMobileNavigation(tab);
+  try { localStorage.setItem(SELECTED_TAB_KEY, tab); } catch {}
 }
 
 function openTerms(termId) {
@@ -3966,14 +4231,51 @@ function returnFromTerms() {
 }
 
 function applyInitialRouteFromQuery() {
-  if (!window.location || !window.location.search) return;
+  if (!window.location) return;
   const params = new URLSearchParams(window.location.search || '');
   const tab = params.get('tab');
   const trade = params.get('trade');
   if (tab === 'active-trades' || tab === 'activeTrades') {
     if (trade) activeTradeWorkspaceState.selectedId = trade;
     switchTab('activeTrades');
+    return;
   }
+  if (tab && tabTargetExists(tab)) {
+    switchTab(tab);
+    return;
+  }
+  try {
+    const saved = localStorage.getItem(SELECTED_TAB_KEY);
+    if (saved && tabTargetExists(saved)) switchTab(saved);
+  } catch {}
+}
+
+function bindMobileNavigationDismissal() {
+  document.addEventListener('click', event => {
+    const menu = document.getElementById('mobileMoreMenu');
+    const button = document.getElementById('mobileMoreButton');
+    if (!menu?.classList.contains('open')) return;
+    if (menu.contains(event.target) || button?.contains(event.target)) return;
+    closeMobileMoreMenu();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeMobileMoreMenu();
+  });
+}
+
+function collapseMobileScannerFiltersAfterScan() {
+  if (mobileFiltersCollapsedAfterScan) return;
+  const filters = document.getElementById('mobileScannerFilters');
+  if (!filters) return;
+  if (window.matchMedia && !window.matchMedia('(max-width: 768px)').matches) return;
+  filters.open = false;
+  mobileFiltersCollapsedAfterScan = true;
+}
+
+function expandMobileScannerFilters() {
+  const filters = document.getElementById('mobileScannerFilters');
+  if (filters) filters.open = true;
+  mobileFiltersCollapsedAfterScan = false;
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
@@ -4346,6 +4648,7 @@ function clearResults() {
   document.getElementById('status').textContent = '';
   renderExecutionTab();
   initializeScannerDefaults();
+  expandMobileScannerFilters();
   const tickerSearch = document.getElementById('tickerInput');
   if (tickerSearch) tickerSearch.value = '';
 }
@@ -4663,10 +4966,16 @@ function updateDataStatus(meta = {}) {
   if (!el) return;
   const status = cacheStatusFromMeta(meta);
   const age = formatScanAge(meta.age_seconds);
+  const nextText = nextScanAt ? formatScheduledScan(nextScanAt).replace(/^Next scan /, 'next scan ') : '';
+  const staleReason = meta.last_refresh_error
+    ? 'Last scan failed'
+    : nextText
+      ? `Scanner data is stale · ${isMarketHours() ? 'waiting for next scheduled scan' : `market closed — ${nextText}`}`
+      : 'Scanner data is stale';
   const labels = {
     fresh: { icon: '🟢', label: 'Fresh', sub: age ? `Last updated ${age}` : 'Ready to scan' },
     warming: { icon: '🟡', label: 'Warming', sub: age ? `Last updated ${age} · refreshing` : 'Building market cache' },
-    stale: { icon: '🔴', label: 'Stale', sub: age ? `Last updated ${age}${meta.last_refresh_error ? ' · refresh failed' : ''}` : (meta.last_refresh_error ? 'Refresh failed' : 'Data needs refresh') },
+    stale: { icon: '🔴', label: 'Stale', sub: age ? `${staleReason} · Last updated ${age}` : staleReason },
   };
   const config = labels[status] || labels.warming;
   el.innerHTML = `
@@ -4706,6 +5015,9 @@ function applyScanPayload(data = {}) {
   scannerRows = nextRows;
   scannerNearMiss = nextNearMiss;
   recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
+  if (nextRows.length || nextNearMiss.length || shouldRenderCompletedScan(scanMeta)) {
+    collapseMobileScannerFiltersAfterScan();
+  }
   refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
   evaluatePositionAlertNotifications();
   loadNotifications(false);
@@ -14501,6 +14813,8 @@ updateDeveloperReplayAccess();
 renderNotificationCenter();
 loadNotifications(false);
 bindTickerSearch();
+bindMobileNavigationDismissal();
+syncMobileNavigation(document.querySelector('.tab-btn.active')?.dataset?.tab || 'scanner');
 setAutoScanButtonState();
 scheduleNextAutoScan();
 autoScanCountdownTimer = setInterval(updateCountdown, 1000);
