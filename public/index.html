@@ -11986,21 +11986,82 @@ function normalizeJournalOptionContract(source = {}) {
   };
 }
 
-function optionContractFieldsFromValues(values = {}, context = {}) {
-  const type = normalizeOptionType(values.optionType, values.direction);
+function optionContractMissingFields(values = {}) {
+  const type = normalizeOptionType(values.optionType);
   const strike = coerceNumber(values.strike);
   const expiration = normalizeDateText(values.expiry);
   const premium = coerceNumber(values.entryPremium);
-  const quantity = coerceInteger(values.quantity) || 1;
+  const quantityRaw = values.quantity;
+  const quantity = coerceInteger(quantityRaw);
+  const missing = [];
+  if (!['CALL', 'PUT'].includes(type)) missing.push('type');
+  if (strike == null || !(strike > 0)) missing.push('strike');
+  if (!expiration) missing.push('expiration');
+  if (premium == null || premium < 0) missing.push('entry premium');
+  if (quantity == null || !(quantity > 0)) missing.push('quantity');
+  return missing;
+}
+
+function optionContractMissingMessage(missing = []) {
+  if (!missing.length) return '';
+  const labels = missing.map(item => item === 'entry premium' ? 'entry premium' : item);
+  if (labels.length === 1) return `Missing: ${labels[0]}.`;
+  return `Missing: ${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}.`;
+}
+
+function optionContractInputState(values = {}) {
+  const type = normalizeOptionType(values.optionType);
+  const hasExplicitType = ['CALL', 'PUT'].includes(type);
   const hasAny = [
     values.optionSymbol,
-    type === 'N/A' ? '' : type,
+    hasExplicitType ? type : '',
     values.expiry,
     values.strike,
     values.entryPremium,
+    values.bid,
+    values.spread,
+    values.openInterest,
+    values.volume,
+    values.currentPremium,
+    values.stopPremium,
+    values.exitPremium,
   ].some(value => value !== undefined && value !== null && value !== '' && value !== 'N/A');
-  if (!hasAny) return { attached: false };
-  const minimumValid = ['CALL', 'PUT'].includes(type) && strike != null && strike > 0 && expiration && premium != null && premium >= 0 && quantity > 0;
+  const missing = optionContractMissingFields(values);
+  return {
+    hasAny,
+    complete: hasAny && missing.length === 0,
+    missing,
+  };
+}
+
+function validateOptionContractForMode(values = {}, mode = 'journal_setup_save') {
+  const state = optionContractInputState(values);
+  if (!state.hasAny && mode === 'position_open') {
+    return {
+      valid: false,
+      noContract: true,
+      message: 'Attach or confirm the option contract before opening this option position.',
+    };
+  }
+  if (!state.hasAny) return { valid: true, noContract: true, message: '' };
+  if (state.complete) return { valid: true, noContract: false, message: '' };
+  return {
+    valid: false,
+    noContract: false,
+    message: `Complete the option contract or clear the partial contract details. ${optionContractMissingMessage(state.missing)}`,
+    missing: state.missing,
+  };
+}
+
+function optionContractFieldsFromValues(values = {}, context = {}) {
+  const validation = validateOptionContractForMode(values, context.contractValidationMode || 'journal_setup_save');
+  const type = normalizeOptionType(values.optionType);
+  const strike = coerceNumber(values.strike);
+  const expiration = normalizeDateText(values.expiry);
+  const premium = coerceNumber(values.entryPremium);
+  const quantity = coerceInteger(values.quantity);
+  if (validation.noContract) return { attached: false };
+  const minimumValid = validation.valid;
   const tier = optionTierLabel(values.contractTier || 'Manual');
   const entryCost = optionEntryCost(premium, quantity);
   const breakeven = optionBreakeven(type, strike, premium);
@@ -12017,7 +12078,8 @@ function optionContractFieldsFromValues(values = {}, context = {}) {
   const realizedPl = exitValue != null && allocatedEntryCost != null ? exitValue - allocatedEntryCost : null;
   return {
     attached: minimumValid,
-    invalid_reason: minimumValid ? '' : 'Minimum option contract fields are type, strike, expiration, entry premium, and quantity.',
+    invalid_reason: minimumValid ? '' : validation.message,
+    missing_fields: validation.missing || [],
     option_type: type,
     option_strike: strike,
     option_expiration: expiration,
@@ -12053,7 +12115,7 @@ function optionContractFieldsFromValues(values = {}, context = {}) {
 }
 
 function journalContractFieldsFromForm(updated = {}) {
-  const contract = optionContractFieldsFromValues({
+  const formValues = {
     optionSymbol: updated.option,
     optionType: updated.optionType,
     strike: updated.strike,
@@ -12073,7 +12135,8 @@ function journalContractFieldsFromForm(updated = {}) {
     exitReason: updated.optionExitReason,
     exitNotes: updated.optionExitNotes,
     direction: updated.direction,
-  }, updated);
+  };
+  const contract = optionContractFieldsFromValues(formValues, { ...updated, contractValidationMode: 'journal_setup_save' });
   if (!contract.attached) {
     return {
       option_contract_invalid_reason: contract.invalid_reason || '',
@@ -12082,7 +12145,7 @@ function journalContractFieldsFromForm(updated = {}) {
       option_strike: null,
       option_expiration: '',
       option_entry_premium: null,
-      option_quantity: coerceInteger(updated.contracts) || 1,
+      option_quantity: null,
       option_entry_cost: null,
       option_contract_tier: '',
       strike_price: null,
@@ -12099,7 +12162,12 @@ function journalContractFieldsFromForm(updated = {}) {
       actual_option_premium: null,
       actual_strike: null,
       actual_expiration: '',
-      actual_quantity: coerceInteger(updated.contracts) || 1,
+      actual_quantity: null,
+      actual_option_type: '',
+      actual_option_strike: null,
+      actual_option_expiration: '',
+      actual_option_entry_premium: null,
+      actual_option_quantity: null,
     };
   }
   return {

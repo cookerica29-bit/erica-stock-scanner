@@ -67,6 +67,7 @@ def entry(**overrides):
         "original_stop": 52.0,
         "original_tp1": 59.5,
         "target_price": 59.5,
+        "actual_option_type": "CALL",
         "actual_option_premium": 1.2,
         "actual_strike": 55,
         "actual_expiration": "2026-08-21",
@@ -477,6 +478,96 @@ def test_option_contract_fields_persist_through_server_journal():
         tmp.cleanup()
 
 
+def test_contract_optional_journal_saves_and_position_open_validation():
+    tmp, repo = make_repo()
+    client, cleanup = client_with_repo(repo)
+    try:
+        no_contract = entry(
+            journal_id="setup-no-contract",
+            position_id="setup-no-contract-pos",
+            ticker="DOW",
+            direction="SHORT",
+            option_type="N/A",
+            option_strike=None,
+            option_expiration="",
+            option_entry_premium=None,
+            option_quantity=None,
+            actual_option_type="",
+            actual_option_strike=None,
+            actual_option_expiration="",
+            actual_option_entry_premium=None,
+            actual_option_quantity=None,
+            contracts=1,
+        )
+        no_contract.pop("actual_option_premium", None)
+        no_contract.pop("actual_strike", None)
+        no_contract.pop("actual_expiration", None)
+        no_contract.pop("actual_quantity", None)
+        created = client.post("/api/journal", headers=headers(), json=no_contract)
+        assert created.status_code == 200
+        payload = created.json()
+        assert payload["ticker"] == "DOW"
+        assert payload.get("option_entry_premium") is None
+        assert payload.get("option_strike") is None
+
+        complete_contract = dict(no_contract)
+        complete_contract.update({
+            "journal_id": "setup-complete-contract",
+            "position_id": "setup-complete-contract-pos",
+            "option_type": "PUT",
+            "option_strike": 29,
+            "option_expiration": "2026-07-31",
+            "option_entry_premium": 0.21,
+            "option_quantity": 1,
+        })
+        completed = client.post("/api/journal", headers=headers(), json=complete_contract)
+        assert completed.status_code == 200
+        assert completed.json()["option_entry_premium"] == 0.21
+
+        partial_contract = dict(no_contract)
+        partial_contract.update({
+            "journal_id": "setup-partial-contract",
+            "position_id": "setup-partial-contract-pos",
+            "option_strike": 29,
+        })
+        partial = client.post("/api/journal", headers=headers(), json=partial_contract)
+        assert partial.status_code == 422
+        assert "Complete the option contract or clear the partial contract details." in partial.json()["detail"]
+        assert "expiration" in partial.json()["detail"]
+
+        edited = client.patch(
+            "/api/journal/setup-no-contract",
+            headers=headers(),
+            json={"record_version": payload["record_version"], "notes": "Edited setup notes only"},
+        )
+        assert edited.status_code == 200
+        assert edited.json()["notes"] == "Edited setup notes only"
+        assert edited.json().get("option_entry_premium") is None
+
+        position_open_missing = dict(no_contract)
+        position_open_missing.update({
+            "journal_id": "position-open-missing-contract",
+            "position_id": "position-open-missing-contract-pos",
+            "contract_validation_mode": "position_open",
+        })
+        rejected_open = client.post("/api/journal", headers=headers(), json=position_open_missing)
+        assert rejected_open.status_code == 422
+        assert rejected_open.json()["detail"] == "Attach or confirm the option contract before opening this option position."
+
+        position_open_complete = dict(complete_contract)
+        position_open_complete.update({
+            "journal_id": "position-open-complete-contract",
+            "position_id": "position-open-complete-contract-pos",
+            "contract_validation_mode": "position_open",
+        })
+        accepted_open = client.post("/api/journal", headers=headers(), json=position_open_complete)
+        assert accepted_open.status_code == 200
+        assert "contract_validation_mode" not in accepted_open.json()
+    finally:
+        cleanup()
+        tmp.cleanup()
+
+
 if __name__ == "__main__":
     test_create_read_list_and_unknown_field_preservation()
     test_canonical_replay_fields_and_stale_cache_behavior()
@@ -492,4 +583,5 @@ if __name__ == "__main__":
     test_multiple_trades_same_ticker_long_short_closed_reopened()
     test_no_scanner_discovery_option_or_alert_side_effects()
     test_option_contract_fields_persist_through_server_journal()
+    test_contract_optional_journal_saves_and_position_open_validation()
     print("Journal persistence v1 tests passed")

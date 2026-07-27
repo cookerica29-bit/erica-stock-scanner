@@ -214,6 +214,60 @@ def core_value(entry: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def option_contract_validation(entry: dict[str, Any], mode: str = "journal_setup_save") -> dict[str, Any]:
+    option_type = str(core_value(entry, "actual_option_type", "option_type", "optionType") or "").upper()
+    if option_type in {"N/A", "NONE"}:
+        option_type = ""
+    strike = core_value(entry, "actual_option_strike", "option_strike", "actual_strike", "strike_price", "strike")
+    expiration = core_value(entry, "actual_option_expiration", "option_expiration", "actual_expiration", "expiration_date", "expiry")
+    premium = core_value(entry, "actual_option_entry_premium", "option_entry_premium", "actual_option_premium", "premium_paid", "askAtSelection")
+    quantity = core_value(entry, "actual_option_quantity", "option_quantity", "actual_quantity")
+    has_contract_data = any(value not in (None, "", "N/A") for value in (
+        core_value(entry, "option_symbol", "option"),
+        option_type,
+        strike,
+        expiration,
+        premium,
+        core_value(entry, "option_bid_at_entry", "option_ask_at_entry", "option_spread_at_entry"),
+        core_value(entry, "option_volume_at_entry", "option_open_interest_at_entry"),
+        core_value(entry, "option_current_premium", "option_stop_premium", "option_exit_premium"),
+    ))
+    if has_contract_data:
+        quantity = core_value(entry, "actual_option_quantity", "option_quantity", "actual_quantity", "contracts")
+    missing: list[str] = []
+    if option_type not in {"CALL", "PUT"}:
+        missing.append("type")
+    if strike in (None, ""):
+        missing.append("strike")
+    if expiration in (None, ""):
+        missing.append("expiration")
+    if premium in (None, ""):
+        missing.append("entry premium")
+    if quantity in (None, ""):
+        missing.append("quantity")
+    if not has_contract_data and mode == "position_open":
+        return {
+            "valid": False,
+            "has_contract": False,
+            "missing": missing,
+            "message": "Attach or confirm the option contract before opening this option position.",
+        }
+    if not has_contract_data:
+        return {"valid": True, "has_contract": False, "missing": [], "message": ""}
+    if not missing:
+        return {"valid": True, "has_contract": True, "missing": [], "message": ""}
+    if len(missing) == 1:
+        missing_text = missing[0]
+    else:
+        missing_text = f"{', '.join(missing[:-1])} and {missing[-1]}"
+    return {
+        "valid": False,
+        "has_contract": True,
+        "missing": missing,
+        "message": f"Complete the option contract or clear the partial contract details. Missing: {missing_text}.",
+    }
+
+
 def merge_history(existing: list[Any], incoming: list[Any]) -> list[Any]:
     output: list[Any] = []
     seen: set[str] = set()
@@ -260,6 +314,10 @@ def validate_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise JournalValidationError("Journal entry must be an object")
     payload = dict(entry)
+    validation_mode = str(payload.pop("contract_validation_mode", payload.pop("validation_mode", "journal_setup_save")) or "journal_setup_save")
+    contract_validation = option_contract_validation(payload, validation_mode)
+    if not contract_validation["valid"]:
+        raise JournalValidationError(contract_validation["message"])
     direction = core_value(payload, "direction", "option_type", "optionType")
     if direction is not None:
         payload["direction"] = normalize_direction(direction)
