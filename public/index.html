@@ -3949,7 +3949,7 @@
       <div class="modal-section">
         <div class="modal-section-title">Option Details</div>
         <div class="form-row">
-          <label>Option Contract</label>
+          <label>Option Contract Symbol</label>
           <input type="text" id="f_option" placeholder="e.g. AAPL MAY 29 $200 C" />
         </div>
         <div class="form-grid-3">
@@ -3972,7 +3972,7 @@
         </div>
         <div class="form-grid-3">
           <div class="form-row">
-            <label>Ask at Selection</label>
+            <label>Entry Premium</label>
             <input type="number" id="f_askAtSelection" step="0.01" placeholder="0.00" />
           </div>
           <div class="form-row">
@@ -3984,7 +3984,7 @@
             <input type="number" id="f_openInterest" step="1" placeholder="0" />
           </div>
         </div>
-        <div class="form-grid">
+        <div class="form-grid-3">
           <div class="form-row">
             <label>Option Volume</label>
             <input type="number" id="f_optionVolume" step="1" placeholder="0" />
@@ -3993,6 +3993,34 @@
             <label>Contracts</label>
             <input type="number" id="f_contracts" step="1" min="1" value="1" />
           </div>
+          <div class="form-row">
+            <label>Contract Tier</label>
+            <select id="f_contractTier">
+              <option value="">Unavailable</option>
+              <option value="Best Quality">Best Quality</option>
+              <option value="Balanced">Balanced</option>
+              <option value="Budget">Budget</option>
+              <option value="Manual">Manual</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-row">
+            <label>Current Premium</label>
+            <input type="number" id="f_optionCurrentPremium" step="0.01" placeholder="manual update" />
+          </div>
+          <div class="form-row">
+            <label>Stop Premium</label>
+            <input type="number" id="f_optionStopPremium" step="0.01" placeholder="option stop, not stock stop" />
+          </div>
+          <div class="form-row">
+            <label>Exit Premium</label>
+            <input type="number" id="f_optionExitPremium" step="0.01" placeholder="closed trades" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Option Exit Reason</label>
+          <input type="text" id="f_optionExitReason" placeholder="TP1, stop, manual close, expired..." />
         </div>
       </div>
 
@@ -8259,12 +8287,14 @@ function positionMfeMaeLabel(model = {}) {
 }
 
 function positionContractLabel(plan = {}) {
+  const actual = plan.actualContract || {};
+  if (!actual.attached) return 'No option contract attached';
   return [
-    plan.optionType,
-    plan.strike != null ? `$${fmtNumber(plan.strike)}` : null,
-    plan.expiration,
-    plan.contractTierLabel || plan.contractTier,
-  ].filter(Boolean).join(' · ') || '—';
+    plan.ticker,
+    actual.expiration ? formatShortDate(actual.expiration) : null,
+    actual.strike != null ? `$${fmtNumber(actual.strike, actual.strike % 1 === 0 ? 0 : 2)}` : null,
+    contractTypePlainText(actual.type),
+  ].filter(Boolean).join(' ');
 }
 
 function expectedMoveWindowLabel(plan = {}) {
@@ -8398,12 +8428,35 @@ function renderOptionPlanSnapshot(plan = {}) {
 
 function renderActualContractSnapshot(plan = {}) {
   const actual = plan.actualContract || {};
-  return renderPositionKvRows([
-    ['Actual Strike', fmtMoney(actual.strike)],
-    ['Actual Expiration', actual.expiration],
-    ['Actual Premium', fmtMoney(actual.premium)],
-    ['Actual Quantity', actual.quantity],
-  ]);
+  if (!actual.attached) return '<div class="analytics-empty" style="text-align:left;">No option contract attached.</div>';
+  const currentRows = [
+    ['Current Premium', actual.currentPremium == null ? 'Unavailable' : fmtMoney(actual.currentPremium)],
+    ['Current Value', actual.currentValue == null ? 'Unavailable' : fmtMoney(actual.currentValue)],
+    ['Unrealized P/L', actual.unrealizedPl == null ? 'Unavailable' : `${actual.unrealizedPl >= 0 ? '+' : ''}${fmtMoney(actual.unrealizedPl)}`],
+    ['Unrealized Return', actual.unrealizedReturnPct == null ? 'Unavailable' : `${actual.unrealizedReturnPct >= 0 ? '+' : ''}${fmtNumber(actual.unrealizedReturnPct)}%`],
+    ['Option Stop Premium', actual.stopPremium == null ? 'Unavailable' : fmtMoney(actual.stopPremium)],
+  ];
+  const exitRows = [
+    ['Exit Premium', actual.exitPremium == null ? 'Unavailable' : fmtMoney(actual.exitPremium)],
+    ['Exit Value', actual.exitValue == null ? 'Unavailable' : fmtMoney(actual.exitValue)],
+    ['Realized P/L', actual.realizedPl == null ? 'Unavailable' : `${actual.realizedPl >= 0 ? '+' : ''}${fmtMoney(actual.realizedPl)}`],
+    ['Realized Return', actual.realizedReturnPct == null ? 'Unavailable' : `${actual.realizedReturnPct >= 0 ? '+' : ''}${fmtNumber(actual.realizedReturnPct)}%`],
+    ['Option Exit Reason', actual.exitReason || 'Unavailable'],
+  ];
+  return `
+    ${renderPositionKvRows([
+      ['Entry Premium', actual.entryPremium == null ? 'Unavailable' : fmtMoney(actual.entryPremium)],
+      ['Entry Cost', actual.entryCost == null ? 'Unavailable' : fmtMoney(actual.entryCost)],
+      ['DTE at Entry', actual.dteAtEntry ?? 'Unavailable'],
+      ['DTE Remaining', plan.liveDteRemaining ?? 'Unavailable'],
+      ['Breakeven', actual.breakeven == null ? 'Unavailable' : fmtMoney(actual.breakeven)],
+      ['Tier', actual.tier || 'Unavailable'],
+      ['Spread at Entry', actual.spreadAtEntry == null ? 'Unavailable' : fmtMoney(actual.spreadAtEntry)],
+      ['OI / Volume', `${actual.openInterestAtEntry ?? 'Unavailable'} / ${actual.volumeAtEntry ?? 'Unavailable'}`],
+    ])}
+    ${renderPositionKvRows(currentRows)}
+    ${renderPositionKvRows(exitRows)}
+  `;
 }
 
 function renderPositionManagerBlock(model = {}) {
@@ -8580,14 +8633,10 @@ function renderPositionsTab() {
             <div class="execution-section-title">Contract</div>
             <div class="execution-contract-main">${escapeHtml(positionContractLabel(plan))}</div>
             ${renderPositionKvRows([
-              ['DTE at Entry', plan.dteAtEntry],
-              ['DTE Remaining', live.contractDteRemaining],
               ['Expected Window', expectedMoveWindowLabel(plan)],
-              ['Cost', plan.estimatedContractCost != null ? fmtMoney(plan.estimatedContractCost) : fmtMoney(plan.premiumPaid)],
-              ['Spread at Entry', plan.spreadAtEntry == null ? '—' : fmtMoney(plan.spreadAtEntry)],
-              ['OI / Volume', `${plan.openInterestAtEntry ?? '—'} / ${plan.optionVolumeAtEntry ?? '—'}`],
               ['Health', live.contractHealth?.status || '—'],
             ])}
+            ${renderActualContractSnapshot(plan)}
             <div class="position-warning">${escapeHtml(healthWarning)}</div>
           </div>
         </div>
@@ -9468,6 +9517,12 @@ function selectedContractFromSetup(setup = {}) {
   const verified = {
     option_symbol: firstPresent(source.symbol, source.contract_symbol, option.symbol, ''),
     option_type: optionType,
+    option_strike: strike,
+    option_expiration: expiry || '',
+    option_entry_premium: premium,
+    option_quantity: contracts,
+    option_entry_cost: estimatedContractCost,
+    option_contract_tier: selectedTierLabel || optionTierLabel(selectedTierKey),
     strike_price: strike,
     expiration_date: expiry || '',
     days_to_expiration_at_entry: expiry ? daysUntilDate(firstPresent(setup.signal_timestamp, setup.scannedAt, new Date().toISOString()), expiry) : null,
@@ -9479,9 +9534,23 @@ function selectedContractFromSetup(setup = {}) {
     option_ask_at_entry: ask,
     option_spread_at_entry: spread,
     open_interest_at_entry: openInterest,
+    option_open_interest_at_entry: openInterest,
     option_volume_at_entry: volume,
     implied_volatility_at_entry: iv,
     underlying_price_at_entry: coerceNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price, setup.entry)),
+    option_dte_at_entry: expiry ? daysUntilDate(firstPresent(setup.signal_timestamp, setup.scannedAt, new Date().toISOString()), expiry) : null,
+    option_breakeven_at_entry: breakeven,
+    suggested_option_type: optionType,
+    suggested_option_strike: strike,
+    suggested_option_expiration: expiry || '',
+    suggested_option_tier: selectedTierLabel || optionTierLabel(selectedTierKey),
+    suggested_option_premium: premium,
+    actual_option_type: optionType,
+    actual_option_strike: strike,
+    actual_option_expiration: expiry || '',
+    actual_option_entry_premium: premium,
+    actual_option_quantity: contracts,
+    actual_option_contract_tier: selectedTierLabel || optionTierLabel(selectedTierKey),
   };
   if (!selectedTierSource && guidance.state === 'potential' && guidance.potential) {
     return {
@@ -10497,6 +10566,7 @@ function positionDiagnostics(models = []) {
 }
 
 function positionPlanSide(entry = {}) {
+  const actualOption = normalizeJournalOptionContract(entry);
   return {
     ticker: String(entry.ticker || '').toUpperCase(),
     direction: firstPresent(entry.direction, entry.option_type, entry.optionType, 'N/A'),
@@ -10516,15 +10586,16 @@ function positionPlanSide(entry = {}) {
     confirmationReason: firstPresent(entry.confirmationReason, ''),
     signalTimestamp: firstPresent(entry.signal_timestamp, entry.signal_market_date, entry.snapshot_timestamp, entry.createdAt, null),
     underlyingPriceAtSignal: coerceNumber(firstPresent(entry.underlying_price_at_signal, entry.entry_price, entry.entry)),
-    contractSymbol: firstPresent(entry.option_symbol, entry.option, ''),
-    optionType: firstPresent(entry.option_type, entry.optionType, 'N/A'),
-    strike: coerceNumber(firstPresent(entry.actual_strike, entry.strike_price, entry.strike)),
-    expiration: firstPresent(entry.actual_expiration, entry.expiration_date, entry.expiry, ''),
+    contractSymbol: firstPresent(actualOption.option_symbol, entry.option_symbol, entry.option, ''),
+    optionType: firstPresent(actualOption.option_type, entry.option_type, entry.optionType, 'N/A'),
+    strike: coerceNumber(firstPresent(actualOption.option_strike, entry.actual_strike, entry.strike_price, entry.strike)),
+    expiration: firstPresent(actualOption.option_expiration, entry.actual_expiration, entry.expiration_date, entry.expiry, ''),
     dteAtEntry: coerceInteger(entry.days_to_expiration_at_entry),
+    liveDteRemaining: contractDteRemaining(entry),
     contractTier: firstPresent(entry.contract_tier, ''),
     contractTierLabel: firstPresent(entry.contract_tier_label, ''),
-    premiumPaid: coerceNumber(firstPresent(entry.actual_premium, entry.premium_paid, entry.option_ask_at_entry, entry.askAtSelection)),
-    estimatedContractCost: coerceNumber(entry.estimated_contract_cost_at_entry),
+    premiumPaid: coerceNumber(firstPresent(actualOption.option_entry_premium, entry.actual_premium, entry.premium_paid, entry.option_ask_at_entry, entry.askAtSelection)),
+    estimatedContractCost: coerceNumber(firstPresent(actualOption.option_entry_cost, entry.estimated_contract_cost_at_entry)),
     spreadAtEntry: coerceNumber(firstPresent(entry.option_spread_at_entry, entry.bidAskSpread)),
     openInterestAtEntry: coerceInteger(firstPresent(entry.open_interest_at_entry, entry.openInterest)),
     optionVolumeAtEntry: coerceInteger(firstPresent(entry.option_volume_at_entry, entry.optionVolume)),
@@ -10554,10 +10625,33 @@ function positionPlanSide(entry = {}) {
       confidence: coerceNumber(entry.option_plan_confidence),
     },
     actualContract: {
-      strike: coerceNumber(firstPresent(entry.actual_strike, entry.strike_price)),
-      expiration: firstPresent(entry.actual_expiration, entry.expiration_date, ''),
-      premium: coerceNumber(firstPresent(entry.actual_premium, entry.premium_paid)),
-      quantity: coerceNumber(firstPresent(entry.actual_quantity, entry.contracts)),
+      attached: actualOption.attached,
+      symbol: actualOption.option_symbol,
+      type: actualOption.option_type,
+      strike: actualOption.option_strike,
+      expiration: actualOption.option_expiration,
+      entryPremium: actualOption.option_entry_premium,
+      premium: actualOption.option_entry_premium,
+      quantity: actualOption.option_quantity,
+      entryCost: actualOption.option_entry_cost,
+      tier: actualOption.option_contract_tier,
+      bidAtEntry: actualOption.option_bid_at_entry,
+      askAtEntry: actualOption.option_ask_at_entry,
+      spreadAtEntry: actualOption.option_spread_at_entry,
+      volumeAtEntry: actualOption.option_volume_at_entry,
+      openInterestAtEntry: actualOption.option_open_interest_at_entry,
+      dteAtEntry: actualOption.option_dte_at_entry,
+      breakeven: actualOption.option_breakeven_at_entry,
+      currentPremium: actualOption.option_current_premium,
+      currentValue: actualOption.option_current_value,
+      unrealizedPl: actualOption.option_unrealized_pl,
+      unrealizedReturnPct: actualOption.option_unrealized_return_pct,
+      stopPremium: actualOption.option_stop_premium,
+      exitPremium: actualOption.option_exit_premium,
+      exitValue: actualOption.option_exit_value,
+      realizedPl: actualOption.option_realized_pl,
+      realizedReturnPct: actualOption.option_realized_return_pct,
+      exitReason: actualOption.option_exit_reason,
     },
   };
 }
@@ -10902,6 +10996,11 @@ function openLogModal(setupJson) {
   setValue('f_bidAskSpread', selectedContract.option_spread_at_entry ?? '');
   setValue('f_openInterest', selectedContract.open_interest_at_entry ?? '');
   setValue('f_optionVolume', selectedContract.option_volume_at_entry ?? '');
+  setValue('f_contractTier', selectedContract.contract_tier_label || selectedContract.contract_tier || '');
+  setValue('f_optionCurrentPremium', '');
+  setValue('f_optionStopPremium', '');
+  setValue('f_optionExitPremium', '');
+  setValue('f_optionExitReason', '');
   setValue('f_entry', s.entry || '');
   setValue('f_plannedStop', s.sl || '');
   setValue('f_plannedTp1', s.tp1 || '');
@@ -10965,6 +11064,11 @@ function openEditModal(id) {
   setValue('f_bidAskSpread', entry.bidAskSpread ?? entry.option_spread_at_entry ?? '');
   setValue('f_openInterest', entry.openInterest ?? entry.open_interest_at_entry ?? '');
   setValue('f_optionVolume', entry.optionVolume ?? entry.option_volume_at_entry ?? '');
+  setValue('f_contractTier', entry.option_contract_tier || entry.actual_option_contract_tier || entry.contract_tier_label || entry.contract_tier || '');
+  setValue('f_optionCurrentPremium', entry.option_current_premium ?? '');
+  setValue('f_optionStopPremium', entry.option_stop_premium ?? '');
+  setValue('f_optionExitPremium', entry.option_exit_premium ?? '');
+  setValue('f_optionExitReason', entry.option_exit_reason || '');
   setValue('f_entry', entry.entry ?? '');
   setValue('f_plannedStop', entry.plannedStop ?? '');
   setValue('f_plannedTp1', entry.plannedTp1 ?? '');
@@ -11068,20 +11172,214 @@ document.getElementById('f_outcome').addEventListener('change', syncResultFromOu
 document.getElementById('f_beforeShot').addEventListener('change', e => readShotFile(e.target, 'before'));
 document.getElementById('f_afterShot').addEventListener('change', e => readShotFile(e.target, 'after'));
 
-function journalContractFieldsFromForm(updated = {}) {
-  const hasContractDetail = [
-    updated.option,
-    updated.strike,
-    updated.expiry,
-    updated.askAtSelection,
-    updated.bidAskSpread,
-    updated.openInterest,
-    updated.optionVolume,
-  ].some(value => value !== undefined && value !== null && value !== '');
-  if (!hasContractDetail) {
+function optionTierLabel(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return contractTierLabel(raw) || formatDisplayLabel(raw).replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function optionEntryCost(premium, quantity) {
+  const p = coerceNumber(premium);
+  const q = coerceInteger(quantity);
+  if (p == null || !(q > 0)) return null;
+  return Math.round(p * 100 * q * 100) / 100;
+}
+
+function optionValueFromPremium(premium, quantity) {
+  return optionEntryCost(premium, quantity);
+}
+
+function optionReturnPercent(pl, cost) {
+  const pnl = coerceNumber(pl);
+  const basis = coerceNumber(cost);
+  if (pnl == null || !(basis > 0)) return null;
+  return (pnl / basis) * 100;
+}
+
+function optionBreakeven(type, strike, premium) {
+  const optionType = normalizeOptionType(type);
+  const s = coerceNumber(strike);
+  const p = coerceNumber(premium);
+  if (!['CALL', 'PUT'].includes(optionType) || s == null || p == null) return null;
+  return optionType === 'PUT' ? s - p : s + p;
+}
+
+function hasOptionContractData(source = {}) {
+  return [
+    source.option_type,
+    source.actual_option_type,
+    source.option_strike,
+    source.actual_option_strike,
+    source.strike_price,
+    source.strike,
+    source.option_expiration,
+    source.actual_option_expiration,
+    source.expiration_date,
+    source.expiry,
+    source.option_entry_premium,
+    source.actual_option_entry_premium,
+    source.premium_paid,
+    source.option_ask_at_entry,
+    source.askAtSelection,
+    source.option_symbol,
+    source.option,
+  ].some(value => value !== undefined && value !== null && value !== '' && value !== 'N/A');
+}
+
+function normalizeJournalOptionContract(source = {}) {
+  if (!hasOptionContractData(source)) {
     return {
+      attached: false,
+      label: 'No option contract attached',
+      compactLabel: 'No option contract attached',
+      premiumLabel: 'Unavailable',
+      returnLabel: 'Unavailable',
+    };
+  }
+  const type = normalizeOptionType(firstPresent(source.actual_option_type, source.option_type, source.optionType), source.direction);
+  const strike = coerceNumber(firstPresent(source.actual_option_strike, source.option_strike, source.strike_price, source.strike));
+  const expiration = normalizeDateText(firstPresent(source.actual_option_expiration, source.option_expiration, source.expiration_date, source.expiry, source.expiration));
+  const quantity = coerceInteger(firstPresent(source.actual_option_quantity, source.option_quantity, source.contracts, source.actual_quantity)) || 1;
+  const entryPremium = coerceNumber(firstPresent(source.actual_option_entry_premium, source.option_entry_premium, source.actual_option_premium, source.premium_paid, source.option_ask_at_entry, source.askAtSelection, source.actual_premium));
+  const entryCost = coerceNumber(firstPresent(source.option_entry_cost, source.estimated_contract_cost_at_entry, optionEntryCost(entryPremium, quantity)));
+  const currentPremium = coerceNumber(source.option_current_premium);
+  const currentValue = coerceNumber(firstPresent(source.option_current_value, optionValueFromPremium(currentPremium, quantity)));
+  const unrealizedPl = coerceNumber(firstPresent(source.option_unrealized_pl, currentValue != null && entryCost != null ? currentValue - entryCost : null));
+  const unrealizedReturnPct = coerceNumber(firstPresent(source.option_unrealized_return_pct, optionReturnPercent(unrealizedPl, entryCost)));
+  const exitPremium = coerceNumber(firstPresent(source.option_exit_premium, source.exit_option_premium));
+  const exitValue = coerceNumber(firstPresent(source.option_exit_value, optionValueFromPremium(exitPremium, quantity)));
+  const realizedPl = coerceNumber(firstPresent(source.option_realized_pl, source.actual_option_pnl, exitValue != null && entryCost != null ? exitValue - entryCost : null));
+  const realizedReturnPct = coerceNumber(firstPresent(source.option_realized_return_pct, optionReturnPercent(realizedPl, entryCost)));
+  const tier = optionTierLabel(firstPresent(source.actual_option_contract_tier, source.option_contract_tier, source.contract_tier_label, source.contract_tier));
+  const dteAtEntry = coerceInteger(firstPresent(source.option_dte_at_entry, source.days_to_expiration_at_entry));
+  const breakeven = coerceNumber(firstPresent(source.option_breakeven_at_entry, source.breakeven_price, optionBreakeven(type, strike, entryPremium)));
+  const compactExpiration = expiration ? formatShortDate(expiration) : '';
+  const typeText = contractTypePlainText(type);
+  const compactLabel = strike != null && expiration && ['CALL', 'PUT'].includes(type)
+    ? `${compactExpiration} $${fmtNumber(strike, strike % 1 === 0 ? 0 : 2)} ${typeText}`
+    : 'No option contract attached';
+  const symbol = firstPresent(source.option_symbol, source.option, '');
+  return {
+    attached: compactLabel !== 'No option contract attached',
+    option_symbol: symbol,
+    option_type: type,
+    option_strike: strike,
+    option_expiration: expiration,
+    option_entry_premium: entryPremium,
+    option_quantity: quantity,
+    option_entry_cost: entryCost,
+    option_contract_tier: tier,
+    option_bid_at_entry: coerceNumber(source.option_bid_at_entry),
+    option_ask_at_entry: coerceNumber(firstPresent(source.option_ask_at_entry, entryPremium)),
+    option_spread_at_entry: coerceNumber(firstPresent(source.option_spread_at_entry, source.bidAskSpread)),
+    option_volume_at_entry: coerceInteger(firstPresent(source.option_volume_at_entry, source.optionVolume)),
+    option_open_interest_at_entry: coerceInteger(firstPresent(source.option_open_interest_at_entry, source.open_interest_at_entry, source.openInterest)),
+    option_dte_at_entry: dteAtEntry,
+    option_breakeven_at_entry: breakeven,
+    option_current_premium: currentPremium,
+    option_current_value: currentValue,
+    option_unrealized_pl: unrealizedPl,
+    option_unrealized_return_pct: unrealizedReturnPct,
+    option_stop_premium: coerceNumber(source.option_stop_premium),
+    option_exit_premium: exitPremium,
+    option_exit_value: exitValue,
+    option_realized_pl: realizedPl,
+    option_realized_return_pct: realizedReturnPct,
+    option_exit_reason: firstPresent(source.option_exit_reason, ''),
+    label: symbol || compactLabel,
+    compactLabel,
+    premiumLabel: entryPremium == null ? 'Unavailable' : `Entry ${fmtMoney(entryPremium)}`,
+    returnLabel: source.result === 'Open'
+      ? (unrealizedReturnPct == null ? 'Open' : `${unrealizedReturnPct >= 0 ? '+' : ''}${fmtNumber(unrealizedReturnPct)}%`)
+      : (realizedReturnPct == null ? 'Unavailable' : `${realizedReturnPct >= 0 ? '+' : ''}${fmtNumber(realizedReturnPct)}%`),
+  };
+}
+
+function optionContractFieldsFromValues(values = {}, context = {}) {
+  const type = normalizeOptionType(values.optionType, values.direction);
+  const strike = coerceNumber(values.strike);
+  const expiration = normalizeDateText(values.expiry);
+  const premium = coerceNumber(values.entryPremium);
+  const quantity = coerceInteger(values.quantity) || 1;
+  const hasAny = [
+    values.optionSymbol,
+    type === 'N/A' ? '' : type,
+    values.expiry,
+    values.strike,
+    values.entryPremium,
+  ].some(value => value !== undefined && value !== null && value !== '' && value !== 'N/A');
+  if (!hasAny) return { attached: false };
+  const minimumValid = ['CALL', 'PUT'].includes(type) && strike != null && strike > 0 && expiration && premium != null && premium >= 0 && quantity > 0;
+  const tier = optionTierLabel(values.contractTier || 'Manual');
+  const entryCost = optionEntryCost(premium, quantity);
+  const breakeven = optionBreakeven(type, strike, premium);
+  const currentPremium = coerceNumber(values.currentPremium);
+  const currentValue = optionValueFromPremium(currentPremium, quantity);
+  const unrealizedPl = currentValue != null && entryCost != null ? currentValue - entryCost : null;
+  const exitPremium = coerceNumber(values.exitPremium);
+  const exitValue = optionValueFromPremium(exitPremium, quantity);
+  const realizedPl = exitValue != null && entryCost != null ? exitValue - entryCost : null;
+  return {
+    attached: minimumValid,
+    invalid_reason: minimumValid ? '' : 'Minimum option contract fields are type, strike, expiration, entry premium, and quantity.',
+    option_type: type,
+    option_strike: strike,
+    option_expiration: expiration,
+    option_entry_premium: premium,
+    option_quantity: quantity,
+    option_entry_cost: entryCost,
+    option_contract_tier: tier,
+    option_symbol: values.optionSymbol || '',
+    option_bid_at_entry: coerceNumber(values.bid),
+    option_ask_at_entry: premium,
+    option_spread_at_entry: coerceNumber(values.spread),
+    option_volume_at_entry: coerceInteger(values.volume),
+    option_open_interest_at_entry: coerceInteger(values.openInterest),
+    option_dte_at_entry: expiration ? daysUntilDate(context.signalTimestamp || context.createdAt || new Date().toISOString(), expiration) : null,
+    option_breakeven_at_entry: breakeven,
+    option_current_premium: currentPremium,
+    option_current_value: currentValue,
+    option_unrealized_pl: unrealizedPl,
+    option_unrealized_return_pct: optionReturnPercent(unrealizedPl, entryCost),
+    option_stop_premium: coerceNumber(values.stopPremium),
+    option_exit_premium: exitPremium,
+    option_exit_value: exitValue,
+    option_realized_pl: realizedPl,
+    option_realized_return_pct: optionReturnPercent(realizedPl, entryCost),
+    option_exit_reason: values.exitReason || '',
+  };
+}
+
+function journalContractFieldsFromForm(updated = {}) {
+  const contract = optionContractFieldsFromValues({
+    optionSymbol: updated.option,
+    optionType: updated.optionType,
+    strike: updated.strike,
+    expiry: updated.expiry,
+    entryPremium: updated.askAtSelection,
+    quantity: updated.contracts,
+    contractTier: updated.contractTier,
+    bid: updated.optionBidAtEntry,
+    spread: updated.bidAskSpread,
+    openInterest: updated.openInterest,
+    volume: updated.optionVolume,
+    currentPremium: updated.optionCurrentPremium,
+    stopPremium: updated.optionStopPremium,
+    exitPremium: updated.optionExitPremium,
+    exitReason: updated.optionExitReason,
+    direction: updated.direction,
+  }, updated);
+  if (!contract.attached) {
+    return {
+      option_contract_invalid_reason: contract.invalid_reason || '',
       option_symbol: '',
       option_type: 'N/A',
+      option_strike: null,
+      option_expiration: '',
+      option_entry_premium: null,
+      option_quantity: coerceInteger(updated.contracts) || 1,
+      option_entry_cost: null,
+      option_contract_tier: '',
       strike_price: null,
       expiration_date: '',
       days_to_expiration_at_entry: null,
@@ -11099,36 +11397,28 @@ function journalContractFieldsFromForm(updated = {}) {
       actual_quantity: coerceInteger(updated.contracts) || 1,
     };
   }
-  const optionType = normalizeOptionType(updated.optionType, updated.direction);
-  const strike = coerceNumber(updated.strike);
-  const expiry = normalizeDateText(updated.expiry);
-  const premium = coerceNumber(updated.askAtSelection);
-  const contracts = coerceInteger(updated.contracts) || 1;
-  const breakeven = strike != null && premium != null
-    ? optionType === 'PUT'
-      ? strike - premium
-      : strike + premium
-    : null;
   return {
-    option_symbol: updated.option || '',
-    option_type: optionType,
-    strike_price: strike,
-    expiration_date: expiry,
-    days_to_expiration_at_entry: expiry ? daysUntilDate(updated.signal_timestamp || updated.createdAt || new Date().toISOString(), expiry) : null,
-    contracts,
-    premium_paid: premium,
-    estimated_contract_cost_at_entry: premium != null ? Math.round(premium * 100 * contracts * 100) / 100 : null,
-    breakeven_price: breakeven,
-    option_ask_at_entry: premium,
-    option_spread_at_entry: coerceNumber(updated.bidAskSpread),
-    open_interest_at_entry: coerceInteger(updated.openInterest),
-    option_volume_at_entry: coerceInteger(updated.optionVolume),
+    ...contract,
+    strike_price: contract.option_strike,
+    expiration_date: contract.option_expiration,
+    days_to_expiration_at_entry: contract.option_dte_at_entry,
+    contracts: contract.option_quantity,
+    premium_paid: contract.option_entry_premium,
+    estimated_contract_cost_at_entry: contract.option_entry_cost,
+    breakeven_price: contract.option_breakeven_at_entry,
+    open_interest_at_entry: contract.option_open_interest_at_entry,
     underlying_price_at_entry: coerceNumber(updated.entry),
     actual_underlying_entry: coerceNumber(updated.entry),
-    actual_option_premium: premium,
-    actual_strike: strike,
-    actual_expiration: expiry || '',
-    actual_quantity: contracts,
+    actual_option_type: contract.option_type,
+    actual_option_strike: contract.option_strike,
+    actual_option_expiration: contract.option_expiration,
+    actual_option_entry_premium: contract.option_entry_premium,
+    actual_option_quantity: contract.option_quantity,
+    actual_option_contract_tier: contract.option_contract_tier,
+    actual_option_premium: contract.option_entry_premium,
+    actual_strike: contract.option_strike,
+    actual_expiration: contract.option_expiration || '',
+    actual_quantity: contract.option_quantity,
   };
 }
 
@@ -11152,11 +11442,11 @@ function mergeJournalEdit(existing = {}, updated = {}) {
 function mirrorJournalCompatibilityFields(entry = {}) {
   entry.option = firstPresent(entry.option, entry.option_symbol, '');
   entry.optionType = firstPresent(entry.optionType, entry.option_type, 'N/A');
-  entry.strike = coerceNumber(firstPresent(entry.strike, entry.strike_price));
-  entry.expiry = firstPresent(entry.expiry, entry.expiration_date, '');
-  entry.askAtSelection = coerceNumber(firstPresent(entry.askAtSelection, entry.option_ask_at_entry, entry.premium_paid));
+  entry.strike = coerceNumber(firstPresent(entry.strike, entry.option_strike, entry.actual_option_strike, entry.strike_price));
+  entry.expiry = firstPresent(entry.expiry, entry.option_expiration, entry.actual_option_expiration, entry.expiration_date, '');
+  entry.askAtSelection = coerceNumber(firstPresent(entry.askAtSelection, entry.option_entry_premium, entry.actual_option_entry_premium, entry.option_ask_at_entry, entry.premium_paid));
   entry.bidAskSpread = coerceNumber(firstPresent(entry.bidAskSpread, entry.option_spread_at_entry));
-  entry.openInterest = coerceInteger(firstPresent(entry.openInterest, entry.open_interest_at_entry));
+  entry.openInterest = coerceInteger(firstPresent(entry.openInterest, entry.option_open_interest_at_entry, entry.open_interest_at_entry));
   entry.optionVolume = coerceInteger(firstPresent(entry.optionVolume, entry.option_volume_at_entry));
   entry.entry = coerceNumber(firstPresent(entry.entry, entry.entry_price));
   entry.plannedStop = coerceNumber(firstPresent(entry.plannedStop, entry.stop_price));
@@ -11227,6 +11517,11 @@ function saveJournalEntry() {
     bidAskSpread: getNumber('f_bidAskSpread'),
     openInterest: parseInt(getValue('f_openInterest')) || null,
     optionVolume: parseInt(getValue('f_optionVolume')) || null,
+    contractTier: getValue('f_contractTier'),
+    optionCurrentPremium: getNumber('f_optionCurrentPremium'),
+    optionStopPremium: getNumber('f_optionStopPremium'),
+    optionExitPremium: getNumber('f_optionExitPremium'),
+    optionExitReason: getValue('f_optionExitReason').trim(),
     entry: getNumber('f_entry'),
     plannedStop: getNumber('f_plannedStop'),
     plannedTp1: getNumber('f_plannedTp1'),
@@ -11261,6 +11556,16 @@ function saveJournalEntry() {
     afterShot: _afterShotData,
   };
   const formContractFields = journalContractFieldsFromForm(updated);
+  if (formContractFields.option_contract_invalid_reason) {
+    alert(formContractFields.option_contract_invalid_reason);
+    return;
+  }
+  const noContractAttached = !formContractFields.option_symbol
+    && formContractFields.option_type === 'N/A'
+    && formContractFields.option_strike == null
+    && !formContractFields.option_expiration
+    && formContractFields.option_entry_premium == null;
+  if (updated.result === 'Open' && noContractAttached && !confirm('No option contract is attached. Continue as stock-only / paper-underlying?')) return;
   Object.assign(updated, formContractFields);
   updated.pnlPct = updated.entry && updated.exit
     ? (((updated.direction === 'LONG' || updated.direction === 'CALL') ? updated.exit - updated.entry : updated.entry - updated.exit) / updated.entry) * 100
@@ -11350,20 +11655,40 @@ function migrateJournalEntry(entry = {}) {
   migrated.setup_id = migrated.setup_id || setupIdFromJournalEntry(migrated);
   migrated.option_symbol = firstPresent(migrated.option_symbol, migrated.option, '');
   migrated.option_type = firstPresent(migrated.option_type, migrated.optionType, 'N/A');
-  migrated.strike_price = coerceNumber(firstPresent(migrated.strike_price, migrated.strike));
-  migrated.expiration_date = firstPresent(migrated.expiration_date, migrated.expiry, '');
-  migrated.contracts = coerceInteger(firstPresent(migrated.contracts, 1)) || 1;
-  migrated.premium_paid = coerceNumber(firstPresent(migrated.premium_paid, migrated.askAtSelection));
+  migrated.option_strike = coerceNumber(firstPresent(migrated.option_strike, migrated.actual_option_strike, migrated.strike_price, migrated.strike));
+  migrated.option_expiration = normalizeDateText(firstPresent(migrated.option_expiration, migrated.actual_option_expiration, migrated.expiration_date, migrated.expiry, ''));
+  migrated.option_entry_premium = coerceNumber(firstPresent(migrated.option_entry_premium, migrated.actual_option_entry_premium, migrated.premium_paid, migrated.option_ask_at_entry, migrated.askAtSelection));
+  migrated.option_quantity = coerceInteger(firstPresent(migrated.option_quantity, migrated.actual_option_quantity, migrated.contracts, 1)) || 1;
+  migrated.option_entry_cost = coerceNumber(firstPresent(migrated.option_entry_cost, migrated.estimated_contract_cost_at_entry, optionEntryCost(migrated.option_entry_premium, migrated.option_quantity)));
+  migrated.option_contract_tier = optionTierLabel(firstPresent(migrated.option_contract_tier, migrated.actual_option_contract_tier, migrated.contract_tier_label, migrated.contract_tier, ''));
+  migrated.strike_price = coerceNumber(firstPresent(migrated.strike_price, migrated.option_strike, migrated.strike));
+  migrated.expiration_date = firstPresent(migrated.expiration_date, migrated.option_expiration, migrated.expiry, '');
+  migrated.contracts = migrated.option_quantity;
+  migrated.premium_paid = coerceNumber(firstPresent(migrated.premium_paid, migrated.option_entry_premium, migrated.askAtSelection));
   migrated.estimated_contract_cost_at_entry = coerceNumber(firstPresent(
     migrated.estimated_contract_cost_at_entry,
+    migrated.option_entry_cost,
     migrated.premium_paid != null ? migrated.premium_paid * 100 * migrated.contracts : null
   ));
-  migrated.breakeven_price = coerceNumber(migrated.breakeven_price);
+  migrated.option_breakeven_at_entry = coerceNumber(firstPresent(migrated.option_breakeven_at_entry, migrated.breakeven_price, optionBreakeven(migrated.option_type, migrated.option_strike, migrated.option_entry_premium)));
+  migrated.breakeven_price = coerceNumber(firstPresent(migrated.breakeven_price, migrated.option_breakeven_at_entry));
   migrated.option_bid_at_entry = coerceNumber(migrated.option_bid_at_entry);
-  migrated.option_ask_at_entry = coerceNumber(firstPresent(migrated.option_ask_at_entry, migrated.askAtSelection));
+  migrated.option_ask_at_entry = coerceNumber(firstPresent(migrated.option_ask_at_entry, migrated.option_entry_premium, migrated.askAtSelection));
   migrated.option_spread_at_entry = coerceNumber(firstPresent(migrated.option_spread_at_entry, migrated.bidAskSpread));
-  migrated.open_interest_at_entry = coerceInteger(firstPresent(migrated.open_interest_at_entry, migrated.openInterest));
+  migrated.option_open_interest_at_entry = coerceInteger(firstPresent(migrated.option_open_interest_at_entry, migrated.open_interest_at_entry, migrated.openInterest));
+  migrated.open_interest_at_entry = coerceInteger(firstPresent(migrated.open_interest_at_entry, migrated.option_open_interest_at_entry));
   migrated.option_volume_at_entry = coerceInteger(firstPresent(migrated.option_volume_at_entry, migrated.optionVolume));
+  migrated.option_dte_at_entry = coerceInteger(firstPresent(migrated.option_dte_at_entry, migrated.days_to_expiration_at_entry));
+  migrated.option_current_premium = coerceNumber(migrated.option_current_premium);
+  migrated.option_current_value = coerceNumber(firstPresent(migrated.option_current_value, optionValueFromPremium(migrated.option_current_premium, migrated.option_quantity)));
+  migrated.option_unrealized_pl = coerceNumber(firstPresent(migrated.option_unrealized_pl, migrated.option_current_value != null && migrated.option_entry_cost != null ? migrated.option_current_value - migrated.option_entry_cost : null));
+  migrated.option_unrealized_return_pct = coerceNumber(firstPresent(migrated.option_unrealized_return_pct, optionReturnPercent(migrated.option_unrealized_pl, migrated.option_entry_cost)));
+  migrated.option_stop_premium = coerceNumber(migrated.option_stop_premium);
+  migrated.option_exit_premium = coerceNumber(migrated.option_exit_premium);
+  migrated.option_exit_value = coerceNumber(firstPresent(migrated.option_exit_value, optionValueFromPremium(migrated.option_exit_premium, migrated.option_quantity)));
+  migrated.option_realized_pl = coerceNumber(firstPresent(migrated.option_realized_pl, migrated.actual_option_pnl, migrated.option_exit_value != null && migrated.option_entry_cost != null ? migrated.option_exit_value - migrated.option_entry_cost : null));
+  migrated.option_realized_return_pct = coerceNumber(firstPresent(migrated.option_realized_return_pct, optionReturnPercent(migrated.option_realized_pl, migrated.option_entry_cost)));
+  migrated.option_exit_reason = firstPresent(migrated.option_exit_reason, '');
   migrated.implied_volatility_at_entry = coerceNumber(migrated.implied_volatility_at_entry);
   migrated.underlying_price_at_entry = coerceNumber(firstPresent(migrated.underlying_price_at_entry, migrated.entry));
   migrated.potential_option_type = firstPresent(migrated.potential_option_type, null);
@@ -11403,10 +11728,21 @@ function migrateJournalEntry(entry = {}) {
   migrated.days_to_expiration_at_entry = migrated.days_to_expiration_at_entry ?? (migrated.expiration_date ? daysUntilDate(migrated.signal_timestamp || migrated.createdAt, migrated.expiration_date) : null);
   migrated.planned_underlying_entry = coerceNumber(firstPresent(migrated.planned_underlying_entry, migrated.entry_price, migrated.entry));
   migrated.actual_underlying_entry = coerceNumber(firstPresent(migrated.actual_underlying_entry, migrated.underlying_price_at_entry));
-  migrated.actual_option_premium = coerceNumber(firstPresent(migrated.actual_option_premium, migrated.actual_premium, migrated.premium_paid));
-  migrated.actual_strike = coerceNumber(firstPresent(migrated.actual_strike, migrated.strike_price));
-  migrated.actual_expiration = firstPresent(migrated.actual_expiration, migrated.expiration_date, '');
-  migrated.actual_quantity = coerceNumber(firstPresent(migrated.actual_quantity, migrated.contracts));
+  migrated.suggested_option_type = firstPresent(migrated.suggested_option_type, migrated.option_type, '');
+  migrated.suggested_option_strike = coerceNumber(firstPresent(migrated.suggested_option_strike, migrated.option_strike));
+  migrated.suggested_option_expiration = firstPresent(migrated.suggested_option_expiration, migrated.option_expiration, '');
+  migrated.suggested_option_tier = firstPresent(migrated.suggested_option_tier, migrated.option_contract_tier, '');
+  migrated.suggested_option_premium = coerceNumber(firstPresent(migrated.suggested_option_premium, migrated.option_entry_premium));
+  migrated.actual_option_type = firstPresent(migrated.actual_option_type, migrated.option_type, '');
+  migrated.actual_option_strike = coerceNumber(firstPresent(migrated.actual_option_strike, migrated.option_strike));
+  migrated.actual_option_expiration = firstPresent(migrated.actual_option_expiration, migrated.option_expiration, '');
+  migrated.actual_option_entry_premium = coerceNumber(firstPresent(migrated.actual_option_entry_premium, migrated.option_entry_premium));
+  migrated.actual_option_quantity = coerceInteger(firstPresent(migrated.actual_option_quantity, migrated.option_quantity, migrated.contracts));
+  migrated.actual_option_contract_tier = firstPresent(migrated.actual_option_contract_tier, migrated.option_contract_tier, '');
+  migrated.actual_option_premium = coerceNumber(firstPresent(migrated.actual_option_premium, migrated.actual_option_entry_premium, migrated.actual_premium, migrated.premium_paid));
+  migrated.actual_strike = coerceNumber(firstPresent(migrated.actual_strike, migrated.actual_option_strike, migrated.strike_price));
+  migrated.actual_expiration = firstPresent(migrated.actual_expiration, migrated.actual_option_expiration, migrated.expiration_date, '');
+  migrated.actual_quantity = coerceNumber(firstPresent(migrated.actual_quantity, migrated.actual_option_quantity, migrated.contracts));
   migrated.earnings_date = firstPresent(migrated.earnings_date, migrated.earningsDate, '');
   migrated.days_until_earnings = migrated.days_until_earnings ?? migrated.daysUntilEarnings ?? null;
   migrated.earnings_source = firstPresent(migrated.earnings_source, migrated.earningsSource, '');
@@ -13395,6 +13731,7 @@ function renderJournal() {
     const displayedResult = e.reviewResult || e.result || 'Pending';
     const badgeCls  = resultBadgeClass(displayedResult);
     const dirCls = directionClass(e.direction);
+    const optionContract = normalizeJournalOptionContract(e);
     const actions = e.result === 'Open'
       ? `<div class="action-stack">
           <button class="btn-ghost" onclick="updateEntryLifecycle(${e.id}, 'tp1')">TP1</button>
@@ -13415,6 +13752,12 @@ function renderJournal() {
         <td>${simplifySetupStatus(e.setupStatus) || '—'}</td>
         <td>${renderJournalStatusPill(e.entryStatus)}</td>
         <td>${confirmationDisplay(Boolean(e.confirmationStarted))}</td>
+        <td>${escapeHtml(optionContract.compactLabel || 'No option contract attached')}</td>
+        <td>${escapeHtml([
+          optionContract.option_entry_premium == null ? null : `Entry ${fmtMoney(optionContract.option_entry_premium)}`,
+          optionContract.option_exit_premium == null ? null : `Exit ${fmtMoney(optionContract.option_exit_premium)}`,
+        ].filter(Boolean).join(' · ') || 'Unavailable')}</td>
+        <td>${escapeHtml(optionContract.returnLabel || 'Unavailable')}</td>
         <td><span class="result-badge ${badgeCls}">${displayedResult}</span></td>
         <td>${e.directionCorrect || 'Pending'}</td>
         <td>${e.entryQuality || 'Pending'}</td>
@@ -13431,7 +13774,7 @@ function renderJournal() {
     <table class="journal-table">
       <thead>
         <tr>
-          <th>Date</th><th>Ticker</th><th>Direction</th><th>Grade</th><th>Trend</th><th>Short-term Flow</th><th>Phase</th><th>Setup Status</th><th>Entry Status</th><th>Confirmation</th><th>Result</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Notes</th><th>Manage</th><th></th>
+          <th>Date</th><th>Ticker</th><th>Direction</th><th>Grade</th><th>Trend</th><th>Short-term Flow</th><th>Phase</th><th>Setup Status</th><th>Entry Status</th><th>Confirmation</th><th>Contract</th><th>Premium</th><th>Option Return</th><th>Result</th><th>Direction Correct?</th><th>Entry Quality</th><th>Review Notes</th><th>Manage</th><th></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -15519,7 +15862,7 @@ function renderReplayFindings(evidence = [], replays = []) {
 function exportCSV() {
   const entries = loadJournal();
   if (!entries.length) { alert('No entries to export.'); return; }
-  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult','setup_id','journal_snapshot_version','snapshot_timestamp','option_type','strike_price','expiration_date','days_to_expiration_at_entry','contracts_snapshot','premium_paid','estimated_contract_cost_at_entry','breakeven_price','option_bid_at_entry','option_ask_at_entry','option_spread_at_entry','open_interest_at_entry','option_volume_at_entry','implied_volatility_at_entry','underlying_price_at_entry','potential_option_type','potential_strike','potential_expiration_min_dte','potential_expiration_max_dte','contract_guidance_source','contract_selection_source','contract_tier','contract_tier_label','potential_strike_increment','potential_strike_increment_source','setup_grade_snapshot','scanner_status_snapshot','scanner_status_raw','scanner_status_normalized','trade_stage','entry_timing_state','entry_trigger_state','confirmation_status','scanner_timeframe','signal_timestamp','signal_market_date','underlying_price_at_signal','entry_price_snapshot','stop_price_snapshot','target_price_snapshot','atr_at_signal','target_distance','target_distance_atr','trend_state','relative_volume_snapshot','atr_expansion_snapshot','earnings_date','days_until_earnings','earnings_source','tracking_status','trade_progress_status','tracking_started_at','tracking_completed_at','completion_reason','highest_price_reached','lowest_price_reached','first_entry_touch_at','first_target_touch_at','first_stop_touch_at','trading_days_elapsed','trading_days_to_entry','trading_days_to_target','trading_days_to_stop','bars_elapsed','last_tracking_bar_time','bars_to_entry','bars_to_target','bars_to_stop','final_trading_days','final_bar_count','maximum_favorable_excursion','maximum_adverse_excursion','maximum_favorable_excursion_percent','maximum_adverse_excursion_percent','maximum_favorable_excursion_atr','maximum_adverse_excursion_atr','maximum_favorable_excursion_r','maximum_adverse_excursion_r','reached_0_5r','reached_1r','reached_2r','time_to_0_5r','time_to_1r','time_to_2r'];
+  const headers = ['CreatedAt','UpdatedAt','Date','Ticker','Direction','Timeframe','ScannerStatus','Trend','Short-term Flow','Phase','SetupStatus','EntryStatus','Setup Grade','Setup Grade Reason','Confirmation Started','Confirmation Reason','TrendScore','TrendState','EntryType','RelativeVolume','ATRExpansion','SetupNotes','Grade','Score','Location','Cleanliness','Freshness','Room','Warning','ContractSelected','Expiration','Strike','CallPut','AskAtSelection','BidAskSpread','OpenInterest','OptionVolume','EntryPrice','Stop','TP1','ExitPrice','PnL','PnLPct','R','Contracts','AccountSize','RiskPct','MaxRisk','ChecklistComplete','BeforeShot','AfterShot','DirectionCorrect','EntryQuality','ReviewResult','TradeQuality','FollowedPlan','Outcome','Mistake','ReviewNotes','LegacyResult','setup_id','journal_snapshot_version','snapshot_timestamp','option_type','option_strike','option_expiration','option_entry_premium','option_quantity','option_entry_cost','option_contract_tier','option_symbol','option_bid_at_entry','option_ask_at_entry','option_spread_at_entry','option_volume_at_entry','option_open_interest_at_entry','option_dte_at_entry','option_breakeven_at_entry','option_current_premium','option_current_value','option_unrealized_pl','option_unrealized_return_pct','option_stop_premium','option_exit_premium','option_exit_value','option_realized_pl','option_realized_return_pct','option_exit_reason','suggested_option_type','suggested_option_strike','suggested_option_expiration','suggested_option_tier','suggested_option_premium','actual_option_type','actual_option_strike','actual_option_expiration','actual_option_entry_premium','actual_option_quantity','strike_price','expiration_date','days_to_expiration_at_entry','contracts_snapshot','premium_paid','estimated_contract_cost_at_entry','breakeven_price','open_interest_at_entry','implied_volatility_at_entry','underlying_price_at_entry','potential_option_type','potential_strike','potential_expiration_min_dte','potential_expiration_max_dte','contract_guidance_source','contract_selection_source','contract_tier','contract_tier_label','potential_strike_increment','potential_strike_increment_source','setup_grade_snapshot','scanner_status_snapshot','scanner_status_raw','scanner_status_normalized','trade_stage','entry_timing_state','entry_trigger_state','confirmation_status','scanner_timeframe','signal_timestamp','signal_market_date','underlying_price_at_signal','entry_price_snapshot','stop_price_snapshot','target_price_snapshot','atr_at_signal','target_distance','target_distance_atr','trend_state','relative_volume_snapshot','atr_expansion_snapshot','earnings_date','days_until_earnings','earnings_source','tracking_status','trade_progress_status','tracking_started_at','tracking_completed_at','completion_reason','highest_price_reached','lowest_price_reached','first_entry_touch_at','first_target_touch_at','first_stop_touch_at','trading_days_elapsed','trading_days_to_entry','trading_days_to_target','trading_days_to_stop','bars_elapsed','last_tracking_bar_time','bars_to_entry','bars_to_target','bars_to_stop','final_trading_days','final_bar_count','maximum_favorable_excursion','maximum_adverse_excursion','maximum_favorable_excursion_percent','maximum_adverse_excursion_percent','maximum_favorable_excursion_atr','maximum_adverse_excursion_atr','maximum_favorable_excursion_r','maximum_adverse_excursion_r','reached_0_5r','reached_1r','reached_2r','time_to_0_5r','time_to_1r','time_to_2r'];
   const rows = entries.map(e => [
     e.createdAt || '', e.updatedAt || '', e.date, e.ticker, e.direction, e.timeframe || 'N/A', e.scannerStatus || 'WATCH', `"${e.trend || ''}"`, `"${e.setupTf || ''}"`, `"${e.phase || ''}"`, `"${e.setupStatus || ''}"`, `"${e.entryStatus || ''}"`, e.setupGrade || '', `"${e.setupGradeReason || ''}"`, e.confirmationStarted ? 'Yes' : 'No', `"${e.confirmationReason || ''}"`, e.trendScore ?? '', `"${e.trendState || ''}"`, `"${e.entryType || 'N/A'}"`, e.relativeVolume ?? '', e.atrExpansion ?? '', `"${e.setupNotes || ''}"`, e.setupGrade || '', e.setupScore ?? '',
     `"${e.setupLocation || ''}"`, `"${e.setupCleanliness || ''}"`, `"${e.setupFreshness || ''}"`, `"${e.setupRoom || ''}"`, `"${e.setupWarning || ''}"`,
@@ -15528,7 +15871,7 @@ function exportCSV() {
     e.accountSize ?? '', e.riskPct ?? '', e.maxRisk ?? '',
     checklistComplete(e) ? 'Yes' : 'No', e.beforeShot ? 'Yes' : 'No', e.afterShot ? 'Yes' : 'No',
     e.directionCorrect || 'Pending', e.entryQuality || 'Pending', e.reviewResult || 'Pending', `"${e.tradeQuality || ''}"`, `"${e.followedPlan || ''}"`, `"${e.outcome || ''}"`, `"${e.mistakeType || ''}"`, `"${e.notes || ''}"`, e.result,
-    e.setup_id || '', e.journal_snapshot_version || '', e.snapshot_timestamp || '', e.option_type || '', e.strike_price ?? '', e.expiration_date || '', e.days_to_expiration_at_entry ?? '', e.contracts ?? '', e.premium_paid ?? '', e.estimated_contract_cost_at_entry ?? '', e.breakeven_price ?? '', e.option_bid_at_entry ?? '', e.option_ask_at_entry ?? '', e.option_spread_at_entry ?? '', e.open_interest_at_entry ?? '', e.option_volume_at_entry ?? '', e.implied_volatility_at_entry ?? '', e.underlying_price_at_entry ?? '', e.potential_option_type || '', e.potential_strike ?? '', e.potential_expiration_min_dte ?? '', e.potential_expiration_max_dte ?? '', e.contract_guidance_source || '', e.contract_selection_source || '', e.contract_tier || '', e.contract_tier_label || '', e.potential_strike_increment ?? '', e.potential_strike_increment_source || '',
+    e.setup_id || '', e.journal_snapshot_version || '', e.snapshot_timestamp || '', e.option_type || '', e.option_strike ?? '', e.option_expiration || '', e.option_entry_premium ?? '', e.option_quantity ?? '', e.option_entry_cost ?? '', e.option_contract_tier || '', e.option_symbol || '', e.option_bid_at_entry ?? '', e.option_ask_at_entry ?? '', e.option_spread_at_entry ?? '', e.option_volume_at_entry ?? '', e.option_open_interest_at_entry ?? '', e.option_dte_at_entry ?? '', e.option_breakeven_at_entry ?? '', e.option_current_premium ?? '', e.option_current_value ?? '', e.option_unrealized_pl ?? '', e.option_unrealized_return_pct ?? '', e.option_stop_premium ?? '', e.option_exit_premium ?? '', e.option_exit_value ?? '', e.option_realized_pl ?? '', e.option_realized_return_pct ?? '', `"${e.option_exit_reason || ''}"`, e.suggested_option_type || '', e.suggested_option_strike ?? '', e.suggested_option_expiration || '', e.suggested_option_tier || '', e.suggested_option_premium ?? '', e.actual_option_type || '', e.actual_option_strike ?? '', e.actual_option_expiration || '', e.actual_option_entry_premium ?? '', e.actual_option_quantity ?? '', e.strike_price ?? '', e.expiration_date || '', e.days_to_expiration_at_entry ?? '', e.contracts ?? '', e.premium_paid ?? '', e.estimated_contract_cost_at_entry ?? '', e.breakeven_price ?? '', e.open_interest_at_entry ?? '', e.implied_volatility_at_entry ?? '', e.underlying_price_at_entry ?? '', e.potential_option_type || '', e.potential_strike ?? '', e.potential_expiration_min_dte ?? '', e.potential_expiration_max_dte ?? '', e.contract_guidance_source || '', e.contract_selection_source || '', e.contract_tier || '', e.contract_tier_label || '', e.potential_strike_increment ?? '', e.potential_strike_increment_source || '',
     e.setup_grade || '', e.scanner_status || '', e.scanner_status_raw || '', e.scanner_status_normalized || '', e.trade_stage || '', e.entry_timing_state || '', e.entry_trigger_state || '', e.confirmation_status || '', e.scanner_timeframe || '', e.signal_timestamp || '', e.signal_market_date || '', e.underlying_price_at_signal ?? '', e.entry_price ?? '', e.stop_price ?? '', e.target_price ?? '', e.atr_at_signal ?? '', e.target_distance ?? '', e.target_distance_atr ?? '', `"${e.trend_state || ''}"`, e.relative_volume ?? '', e.atr_expansion ?? '', e.earnings_date || '', e.days_until_earnings ?? '', e.earnings_source || '',
     e.tracking_status || '', e.trade_progress_status || '', e.tracking_started_at || '', e.tracking_completed_at || '', e.completion_reason || '', e.highest_price_reached ?? '', e.lowest_price_reached ?? '', e.first_entry_touch_at || '', e.first_target_touch_at || '', e.first_stop_touch_at || '', e.trading_days_elapsed ?? '', e.trading_days_to_entry ?? '', e.trading_days_to_target ?? '', e.trading_days_to_stop ?? '', e.bars_elapsed ?? '', e.last_tracking_bar_time || '', e.bars_to_entry ?? '', e.bars_to_target ?? '', e.bars_to_stop ?? '', e.final_trading_days ?? '', e.final_bar_count ?? '', e.maximum_favorable_excursion ?? '', e.maximum_adverse_excursion ?? '', e.maximum_favorable_excursion_percent ?? '', e.maximum_adverse_excursion_percent ?? '', e.maximum_favorable_excursion_atr ?? '', e.maximum_adverse_excursion_atr ?? '', e.maximum_favorable_excursion_r ?? '', e.maximum_adverse_excursion_r ?? '', e.reached_0_5r ? 'Yes' : 'No', e.reached_1r ? 'Yes' : 'No', e.reached_2r ? 'Yes' : 'No', e.time_to_0_5r ?? '', e.time_to_1r ?? '', e.time_to_2r ?? '',
   ]);

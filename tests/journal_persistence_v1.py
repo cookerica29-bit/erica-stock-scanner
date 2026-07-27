@@ -429,6 +429,54 @@ def test_no_scanner_discovery_option_or_alert_side_effects():
         tmp.cleanup()
 
 
+def test_option_contract_fields_persist_through_server_journal():
+    tmp, repo = make_repo()
+    client, cleanup = client_with_repo(repo)
+    try:
+        created = client.post("/api/journal", headers=headers(), json=entry(
+            journal_id="contract-1",
+            position_id="contract-pos-1",
+            ticker="DOW",
+            direction="SHORT",
+            option_symbol="DOW260731P00029000",
+            option_type="PUT",
+            option_strike=29,
+            option_expiration="2026-07-31",
+            option_entry_premium=0.21,
+            option_quantity=1,
+            option_entry_cost=21,
+            option_contract_tier="Manual",
+            option_stop_premium=0.59,
+            option_exit_premium=0.59,
+            option_exit_value=59,
+            option_realized_pl=38,
+            option_realized_return_pct=180.9523,
+            suggested_option_type="PUT",
+            suggested_option_strike=30,
+            suggested_option_expiration="2026-07-31",
+            suggested_option_tier="Budget",
+            suggested_option_premium=0.18,
+            actual_option_type="PUT",
+            actual_option_strike=29,
+            actual_option_expiration="2026-07-31",
+            actual_option_entry_premium=0.21,
+            actual_option_quantity=1,
+        ))
+        assert created.status_code == 200
+        payload = created.json()
+        assert payload["option_symbol"] == "DOW260731P00029000"
+        assert payload["option_entry_cost"] == 21
+        assert payload["actual_option_strike"] == 29
+        assert payload["suggested_option_strike"] == 30
+        reloaded = repo.get_entry("contract-1")
+        assert reloaded["option_stop_premium"] == 0.59
+        assert reloaded["option_realized_pl"] == 38
+        assert reloaded["option_realized_return_pct"] == 180.9523
+    finally:
+        cleanup()
+        tmp.cleanup()
+
+
 if __name__ == "__main__":
     test_create_read_list_and_unknown_field_preservation()
     test_canonical_replay_fields_and_stale_cache_behavior()
@@ -443,4 +491,5 @@ if __name__ == "__main__":
     test_api_crud_migrate_filters_and_auth()
     test_multiple_trades_same_ticker_long_short_closed_reopened()
     test_no_scanner_discovery_option_or_alert_side_effects()
+    test_option_contract_fields_persist_through_server_journal()
     print("Journal persistence v1 tests passed")

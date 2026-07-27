@@ -32,6 +32,31 @@ NUMERIC_FIELDS = {
     "actual_option_premium",
     "actual_strike",
     "actual_quantity",
+    "option_strike",
+    "option_entry_premium",
+    "option_quantity",
+    "option_entry_cost",
+    "option_bid_at_entry",
+    "option_ask_at_entry",
+    "option_spread_at_entry",
+    "option_volume_at_entry",
+    "option_open_interest_at_entry",
+    "option_dte_at_entry",
+    "option_breakeven_at_entry",
+    "option_current_premium",
+    "option_current_value",
+    "option_unrealized_pl",
+    "option_unrealized_return_pct",
+    "option_stop_premium",
+    "option_exit_premium",
+    "option_exit_value",
+    "option_realized_pl",
+    "option_realized_return_pct",
+    "actual_option_strike",
+    "actual_option_entry_premium",
+    "actual_option_quantity",
+    "suggested_option_strike",
+    "suggested_option_premium",
     "position_best_price",
     "position_max_progress_percent",
 }
@@ -61,6 +86,19 @@ CANONICAL_REPLAY_FIELDS = {
     "actual_strike",
     "actual_expiration",
     "actual_quantity",
+    "actual_option_strike",
+    "actual_option_expiration",
+    "actual_option_entry_premium",
+    "actual_option_quantity",
+    "option_symbol",
+    "option_type",
+    "option_strike",
+    "option_expiration",
+    "option_entry_premium",
+    "option_quantity",
+    "option_entry_cost",
+    "option_exit_premium",
+    "option_realized_pl",
 }
 REPLAY_RELEVANT_FIELDS = {
     *CANONICAL_REPLAY_FIELDS,
@@ -85,6 +123,13 @@ REPLAY_RELEVANT_FIELDS = {
     "expiration_date",
     "expiry",
     "contracts",
+    "option_contract_tier",
+    "actual_option_contract_tier",
+    "suggested_option_type",
+    "suggested_option_strike",
+    "suggested_option_expiration",
+    "suggested_option_tier",
+    "suggested_option_premium",
 }
 
 
@@ -241,20 +286,28 @@ def canonicalize_replay_fields(payload: dict[str, Any]) -> dict[str, Any]:
         "original_tp1": ("original_tp1", "target_price", "plannedTp1", "tp1"),
         "original_tp2": ("original_tp2", "plannedTp2", "tp2"),
         "original_tp3": ("original_tp3", "plannedTp3", "tp3"),
-        "actual_option_premium": ("actual_option_premium", "actual_premium", "premium_paid", "askAtSelection"),
-        "actual_strike": ("actual_strike", "strike_price", "strike"),
-        "actual_quantity": ("actual_quantity", "contracts"),
+        "actual_option_premium": ("actual_option_premium", "actual_option_entry_premium", "option_entry_premium", "actual_premium", "premium_paid", "askAtSelection"),
+        "actual_strike": ("actual_strike", "actual_option_strike", "option_strike", "strike_price", "strike"),
+        "actual_quantity": ("actual_quantity", "actual_option_quantity", "option_quantity", "contracts"),
+        "actual_option_entry_premium": ("actual_option_entry_premium", "option_entry_premium", "actual_option_premium", "premium_paid", "askAtSelection"),
+        "actual_option_strike": ("actual_option_strike", "option_strike", "actual_strike", "strike_price", "strike"),
+        "actual_option_quantity": ("actual_option_quantity", "option_quantity", "actual_quantity", "contracts"),
     }
     for target, aliases in number_aliases.items():
         value = core_value(payload, *aliases)
         if value not in (None, ""):
             payload[target] = normalize_number(value, target)
-    expiration = core_value(payload, "actual_expiration", "expiration_date", "expiry")
+    expiration = core_value(payload, "actual_option_expiration", "option_expiration", "actual_expiration", "expiration_date", "expiry")
     if expiration not in (None, ""):
         payload["actual_expiration"] = str(expiration)
+        payload["actual_option_expiration"] = str(expiration)
     option_type = core_value(payload, "actual_option_type", "option_type", "optionType")
     if option_type not in (None, ""):
         payload["actual_option_type"] = str(option_type).upper()
+        payload["option_type"] = str(option_type).upper()
+    option_symbol = core_value(payload, "option_symbol", "option")
+    if option_symbol not in (None, ""):
+        payload["option_symbol"] = str(option_symbol)
     return payload
 
 
