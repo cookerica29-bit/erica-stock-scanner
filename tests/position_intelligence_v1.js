@@ -56,8 +56,11 @@ const context = {
   document: {
     body: { appendChild() {} },
     getElementById: () => elementStub(),
+    querySelector: () => null,
     querySelectorAll: () => [],
     createElement: () => elementStub(),
+    addEventListener() {},
+    removeEventListener() {},
   },
   navigator: { clipboard: { writeText: () => Promise.resolve() } },
 };

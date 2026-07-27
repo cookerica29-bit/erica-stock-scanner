@@ -6969,7 +6969,7 @@ function guidedNextStep(subject = {}, context = 'setup') {
 
 function guidedWhyItems(subject = {}, context = 'setup') {
   const items = [];
-  const direction = renderDirectionText(subject.direction);
+  const direction = simpleDirection(subject.direction);
   const trend = firstPresent(subject.stockTrend, subject.trendDirection, subject.trend_state, subject.trend, null);
   const location = firstPresent(subject.stockLocation, subject.setupLocation, subject.trade_eval?.location, null);
   const phase = firstPresent(subject.stockPhase, subject.phase, null);
@@ -7047,7 +7047,7 @@ function renderGuidedTradeChartBlock(subject = {}, context = 'setup') {
     <details class="guided-chart" data-guided-chart-key="${escapeHtml(key)}" ontoggle="handleGuidedChartToggle(this)">
       <summary aria-label="Open guided trade chart for ${escapeHtml(plan.symbol)}">
         <span class="guided-chart-title">View Trade Chart</span>
-        <span class="guided-chart-summary">${escapeHtml(renderDirectionText(plan.direction))} · ${escapeHtml(plan.status)} · Entry ${escapeHtml(fmtMoney(plan.entry))}</span>
+        <span class="guided-chart-summary">${escapeHtml(simpleDirection(plan.direction))} · ${escapeHtml(plan.status)} · Entry ${escapeHtml(fmtMoney(plan.entry))}</span>
       </summary>
       <div class="guided-chart-body" id="guidedChart-${escapeHtml(key)}">
         ${renderGuidedChartShell(key, plan, subject, context, signalAge)}
@@ -7096,7 +7096,7 @@ function renderGuidedChartShell(key, plan, subject, context, signalAge = '') {
   return `
     <div class="guided-chart-head">
       <div>
-        <div class="guided-chart-status">${escapeHtml(plan.symbol)} — ${escapeHtml(renderDirectionText(plan.direction))} · ${escapeHtml(plan.status)}</div>
+        <div class="guided-chart-status">${escapeHtml(plan.symbol)} — ${escapeHtml(simpleDirection(plan.direction))} · ${escapeHtml(plan.status)}</div>
         <div class="guided-chart-next"><strong>What happens next:</strong> ${escapeHtml(guidedNextStep(subject, context))}</div>
         <div class="guided-chart-next">${escapeHtml(guidedPriceContext(plan))}</div>
         ${guidedVerificationNote(subject, context) ? `<div class="guided-chart-next">${escapeHtml(guidedVerificationNote(subject, context))}</div>` : ''}
@@ -7374,7 +7374,7 @@ function renderGuidedTradeChartSvg(plan = {}, candles = [], meta = {}) {
   const riskRectH = Math.max(2, Math.abs(riskY2 - riskY1));
   const rewardRect = rewardY == null ? '' : `<rect class="guided-reward-zone" x="${left}" y="${Math.min(riskY1, rewardY).toFixed(1)}" width="${plotW}" height="${Math.max(2, Math.abs(rewardY - riskY1)).toFixed(1)}"></rect>`;
   return `
-    <svg class="guided-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(plan.symbol)} ${escapeHtml(renderDirectionText(plan.direction))} guided trade chart with planned entry, stop loss, targets, and current price">
+    <svg class="guided-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(plan.symbol)} ${escapeHtml(simpleDirection(plan.direction))} guided trade chart with planned entry, stop loss, targets, and current price">
       <rect x="0" y="0" width="${width}" height="${height}" fill="rgba(15,23,42,0.2)"></rect>
       ${rewardRect}
       <rect class="guided-risk-zone" x="${left}" y="${riskRectY.toFixed(1)}" width="${plotW}" height="${riskRectH.toFixed(1)}"></rect>
@@ -8140,6 +8140,124 @@ function renderPositionKvRows(items = []) {
   `).join('');
 }
 
+function positionEnteredEvidence(entry = {}, live = {}) {
+  return Boolean(
+    entry.actual_entry_at
+    || entry.position_opened_at
+    || entry.entered_at
+    || entry.entry_timestamp
+    || entry.position_entered_at
+    || entry.position_entered === true
+  );
+}
+
+function scannerStillWaitingForEntry(live = {}) {
+  const text = [live.currentEntryStatus, live.currentScannerStatus]
+    .filter(Boolean)
+    .join(' ')
+    .toUpperCase();
+  return text.includes('WAIT') || text.includes('NOT TOUCHED') || text.includes('NOT_REACHED') || text.includes('NOT REACHED');
+}
+
+function positionEntryReachedEvidence(entry = {}, live = {}) {
+  const currentR = coerceNumber(live.rNow);
+  return Boolean(
+    positionEnteredEvidence(entry, live)
+    || entry.first_entry_touch_at
+    || entry.entry_reached_at
+    || live.entryTouchedAt
+    || (currentR != null && currentR >= 0)
+    || (firstPresent(entry.actual_underlying_entry, null) != null && !scannerStillWaitingForEntry(live))
+  );
+}
+
+function positionIsClosed(entry = {}, live = {}) {
+  return (entry.result || 'Open') !== 'Open'
+    || entry.tracking_status === 'completed'
+    || Boolean(entry.completion_reason)
+    || Boolean(live.stopTouchedAt || entry.first_stop_touch_at);
+}
+
+function positionEntryState(model = {}) {
+  const entry = model.entry || {};
+  const live = model.live || {};
+  if (positionEnteredEvidence(entry, live)) return 'Entered';
+  if (positionEntryReachedEvidence(entry, live)) {
+    const touchAt = firstPresent(live.entryTouchedAt, entry.entry_reached_at, entry.first_entry_touch_at);
+    return touchAt ? `Entry reached ${formatShortDate(touchAt) || ''}`.trim() : 'Entry reached';
+  }
+  return 'Waiting for entry';
+}
+
+function positionTargetState(model = {}, targetKey = 'tp1') {
+  const entry = model.entry || {};
+  const live = model.live || {};
+  const touchAt = targetKey === 'tp1'
+    ? firstPresent(live.tp1TouchedAt, entry.tp1_reached_at, entry.first_target_touch_at)
+    : firstPresent(entry[`${targetKey}_reached_at`], entry[`first_${targetKey}_touch_at`]);
+  return touchAt ? `Reached ${formatShortDate(touchAt) || ''}`.trim() : 'Not reached';
+}
+
+function positionStopState(model = {}) {
+  const touchAt = firstPresent(model.live?.stopTouchedAt, model.entry?.first_stop_touch_at);
+  return touchAt ? `Reached ${formatShortDate(touchAt) || ''}`.trim() : 'Not reached';
+}
+
+function positionLifecycleStatus(model = {}) {
+  const entry = model.entry || {};
+  const live = model.live || {};
+  const entered = positionEntryReachedEvidence(entry, live);
+  const completion = String(entry.completion_reason || '').toLowerCase();
+  const outcome = String(firstPresent(entry.outcome, entry.result, '') || '').toUpperCase();
+  if (positionIsClosed(entry, live)) {
+    if (completion === 'stop' || outcome.includes('STOP') || outcome === 'LOSS' || live.stopTouchedAt || entry.first_stop_touch_at) return 'STOPPED';
+    if (outcome === 'TP3') return 'TP3 REACHED';
+    if (outcome === 'TP2') return 'TP2 REACHED';
+    if (completion === 'target' || outcome === 'TP1') return 'TP1 REACHED';
+    return 'CLOSED';
+  }
+  if (!entered && ['INVALIDATED', 'SKIP', 'NO TRADE'].includes(String(entry.entry_timing_state || '').toUpperCase())) {
+    return 'INVALIDATED BEFORE ENTRY';
+  }
+  if (!entered) return 'WAITING FOR ENTRY';
+  if (firstPresent(entry.tp3_reached_at, entry.first_tp3_touch_at)) return 'TP3 REACHED';
+  if (firstPresent(entry.tp2_reached_at, entry.first_tp2_touch_at)) return 'TP2 REACHED';
+  if (firstPresent(live.tp1TouchedAt, entry.tp1_reached_at, entry.first_target_touch_at, entry.position_tp1_reached ? true : null)) return 'TP1 REACHED';
+  if (live.rNow != null || live.currentPrice != null) return 'POSITION OPEN';
+  return 'MANAGING';
+}
+
+function currentScannerViewLabel(model = {}) {
+  const live = model.live || {};
+  return [live.currentScannerStatus, live.currentGrade ? `Grade ${live.currentGrade}` : null, live.currentEntryStatus]
+    .filter(Boolean)
+    .join(' · ') || 'No current scanner match';
+}
+
+function positionRRange(entry = {}, live = {}) {
+  const storedMfe = coerceNumber(firstPresent(entry.position_mfe_r, entry.maximum_favorable_excursion_r, live.mfeR));
+  const storedMae = coerceNumber(firstPresent(entry.position_mae_r, entry.maximum_adverse_excursion_r, live.maeR));
+  const currentR = coerceNumber(live.rNow);
+  let mfe = storedMfe;
+  let mae = storedMae;
+  if (currentR != null) {
+    mfe = mfe == null ? Math.max(0, currentR) : Math.max(mfe, currentR);
+    mae = mae == null ? Math.min(0, currentR) : Math.min(mae, currentR);
+  }
+  return {
+    mfe,
+    mae,
+    available: mfe != null || mae != null,
+    usedCurrentFallback: currentR != null && (storedMfe == null || storedMae == null),
+  };
+}
+
+function positionMfeMaeLabel(model = {}) {
+  const range = positionRRange(model.entry, model.live);
+  if (!range.available) return 'Tracking unavailable';
+  return `${formatRMultiple(range.mfe ?? 0)} / ${formatRMultiple(range.mae ?? 0)}`;
+}
+
 function positionContractLabel(plan = {}) {
   return [
     plan.optionType,
@@ -8408,13 +8526,18 @@ function renderPositionsTab() {
     const urgency = positionUrgency(model);
     const stripClass = positionProgressClass(model);
     const healthWarning = live.contractHealth?.warning || '—';
+    const lifecycleStatus = positionLifecycleStatus(model);
+    const enteredOrReached = positionEntryReachedEvidence(model.entry, live);
+    const closed = positionIsClosed(model.entry, live);
+    const canMarkTp1 = enteredOrReached && !closed && !live.tp1TouchedAt;
+    const canMoveStopToBE = enteredOrReached && !closed && live.rNow != null && live.rNow >= 1;
     return `
       <div class="execution-card position-card" data-position-id="${escapeHtml(String(model.id ?? ''))}">
         <div class="position-progress-strip ${stripClass}"></div>
         <div class="execution-card-head">
           <div>
             <div class="execution-ticker ticker-with-direction">${escapeHtml(plan.ticker || '—')} ${renderDirectionMarker(plan.direction)}</div>
-            <div class="execution-subtitle">${escapeHtml(firstPresent(live.tradeProgressStatus, 'WAITING'))} · ${live.rNow == null ? '—' : `${fmtNumber(live.rNow)}R`} · ${live.tradingDaysElapsed ?? '—'} trading days elapsed</div>
+            <div class="execution-subtitle">${escapeHtml(lifecycleStatus)} · ${live.rNow == null ? '—' : `${fmtNumber(live.rNow)}R`} · ${live.tradingDaysElapsed ?? '—'} trading days elapsed</div>
           </div>
           <div class="position-urgency ${urgency.className}">${escapeHtml(urgency.label)}</div>
         </div>
@@ -8429,7 +8552,7 @@ function renderPositionsTab() {
               ['TP1', fmtMoney(plan.tp1)],
               ['TP2', fmtMoney(plan.tp2)],
               ['TP3', fmtMoney(plan.tp3)],
-              ['Grade', plan.setupGrade],
+              ['Original Grade', plan.setupGrade],
               ['Reason', plan.setupGradeReason],
               ['Confirmation', [plan.confirmationStatus, plan.confirmationReason].filter(Boolean).join(' — ')],
               ['Sector', plan.sector],
@@ -8441,16 +8564,16 @@ function renderPositionsTab() {
           <div class="execution-section position-section live">
             <div class="execution-section-title">Live</div>
             ${renderPositionKvRows([
-              ['Now', fmtMoney(live.currentPrice)],
-              ['R Now', live.rNow == null ? '—' : `${fmtNumber(live.rNow)}R`],
-              ['MFE / MAE', `${fmtNumber(live.mfeR)}R / ${fmtNumber(live.maeR)}R`],
-              ['Entry', live.entryTouchedAt ? `Touched ${formatShortDate(live.entryTouchedAt)}` : 'Not touched'],
-              ['TP1', live.tp1TouchedAt ? `Touched ${formatShortDate(live.tp1TouchedAt)}` : 'Not reached'],
-              ['Stop', live.stopTouchedAt ? `Touched ${formatShortDate(live.stopTouchedAt)}` : 'Not reached'],
-              ['Current Status', live.currentScannerStatus],
-              ['Current Grade', live.currentGrade],
-              ['Current Entry Status', live.currentEntryStatus],
+              ['Position Status', lifecycleStatus],
+              ['Current Price', fmtMoney(live.currentPrice)],
+              ['Current R', live.rNow == null ? '—' : formatRMultiple(live.rNow)],
+              ['MFE / MAE', positionMfeMaeLabel(model)],
+              ['Entry State', positionEntryState(model)],
+              ['TP1 State', positionTargetState(model, 'tp1')],
+              ['Stop State', positionStopState(model)],
               ['Elapsed', `${live.tradingDaysElapsed ?? '—'} trading days · ${live.barsElapsed ?? '—'} bars`],
+              ['Current Scanner View', currentScannerViewLabel(model)],
+              ['Current Scanner Grade', live.currentGrade ? `Grade ${live.currentGrade}` : '—'],
             ])}
           </div>
           <div class="execution-section position-section contract">
@@ -8469,8 +8592,8 @@ function renderPositionsTab() {
           </div>
         </div>
         <div class="position-actions">
-          <button class="btn-secondary" onclick="updatePositionLifecycleFromButton(this, 'tp1')">Mark TP1</button>
-          <button class="btn-ghost" onclick="updatePositionLifecycleFromButton(this, 'breakeven')">Move Stop to BE</button>
+          <button class="btn-secondary" onclick="updatePositionLifecycleFromButton(this, 'tp1')" ${canMarkTp1 ? '' : 'disabled'}>Mark TP1</button>
+          <button class="btn-ghost" onclick="updatePositionLifecycleFromButton(this, 'breakeven')" ${canMoveStopToBE ? '' : 'disabled'}>Move Stop to BE</button>
           <button class="btn-danger" onclick="updatePositionLifecycleFromButton(this, 'manual')">Close or Edit</button>
         </div>
         ${renderPositionAlertControls(model)}
@@ -9513,6 +9636,8 @@ function defaultTrackingFields(startedAt = null) {
     position_last_evaluated_at: null,
     position_best_price: null,
     position_max_progress_percent: null,
+    position_mfe_r: null,
+    position_mae_r: null,
     position_tp1_reached: false,
     position_state_history: [],
   };
@@ -10288,6 +10413,17 @@ function syncPositionIntelligenceHistory(models = []) {
       changed = true;
     }
     if (intel.max_progress_percent != null) updated.position_max_progress_percent = intel.max_progress_percent;
+    const range = positionRRange(updated, { rNow: intel.current_r });
+    if (range.mfe != null && updated.position_mfe_r !== range.mfe) {
+      updated.position_mfe_r = range.mfe;
+      if (updated.maximum_favorable_excursion_r == null) updated.maximum_favorable_excursion_r = range.mfe;
+      changed = true;
+    }
+    if (range.mae != null && updated.position_mae_r !== range.mae) {
+      updated.position_mae_r = range.mae;
+      if (updated.maximum_adverse_excursion_r == null) updated.maximum_adverse_excursion_r = range.mae;
+      changed = true;
+    }
     if (intel.tp1_reached && !updated.position_tp1_reached) {
       updated.position_tp1_reached = true;
       changed = true;
@@ -10441,8 +10577,8 @@ function positionLiveSide(entry = {}, latestSetup = null) {
     currentEntryStatus: latestSetup ? firstPresent(latestSetup.entryStatus, latestSetup.entry_status, null) : null,
     mfe: coerceNumber(entry.maximum_favorable_excursion),
     mae: coerceNumber(entry.maximum_adverse_excursion),
-    mfeR: coerceNumber(entry.maximum_favorable_excursion_r),
-    maeR: coerceNumber(entry.maximum_adverse_excursion_r),
+    mfeR: coerceNumber(firstPresent(entry.position_mfe_r, entry.maximum_favorable_excursion_r)),
+    maeR: coerceNumber(firstPresent(entry.position_mae_r, entry.maximum_adverse_excursion_r)),
     rNow: rNowForPosition(entry, currentPrice),
     entryTouchedAt: firstPresent(entry.first_entry_touch_at, entry.entry_reached_at, null),
     tp1TouchedAt: firstPresent(entry.first_target_touch_at, entry.tp1_reached_at, null),
@@ -11291,6 +11427,8 @@ function migrateJournalEntry(entry = {}) {
   migrated.position_last_evaluated_at = migrated.position_last_evaluated_at ?? null;
   migrated.position_best_price = coerceNumber(migrated.position_best_price);
   migrated.position_max_progress_percent = coerceNumber(migrated.position_max_progress_percent);
+  migrated.position_mfe_r = coerceNumber(migrated.position_mfe_r);
+  migrated.position_mae_r = coerceNumber(migrated.position_mae_r);
   migrated.position_tp1_reached = Boolean(migrated.position_tp1_reached);
   migrated.position_state_history = Array.isArray(migrated.position_state_history) ? migrated.position_state_history : [];
 
