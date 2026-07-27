@@ -1255,10 +1255,114 @@
     line-height:1.35;
     margin-top:8px;
   }
+  .active-dashboard { display:grid; gap:14px; }
+  .active-dashboard-head {
+    background:rgba(15,23,42,0.52);
+    border:1px solid rgba(148,163,184,0.14);
+    border-radius:10px;
+    padding:12px;
+  }
+  .active-dashboard-title { color:var(--text); font-size:16px; font-weight:950; letter-spacing:.04em; text-transform:uppercase; }
+  .active-dashboard-note { color:var(--muted); font-size:11px; line-height:1.45; margin-top:8px; }
+  .active-dashboard-stats { display:grid; gap:8px; grid-template-columns:repeat(6, minmax(0, 1fr)); margin-top:12px; }
+  .active-dashboard-stat {
+    background:rgba(2,6,23,0.24);
+    border:1px solid rgba(148,163,184,0.10);
+    border-radius:8px;
+    min-width:0;
+    padding:9px;
+  }
+  .active-dashboard-stat label { color:var(--muted); display:block; font-size:9.5px; font-weight:850; letter-spacing:.04em; text-transform:uppercase; }
+  .active-dashboard-stat strong { color:var(--text); display:block; font-size:15px; font-weight:950; margin-top:5px; }
+  .active-dashboard-stat strong.positive { color:#86efac; }
+  .active-dashboard-stat strong.negative { color:#fca5a5; }
+  .profit-protection {
+    background:rgba(2,6,23,0.22);
+    border:1px solid rgba(148,163,184,0.10);
+    border-radius:8px;
+    margin-top:10px;
+    padding:10px;
+  }
+  .profit-protection-row { align-items:center; display:flex; gap:10px; justify-content:space-between; }
+  .profit-protection-title { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
+  .profit-protection-values { color:var(--text); font-size:12px; font-weight:850; text-align:right; }
+  .profit-protection-bar { background:rgba(148,163,184,0.15); border-radius:999px; height:9px; margin-top:8px; overflow:hidden; }
+  .profit-protection-bar span { display:block; float:left; height:100%; }
+  .profit-protection-bar .protected { background:#22c55e; }
+  .profit-protection-bar .unprotected { background:#f59e0b; }
+  .active-filter-row { display:flex; flex-wrap:wrap; gap:8px; }
+  .active-filter-row button {
+    background:rgba(15,23,42,0.6);
+    border:1px solid rgba(148,163,184,0.18);
+    border-radius:999px;
+    color:var(--muted);
+    font-size:11px;
+    font-weight:850;
+    padding:8px 10px;
+  }
+  .active-filter-row button.active { background:rgba(139,92,246,0.18); border-color:rgba(139,92,246,0.46); color:var(--text); }
+  .active-card-grid { display:grid; gap:12px; }
+  .active-trade-card {
+    background:linear-gradient(180deg, rgba(65,80,106,0.98), rgba(43,54,72,0.94));
+    border:1px solid rgba(148,163,184,0.16);
+    border-radius:12px;
+    box-shadow:var(--card-shadow);
+    padding:13px;
+  }
+  .active-trade-card.needs-action { border-color:rgba(245,158,11,0.42); }
+  .active-trade-card.at-risk { border-color:rgba(239,68,68,0.48); }
+  .active-trade-head { align-items:flex-start; display:flex; gap:12px; justify-content:space-between; }
+  .active-trade-symbol { color:var(--text); font-size:19px; font-weight:950; }
+  .active-trade-contract { color:var(--muted); font-size:12px; margin-top:3px; }
+  .active-status-pill {
+    border:1px solid rgba(148,163,184,0.24);
+    border-radius:999px;
+    color:var(--text);
+    font-size:10px;
+    font-weight:950;
+    padding:5px 8px;
+    text-transform:uppercase;
+    white-space:nowrap;
+  }
+  .active-status-pill.healthy { border-color:rgba(34,197,94,0.36); color:#86efac; }
+  .active-status-pill.needs-attention,
+  .active-status-pill.expiring-soon,
+  .active-status-pill.missing-data { border-color:rgba(245,158,11,0.42); color:#fbbf24; }
+  .active-status-pill.at-risk { border-color:rgba(239,68,68,0.48); color:#fca5a5; }
+  .active-card-sections { display:grid; gap:10px; grid-template-columns:repeat(3, minmax(0,1fr)); margin-top:11px; }
+  .active-card-section {
+    background:rgba(2,6,23,0.20);
+    border:1px solid rgba(148,163,184,0.08);
+    border-radius:8px;
+    min-width:0;
+    padding:9px;
+  }
+  .active-card-title { color:var(--muted); font-size:9.5px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
+  .active-kv { align-items:baseline; display:flex; gap:8px; justify-content:space-between; margin-top:7px; }
+  .active-kv span:first-child { color:var(--muted); font-size:11px; }
+  .active-kv span:last-child { color:var(--text); font-size:12px; font-weight:900; text-align:right; }
+  .active-kv .positive { color:#86efac; }
+  .active-kv .negative { color:#fca5a5; }
+  .active-attention {
+    background:rgba(245,158,11,0.10);
+    border:1px solid rgba(245,158,11,0.20);
+    border-radius:8px;
+    color:#fde68a;
+    font-size:12px;
+    line-height:1.45;
+    margin-top:10px;
+    padding:9px;
+  }
+  .active-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
+  .active-actions button { flex:1 1 132px; }
   @media (max-width: 900px) {
     .position-card-grid { grid-template-columns:1fr; }
     .option-update-grid { grid-template-columns:1fr 1fr; }
     .position-manager-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .active-dashboard-stats { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+    .active-card-sections { grid-template-columns:1fr; }
+    .active-filter-row { flex-wrap:nowrap; overflow-x:auto; padding-bottom:2px; }
+    .active-filter-row button { flex:0 0 auto; }
   }
   .execution-empty {
     background:rgba(15,23,42,0.75);
@@ -3317,8 +3421,7 @@
   <button class="tab-btn" data-tab="execution" onclick="switchTab('execution')">Execution</button>
   <button class="tab-btn" data-tab="further" onclick="switchTab('further')">Further Analysis</button>
   <button class="tab-btn" data-tab="journal" onclick="switchTab('journal')">Journal</button>
-  <button class="tab-btn" data-tab="positions" onclick="switchTab('positions')">Positions</button>
-  <button class="tab-btn" data-tab="activeTrades" onclick="switchTab('activeTrades')">Active Trades</button>
+  <button class="tab-btn" data-tab="positions" onclick="switchTab('positions')">Active Trades</button>
   <button class="tab-btn" data-tab="analytics" onclick="switchTab('analytics')">Analytics</button>
   <button class="tab-btn" data-tab="diagnostics" onclick="switchTab('diagnostics')">Diagnostics</button>
   <button class="tab-btn" id="positionReplayTabButton" data-tab="positionReplay" onclick="switchTab('positionReplay')">Position Replay</button>
@@ -3556,8 +3659,8 @@
   <div class="execution-panel">
     <div class="execution-head">
       <div>
-        <div class="execution-title">Positions</div>
-        <div class="execution-subtitle">Open journal positions compared against their original locked plan and the latest loaded scanner state.</div>
+        <div class="execution-title">Active Trades</div>
+        <div class="execution-subtitle">Open option positions summarized from the journal, live option updates, Position Manager, and the latest loaded scanner state.</div>
       </div>
       <button class="btn-secondary" onclick="renderPositionsTab()">Refresh View</button>
     </div>
@@ -8401,6 +8504,383 @@ function sortPositionModels(models = []) {
   });
 }
 
+let activeTradeDashboardFilter = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('kairos_active_trade_filter')) || 'all';
+
+function activeMoneyLabel(value) {
+  const n = coerceNumber(value);
+  if (n == null) return 'Unavailable';
+  return formatSignedMoney(n);
+}
+
+function activePercentLabel(value) {
+  const n = coerceNumber(value);
+  if (n == null) return 'Unavailable';
+  return formatSignedPercent(n);
+}
+
+function activeValueClass(value) {
+  const n = coerceNumber(value);
+  if (n == null || n === 0) return '';
+  return n > 0 ? 'positive' : 'negative';
+}
+
+function activePositionAttention(model = {}) {
+  const plan = model.plan || {};
+  const live = model.live || {};
+  const intel = model.position_intelligence || {};
+  const actual = plan.actualContract || {};
+  const reasons = [];
+  const add = (code, message, priority = 50) => reasons.push({ code, message, priority });
+  const currentPremium = coerceNumber(actual.currentPremium);
+  const entryPremium = coerceNumber(actual.entryPremium);
+  const stopPremium = coerceNumber(actual.stopPremium);
+  const unrealizedPl = coerceNumber(actual.unrealizedPl);
+
+  if (!actual.attached) add('NO_OPTION_CONTRACT', 'No option contract is attached.', 80);
+  if (actual.attached && entryPremium == null) add('MISSING_ENTRY_PREMIUM', 'Entry premium is unavailable.', 80);
+  if (actual.attached && !(coerceInteger(actual.quantity) > 0)) add('MISSING_QUANTITY', 'Option quantity is unavailable.', 80);
+  if (actual.attached && currentPremium == null) add('MISSING_CURRENT_PREMIUM', 'Current option premium has not been updated.', 70);
+  if (actual.attached && unrealizedPl != null && unrealizedPl > 0 && stopPremium == null) add('MISSING_OPTION_STOP', 'Option stop has not been set.', 45);
+  if (actual.attached && currentPremium != null && stopPremium != null && currentPremium <= stopPremium) add('OPTION_STOP_TRIGGERED', 'Current premium is at or below the stored option stop.', 5);
+  if (live.stopTouchedAt || intel.reason_code === 'STOP_INVALIDATED' || intel.state === 'EXIT') add('UNDERLYING_STOP_BREACHED', 'Underlying stop has been breached.', 5);
+  if (intel.tp1_reached && !model.entry?.position_tp1_reached && !model.entry?.first_target_touch_at) add('TP1_UNRECORDED', 'TP1 appears reached but has not been recorded.', 30);
+  if (intel.next_action && !['HOLD', 'MONITOR'].includes(String(intel.next_action).toUpperCase())) add('POSITION_MANAGER_ACTION', `Position Manager says ${intel.next_action_label || 'review position'}.`, 35);
+  if (live.contractDteRemaining != null && live.contractDteRemaining <= 7) add('EXPIRING_SOON', `${live.contractDteRemaining} calendar days remaining.`, 20);
+  if (intel.reason_code === 'INVALID_POSITION_GEOMETRY' || intel.reason_code === 'MISSING_POSITION_DATA') add('INCOMPLETE_POSITION_DATA', intel.triggered_rule || 'Position data is incomplete or contradictory.', 75);
+
+  reasons.sort((a, b) => a.priority - b.priority || a.code.localeCompare(b.code));
+  return reasons;
+}
+
+function activePositionStatus(attention = []) {
+  if (attention.some(reason => ['OPTION_STOP_TRIGGERED', 'UNDERLYING_STOP_BREACHED'].includes(reason.code))) return 'At Risk';
+  if (attention.some(reason => reason.code === 'EXPIRING_SOON')) return 'Expiring Soon';
+  if (attention.some(reason => ['NO_OPTION_CONTRACT', 'MISSING_ENTRY_PREMIUM', 'MISSING_QUANTITY', 'MISSING_CURRENT_PREMIUM', 'INCOMPLETE_POSITION_DATA'].includes(reason.code))) return 'Missing Data';
+  if (attention.length) return 'Needs Attention';
+  return 'Healthy';
+}
+
+function activeDashboardPriority(vm = {}) {
+  const codes = new Set((vm.attention_reasons || []).map(reason => reason.code));
+  if (codes.has('OPTION_STOP_TRIGGERED') || codes.has('UNDERLYING_STOP_BREACHED')) return 0;
+  if (codes.has('EXPIRING_SOON')) return 1;
+  if (vm.needs_action) return 2;
+  if (vm.option_unprotected_pl != null && vm.option_unprotected_pl > 0) return 3;
+  if (vm.option_unrealized_pl != null && vm.option_unrealized_pl < 0) return 4;
+  return 5;
+}
+
+function activeDashboardViewModel(model = {}) {
+  const plan = model.plan || {};
+  const live = model.live || {};
+  const intel = model.position_intelligence || {};
+  const actual = plan.actualContract || {};
+  const attention = activePositionAttention(model);
+  const currentPositive = Math.max(coerceNumber(actual.unrealizedPl) || 0, 0);
+  const protectedPositive = Math.min(currentPositive, Math.max(coerceNumber(actual.protectedPl) || 0, 0));
+  const unprotected = currentPositive - protectedPositive;
+  const status = activePositionStatus(attention);
+  const updatedAtRaw = firstPresent(model.entry?.updatedAt, model.entry?.updated_at, model.entry?.position_last_evaluated_at, model.entry?.createdAt, model.entry?.created_at);
+  const updatedAt = updatedAtRaw ? Date.parse(updatedAtRaw) : positionOpenedAtMs(model);
+  const vm = {
+    model,
+    journal_id: model.id,
+    setup_id: model.entry?.setup_id,
+    ticker: plan.ticker,
+    direction: plan.direction,
+    position_lifecycle: positionLifecycleStatus(model),
+    position_health: intel.state_label || positionStateLabel(intel.state),
+    dashboard_status: status,
+    attention_reasons: attention,
+    needs_action: attention.length > 0,
+    recommendation: intel.next_action_label || 'Review Position',
+    original_grade: plan.setupGrade,
+    current_scanner_grade: live.currentGrade,
+    current_scanner_status: live.currentScannerStatus,
+    current_scanner_entry_status: live.currentEntryStatus,
+    option_contract_label: positionContractLabel(plan),
+    option_quantity: actual.quantity,
+    option_entry_premium: actual.entryPremium,
+    option_current_premium: actual.currentPremium,
+    option_stop_premium: actual.stopPremium,
+    option_entry_cost: actual.entryCost,
+    option_current_value: actual.currentValue,
+    option_unrealized_pl: actual.unrealizedPl,
+    option_unrealized_return_pct: actual.unrealizedReturnPct,
+    option_protected_pl: actual.protectedPl,
+    option_protected_return_pct: actual.protectedReturnPct,
+    option_unprotected_pl: unprotected,
+    option_dte_remaining: live.contractDteRemaining,
+    underlying_entry: plan.entryPrice,
+    underlying_current_price: live.currentPrice,
+    underlying_stop: plan.stopPrice,
+    underlying_current_r: live.rNow,
+    mfe_r: positionRRange(model.entry, live).mfe,
+    mae_r: positionRRange(model.entry, live).mae,
+    tp1_progress_pct: intel.progress_to_tp1?.display_percent,
+    opportunity_remaining_pct: intel.position_opportunity_remaining,
+    updated_at: Number.isFinite(updatedAt) ? updatedAt : 0,
+  };
+  vm.priority = activeDashboardPriority(vm);
+  return vm;
+}
+
+function activeDashboardPortfolio(vms = []) {
+  const usablePnl = vms.filter(vm => vm.option_unrealized_pl != null);
+  const usableCapital = vms.filter(vm => vm.option_entry_cost != null);
+  const currentPnl = usablePnl.reduce((sum, vm) => sum + vm.option_unrealized_pl, 0);
+  const capital = usableCapital.reduce((sum, vm) => sum + vm.option_entry_cost, 0);
+  const protectedProfit = vms.reduce((sum, vm) => {
+    const currentPositive = Math.max(coerceNumber(vm.option_unrealized_pl) || 0, 0);
+    const protectedPositive = Math.min(currentPositive, Math.max(coerceNumber(vm.option_protected_pl) || 0, 0));
+    return sum + protectedPositive;
+  }, 0);
+  const currentPositiveTotal = vms.reduce((sum, vm) => sum + Math.max(coerceNumber(vm.option_unrealized_pl) || 0, 0), 0);
+  return {
+    open_positions: vms.length,
+    current_option_pl: usablePnl.length ? currentPnl : null,
+    protected_profit: usablePnl.length ? protectedProfit : null,
+    unprotected_profit: usablePnl.length ? Math.max(0, currentPositiveTotal - protectedProfit) : null,
+    capital_in_open_trades: usableCapital.length ? capital : null,
+    positions_needing_action: vms.filter(vm => vm.needs_action).length,
+    usable_pnl_count: usablePnl.length,
+    usable_capital_count: usableCapital.length,
+  };
+}
+
+function activeDashboardFilterMatches(vm = {}, filter = activeTradeDashboardFilter) {
+  const codes = new Set((vm.attention_reasons || []).map(reason => reason.code));
+  if (filter === 'needsAction') return vm.needs_action;
+  if (filter === 'profitable') return coerceNumber(vm.option_unrealized_pl) != null && vm.option_unrealized_pl > 0;
+  if (filter === 'losing') return coerceNumber(vm.option_unrealized_pl) != null && vm.option_unrealized_pl < 0;
+  if (filter === 'expiringSoon') return codes.has('EXPIRING_SOON');
+  if (filter === 'missingData') return ['NO_OPTION_CONTRACT', 'MISSING_ENTRY_PREMIUM', 'MISSING_QUANTITY', 'MISSING_CURRENT_PREMIUM', 'INCOMPLETE_POSITION_DATA'].some(code => codes.has(code));
+  return true;
+}
+
+function sortActiveDashboardCards(vms = []) {
+  return vms.slice().sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    return b.updated_at - a.updated_at;
+  });
+}
+
+function setActiveTradeFilter(filter) {
+  activeTradeDashboardFilter = filter || 'all';
+  if (typeof sessionStorage !== 'undefined') sessionStorage.setItem('kairos_active_trade_filter', activeTradeDashboardFilter);
+  renderPositionsTab();
+}
+
+function activeStatusClass(label = '') {
+  return String(label || '').toLowerCase().replace(/\s+/g, '-');
+}
+
+function renderDashboardMetric(label, value, className = '') {
+  return `<div class="active-dashboard-stat"><label>${escapeHtml(label)}</label><strong class="${escapeHtml(className)}">${escapeHtml(value)}</strong></div>`;
+}
+
+function renderProfitProtection(portfolio = {}) {
+  const currentPositive = Math.max(coerceNumber(portfolio.protected_profit) || 0, 0) + Math.max(coerceNumber(portfolio.unprotected_profit) || 0, 0);
+  const protectedPct = currentPositive > 0 ? Math.min(100, ((portfolio.protected_profit || 0) / currentPositive) * 100) : 0;
+  const unprotectedPct = currentPositive > 0 ? Math.max(0, 100 - protectedPct) : 0;
+  return `
+    <div class="profit-protection">
+      <div class="profit-protection-row">
+        <div class="profit-protection-title">Open Profit</div>
+        <div class="profit-protection-values">Current ${portfolio.current_option_pl == null ? 'Unavailable' : activeMoneyLabel(portfolio.current_option_pl)} · Protected ${portfolio.protected_profit == null ? 'Unavailable' : activeMoneyLabel(portfolio.protected_profit)} · Unprotected ${portfolio.unprotected_profit == null ? 'Unavailable' : activeMoneyLabel(portfolio.unprotected_profit)}</div>
+      </div>
+      <div class="profit-protection-bar" aria-label="Protected and unprotected open profit">
+        <span class="protected" style="width:${protectedPct}%"></span>
+        <span class="unprotected" style="width:${unprotectedPct}%"></span>
+      </div>
+    </div>`;
+}
+
+function renderActiveDashboardHeader(portfolio = {}) {
+  return `
+    <div class="active-dashboard-head">
+      <div class="active-dashboard-title">Active Trades</div>
+      <div class="active-dashboard-stats">
+        ${renderDashboardMetric('Open Positions', String(portfolio.open_positions))}
+        ${renderDashboardMetric('Current Option P/L', portfolio.current_option_pl == null ? 'Unavailable' : activeMoneyLabel(portfolio.current_option_pl), activeValueClass(portfolio.current_option_pl))}
+        ${renderDashboardMetric('Protected Profit', portfolio.protected_profit == null ? 'Unavailable' : activeMoneyLabel(portfolio.protected_profit), activeValueClass(portfolio.protected_profit))}
+        ${renderDashboardMetric('Unprotected Profit', portfolio.unprotected_profit == null ? 'Unavailable' : activeMoneyLabel(portfolio.unprotected_profit), activeValueClass(portfolio.unprotected_profit))}
+        ${renderDashboardMetric('Capital in Open Trades', portfolio.capital_in_open_trades == null ? 'Unavailable' : fmtMoney(portfolio.capital_in_open_trades))}
+        ${renderDashboardMetric('Positions Needing Action', String(portfolio.positions_needing_action), portfolio.positions_needing_action ? 'negative' : 'positive')}
+      </div>
+      ${renderProfitProtection(portfolio)}
+      <div class="active-dashboard-note">
+        Protected profit is estimated from stop premiums. Actual fills may differ.
+        ${portfolio.usable_pnl_count ? '' : 'No active positions currently have enough option premium data for portfolio P/L.'}
+      </div>
+    </div>`;
+}
+
+function renderActiveFilterRow(vms = []) {
+  const filters = [
+    ['all', 'All'],
+    ['needsAction', 'Needs Action'],
+    ['profitable', 'Profitable'],
+    ['losing', 'Losing'],
+    ['expiringSoon', 'Expiring Soon'],
+    ['missingData', 'Missing Data'],
+  ];
+  return `<div class="active-filter-row" role="tablist" aria-label="Active trade filters">
+    ${filters.map(([key, label]) => {
+      const count = vms.filter(vm => activeDashboardFilterMatches(vm, key)).length;
+      return `<button type="button" class="${activeTradeDashboardFilter === key ? 'active' : ''}" onclick="setActiveTradeFilter('${key}')">${escapeHtml(label)} ${count}</button>`;
+    }).join('')}
+  </div>`;
+}
+
+function renderActiveKv(label, value, className = '') {
+  return `<div class="active-kv"><span>${escapeHtml(label)}</span><span class="${escapeHtml(className)}">${escapeHtml(value)}</span></div>`;
+}
+
+function toggleDashboardDetailsFromButton(button) {
+  const id = optionPositionDomId(button?.closest('[data-position-id]')?.dataset?.positionId);
+  const details = document.getElementById(`activeDetails-${id}`);
+  if (details) {
+    details.open = true;
+    details.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function renderActiveDashboardCard(vm = {}) {
+  const model = vm.model;
+  const urgency = positionUrgency(model);
+  const lifecycleStatus = vm.position_lifecycle;
+  const enteredOrReached = positionEntryReachedEvidence(model.entry, model.live);
+  const closed = positionIsClosed(model.entry, model.live);
+  const canMarkTp1 = enteredOrReached && !closed && !model.live.tp1TouchedAt;
+  const canMoveStopToBE = enteredOrReached && !closed && model.live.rNow != null && model.live.rNow >= 1;
+  const firstReason = vm.attention_reasons[0];
+  const statusClass = activeStatusClass(vm.dashboard_status);
+  const cardClass = vm.dashboard_status === 'At Risk' ? 'at-risk' : vm.needs_action ? 'needs-action' : '';
+  const id = optionPositionDomId(vm.journal_id);
+  const protectedLabel = vm.option_protected_pl == null
+    ? 'Unavailable'
+    : vm.option_protected_pl >= 0
+      ? activeMoneyLabel(vm.option_protected_pl)
+      : `Risk at option stop: ${activeMoneyLabel(vm.option_protected_pl)}`;
+  return `
+    <div class="active-trade-card ${cardClass}" data-position-id="${escapeHtml(String(vm.journal_id ?? ''))}">
+      <div class="active-trade-head">
+        <div>
+          <div class="active-trade-symbol">${escapeHtml(vm.ticker || '—')}</div>
+          <div class="active-trade-contract">${escapeHtml(vm.option_contract_label || 'No option contract attached')} · ${vm.option_quantity ? `${escapeHtml(String(vm.option_quantity))} contract${vm.option_quantity === 1 ? '' : 's'}` : 'Quantity unavailable'}</div>
+        </div>
+        <div class="active-status-pill ${statusClass}">${escapeHtml(vm.dashboard_status)}</div>
+      </div>
+      ${firstReason ? `<div class="active-attention"><strong>${vm.dashboard_status === 'Healthy' ? 'Status' : 'Needs attention'}</strong><br>${escapeHtml(firstReason.message)}</div>` : ''}
+      <div class="active-card-sections">
+        <div class="active-card-section">
+          <div class="active-card-title">Option Performance</div>
+          ${renderActiveKv('Current Return', activePercentLabel(vm.option_unrealized_return_pct), activeValueClass(vm.option_unrealized_return_pct))}
+          ${renderActiveKv('Unrealized P/L', activeMoneyLabel(vm.option_unrealized_pl), activeValueClass(vm.option_unrealized_pl))}
+          ${renderActiveKv('Protected Profit', protectedLabel, activeValueClass(vm.option_protected_pl))}
+          ${renderActiveKv('Unprotected Profit', vm.option_unprotected_pl == null ? 'Unavailable' : activeMoneyLabel(vm.option_unprotected_pl), activeValueClass(vm.option_unprotected_pl))}
+          ${renderActiveKv('Current / Stop', `${vm.option_current_premium == null ? 'Not updated' : fmtMoney(vm.option_current_premium)} / ${vm.option_stop_premium == null ? 'Not updated' : fmtMoney(vm.option_stop_premium)}`)}
+        </div>
+        <div class="active-card-section">
+          <div class="active-card-title">Underlying Progress</div>
+          ${renderActiveKv('Current R', vm.underlying_current_r == null ? 'Unavailable' : formatRMultiple(vm.underlying_current_r), activeValueClass(vm.underlying_current_r))}
+          ${renderActiveKv('Progress to TP1', vm.tp1_progress_pct == null ? 'Unavailable' : `${fmtNumber(vm.tp1_progress_pct)}%`)}
+          ${renderActiveKv('Opportunity Remaining', vm.opportunity_remaining_pct == null ? 'Unavailable' : `${fmtNumber(vm.opportunity_remaining_pct)}%`)}
+          ${renderActiveKv('MFE / MAE', positionMfeMaeLabel(model))}
+        </div>
+        <div class="active-card-section">
+          <div class="active-card-title">Position Status</div>
+          ${renderActiveKv('Health', vm.position_health || 'Unavailable')}
+          ${renderActiveKv('Recommendation', vm.recommendation || 'Review Position')}
+          ${renderActiveKv('Original Setup', [vm.original_grade ? `Grade ${vm.original_grade}` : null, vm.direction, lifecycleStatus].filter(Boolean).join(' · ') || 'Unavailable')}
+          ${renderActiveKv('Current Scanner View', currentScannerViewLabel(model))}
+        </div>
+      </div>
+      <div class="active-card-section" style="margin-top:10px;">
+        <div class="active-card-title">Next Action</div>
+        <div class="option-position-note">${escapeHtml(firstReason?.message || vm.recommendation || 'Continue managing position.')}</div>
+      </div>
+      <div class="active-actions">
+        <button class="btn-secondary" onclick="toggleDashboardDetailsFromButton(this)">Update Option</button>
+        <button class="btn-secondary" onclick="toggleDashboardDetailsFromButton(this)">Open Position Manager</button>
+        <button class="btn-ghost" onclick="updatePositionLifecycleFromButton(this, 'tp1')" ${canMarkTp1 ? '' : 'disabled'}>Mark TP1</button>
+        <button class="btn-ghost" onclick="updatePositionLifecycleFromButton(this, 'breakeven')" ${canMoveStopToBE ? '' : 'disabled'}>Move Underlying Stop to BE</button>
+        <button class="btn-danger" onclick="updatePositionLifecycleFromButton(this, 'manual')">Close Position</button>
+      </div>
+      <details class="position-details" id="activeDetails-${id}">
+        <summary>Detailed Position Manager</summary>
+        ${renderPositionManagerBlock(model)}
+        ${renderGuidedTradeChartBlock(guidedSubjectFromPositionModel(model), 'position')}
+        <div class="position-card-grid">
+          <div class="execution-section position-section plan">
+            <div class="execution-section-title">Plan</div>
+            ${renderPositionKvRows([
+              ['Entry', fmtMoney(model.plan.entryPrice)],
+              ['Stop', fmtMoney(model.plan.stopPrice)],
+              ['TP1', fmtMoney(model.plan.tp1)],
+              ['TP2', fmtMoney(model.plan.tp2)],
+              ['TP3', fmtMoney(model.plan.tp3)],
+              ['Original Grade', model.plan.setupGrade],
+              ['Reason', model.plan.setupGradeReason],
+              ['Confirmation', [model.plan.confirmationStatus, model.plan.confirmationReason].filter(Boolean).join(' — ')],
+              ['Sector', model.plan.sector],
+              ['Opportunity at Entry', model.plan.opportunityRemainingAtEntry == null ? '—' : `${fmtNumber(model.plan.opportunityRemainingAtEntry)}%`],
+            ])}
+          </div>
+          <div class="execution-section position-section live">
+            <div class="execution-section-title">Live</div>
+            ${renderPositionKvRows([
+              ['Position Status', lifecycleStatus],
+              ['Current Price', fmtMoney(model.live.currentPrice)],
+              ['Current R', model.live.rNow == null ? '—' : formatRMultiple(model.live.rNow)],
+              ['MFE / MAE', positionMfeMaeLabel(model)],
+              ['Entry State', positionEntryState(model)],
+              ['TP1 State', positionTargetState(model, 'tp1')],
+              ['Stop State', positionStopState(model)],
+              ['Elapsed', `${model.live.tradingDaysElapsed ?? '—'} trading days · ${model.live.barsElapsed ?? '—'} bars`],
+              ['Current Scanner View', currentScannerViewLabel(model)],
+              ['Current Scanner Grade', model.live.currentGrade ? `Grade ${model.live.currentGrade}` : '—'],
+            ])}
+          </div>
+          ${renderOptionPositionSection(model)}
+          <div class="execution-section position-section contract">
+            <div class="execution-section-title">Contract</div>
+            <div class="execution-contract-main">${escapeHtml(positionContractLabel(model.plan))}</div>
+            ${renderPositionKvRows([
+              ['Expected Window', expectedMoveWindowLabel(model.plan)],
+              ['Health', model.live.contractHealth?.status || '—'],
+            ])}
+            ${renderActualContractSnapshot(model.plan)}
+            <div class="position-warning">${escapeHtml(model.live.contractHealth?.warning || '—')}</div>
+          </div>
+        </div>
+        ${renderPositionAlertControls(model)}
+      </details>
+    </div>`;
+}
+
+function renderActiveTradeDashboard(models = []) {
+  const vms = sortActiveDashboardCards(models.map(activeDashboardViewModel));
+  const portfolio = activeDashboardPortfolio(vms);
+  const filtered = vms.filter(vm => activeDashboardFilterMatches(vm));
+  if (!vms.length) {
+    return `
+      <div class="active-dashboard">
+        ${renderActiveDashboardHeader(portfolio)}
+        <div class="execution-empty">No active trades<br><span style="font-size:12px;">Trades you open from the Journal or Scanner will appear here for live management.</span></div>
+      </div>`;
+  }
+  return `
+    <div class="active-dashboard">
+      ${renderActiveDashboardHeader(portfolio)}
+      ${renderActiveFilterRow(vms)}
+      <div class="active-card-grid">
+        ${filtered.length ? filtered.map(renderActiveDashboardCard).join('') : '<div class="execution-empty">No active trades match this filter.</div>'}
+      </div>
+    </div>`;
+}
+
 function updatePositionLifecycle(id, action) {
   updateEntryLifecycle(id, action);
   if (action !== 'manual') renderPositionsTab();
@@ -8805,88 +9285,9 @@ function renderPositionsTab() {
   positions = sortPositionModels(buildPositionModels());
   const diag = positionDiagnostics(positions);
   summary.textContent = positions.length
-    ? `${positions.length} active journal position${positions.length === 1 ? '' : 's'} tracked · Healthy ${diag.healthy_positions} · Watch ${diag.watch_positions} · Protect ${diag.protect_positions} · Exit ${diag.exit_positions} · Data Needed ${diag.data_needed_positions}.`
-    : 'No active journal positions. Log a scanner setup with Result = Open to track it here.';
-  if (!positions.length) {
-    list.innerHTML = '<div class="execution-empty">No active positions right now.</div>';
-    return;
-  }
-  list.innerHTML = positions.map(model => {
-    const plan = model.plan;
-    const live = model.live;
-    const urgency = positionUrgency(model);
-    const stripClass = positionProgressClass(model);
-    const healthWarning = live.contractHealth?.warning || '—';
-    const lifecycleStatus = positionLifecycleStatus(model);
-    const enteredOrReached = positionEntryReachedEvidence(model.entry, live);
-    const closed = positionIsClosed(model.entry, live);
-    const canMarkTp1 = enteredOrReached && !closed && !live.tp1TouchedAt;
-    const canMoveStopToBE = enteredOrReached && !closed && live.rNow != null && live.rNow >= 1;
-    return `
-      <div class="execution-card position-card" data-position-id="${escapeHtml(String(model.id ?? ''))}">
-        <div class="position-progress-strip ${stripClass}"></div>
-        <div class="execution-card-head">
-          <div>
-            <div class="execution-ticker ticker-with-direction">${escapeHtml(plan.ticker || '—')} ${renderDirectionMarker(plan.direction)}</div>
-            <div class="execution-subtitle">${escapeHtml(lifecycleStatus)} · ${live.rNow == null ? '—' : `${fmtNumber(live.rNow)}R`} · ${live.tradingDaysElapsed ?? '—'} trading days elapsed</div>
-          </div>
-          <div class="position-urgency ${urgency.className}">${escapeHtml(urgency.label)}</div>
-        </div>
-        ${renderPositionManagerBlock(model)}
-        ${renderGuidedTradeChartBlock(guidedSubjectFromPositionModel(model), 'position')}
-        <div class="position-card-grid">
-          <div class="execution-section position-section plan">
-            <div class="execution-section-title">Plan</div>
-            ${renderPositionKvRows([
-              ['Entry', fmtMoney(plan.entryPrice)],
-              ['Stop', fmtMoney(plan.stopPrice)],
-              ['TP1', fmtMoney(plan.tp1)],
-              ['TP2', fmtMoney(plan.tp2)],
-              ['TP3', fmtMoney(plan.tp3)],
-              ['Original Grade', plan.setupGrade],
-              ['Reason', plan.setupGradeReason],
-              ['Confirmation', [plan.confirmationStatus, plan.confirmationReason].filter(Boolean).join(' — ')],
-              ['Sector', plan.sector],
-              ['Regime', [plan.marketRegime, plan.marketRegimeScore != null ? fmtNumber(plan.marketRegimeScore) : null].filter(Boolean).join(' · ')],
-              ['Opportunity at Entry', plan.opportunityRemainingAtEntry == null ? '—' : `${fmtNumber(plan.opportunityRemainingAtEntry)}%`],
-              ['Risk Size', [plan.contracts ? `${plan.contracts} contracts` : null, plan.riskPct != null ? `${fmtNumber(plan.riskPct)}%` : null, plan.maxRisk != null ? fmtMoney(plan.maxRisk) : null].filter(Boolean).join(' · ')],
-            ])}
-          </div>
-          <div class="execution-section position-section live">
-            <div class="execution-section-title">Live</div>
-            ${renderPositionKvRows([
-              ['Position Status', lifecycleStatus],
-              ['Current Price', fmtMoney(live.currentPrice)],
-              ['Current R', live.rNow == null ? '—' : formatRMultiple(live.rNow)],
-              ['MFE / MAE', positionMfeMaeLabel(model)],
-              ['Entry State', positionEntryState(model)],
-              ['TP1 State', positionTargetState(model, 'tp1')],
-              ['Stop State', positionStopState(model)],
-              ['Elapsed', `${live.tradingDaysElapsed ?? '—'} trading days · ${live.barsElapsed ?? '—'} bars`],
-              ['Current Scanner View', currentScannerViewLabel(model)],
-              ['Current Scanner Grade', live.currentGrade ? `Grade ${live.currentGrade}` : '—'],
-            ])}
-          </div>
-          ${renderOptionPositionSection(model)}
-          <div class="execution-section position-section contract">
-            <div class="execution-section-title">Contract</div>
-            <div class="execution-contract-main">${escapeHtml(positionContractLabel(plan))}</div>
-            ${renderPositionKvRows([
-              ['Expected Window', expectedMoveWindowLabel(plan)],
-              ['Health', live.contractHealth?.status || '—'],
-            ])}
-            ${renderActualContractSnapshot(plan)}
-            <div class="position-warning">${escapeHtml(healthWarning)}</div>
-          </div>
-        </div>
-        <div class="position-actions">
-          <button class="btn-secondary" onclick="updatePositionLifecycleFromButton(this, 'tp1')" ${canMarkTp1 ? '' : 'disabled'}>Mark TP1</button>
-          <button class="btn-ghost" onclick="updatePositionLifecycleFromButton(this, 'breakeven')" ${canMoveStopToBE ? '' : 'disabled'}>Move Stop to BE</button>
-          <button class="btn-danger" onclick="updatePositionLifecycleFromButton(this, 'manual')">Close or Edit</button>
-        </div>
-        ${renderPositionAlertControls(model)}
-      </div>`;
-  }).join('');
+    ? `${positions.length} active trade${positions.length === 1 ? '' : 's'} tracked · Healthy ${diag.healthy_positions} · Watch ${diag.watch_positions} · Protect ${diag.protect_positions} · Exit ${diag.exit_positions} · Data Needed ${diag.data_needed_positions}.`
+    : 'No active trades. Log a scanner setup with Result = Open to track it here.';
+  list.innerHTML = renderActiveTradeDashboard(positions);
 }
 
 let activeTradeWorkspaceState = { loading: false, payload: null, details: new Map(), selectedId: '', error: null, token: '' };
