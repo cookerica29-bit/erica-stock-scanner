@@ -1397,16 +1397,30 @@ def _active_trade_contract(entry: dict) -> dict:
     unrealized_return_pct = _number(entry.get("option_unrealized_return_pct"))
     if unrealized_return_pct is None and unrealized_pl is not None and entry_cost and entry_cost > 0:
         unrealized_return_pct = round((unrealized_pl / entry_cost) * 100, 4)
+    stop_premium = _number(entry.get("option_stop_premium"))
+    protected_value = _number(entry.get("option_protected_value"))
+    if protected_value is None and stop_premium is not None and quantity:
+        protected_value = round(stop_premium * 100 * quantity, 2)
+    protected_pl = _number(entry.get("option_protected_pl"))
+    if protected_pl is None and protected_value is not None and entry_cost is not None:
+        protected_pl = round(protected_value - entry_cost, 2)
+    protected_return_pct = _number(entry.get("option_protected_return_pct"))
+    if protected_return_pct is None and protected_pl is not None and entry_cost and entry_cost > 0:
+        protected_return_pct = round((protected_pl / entry_cost) * 100, 4)
     exit_premium = _number(_first_present(entry.get("option_exit_premium"), entry.get("actual_exit_premium"), entry.get("exit_option_premium"), entry.get("exit_premium")))
+    exit_quantity = _number(_first_present(entry.get("option_exit_quantity"), entry.get("quantity_closed"), quantity)) or quantity
     exit_value = _number(entry.get("option_exit_value"))
-    if exit_value is None and exit_premium is not None and quantity:
-        exit_value = round(exit_premium * 100 * quantity, 2)
+    if exit_value is None and exit_premium is not None and exit_quantity:
+        exit_value = round(exit_premium * 100 * exit_quantity, 2)
+    allocated_entry_cost = None
+    if entry_premium is not None and exit_quantity:
+        allocated_entry_cost = round(entry_premium * 100 * exit_quantity, 2)
     realized_pl = _number(_first_present(entry.get("option_realized_pl"), entry.get("actual_option_pnl"), entry.get("manual_realized_pnl"), entry.get("realized_pnl")))
-    if realized_pl is None and exit_value is not None and entry_cost is not None:
-        realized_pl = round(exit_value - entry_cost, 2)
+    if realized_pl is None and exit_value is not None and allocated_entry_cost is not None:
+        realized_pl = round(exit_value - allocated_entry_cost, 2)
     realized_return_pct = _number(entry.get("option_realized_return_pct"))
-    if realized_return_pct is None and realized_pl is not None and entry_cost and entry_cost > 0:
-        realized_return_pct = round((realized_pl / entry_cost) * 100, 4)
+    if realized_return_pct is None and realized_pl is not None and allocated_entry_cost and allocated_entry_cost > 0:
+        realized_return_pct = round((realized_pl / allocated_entry_cost) * 100, 4)
     return {
         "instrument_type": "option" if _first_present(strike, expiration, entry_premium) else "stock_or_underlying",
         "option_symbol": _first_present(entry.get("option_symbol"), entry.get("option")),
@@ -1423,13 +1437,19 @@ def _active_trade_contract(entry: dict) -> dict:
         "current_value": current_value,
         "unrealized_pl": unrealized_pl,
         "unrealized_return_pct": unrealized_return_pct,
-        "stop_premium": _number(entry.get("option_stop_premium")),
+        "stop_premium": stop_premium,
+        "protected_value": protected_value,
+        "protected_pl": protected_pl,
+        "protected_return_pct": protected_return_pct,
         "exit_premium": exit_premium,
+        "exit_quantity": exit_quantity,
+        "exit_timestamp": _first_present(entry.get("option_exit_timestamp"), entry.get("exit_timestamp"), entry.get("tracking_completed_at")),
         "exit_value": exit_value,
         "actual_option_pnl": realized_pl,
         "realized_pl": realized_pl,
         "realized_return_pct": realized_return_pct,
         "exit_reason": _first_present(entry.get("option_exit_reason"), entry.get("outcome")),
+        "exit_notes": _first_present(entry.get("option_exit_notes"), entry.get("completion_notes")),
     }
 
 
@@ -2107,6 +2127,12 @@ def api_active_trade_complete(
         raise HTTPException(status_code=422, detail="Exit timestamp and exit reason are required")
     if exit_price is None:
         raise HTTPException(status_code=422, detail="Exit underlying price is required")
+    option_exit_premium = _number(_first_present((payload or {}).get("option_exit_premium"), (payload or {}).get("actual_exit_premium"), (payload or {}).get("contract_exit_value")))
+    if option_exit_premium is not None and option_exit_premium < 0:
+        raise HTTPException(status_code=422, detail="Option exit premium must be greater than or equal to 0")
+    option_exit_quantity = _number(_first_present((payload or {}).get("option_exit_quantity"), (payload or {}).get("quantity_closed")))
+    if option_exit_quantity is not None and (option_exit_quantity <= 0 or float(option_exit_quantity) != int(option_exit_quantity)):
+        raise HTTPException(status_code=422, detail="Option exit quantity must be a positive integer")
     reason_upper = exit_reason.upper().replace(" ", "_")
     result = str((payload or {}).get("result") or "").strip()
     if not result:
@@ -2125,25 +2151,34 @@ def api_active_trade_complete(
         "tracking_completed_at": exit_timestamp,
         "exit_timestamp": exit_timestamp,
         "exit_price": exit_price,
-        "option_exit_premium": _number(_first_present((payload or {}).get("option_exit_premium"), (payload or {}).get("actual_exit_premium"), (payload or {}).get("contract_exit_value"))),
+        "option_exit_premium": option_exit_premium,
+        "option_exit_quantity": option_exit_quantity,
+        "option_exit_timestamp": exit_timestamp,
         "option_exit_reason": exit_reason,
-        "actual_exit_premium": _number(_first_present((payload or {}).get("option_exit_premium"), (payload or {}).get("actual_exit_premium"), (payload or {}).get("contract_exit_value"))),
+        "option_exit_notes": str((payload or {}).get("option_exit_notes") or (payload or {}).get("notes") or "")[:2000],
+        "actual_exit_premium": option_exit_premium,
         "actual_option_pnl": _number((payload or {}).get("actual_option_pnl")),
         "quantity_closed": _number((payload or {}).get("quantity_closed")),
         "completion_notes": str((payload or {}).get("notes") or "")[:2000],
     }
     quantity = _number(_first_present(entry.get("actual_option_quantity"), entry.get("option_quantity"), entry.get("actual_quantity"), entry.get("contracts"))) or 1
+    exit_quantity = patch["option_exit_quantity"] or quantity
+    patch["option_exit_quantity"] = exit_quantity
     entry_cost = _number(entry.get("option_entry_cost"))
     if entry_cost is None:
         entry_premium = _number(_first_present(entry.get("actual_option_entry_premium"), entry.get("option_entry_premium"), entry.get("actual_option_premium"), entry.get("premium_paid")))
         if entry_premium is not None:
             entry_cost = round(entry_premium * 100 * quantity, 2)
             patch["option_entry_cost"] = entry_cost
+    allocated_entry_cost = None
+    entry_premium = _number(_first_present(entry.get("actual_option_entry_premium"), entry.get("option_entry_premium"), entry.get("actual_option_premium"), entry.get("premium_paid")))
+    if entry_premium is not None and exit_quantity:
+        allocated_entry_cost = round(entry_premium * 100 * exit_quantity, 2)
     if patch["option_exit_premium"] is not None:
-        patch["option_exit_value"] = round(patch["option_exit_premium"] * 100 * quantity, 2)
-        if entry_cost is not None:
-            patch["option_realized_pl"] = round(patch["option_exit_value"] - entry_cost, 2)
-            patch["option_realized_return_pct"] = round((patch["option_realized_pl"] / entry_cost) * 100, 4) if entry_cost > 0 else None
+        patch["option_exit_value"] = round(patch["option_exit_premium"] * 100 * exit_quantity, 2)
+        if allocated_entry_cost is not None:
+            patch["option_realized_pl"] = round(patch["option_exit_value"] - allocated_entry_cost, 2)
+            patch["option_realized_return_pct"] = round((patch["option_realized_pl"] / allocated_entry_cost) * 100, 4) if allocated_entry_cost > 0 else None
             patch["actual_option_pnl"] = patch["actual_option_pnl"] if patch["actual_option_pnl"] is not None else patch["option_realized_pl"]
     try:
         updated = _journal_repository.update_entry(str(entry.get("journal_id")), patch)

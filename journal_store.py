@@ -48,7 +48,11 @@ NUMERIC_FIELDS = {
     "option_unrealized_pl",
     "option_unrealized_return_pct",
     "option_stop_premium",
+    "option_protected_value",
+    "option_protected_pl",
+    "option_protected_return_pct",
     "option_exit_premium",
+    "option_exit_quantity",
     "option_exit_value",
     "option_realized_pl",
     "option_realized_return_pct",
@@ -61,6 +65,17 @@ NUMERIC_FIELDS = {
     "position_max_progress_percent",
 }
 VALID_DIRECTIONS = {"LONG", "SHORT", "CALL", "PUT", "N/A", ""}
+NON_NEGATIVE_OPTION_FIELDS = {
+    "option_current_premium",
+    "option_stop_premium",
+    "option_exit_premium",
+    "option_entry_premium",
+}
+POSITIVE_INTEGER_OPTION_FIELDS = {
+    "option_quantity",
+    "actual_option_quantity",
+    "option_exit_quantity",
+}
 CANONICAL_REPLAY_FIELDS = {
     "journal_id",
     "position_id",
@@ -251,7 +266,12 @@ def validate_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
     for field in NUMERIC_FIELDS:
         if field in payload:
             payload[field] = normalize_number(payload[field], field)
-    for field in ["entry_timestamp", "exit_timestamp", "created_at", "updated_at", "snapshot_timestamp", "tracking_started_at", "tracking_completed_at"]:
+            if field in NON_NEGATIVE_OPTION_FIELDS and payload[field] is not None and payload[field] < 0:
+                raise JournalValidationError(f"{field} must be greater than or equal to 0")
+            if field in POSITIVE_INTEGER_OPTION_FIELDS and payload[field] is not None:
+                if payload[field] <= 0 or float(payload[field]) != int(payload[field]):
+                    raise JournalValidationError(f"{field} must be a positive integer")
+    for field in ["entry_timestamp", "exit_timestamp", "created_at", "updated_at", "snapshot_timestamp", "tracking_started_at", "tracking_completed_at", "option_exit_timestamp"]:
         if field in payload:
             payload[field] = normalize_timestamp(payload[field], field)
     if "position_state_history" in payload:

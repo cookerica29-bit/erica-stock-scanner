@@ -100,8 +100,8 @@ assert.ok(Math.abs(dow.option_realized_return_pct - 180.9523) < 0.01);
 
 const normalizedDow = context.normalizeJournalOptionContract({ ticker: 'DOW', result: 'Win', ...dow });
 assert.strictEqual(normalizedDow.compactLabel, 'Jul 31 $29 Put');
-assert.strictEqual(normalizedDow.premiumLabel, 'Entry $0.21');
-assert.strictEqual(normalizedDow.returnLabel, '+180.95%');
+assert.strictEqual(normalizedDow.premiumLabel, 'Entry $0.21 · Exit $0.59');
+assert.strictEqual(normalizedDow.returnLabel, '+$38.00 · +180.95%');
 
 const positionPlan = context.positionPlanSide({
   ticker: 'DOW',
@@ -121,8 +121,14 @@ assert.ok(contractHtml.includes('Entry Cost'));
 assert.ok(contractHtml.includes('$21.00'));
 assert.ok(contractHtml.includes('Breakeven'));
 assert.ok(contractHtml.includes('$28.79'));
-assert.ok(contractHtml.includes('Realized P/L'));
-assert.ok(contractHtml.includes('+$38.00'));
+const optionPositionHtml = context.renderOptionPositionSection({
+  id: 1,
+  entry: { result: 'Win' },
+  plan: positionPlan,
+  live: {},
+});
+assert.ok(optionPositionHtml.includes('Realized P/L'));
+assert.ok(optionPositionHtml.includes('+$38.00'));
 assert.ok(!contractHtml.includes('$0.00'));
 assert.ok(!contractHtml.includes('N/A'));
 
