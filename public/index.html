@@ -4908,13 +4908,25 @@ function currentScannerUniverse() {
   return document.getElementById('universeFilter')?.value || 'discovered';
 }
 
+function normalizedScannerUniverse(value = currentScannerUniverse()) {
+  const raw = String(value || 'discovered').trim().toLowerCase();
+  if (raw === 'default' || raw === 'finviz' || raw === 'discovered') return raw;
+  return 'discovered';
+}
+
 function scannerScanUrl({ refresh = false } = {}) {
   const params = new URLSearchParams();
-  const universe = currentScannerUniverse();
+  const universe = normalizedScannerUniverse();
   if (universe && universe !== 'discovered') params.set('universe', universe);
   if (refresh) params.set('refresh', 'true');
   const query = params.toString();
   return `${API}/api/scan${query ? `?${query}` : ''}`;
+}
+
+function scannerCacheStatusUrl(universe = currentScannerUniverse()) {
+  const params = new URLSearchParams();
+  params.set('universe', normalizedScannerUniverse(universe));
+  return `${API}/api/cache/status?${params.toString()}`;
 }
 
 function handleUniverseChange() {
@@ -4928,6 +4940,19 @@ function handleUniverseChange() {
   contractPendingTimedOutKeys = new Set();
   renderScannerResults();
   runScan();
+}
+
+function metaUniverse(meta = {}) {
+  const raw = String(firstPresent(meta.universe, meta.cache_key, '') || '').trim().toLowerCase();
+  if (raw === 'default' || raw === 'finviz' || raw === 'discovered') return raw;
+  if (raw === 'discover') return 'finviz';
+  return '';
+}
+
+function cacheStatusMatchesActiveUniverse(meta = {}, universe = currentScannerUniverse()) {
+  const active = normalizedScannerUniverse(universe);
+  const resolved = metaUniverse(meta);
+  return !resolved || resolved === active;
 }
 
 function clearScannerWarmingPoll() {
@@ -5066,7 +5091,9 @@ async function runScan(options = {}) {
     hadError = true;
     clearScannerWarmingPoll();
     if (status) status.textContent = `Error: ${e.message}`;
-    if (results) results.innerHTML = '<div class="empty">Full scan is still unavailable. Check the connection and try again.</div>';
+    if (results && !String(results.innerHTML || '').includes('Scan completed, but results could not be displayed.')) {
+      results.innerHTML = '<div class="empty">Full scan is still unavailable. Check the connection and try again.</div>';
+    }
     return null;
   } finally {
     if (scannerRequestController === controller) {
@@ -5513,8 +5540,17 @@ function cacheStatusFromMeta(meta = {}) {
 function updateDataStatus(meta = {}) {
   const el = document.getElementById('dataStatus');
   if (!el) return;
+  if (!cacheStatusMatchesActiveUniverse(meta)) {
+    el.innerHTML = `
+      <span class="data-status-dot warming"></span>
+      <div>
+        <div class="data-status-main">Scanner health is updating...</div>
+        <div class="data-status-sub">Waiting for ${escapeHtml(normalizedScannerUniverse())} scanner health.</div>
+      </div>`;
+    return;
+  }
   const status = cacheStatusFromMeta(meta);
-  const age = formatScanAge(meta.age_seconds);
+  const age = formatScanAge(firstPresent(meta.cache_age_seconds, meta.age_seconds));
   const nextText = nextScanAt ? formatScheduledScan(nextScanAt).replace(/^Next scan /, 'next scan ') : '';
   const scheduleText = nextText
     ? (isMarketHours() ? `Waiting for ${nextText}` : `Market closed — ${nextText}`)
@@ -5552,31 +5588,40 @@ function setScannerLoadingState(isLoading, message = '') {
 
 function applyScanPayload(data = {}) {
   const scanMeta = data.meta || {};
-  latestScannerMeta = scanMeta;
-  updateDataStatus(scanMeta || {});
+  try {
+    latestScannerMeta = scanMeta;
+    updateDataStatus(scanMeta || {});
 
-  const previousRows = [...scannerRows, ...scannerNearMiss];
-  const nextRows = preservePriorEarningsRows(normalizeScanRowsForClient(data.rows || []), previousRows);
-  const nextNearMiss = preservePriorEarningsRows(normalizeScanRowsForClient(data.near_miss || []), previousRows);
-  const stockAlerts = detectStockAlertEvents([...nextRows, ...nextNearMiss], scanMeta || {});
-  aPlusReadyAlerts = new Set(stockAlerts.filter(a => a.type === 'ENTER_NOW').map(a => a.setup?.ticker));
-  stockAlerts.forEach(deliverStockAlertEvent);
+    const previousRows = [...scannerRows, ...scannerNearMiss];
+    const nextRows = preservePriorEarningsRows(normalizeScanRowsForClient(data.rows || []), previousRows);
+    const nextNearMiss = preservePriorEarningsRows(normalizeScanRowsForClient(data.near_miss || []), previousRows);
+    const stockAlerts = detectStockAlertEvents([...nextRows, ...nextNearMiss], scanMeta || {});
+    aPlusReadyAlerts = new Set(stockAlerts.filter(a => a.type === 'ENTER_NOW').map(a => a.setup?.ticker));
+    stockAlerts.forEach(deliverStockAlertEvent);
 
-  scannerRows = nextRows;
-  scannerNearMiss = nextNearMiss;
-  recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
-  if (nextRows.length || nextNearMiss.length || shouldRenderCompletedScan(scanMeta)) {
-    collapseMobileScannerFiltersAfterScan();
-  }
-  refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
-  evaluatePositionAlertNotifications();
-  loadNotifications(false);
-  renderScannerResults();
-  renderExecutionTab();
-  renderFurtherAnalysisTab();
-  renderPositionsTab();
-  if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
-    scheduleContractRefreshPoll();
+    scannerRows = nextRows;
+    scannerNearMiss = nextNearMiss;
+    recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
+    if (nextRows.length || nextNearMiss.length || shouldRenderCompletedScan(scanMeta)) {
+      collapseMobileScannerFiltersAfterScan();
+    }
+    refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
+    evaluatePositionAlertNotifications();
+    loadNotifications(false);
+    renderScannerResults();
+    renderExecutionTab();
+    renderFurtherAnalysisTab();
+    renderPositionsTab();
+    if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
+      scheduleContractRefreshPoll();
+    }
+  } catch (error) {
+    console.error('[Scanner] scan response received but render failed:', error);
+    const results = document.getElementById('results');
+    if (results) {
+      results.innerHTML = '<div class="empty">Scan completed, but results could not be displayed. Refresh the page and try again.</div>';
+    }
+    throw error;
   }
   return scanMeta;
 }
@@ -5604,12 +5649,19 @@ function scheduleScannerWarmingPoll() {
 }
 
 async function loadCacheStatus() {
+  const requestedUniverse = normalizedScannerUniverse();
   try {
-    const res = await fetchWithTimeout(`${API}/api/cache/status`, {}, 6000);
+    const res = await fetchWithTimeout(scannerCacheStatusUrl(requestedUniverse), {}, 6000);
     if (!res.ok) throw new Error(`Cache status failed with HTTP ${res.status}`);
-    updateDataStatus(await res.json());
+    const status = await res.json();
+    if (!cacheStatusMatchesActiveUniverse(status, requestedUniverse)) {
+      updateDataStatus({ universe: 'pending', status: 'warming', refreshing: true });
+      setTimeout(loadCacheStatus, 2000);
+      return;
+    }
+    updateDataStatus(status);
   } catch {
-    updateDataStatus({ status: 'warming', refreshing: true });
+    updateDataStatus({ universe: requestedUniverse, status: 'warming', refreshing: true });
   }
 }
 

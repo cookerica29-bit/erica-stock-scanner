@@ -29,7 +29,7 @@ try:
         "near_miss": [],
         "meta": {"cache": "test"},
     }
-    main.analysis_cache_status = lambda: {"status": "ready"}
+    main.analysis_cache_status = lambda *args, **kwargs: {"status": "ready"}
 
     client = TestClient(main.app)
 

@@ -60,6 +60,8 @@ const context = {
     querySelector: () => null,
     querySelectorAll: () => [],
     createElement: () => elementStub(),
+    addEventListener() {},
+    removeEventListener() {},
   },
   navigator: { clipboard: { writeText: () => Promise.resolve() } },
 };
@@ -193,7 +195,7 @@ assert.ok(verifiedHistoryEl.innerHTML.includes('Needs Review'));
 assert.ok(verifiedHistoryEl.innerHTML.includes('Journal and replay disagree.'));
 assert.ok(verifiedHistoryDiag.innerHTML.includes('Duplicate active jobs'));
 context.document.getElementById = originalGetElementByIdForHistory;
-assert.ok(html.includes('data-tab="activeTrades"'), 'Navigation should include Active Trades');
+assert.ok(html.includes('data-tab="positions"') && html.includes('Active Trades'), 'Navigation should include Active Trades via the Positions tab');
 assert.ok(html.includes('id="active-trades-panel"'), 'Active Trade Workspace panel should be present');
 const activeTradesSummary = elementStub();
 const activeTradesBody = elementStub();
@@ -1627,7 +1629,7 @@ context.fetchWithTimeout = () => Promise.resolve({ ok: true, json: () => Promise
 await context.runScan();
 assert.strictEqual(scannerLifecycleElements.scanBtn.disabled, false);
 assert.ok(scannerLifecycleElements.status.textContent.includes('Error: render exploded'));
-assert.ok(scannerLifecycleElements.results.innerHTML.includes('Full scan is still unavailable'));
+assert.ok(scannerLifecycleElements.results.innerHTML.includes('Scan completed, but results could not be displayed.'));
 vm.runInContext(`
   renderScannerResults = () => {
     globalThis.__scannerLifecycleRenderCount += 1;

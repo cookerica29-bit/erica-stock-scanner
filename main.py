@@ -710,8 +710,43 @@ def api_watchlist():
 
 
 @app.get("/api/cache/status")
-def api_cache_status():
-    return analysis_cache_status()
+def api_cache_status(
+    universe: str = Query(default="discovered"),
+    discover: bool = Query(default=False),
+):
+    selected_universe = str(universe or "discovered").strip().lower()
+    if discover:
+        selected_universe = "finviz"
+    if selected_universe == "discovered":
+        ready, symbols, discovery_status = _discovery_symbols_ready()
+        if not ready:
+            meta = _discovery_scan_not_ready_response(discovery_status).get("meta") or {}
+        else:
+            meta = analysis_cache_status(
+                symbols,
+                universe="discovered",
+            )
+    elif selected_universe == "default":
+        meta = analysis_cache_status(universe="default")
+    elif selected_universe == "finviz":
+        meta = analysis_cache_status(discover=True, universe="finviz")
+    else:
+        raise HTTPException(status_code=422, detail="Unsupported scanner universe")
+
+    return {
+        **meta,
+        "universe": selected_universe,
+        "cache_age_seconds": meta.get("age_seconds"),
+        "fresh": not bool(meta.get("stale")) and bool(meta.get("generated_at")),
+        "last_successful_refresh": meta.get("last_refresh_success_at"),
+        "last_refresh_duration_ms": (
+            round(float(meta.get("last_refresh_duration")) * 1000, 1)
+            if meta.get("last_refresh_duration") is not None
+            else None
+        ),
+        "qualified_count": meta.get("qualified_rows"),
+        "near_miss_count": meta.get("near_miss_rows"),
+    }
 
 
 @app.post("/api/discovery/run")
