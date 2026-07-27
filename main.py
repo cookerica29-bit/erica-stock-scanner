@@ -63,6 +63,7 @@ from trade_intelligence import (
     trade_intelligence_eligibility_funnel,
 )
 from provider_migration_audit import (
+    four_h_forensics_report,
     migration_state_report,
     provider_comparison_report,
 )
@@ -2216,6 +2217,28 @@ def api_dev_provider_comparison(
     return provider_comparison_report(
         symbols=symbol_list,
         timeframes=timeframe_list,
+        include_strategy=include_strategy,
+        limit=limit,
+    )
+
+
+@app.get("/api/dev/provider-comparison/4h-forensics")
+def api_dev_provider_comparison_4h_forensics(
+    symbols: str = Query(default="SPY,NVDA,DOW"),
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    include_extended_hours: bool = Query(default=False),
+    include_strategy: bool = Query(default=True),
+    limit: int = Query(default=3, ge=1, le=10),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
+    return four_h_forensics_report(
+        symbols=symbol_list,
+        start=start or None,
+        end=end or None,
+        include_extended_hours=include_extended_hours,
         include_strategy=include_strategy,
         limit=limit,
     )

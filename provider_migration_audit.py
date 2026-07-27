@@ -9,13 +9,15 @@ from __future__ import annotations
 import os
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any
 
 import market_data
+import pandas as pd
 
 
 AUDIT_VERSION = "alpaca-migration-audit-v1"
+FOUR_H_FORENSIC_VERSION = "4h-market-data-forensics-v1"
 RAW_DISCREPANCY_CLASSES = {
     "MATCH",
     "EXPECTED_PROVIDER_VARIATION",
@@ -62,6 +64,26 @@ ALL_YAHOO_PROFILE = {
     "1D": market_data.YAHOO_PROVIDER_NAME,
     "1W": market_data.YAHOO_PROVIDER_NAME,
     "4H": market_data.YAHOO_PROVIDER_NAME,
+}
+FOUR_H_MISMATCH_CLASSES = {
+    "MATCH",
+    "TIMESTAMP_LABEL_ONLY",
+    "SESSION_BOUNDARY_DIFFERENCE",
+    "EXTENDED_HOURS_DIFFERENCE",
+    "SOURCE_AGGREGATION_DIFFERENCE",
+    "PARTIAL_BAR_DIFFERENCE",
+    "TIMEZONE_DEFECT",
+    "DAYLIGHT_SAVING_DEFECT",
+    "MISSING_SOURCE_BARS",
+    "IMPLEMENTATION_DEFECT",
+    "UNRESOLVED",
+}
+STRATEGY_IMPACT_CLASSES = {
+    "MATCH",
+    "HARMLESS_DIFFERENCE",
+    "STRATEGY_SIGNIFICANT",
+    "IMPLEMENTATION_DEFECT",
+    "UNRESOLVED",
 }
 
 
@@ -525,6 +547,489 @@ def provider_comparison_report(
         },
         "duration_ms": round((time.perf_counter() - started) * 1000, 1),
     }
+
+
+def _parse_date_bound(value: str | None) -> pd.Timestamp | None:
+    if not value:
+        return None
+    try:
+        return pd.Timestamp(value)
+    except Exception:
+        return None
+
+
+def _to_et_timestamp(value) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize(market_data.EASTERN_TZ)
+    return ts.tz_convert(market_data.EASTERN_TZ)
+
+
+def _to_utc_iso(value) -> str | None:
+    if value is None:
+        return None
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(market_data.EASTERN_TZ)
+    return ts.tz_convert(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _to_et_iso(value) -> str | None:
+    if value is None:
+        return None
+    return _to_et_timestamp(value).isoformat()
+
+
+def _filter_frame_window(df: pd.DataFrame, start: str | None = None, end: str | None = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    result = df.copy()
+    start_ts = _parse_date_bound(start)
+    end_ts = _parse_date_bound(end)
+    if start_ts is not None:
+        start_et = _to_et_timestamp(start_ts)
+        result = result[[(_to_et_timestamp(idx) >= start_et) for idx in result.index]]
+    if end_ts is not None:
+        end_et = _to_et_timestamp(end_ts)
+        result = result[[(_to_et_timestamp(idx) <= end_et) for idx in result.index]]
+    return result
+
+
+def _session_bucket_for_timestamp(ts_et: pd.Timestamp, include_extended_hours: bool = False) -> tuple[pd.Timestamp, pd.Timestamp, str, int] | None:
+    day = ts_et.date()
+
+    def stamp(hour: int, minute: int = 0) -> pd.Timestamp:
+        return pd.Timestamp(datetime.combine(day, datetime_time(hour, minute)), tz=market_data.EASTERN_TZ)
+
+    if include_extended_hours:
+        buckets = [
+            (stamp(4), stamp(8), "pre_market", 8),
+            (stamp(8), stamp(12), "regular_or_extended", 8),
+            (stamp(12), stamp(16), "regular_or_extended", 8),
+            (stamp(16), stamp(20), "after_hours", 8),
+        ]
+    else:
+        buckets = [
+            (stamp(9, 30), stamp(13, 30), "regular", 8),
+            (stamp(13, 30), stamp(16), "regular_short_final", 5),
+        ]
+    for start, end, session_type, expected_count in buckets:
+        if start <= ts_et < end:
+            return start, end, session_type, expected_count
+    return None
+
+
+def _ohlcv_from_group(group: pd.DataFrame) -> dict[str, float | None]:
+    if group is None or group.empty:
+        return {"open": None, "high": None, "low": None, "close": None, "volume": None}
+    return {
+        "open": _safe_float(group.iloc[0].get("Open")),
+        "high": _safe_float(group["High"].max()),
+        "low": _safe_float(group["Low"].min()),
+        "close": _safe_float(group.iloc[-1].get("Close")),
+        "volume": _safe_float(group["Volume"].sum()),
+    }
+
+
+def _safe_float(value):
+    try:
+        if value is None:
+            return None
+        number = float(value)
+        return number if number == number else None
+    except Exception:
+        return None
+
+
+def _frame_to_native_4h_candles(symbol: str, provider: str, df: pd.DataFrame, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+    filtered = _filter_frame_window(market_data._normalize_ohlcv(df), start=start, end=end)
+    candles = []
+    for ts, row in filtered.iterrows():
+        ts_et = _to_et_timestamp(ts)
+        bucket_end = ts_et + timedelta(hours=4)
+        candles.append({
+            "symbol": symbol,
+            "provider": provider,
+            "trading_date": ts_et.date().isoformat(),
+            "market_timezone": "America/New_York",
+            "session_type": "provider_native",
+            "source_interval": "4h",
+            "native_or_aggregated": "provider_native",
+            "bucket_start": _to_utc_iso(ts_et),
+            "bucket_end": _to_utc_iso(bucket_end),
+            "bucket_start_et": ts_et.isoformat(),
+            "bucket_end_et": bucket_end.isoformat(),
+            "timestamp_label": _to_utc_iso(ts),
+            "timestamp_label_et": ts_et.isoformat(),
+            "timestamp_label_convention": "provider_label_preserved_assumed_bucket_start_for_native_4h",
+            "first_source_bar_time": _to_utc_iso(ts),
+            "last_source_bar_time": _to_utc_iso(ts),
+            "source_bar_count": 1,
+            "expected_source_bar_count": 1,
+            "open": _safe_float(row.get("Open")),
+            "high": _safe_float(row.get("High")),
+            "low": _safe_float(row.get("Low")),
+            "close": _safe_float(row.get("Close")),
+            "volume": _safe_float(row.get("Volume")),
+            "is_partial": False,
+            "is_complete": True,
+            "cache_used": False,
+            "data_as_of": utc_now_iso(),
+        })
+    return candles
+
+
+def reconstruct_4h_candles(
+    symbol: str,
+    provider: str,
+    source_df: pd.DataFrame,
+    *,
+    include_extended_hours: bool = False,
+    start: str | None = None,
+    end: str | None = None,
+) -> list[dict[str, Any]]:
+    source = _filter_frame_window(market_data._normalize_ohlcv(source_df), start=start, end=end)
+    grouped: dict[tuple[str, str], list[tuple[pd.Timestamp, Any]]] = {}
+    for ts, row in source.iterrows():
+        ts_et = _to_et_timestamp(ts)
+        bucket = _session_bucket_for_timestamp(ts_et, include_extended_hours=include_extended_hours)
+        if not bucket:
+            continue
+        bucket_start, bucket_end, session_type, expected_count = bucket
+        key = (bucket_start.isoformat(), bucket_end.isoformat())
+        grouped.setdefault(key, []).append((ts_et, row))
+
+    candles = []
+    for key, rows in sorted(grouped.items()):
+        bucket_start = pd.Timestamp(key[0])
+        bucket_end = pd.Timestamp(key[1])
+        session_type = _session_bucket_for_timestamp(bucket_start, include_extended_hours=include_extended_hours)[2]
+        expected_count = _session_bucket_for_timestamp(bucket_start, include_extended_hours=include_extended_hours)[3]
+        rows = sorted(rows, key=lambda item: item[0])
+        frame = pd.DataFrame([row for _, row in rows], index=[ts for ts, _ in rows])
+        ohlcv = _ohlcv_from_group(frame)
+        source_count = len(rows)
+        candles.append({
+            "symbol": symbol,
+            "provider": provider,
+            "trading_date": bucket_start.date().isoformat(),
+            "market_timezone": "America/New_York",
+            "session_type": session_type,
+            "source_interval": "30m",
+            "native_or_aggregated": "canonical_kairos_aggregated",
+            "bucket_start": _to_utc_iso(bucket_start),
+            "bucket_end": _to_utc_iso(bucket_end),
+            "bucket_start_et": bucket_start.isoformat(),
+            "bucket_end_et": bucket_end.isoformat(),
+            "timestamp_label": _to_utc_iso(bucket_start),
+            "timestamp_label_et": bucket_start.isoformat(),
+            "timestamp_label_convention": "canonical_bucket_start",
+            "first_source_bar_time": _to_utc_iso(rows[0][0]) if rows else None,
+            "last_source_bar_time": _to_utc_iso(rows[-1][0]) if rows else None,
+            "source_bar_count": source_count,
+            "expected_source_bar_count": expected_count,
+            **ohlcv,
+            "is_partial": source_count < expected_count,
+            "is_complete": source_count >= expected_count,
+            "cache_used": False,
+            "data_as_of": utc_now_iso(),
+        })
+    return candles
+
+
+def _interval_key(candle: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(candle.get("trading_date") or ""),
+        str(candle.get("session_type") or ""),
+        str(candle.get("bucket_start") or ""),
+        str(candle.get("bucket_end") or ""),
+    )
+
+
+def _label_key(candle: dict[str, Any]) -> str:
+    return str(candle.get("timestamp_label") or "")
+
+
+def _ohlcv_differences(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    differences = {}
+    for field in ["open", "high", "low", "close", "volume"]:
+        lv = _safe_float(left.get(field))
+        rv = _safe_float(right.get(field))
+        if lv is None or rv is None:
+            differences[field] = {"left": lv, "right": rv, "absolute": None, "percent": None}
+            continue
+        absolute = rv - lv
+        percent = (absolute / lv * 100) if lv else None
+        differences[field] = {"left": lv, "right": rv, "absolute": absolute, "percent": percent}
+    return differences
+
+
+def _max_price_percent_difference(differences: dict[str, Any]) -> float:
+    values = []
+    for field in ["open", "high", "low", "close"]:
+        percent = (differences.get(field) or {}).get("percent")
+        if percent is not None:
+            values.append(abs(float(percent)))
+    return max(values) if values else 0.0
+
+
+def compare_candle_intervals(left: list[dict[str, Any]], right: list[dict[str, Any]], *, left_name: str, right_name: str) -> dict[str, Any]:
+    left_by_interval = {_interval_key(candle): candle for candle in left}
+    right_by_interval = {_interval_key(candle): candle for candle in right}
+    left_by_label = {_label_key(candle): candle for candle in left if _label_key(candle)}
+    right_by_label = {_label_key(candle): candle for candle in right if _label_key(candle)}
+    interval_keys = sorted(set(left_by_interval) | set(right_by_interval))
+    rows = []
+    counts = Counter()
+    for key in interval_keys:
+        l = left_by_interval.get(key)
+        r = right_by_interval.get(key)
+        if l and r:
+            differences = _ohlcv_differences(l, r)
+            max_price_pct = _max_price_percent_difference(differences)
+            if _label_key(l) != _label_key(r):
+                classification = "TIMESTAMP_LABEL_ONLY" if max_price_pct <= 0.05 else "SOURCE_AGGREGATION_DIFFERENCE"
+            elif max_price_pct > 0.05:
+                classification = "SOURCE_AGGREGATION_DIFFERENCE"
+            else:
+                classification = "TIMESTAMP_LABEL_ONLY" if _label_key(l) != _label_key(r) else "MATCH"
+            counts[classification] += 1
+            rows.append({
+                "interval_key": key,
+                "classification": classification,
+                "left_timestamp_label": _label_key(l),
+                "right_timestamp_label": _label_key(r),
+                "ohlcv_differences": differences,
+                "max_price_percent_difference": max_price_pct,
+                "left": l,
+                "right": r,
+            })
+            continue
+        missing = l or r
+        label = _label_key(missing)
+        label_counterpart = right_by_label.get(label) if l else left_by_label.get(label)
+        if label_counterpart:
+            classification = "SESSION_BOUNDARY_DIFFERENCE"
+        elif missing and missing.get("is_partial"):
+            classification = "PARTIAL_BAR_DIFFERENCE"
+        else:
+            classification = "MISSING_SOURCE_BARS"
+        counts[classification] += 1
+        rows.append({
+            "interval_key": key,
+            "classification": classification,
+            "left_timestamp_label": _label_key(l) if l else None,
+            "right_timestamp_label": _label_key(r) if r else None,
+            "missing_side": right_name if l else left_name,
+            "left": l,
+            "right": r,
+        })
+    return {
+        "left": left_name,
+        "right": right_name,
+        "candles_compared": len(rows),
+        "interval_matches": counts.get("MATCH", 0) + counts.get("TIMESTAMP_LABEL_ONLY", 0) + counts.get("SOURCE_AGGREGATION_DIFFERENCE", 0),
+        "classification_counts": dict(counts),
+        "rows": rows[:120],
+    }
+
+
+def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    index = []
+    for candle in candles:
+        if not candle.get("bucket_start"):
+            continue
+        index.append(pd.Timestamp(candle["bucket_start"]))
+        rows.append({
+            "Open": candle.get("open"),
+            "High": candle.get("high"),
+            "Low": candle.get("low"),
+            "Close": candle.get("close"),
+            "Volume": candle.get("volume"),
+        })
+    if not rows:
+        return pd.DataFrame()
+    return market_data._normalize_ohlcv(pd.DataFrame(rows, index=pd.DatetimeIndex(index)))
+
+
+def _strategy_impact_rows(symbol: str, series: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    from scanner import scan_ticker
+
+    yahoo_provider = market_data.YahooMarketDataProvider()
+    alpaca_provider = market_data.AlpacaMarketDataProvider()
+    active_profile = market_data.configured_timeframe_provider_profile()
+    daily_provider = alpaca_provider if active_profile.get("1D") == market_data.ALPACA_PROVIDER_NAME else yahoo_provider
+    weekly_provider = alpaca_provider if active_profile.get("1W") == market_data.ALPACA_PROVIDER_NAME else yahoo_provider
+    daily_df, daily_error = market_data._safe_provider_download(daily_provider, symbol, "1y", "1d")
+    weekly_df, weekly_error = market_data._safe_provider_download(weekly_provider, symbol, "2y", "1wk")
+    if daily_error or weekly_error:
+        return [{
+            "symbol": symbol,
+            "baseline": "production_yahoo_4h",
+            "variant": "all",
+            "classification": "UNRESOLVED",
+            "reason": "daily or weekly provider data unavailable",
+            "errors": {"daily": daily_error, "weekly": weekly_error},
+        }]
+    outputs = {}
+    for name, candles in series.items():
+        h4_df = _candles_to_frame(candles)
+        output = scan_ticker(symbol, _daily_df=daily_df, _weekly_df=weekly_df, _h4_df=h4_df)
+        outputs[name] = market_data._strategy_output_snapshot(output)
+    baseline = outputs.get("production_yahoo_4h")
+    rows = []
+    for name, output in outputs.items():
+        if name == "production_yahoo_4h":
+            continue
+        comparison = market_data._compare_strategy_outputs(baseline, output)
+        material = comparison.get("material_differences") or []
+        classification = "STRATEGY_SIGNIFICANT" if material else "HARMLESS_DIFFERENCE" if comparison.get("differences") else "MATCH"
+        rows.append({
+            "symbol": symbol,
+            "baseline": "production_yahoo_4h",
+            "variant": name,
+            "classification": classification,
+            "comparison": comparison,
+            "baseline_output": baseline,
+            "variant_output": output,
+        })
+    return rows
+
+
+def _provider_download(provider_name: str, symbol: str, period: str, interval: str) -> tuple[pd.DataFrame, str | None]:
+    provider = market_data.AlpacaMarketDataProvider() if provider_name == market_data.ALPACA_PROVIDER_NAME else market_data.YahooMarketDataProvider()
+    return market_data._safe_provider_download(provider, symbol, period, interval)
+
+
+def _construction_map() -> list[dict[str, Any]]:
+    return [
+        {
+            "provider": "Yahoo",
+            "source_interval": "4h via yfinance.download(interval='4h')",
+            "native_or_aggregated": "provider/yfinance native from Kairos perspective",
+            "session_policy": "provider_default; no Kairos regular-session filter before scanner consumption",
+            "bucket_anchor": "provider-defined",
+            "timestamp_label": "provider timestamp preserved in pandas index",
+            "partial_bar_policy": "scanner consumes returned frame; diagnostics can identify forming bars separately",
+            "completed_bar_policy": "not centrally enforced in scanner batch path",
+        },
+        {
+            "provider": "Alpaca",
+            "source_interval": "4Hour via /v2/stocks/bars",
+            "native_or_aggregated": "provider native 4Hour bars",
+            "session_policy": "Alpaca provider default feed/session behavior",
+            "bucket_anchor": "provider-defined by Alpaca timeframe",
+            "timestamp_label": "Alpaca bar timestamp converted to pandas UTC index",
+            "partial_bar_policy": "scanner consumes returned frame when configured; diagnostics can identify forming bars separately",
+            "completed_bar_policy": "not centrally enforced in scanner batch path",
+        },
+        {
+            "provider": "Canonical Kairos Reconstruction",
+            "source_interval": "30m",
+            "native_or_aggregated": "diagnostic-only aggregation",
+            "session_policy": "regular: 09:30-13:30 and 13:30-16:00 ET; extended optional: 04:00-08:00, 08:00-12:00, 12:00-16:00, 16:00-20:00 ET",
+            "bucket_anchor": "explicit bucket start in America/New_York",
+            "timestamp_label": "canonical bucket start",
+            "partial_bar_policy": "source_bar_count < expected_source_bar_count marks partial",
+            "completed_bar_policy": "complete only when expected 30m source bars exist for the bucket",
+        },
+    ]
+
+
+def four_h_forensics_report(
+    *,
+    symbols: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    include_extended_hours: bool = False,
+    include_strategy: bool = True,
+    limit: int = 3,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    selected = [str(s or "").strip().upper() for s in (symbols or ["SPY", "NVDA", "DOW"]) if str(s or "").strip()]
+    selected = list(dict.fromkeys(selected))[: max(1, min(int(limit or 3), 10))]
+    reports = []
+    interval_totals = Counter()
+    strategy_totals = Counter()
+    for symbol in selected:
+        yahoo_4h_df, yahoo_4h_error = _provider_download(market_data.YAHOO_PROVIDER_NAME, symbol, "60d", "4h")
+        alpaca_4h_df, alpaca_4h_error = _provider_download(market_data.ALPACA_PROVIDER_NAME, symbol, "60d", "4h")
+        yahoo_30m_df, yahoo_30m_error = _provider_download(market_data.YAHOO_PROVIDER_NAME, symbol, "60d", "30m")
+        alpaca_30m_df, alpaca_30m_error = _provider_download(market_data.ALPACA_PROVIDER_NAME, symbol, "60d", "30m")
+        series = {
+            "production_yahoo_4h": _frame_to_native_4h_candles(symbol, market_data.YAHOO_PROVIDER_NAME, yahoo_4h_df, start=start, end=end),
+            "current_alpaca_4h": _frame_to_native_4h_candles(symbol, market_data.ALPACA_PROVIDER_NAME, alpaca_4h_df, start=start, end=end),
+            "reconstructed_yahoo_4h": reconstruct_4h_candles(symbol, market_data.YAHOO_PROVIDER_NAME, yahoo_30m_df, include_extended_hours=include_extended_hours, start=start, end=end),
+            "reconstructed_alpaca_4h": reconstruct_4h_candles(symbol, market_data.ALPACA_PROVIDER_NAME, alpaca_30m_df, include_extended_hours=include_extended_hours, start=start, end=end),
+        }
+        comparisons = {
+            "native_yahoo_vs_native_alpaca": compare_candle_intervals(series["production_yahoo_4h"], series["current_alpaca_4h"], left_name="production_yahoo_4h", right_name="current_alpaca_4h"),
+            "reconstructed_yahoo_vs_reconstructed_alpaca": compare_candle_intervals(series["reconstructed_yahoo_4h"], series["reconstructed_alpaca_4h"], left_name="reconstructed_yahoo_4h", right_name="reconstructed_alpaca_4h"),
+            "native_yahoo_vs_reconstructed_yahoo": compare_candle_intervals(series["production_yahoo_4h"], series["reconstructed_yahoo_4h"], left_name="production_yahoo_4h", right_name="reconstructed_yahoo_4h"),
+            "native_alpaca_vs_reconstructed_alpaca": compare_candle_intervals(series["current_alpaca_4h"], series["reconstructed_alpaca_4h"], left_name="current_alpaca_4h", right_name="reconstructed_alpaca_4h"),
+        }
+        for comparison in comparisons.values():
+            interval_totals.update(comparison.get("classification_counts") or {})
+        strategy_rows = _strategy_impact_rows(symbol, series) if include_strategy else []
+        strategy_totals.update(row.get("classification") for row in strategy_rows)
+        reports.append({
+            "symbol": symbol,
+            "provider_errors": {
+                "yahoo_4h": yahoo_4h_error,
+                "alpaca_4h": alpaca_4h_error,
+                "yahoo_30m": yahoo_30m_error,
+                "alpaca_30m": alpaca_30m_error,
+            },
+            "series_counts": {name: len(candles) for name, candles in series.items()},
+            "sample_candles": {name: candles[-8:] for name, candles in series.items()},
+            "interval_comparisons": comparisons,
+            "strategy_impact": strategy_rows,
+        })
+    recommendation = _four_h_recommendation(interval_totals, strategy_totals)
+    return {
+        "version": FOUR_H_FORENSIC_VERSION,
+        "generated_at": utc_now_iso(),
+        "production_routing_changed": False,
+        "symbols": selected,
+        "start": start,
+        "end": end,
+        "include_extended_hours": bool(include_extended_hours),
+        "construction_map": _construction_map(),
+        "mismatch_classification_values": sorted(FOUR_H_MISMATCH_CLASSES),
+        "strategy_impact_classification_values": sorted(STRATEGY_IMPACT_CLASSES),
+        "reports": reports,
+        "interval_comparison_totals": dict(interval_totals),
+        "strategy_impact_totals": dict(strategy_totals),
+        "completed_bar_findings": {
+            "regular_first_bucket": "09:30-13:30 ET expects 8 30m source bars in canonical reconstruction.",
+            "regular_final_bucket": "13:30-16:00 ET is a shortened final session bucket and expects 5 30m source bars.",
+            "incomplete_current_bucket": "Diagnostic reconstruction marks buckets partial when expected 30m bars are missing.",
+            "holidays_and_early_closes": "Not fully calendar-aware yet; early close support is represented by partial bucket evidence rather than an exchange calendar.",
+            "daylight_saving": "Buckets are anchored in America/New_York; UTC offsets change with DST through zoneinfo conversion.",
+        },
+        "root_cause_summary": _four_h_root_cause(interval_totals),
+        "recommendation": recommendation,
+        "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+
+
+def _four_h_root_cause(interval_totals: Counter) -> str:
+    if interval_totals.get("SESSION_BOUNDARY_DIFFERENCE") or interval_totals.get("MISSING_SOURCE_BARS"):
+        return "Native Yahoo and Alpaca 4H bars are not directly timestamp-comparable because provider-native buckets use different anchors/session construction; interval-based reconstructed candles are required before strategy conclusions."
+    if interval_totals.get("TIMESTAMP_LABEL_ONLY"):
+        return "Provider labels differ for otherwise equivalent intervals in at least part of the sample."
+    return "Root cause remains unresolved from the current bounded sample."
+
+
+def _four_h_recommendation(interval_totals: Counter, strategy_totals: Counter) -> str:
+    if strategy_totals.get("STRATEGY_SIGNIFICANT") or interval_totals.get("SOURCE_AGGREGATION_DIFFERENCE"):
+        return "BLOCK_ROUTING_DECISION"
+    if interval_totals.get("SESSION_BOUNDARY_DIFFERENCE") or interval_totals.get("MISSING_SOURCE_BARS"):
+        return "USE_CANONICAL_KAIROS_AGGREGATION"
+    if interval_totals.get("UNRESOLVED"):
+        return "RETAIN_HYBRID_PENDING_MORE_DATA"
+    return "RETAIN_HYBRID_PENDING_MORE_DATA"
 
 
 def _strategy_comparison_rows(symbols: list[str]) -> list[dict[str, Any]]:
