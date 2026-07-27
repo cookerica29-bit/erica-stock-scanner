@@ -103,6 +103,30 @@
   .notification-panel-title { font-size:12px; font-weight:950; }
   .notification-actions { display:flex; gap:6px; }
   .notification-actions button { font-size:10px; padding:5px 7px; }
+  .notification-tabs {
+    border-bottom:1px solid rgba(148,163,184,0.12);
+    display:grid;
+    gap:6px;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+    padding:8px 12px;
+  }
+  .notification-tab {
+    background:rgba(65,80,106,0.46);
+    border:1px solid rgba(148,163,184,0.16);
+    border-radius:8px;
+    color:var(--muted);
+    cursor:pointer;
+    font-family:inherit;
+    font-size:10px;
+    font-weight:900;
+    min-height:34px;
+    padding:6px;
+  }
+  .notification-tab.active {
+    background:rgba(139,92,246,0.18);
+    border-color:rgba(167,139,250,0.46);
+    color:var(--text);
+  }
   .notification-list { display:grid; gap:0; max-height:420px; overflow:auto; }
   .notification-item {
     border-bottom:1px solid rgba(148,163,184,0.10);
@@ -113,13 +137,38 @@
   .notification-item.unread { background:rgba(139,92,246,0.08); }
   .notification-title { color:var(--text); font-size:12px; font-weight:900; }
   .notification-meta { color:var(--muted); font-size:10.5px; line-height:1.35; }
+  .notification-state {
+    border-radius:999px;
+    display:inline-flex;
+    font-size:9.5px;
+    font-weight:950;
+    letter-spacing:0.05em;
+    padding:3px 7px;
+    text-transform:uppercase;
+    width:max-content;
+  }
+  .notification-state.actionable { background:rgba(34,197,94,0.14); color:#86efac; }
+  .notification-state.earlier { background:rgba(245,158,11,0.14); color:#fbbf24; }
+  .notification-state.resolved { background:rgba(148,163,184,0.14); color:#cbd5e1; }
   .notification-next { color:#c4b5fd; font-size:11px; font-weight:850; }
   .notification-empty { color:var(--muted); font-size:12px; padding:14px; text-align:center; }
-  .notification-preferences {
+  .notification-settings-shell {
     border-top:1px solid rgba(148,163,184,0.14);
+  }
+  .notification-settings-shell summary {
+    color:var(--muted);
+    cursor:pointer;
+    font-size:10.5px;
+    font-weight:900;
+    list-style:none;
+    min-height:34px;
+    padding:10px 12px;
+  }
+  .notification-settings-shell summary::-webkit-details-marker { display:none; }
+  .notification-preferences {
     display:grid;
     gap:7px;
-    padding:10px 12px;
+    padding:0 12px 10px;
   }
   .notification-pref-row { align-items:center; display:flex; justify-content:space-between; gap:10px; color:var(--muted); font-size:10.5px; }
   .notification-pref-row input { accent-color:var(--accent); }
@@ -1803,6 +1852,49 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .notification-panel {
+      max-height: calc(100vh - 96px - env(safe-area-inset-bottom));
+      overflow: auto;
+      right: -2px;
+      width: min(390px, calc(100vw - 16px));
+    }
+    .notification-panel-head {
+      background:rgba(30,41,59,0.98);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .notification-actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .notification-tabs {
+      background:rgba(30,41,59,0.98);
+      position: sticky;
+      top: 50px;
+      z-index: 2;
+    }
+    .notification-tab {
+      min-height: 42px;
+      padding: 7px 4px;
+      width: 100%;
+    }
+    .notification-list {
+      max-height: none;
+      overflow: visible;
+    }
+    .notification-item {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .notification-item .notification-actions {
+      display: grid;
+      grid-template-columns: 1fr;
+      justify-content: stretch;
+    }
+    .notification-item .notification-actions button {
+      width: 100%;
+    }
     .tab-bar {
       display: none;
     }
@@ -3188,7 +3280,10 @@
         </div>
       </div>
       <div id="notificationList" class="notification-list"><div class="notification-empty">No notifications loaded.</div></div>
-      <div id="notificationPreferences" class="notification-preferences"></div>
+      <details class="notification-settings-shell">
+        <summary>Notification settings</summary>
+        <div id="notificationPreferences" class="notification-preferences"></div>
+      </details>
     </div>
   </div>
 </header>
@@ -4135,7 +4230,8 @@ let indexContractRefreshTimer = null;
 let indexContractRefreshAttempts = 0;
 let indexContractPendingTimedOutKeys = new Set();
 let notificationCenterOpen = false;
-let notificationState = { events: [], unread_count: 0, preferences: null, diagnostics: null, error: null, loading: false };
+let notificationState = { events: [], unread_count: 0, preferences: null, diagnostics: null, audit: null, error: null, loading: false };
+let notificationActionabilityTab = 'ACTIONABLE';
 
 // ── Auto-scan ─────────────────────────────────────────────────────────────────
 const SCAN_SCHEDULE_ET = [
@@ -11305,7 +11401,7 @@ function clearJournalAdminToken() {
   renderVerifiedAnalyticsFromCache();
   renderTradeIntelligenceDashboard(null);
   updateDeveloperReplayAccess();
-  notificationState = { events: [], unread_count: 0, preferences: null, diagnostics: null, error: null, loading: false };
+  notificationState = { events: [], unread_count: 0, preferences: null, diagnostics: null, audit: null, error: null, loading: false };
   renderNotificationCenter();
 }
 
@@ -11318,6 +11414,146 @@ function notificationEventLabel(type) {
     SETUP_INVALIDATED: 'Setup Invalidated',
     POSITION_STATUS_CHANGE: 'Position Status Change',
   }[type] || formatDisplayLabel(type || 'Notification');
+}
+
+function notificationEventTime(event = {}) {
+  const raw = firstPresent(event.source_event_time, event.event_time, event.created_at, null);
+  if (!raw) return 'Time unavailable';
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return String(raw);
+  return parsed.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+function notificationSetupCandidates() {
+  return [...scannerRows, ...scannerNearMiss].filter(row => row && row.ticker);
+}
+
+function notificationSetupMatchesEvent(setup = {}, event = {}) {
+  const eventSetupIds = [
+    event.setup_id,
+    event.setupId,
+    event.entity_id,
+    String(event.deep_link || '').startsWith('setup:') ? String(event.deep_link).slice(6) : '',
+  ].filter(Boolean).map(String);
+  const rowIds = [setup.setup_id, setup.setupId, setup.id].filter(Boolean).map(String);
+  if (eventSetupIds.length && rowIds.some(id => eventSetupIds.includes(id))) return true;
+  const tickerMatch = String(setup.ticker || '').toUpperCase() === String(event.symbol || '').toUpperCase();
+  const directionMatch = !event.direction || String(setup.direction || '').toUpperCase() === String(event.direction || '').toUpperCase();
+  if (['TP1_REACHED', 'STOP_REACHED', 'SETUP_INVALIDATED'].includes(String(event.event_type || ''))) {
+    return tickerMatch && directionMatch;
+  }
+  const eventLevel = coerceNumber(event.relevant_level);
+  const setupEntry = coerceNumber(firstPresent(setup.entry, setup.entry_price, setup.planned_underlying_entry));
+  const levelMatch = eventLevel == null || setupEntry == null || Math.abs(eventLevel - setupEntry) <= Math.max(0.01, Math.abs(setupEntry) * 0.0005);
+  return tickerMatch && directionMatch && levelMatch;
+}
+
+function currentSetupForNotification(event = {}) {
+  const matches = notificationSetupCandidates().filter(setup => notificationSetupMatchesEvent(setup, event));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    const exactStatus = matches.find(setup => setupProgressState(setup).bucket === 'ENTER_NOW');
+    return exactStatus || matches[0];
+  }
+  return null;
+}
+
+function setupCurrentlyTooFar(setup = {}) {
+  return [setup.entryStatus, setup.entry_timing_state, setup.entryTimingState, setup.timing_state, setup.status]
+    .some(value => String(value || '').toUpperCase().includes('TOO FAR'));
+}
+
+function setupAtOrBeyondTp1(setup = {}) {
+  const direction = String(setup.direction || '').toUpperCase();
+  const price = coerceNumber(firstPresent(setup.current_quote_price, setup.currentQuotePrice, setup.price, setup.current_price, setup.currentPrice, setup.underlying_price));
+  const tp1 = coerceNumber(firstPresent(setup.tp1, setup.target, setup.target_price, setup.plannedTp1, setup.original_tp1));
+  if (price == null || tp1 == null) return false;
+  if (direction === 'LONG') return price >= tp1;
+  if (direction === 'SHORT') return price <= tp1;
+  return false;
+}
+
+function notificationActionability(event = {}) {
+  const setup = currentSetupForNotification(event);
+  const eventType = String(event.event_type || '');
+  if (!setup) {
+    return {
+      tab: 'RESOLVED',
+      label: 'Resolved',
+      className: 'resolved',
+      currentState: 'No current setup',
+      reason: 'No matching current scanner setup.',
+      setup: null,
+      canOpen: false,
+    };
+  }
+  const progress = setupProgressState(setup);
+  const currentState = firstPresent(setup.entryStatus, setup.entry_timing_state, progress.label, event.current_state, 'Current setup');
+  if (setupCurrentlyTooFar(setup)) {
+    return { tab: 'EARLIER', label: 'No longer actionable', className: 'earlier', currentState: 'Too Far', reason: 'Price moved beyond the execution window.', setup, canOpen: true };
+  }
+  if (progress.bucket === 'SKIP') {
+    return { tab: 'RESOLVED', label: 'Resolved', className: 'resolved', currentState, reason: 'The setup is no longer valid in the current scanner output.', setup, canOpen: true };
+  }
+  if (setupAtOrBeyondTp1(setup)) {
+    return { tab: 'EARLIER', label: 'Happened earlier', className: 'earlier', currentState: 'At or beyond TP1', reason: 'Price is already at or beyond the first target.', setup, canOpen: true };
+  }
+  if (['NEW_ENTER_NOW', 'PLANNED_ENTRY_REACHED'].includes(eventType) && progress.bucket === 'ENTER_NOW') {
+    return { tab: 'ACTIONABLE', label: 'Actionable now', className: 'actionable', currentState, reason: event.next_step || 'Review the option plan before executing.', setup, canOpen: true };
+  }
+  if (['TP1_REACHED', 'STOP_REACHED'].includes(eventType)) {
+    return { tab: 'EARLIER', label: 'Happened earlier', className: 'earlier', currentState, reason: 'This is a lifecycle milestone, not a current entry action.', setup, canOpen: true };
+  }
+  return { tab: 'EARLIER', label: 'Happened earlier', className: 'earlier', currentState, reason: 'The setup moved into another lifecycle stage.', setup, canOpen: true };
+}
+
+function classifiedNotifications() {
+  const duplicateKeep = new Set();
+  const duplicateKeys = new Map();
+  (notificationState.events || []).forEach(event => {
+    if (event.event_type !== 'PLANNED_ENTRY_REACHED') return;
+    const key = [
+      event.event_type,
+      String(firstPresent(event.setup_id, event.entity_id, event.symbol, '')).toUpperCase(),
+      String(event.symbol || '').toUpperCase(),
+      String(event.direction || '').toUpperCase(),
+      coerceNumber(event.relevant_level) ?? 'NA',
+    ].join('|');
+    if (!duplicateKeys.has(key)) duplicateKeys.set(key, []);
+    duplicateKeys.get(key).push(event);
+  });
+  duplicateKeys.forEach(group => {
+    const sorted = group.slice().sort((a, b) => Date.parse(b.source_event_time || b.created_at || 0) - Date.parse(a.source_event_time || a.created_at || 0));
+    if (sorted[0]) duplicateKeep.add(String(sorted[0].event_id || sorted[0].id));
+  });
+  return (notificationState.events || []).map(event => {
+    let actionability = notificationActionability(event);
+    const eventId = String(event.event_id || event.id);
+    if (event.event_type === 'PLANNED_ENTRY_REACHED' && duplicateKeep.size && !duplicateKeep.has(eventId)) {
+      actionability = {
+        ...actionability,
+        tab: 'RESOLVED',
+        label: 'Resolved',
+        className: 'resolved',
+        reason: 'Duplicate historical alert for the same planned-entry lifecycle event.',
+        canOpen: Boolean(actionability.setup),
+      };
+    }
+    return { event, actionability };
+  });
+}
+
+function notificationCountsByActionability(classified = classifiedNotifications()) {
+  return classified.reduce((acc, item) => {
+    acc[item.actionability.tab] = (acc[item.actionability.tab] || 0) + 1;
+    if (!item.event.read_at && item.actionability.tab === 'ACTIONABLE') acc.actionableUnread += 1;
+    return acc;
+  }, { ACTIONABLE: 0, EARLIER: 0, RESOLVED: 0, actionableUnread: 0 });
+}
+
+function setNotificationActionabilityTab(tab) {
+  notificationActionabilityTab = ['ACTIONABLE', 'EARLIER', 'RESOLVED'].includes(tab) ? tab : 'ACTIONABLE';
+  renderNotificationCenter();
 }
 
 function renderNotificationPreferences(prefs = notificationState.preferences) {
@@ -11345,34 +11581,52 @@ function renderNotificationCenter() {
   const count = document.getElementById('notificationUnreadCount');
   const list = document.getElementById('notificationList');
   const status = document.getElementById('notificationStatus');
-  if (count) count.textContent = String(notificationState.unread_count || 0);
+  const classified = classifiedNotifications();
+  const actionCounts = notificationCountsByActionability(classified);
+  if (count) count.textContent = String(actionCounts.actionableUnread || 0);
   if (status) {
     if (!journalServerSyncEnabled()) status.textContent = 'Connect journal token to sync.';
     else if (notificationState.error) status.textContent = `Unavailable: ${notificationState.error}`;
     else if (notificationState.loading) status.textContent = 'Loading...';
-    else status.textContent = `${notificationState.unread_count || 0} unread · ${SMART_NOTIFICATION_VERSION}`;
+    else status.textContent = `${notificationState.unread_count || 0} total unread · ${actionCounts.actionableUnread || 0} actionable unread`;
   }
   if (list) {
-    const events = notificationState.events || [];
+    const events = classified.filter(item => item.actionability.tab === notificationActionabilityTab);
+    const tabs = `
+      <div class="notification-tabs" role="tablist" aria-label="Notification actionability">
+        ${[
+          ['ACTIONABLE', 'Actionable', actionCounts.ACTIONABLE],
+          ['EARLIER', 'Earlier', actionCounts.EARLIER],
+          ['RESOLVED', 'Resolved', actionCounts.RESOLVED],
+        ].map(([key, label, tabCount]) => `
+          <button class="notification-tab ${notificationActionabilityTab === key ? 'active' : ''}" type="button" role="tab" aria-selected="${notificationActionabilityTab === key ? 'true' : 'false'}" onclick="setNotificationActionabilityTab('${key}')">${label} ${tabCount || 0}</button>
+        `).join('')}
+      </div>`;
     if (!journalServerSyncEnabled()) {
       list.innerHTML = '<div class="notification-empty">Enter the journal admin token to load notifications.</div>';
-    } else if (notificationState.loading && !events.length) {
-      list.innerHTML = '<div class="notification-empty">Loading notifications...</div>';
+    } else if (notificationState.loading && !(notificationState.events || []).length) {
+      list.innerHTML = `${tabs}<div class="notification-empty">Loading notifications...</div>`;
+    } else if (!(notificationState.events || []).length) {
+      list.innerHTML = `${tabs}<div class="notification-empty">No notifications yet.</div>`;
     } else if (!events.length) {
-      list.innerHTML = '<div class="notification-empty">No notifications yet.</div>';
+      const emptyLabel = notificationActionabilityTab === 'ACTIONABLE' ? 'No actionable notifications now.' : notificationActionabilityTab === 'EARLIER' ? 'No earlier lifecycle events in the loaded history.' : 'No resolved notifications in the loaded history.';
+      list.innerHTML = `${tabs}<div class="notification-empty">${emptyLabel}</div>`;
     } else {
-      list.innerHTML = events.map(event => {
+      list.innerHTML = tabs + events.map(({ event, actionability }) => {
         const unread = !event.read_at;
-        const time = event.source_event_time || event.created_at || '';
-        const level = event.relevant_level != null ? `${event.level_name || 'Level'} ${fmtMoney(event.relevant_level)}` : '';
+        const level = event.relevant_level != null ? `${event.level_name || 'Level'}: ${fmtMoney(event.relevant_level)}` : '';
+        const currentPrice = firstPresent(event.current_price, actionability.setup?.price, actionability.setup?.current_price, actionability.setup?.current_quote_price, null);
         return `
           <div class="notification-item ${unread ? 'unread' : ''}">
             <div class="notification-title">${escapeHtml(event.title || notificationEventLabel(event.event_type))}</div>
-            <div class="notification-meta">${escapeHtml([event.direction, level, time].filter(Boolean).join(' · '))}</div>
+            <div class="notification-state ${escapeHtml(actionability.className)}">${escapeHtml(actionability.label)}</div>
+            <div class="notification-meta">Occurred ${escapeHtml(notificationEventTime(event))}</div>
+            <div class="notification-meta">${escapeHtml([event.direction, level, currentPrice != null ? `Current price: ${fmtMoney(currentPrice)}` : ''].filter(Boolean).join(' · '))}</div>
+            <div class="notification-meta">Current state: ${escapeHtml(actionability.currentState)}</div>
             <div class="notification-meta">${escapeHtml(event.message || '')}</div>
-            <div class="notification-next">${escapeHtml(event.next_step || 'Open Kairos and review the setup.')}</div>
+            <div class="notification-next">${escapeHtml(actionability.reason || event.next_step || 'Open Kairos and review the setup.')}</div>
             <div class="notification-actions">
-              ${event.deep_link ? `<button class="btn-secondary" onclick="openNotificationDeepLink('${escapeHtml(event.deep_link)}')">Open related trade</button>` : ''}
+              ${actionability.canOpen ? `<button class="btn-secondary" onclick="openNotificationEvent('${escapeHtml(event.event_id || event.id)}')">Open related trade</button>` : '<span class="notification-meta">No current matching setup</span>'}
               ${unread ? `<button class="btn-secondary" onclick="markNotificationRead('${escapeHtml(event.event_id || event.id)}')">Mark read</button>` : ''}
             </div>
           </div>`;
@@ -11388,6 +11642,11 @@ function toggleNotificationCenter() {
   if (notificationCenterOpen) loadNotifications(true);
 }
 
+function closeNotificationCenter() {
+  notificationCenterOpen = false;
+  document.getElementById('notificationPanel')?.classList.remove('open');
+}
+
 async function loadNotifications(force = false) {
   if (!journalServerSyncEnabled()) {
     renderNotificationCenter();
@@ -11397,21 +11656,25 @@ async function loadNotifications(force = false) {
   notificationState = { ...notificationState, loading: true, error: null };
   renderNotificationCenter();
   try {
-    const [eventsRes, prefsRes, diagRes] = await Promise.all([
-      fetchWithTimeout(`${API}/api/notifications?limit=25`, { headers: journalAuthHeaders() }, 8000),
+    const [eventsRes, prefsRes, diagRes, auditRes] = await Promise.all([
+      fetchWithTimeout(`${API}/api/notifications?limit=200`, { headers: journalAuthHeaders() }, 8000),
       fetchWithTimeout(`${API}/api/notifications/preferences`, { headers: journalAuthHeaders() }, 8000),
       fetchWithTimeout(`${API}/api/dev/smart-notifications/diagnostics`, { headers: journalAuthHeaders() }, 8000),
+      fetchWithTimeout(`${API}/api/dev/smart-notifications/audit?universe=${encodeURIComponent(currentScannerUniverse())}`, { headers: journalAuthHeaders() }, 8000),
     ]);
-    if (eventsRes.status === 403 || prefsRes.status === 403 || diagRes.status === 403) throw new Error('Invalid token');
+    if (eventsRes.status === 403 || prefsRes.status === 403 || diagRes.status === 403 || auditRes.status === 403) throw new Error('Invalid token');
     if (!eventsRes.ok) throw new Error(`notifications ${eventsRes.status}`);
     const payload = await eventsRes.json();
     const prefs = prefsRes.ok ? await prefsRes.json() : {};
     const diagnostics = diagRes.ok ? await diagRes.json() : null;
+    const audit = auditRes.ok ? await auditRes.json() : null;
     notificationState = {
       events: payload.events || [],
       unread_count: payload.unread_count || 0,
+      total_count: payload.total_count || 0,
       preferences: prefs.preferences || notificationState.preferences,
       diagnostics,
+      audit,
       error: null,
       loading: false,
     };
@@ -11478,8 +11741,9 @@ function openNotificationDeepLink(deepLink) {
   if (type === 'setup') {
     switchTab('scanner');
     const setup = [...scannerRows, ...scannerNearMiss].find(row => {
-      const rowId = firstPresent(row.setup_id, row.setupId, null);
-      return rowId && String(rowId) === id;
+      const rowId = firstPresent(row.setup_id, row.setupId, row.id, null);
+      if (rowId && String(rowId) === id) return true;
+      return false;
     });
     if (setup?.ticker) {
       const input = document.getElementById('tickerInput');
@@ -11489,6 +11753,20 @@ function openNotificationDeepLink(deepLink) {
     return;
   }
   if (type === 'position') switchTab('positions');
+}
+
+function openNotificationEvent(eventId) {
+  const event = (notificationState.events || []).find(item => String(item.event_id || item.id) === String(eventId));
+  const actionability = event ? notificationActionability(event) : null;
+  if (actionability?.setup?.ticker) {
+    switchTab('scanner');
+    const input = document.getElementById('tickerInput');
+    if (input) input.value = actionability.setup.ticker;
+    renderScannerResults();
+    closeNotificationCenter();
+    return;
+  }
+  if (event?.deep_link) openNotificationDeepLink(event.deep_link);
 }
 
 function ensureJournalStableIds(entry = {}) {
@@ -14657,6 +14935,7 @@ function renderSmartNotificationDiagnostics() {
   const el = document.getElementById('smartNotificationDiagnostics');
   if (!el) return;
   const diag = notificationState.diagnostics || {};
+  const audit = notificationState.audit || {};
   const scanDiag = latestScannerMeta?.smart_notifications || {};
   if (!journalServerSyncEnabled()) {
     el.innerHTML = '<div class="analytics-empty">Enter the journal admin token to view notification diagnostics.</div>';
@@ -14670,8 +14949,12 @@ function renderSmartNotificationDiagnostics() {
       ${renderReplayStat('Version', diag.version || scanDiag.version || SMART_NOTIFICATION_VERSION)}
       ${renderReplayStat('Events Total', diag.events_total ?? '—')}
       ${renderReplayStat('Unread', diag.unread ?? notificationState.unread_count ?? 0)}
+      ${renderReplayStat('Actionable', audit.actionability_counts?.ACTIONABLE ?? notificationCountsByActionability().ACTIONABLE)}
+      ${renderReplayStat('Earlier', audit.actionability_counts?.EARLIER ?? notificationCountsByActionability().EARLIER)}
+      ${renderReplayStat('Resolved', audit.actionability_counts?.RESOLVED ?? notificationCountsByActionability().RESOLVED)}
       ${renderReplayStat('Last Scan Created', scanDiag.events_created ?? '—')}
       ${renderReplayStat('Deduplicated', scanDiag.events_deduplicated ?? '—')}
+      ${renderReplayStat('Duplicate Groups', audit.duplicate_group_count ?? '—')}
       ${renderReplayStat('Suppressed Stale', scanDiag.events_suppressed_as_stale ?? '—')}
       ${renderReplayStat('Eval Time', scanDiag.notification_evaluation_ms == null ? '—' : `${fmtNumber(scanDiag.notification_evaluation_ms)} ms`)}
       ${renderReplayStat('External Failures', scanDiag.external_delivery_failures ?? 0)}
@@ -14679,6 +14962,14 @@ function renderSmartNotificationDiagnostics() {
     <table class="analytics-table">
       <thead><tr><th>Event Type</th><th>Count</th></tr></thead>
       <tbody>${Object.entries(diag.events_by_type || {}).map(([key, value]) => `<tr><td>${escapeHtml(notificationEventLabel(key))}</td><td>${escapeHtml(String(value))}</td></tr>`).join('') || '<tr><td colspan="2">No durable events yet.</td></tr>'}</tbody>
+    </table>
+    <div class="snapshot-group-title" style="margin-top:12px;">Suspected Planned Entry Duplicate Groups</div>
+    <table class="analytics-table">
+      <thead><tr><th>Dedupe Identity</th><th>Count</th><th>Sample Fields</th></tr></thead>
+      <tbody>${(audit.suspected_duplicate_groups || []).slice(0, 8).map(group => {
+        const sample = (group.events || [])[0] || {};
+        return `<tr><td>${escapeHtml(group.dedupe_key || '—')}</td><td>${escapeHtml(String(group.count || 0))}</td><td>${escapeHtml([sample.ticker, sample.direction, sample.plannedEntry, sample.setupId, sample.signalTimestamp, sample.lifecycleState].filter(Boolean).join(' · ') || '—')}</td></tr>`;
+      }).join('') || '<tr><td colspan="3">No suspected duplicate groups in loaded audit.</td></tr>'}</tbody>
     </table>`;
 }
 

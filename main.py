@@ -474,6 +474,17 @@ def _attach_notification_metrics(result: dict) -> dict:
     return result
 
 
+def _notification_current_setups(universe: str = "discovered") -> list[dict]:
+    requested = (universe or "discovered").lower()
+    kwargs = {"discover": requested == "discovered", "universe": "discovered" if requested == "discovered" else requested}
+    snapshot = analysis_cache_snapshot(None, **kwargs)
+    if not snapshot and requested != "default":
+        snapshot = analysis_cache_snapshot(WATCHLIST, discover=False, universe="default")
+    if not snapshot:
+        return []
+    return [*(snapshot.get("rows") or []), *(snapshot.get("near_miss") or [])]
+
+
 def _first_present(*values):
     for value in values:
         if value not in (None, ""):
@@ -651,6 +662,32 @@ def api_notification_preferences_update(
 def api_smart_notification_diagnostics(x_kairos_admin_token: str = Header(default="")):
     _require_journal_admin_token(x_kairos_admin_token)
     return _notification_repository.diagnostics()
+
+
+@app.get("/api/dev/smart-notifications/audit")
+def api_smart_notification_audit(
+    universe: str = Query(default="discovered"),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    current_setups = _notification_current_setups(universe)
+    audit = _notification_repository.audit_events(current_setups=current_setups, limit=1000)
+    audit["current_setup_count"] = len(current_setups)
+    audit["universe"] = universe
+    return audit
+
+
+@app.post("/api/dev/smart-notifications/duplicate-cleanup-preview")
+def api_smart_notification_duplicate_cleanup_preview(
+    universe: str = Query(default="discovered"),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    current_setups = _notification_current_setups(universe)
+    preview = _notification_repository.duplicate_cleanup_preview(current_setups=current_setups, limit=1000)
+    preview["current_setup_count"] = len(current_setups)
+    preview["universe"] = universe
+    return preview
 
 
 @app.get("/api/scan/{ticker}")

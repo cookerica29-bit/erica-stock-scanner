@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import time
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -181,13 +182,59 @@ def entry_reached(setup: dict[str, Any]) -> bool:
     return abs(price - entry) < 0.000001
 
 
+def target_reached(setup: dict[str, Any]) -> bool:
+    target = target_one(setup)
+    price = current_price(setup)
+    direction = normalize_direction(setup.get("direction"))
+    if target is None or price is None:
+        return False
+    if direction == "SHORT":
+        return price <= target
+    if direction == "LONG":
+        return price >= target
+    return False
+
+
 def invalidated(setup: dict[str, Any]) -> bool:
     bucket = setup_bucket(setup)
     return bucket in {"SKIP", "INVALIDATED", "REJECTED"}
 
 
+def setup_too_far(setup: dict[str, Any]) -> bool:
+    values = [
+        setup.get("entryStatus"),
+        setup.get("entry_timing_state"),
+        setup.get("entryTimingState"),
+        setup.get("timing_state"),
+        setup.get("status"),
+    ]
+    return any("TOO" in str(value or "").upper() and "FAR" in str(value or "").upper() for value in values)
+
+
 def stable_event_id(dedupe_key: str) -> str:
     return f"notif:{hashlib.sha1(dedupe_key.encode('utf-8')).hexdigest()}"
+
+
+def planned_entry_cycle_key(setup: dict[str, Any], event_type: str, level: float | None) -> str:
+    symbol = str(setup.get("ticker") or "UNKNOWN").upper()
+    direction = normalize_direction(setup.get("direction"))
+    setup_id = setup_identity(setup)
+    signal_time = str(first_present(
+        setup.get("signal_timestamp"),
+        setup.get("signalTimestamp"),
+        setup.get("candle_timestamp"),
+        setup.get("candleTime"),
+        setup.get("signal_market_date"),
+        "",
+    ))
+    return "|".join([
+        event_type,
+        setup_id,
+        symbol,
+        direction,
+        signal_time,
+        str(level if level is not None else "NA"),
+    ])
 
 
 def event_is_fresh(event_type: str, event_time: str, now: datetime | None = None) -> bool:
@@ -229,7 +276,10 @@ def build_setup_event(
     if event_type == "SETUP_INVALIDATED":
         level = stop_level(setup)
         level_name = "Stop Loss" if level is not None else None
-    dedupe_key = "|".join([symbol, setup_id, event_type, event_time, str(level if level is not None else "NA")])
+    if event_type == "PLANNED_ENTRY_REACHED":
+        dedupe_key = planned_entry_cycle_key(setup, event_type, level)
+    else:
+        dedupe_key = "|".join([symbol, setup_id, event_type, event_time, str(level if level is not None else "NA")])
     if event_type == "PLANNED_ENTRY_REACHED":
         message = f"{symbol} reached its planned entry. {direction.title()} setup. Planned Entry: {money(level)}. Current Price: {money(current_price(setup))}."
         next_step = "Review the option plan before executing."
@@ -504,6 +554,14 @@ class SQLiteNotificationRepository:
             "offset": offset,
         }
 
+    def all_events(self, limit: int = 1000) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM smart_notifications ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 5000)),),
+            ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
     def mark_read(self, event_id: str) -> dict[str, Any] | None:
         now = utc_now_iso()
         with self._connect() as conn:
@@ -535,6 +593,168 @@ class SQLiteNotificationRepository:
             "events_by_type": dict(sorted(by_type.items())),
             "delivery_status": dict(sorted(delivery.items())),
             "tracked_entity_states": int(state_count),
+        }
+
+    def _current_setup_indexes(self, current_setups: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        by_setup_id: dict[str, dict[str, Any]] = {}
+        by_fallback: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for setup in current_setups or []:
+            if not isinstance(setup, dict):
+                continue
+            explicit = first_present(setup.get("setup_id"), setup.get("setupId"), setup.get("id"))
+            generated = setup_identity(setup)
+            for key in {str(explicit) if explicit else "", generated}:
+                if key:
+                    by_setup_id[key] = setup
+            fallback = "|".join([
+                str(setup.get("ticker") or "").upper(),
+                normalize_direction(setup.get("direction")),
+                str(planned_entry(setup) if planned_entry(setup) is not None else "NA"),
+            ])
+            by_fallback[fallback].append(setup)
+        return {"by_setup_id": by_setup_id, "by_fallback": by_fallback}
+
+    def _matching_setup(self, event: dict[str, Any], indexes: dict[str, Any]) -> dict[str, Any] | None:
+        for key in [event.get("setup_id"), event.get("entity_id")]:
+            if key and key in indexes["by_setup_id"]:
+                return indexes["by_setup_id"][key]
+        fallback = "|".join([
+            str(event.get("symbol") or "").upper(),
+            normalize_direction(event.get("direction")),
+            str(finite_number(event.get("relevant_level")) if finite_number(event.get("relevant_level")) is not None else "NA"),
+        ])
+        candidates = indexes["by_fallback"].get(fallback) or []
+        return candidates[0] if len(candidates) == 1 else None
+
+    def classify_event_actionability(self, event: dict[str, Any], current_setup: dict[str, Any] | None = None) -> dict[str, Any]:
+        event_type = str(event.get("event_type") or "")
+        if not current_setup:
+            return {
+                "state": "RESOLVED",
+                "current_lifecycle_state": "No current setup",
+                "reason": "No matching current scanner setup.",
+                "has_current_setup": False,
+            }
+        bucket = setup_bucket(current_setup)
+        lifecycle = current_setup.get("entryStatus") or current_setup.get("entry_timing_state") or bucket
+        if invalidated(current_setup):
+            return {
+                "state": "RESOLVED",
+                "current_lifecycle_state": str(lifecycle or "Invalidated"),
+                "reason": "The setup is no longer valid in the current scanner output.",
+                "has_current_setup": True,
+            }
+        if setup_too_far(current_setup):
+            return {
+                "state": "EARLIER",
+                "current_lifecycle_state": str(lifecycle or "Too Far"),
+                "reason": "Price moved beyond the execution window.",
+                "has_current_setup": True,
+            }
+        if target_reached(current_setup):
+            return {
+                "state": "EARLIER",
+                "current_lifecycle_state": "At or beyond TP1",
+                "reason": "Price is already at or beyond the first target.",
+                "has_current_setup": True,
+            }
+        if event_type in {"NEW_ENTER_NOW", "PLANNED_ENTRY_REACHED"} and bucket == "ENTER_NOW":
+            return {
+                "state": "ACTIONABLE",
+                "current_lifecycle_state": str(lifecycle or "Enter Now"),
+                "reason": "Current scanner setup remains valid for review.",
+                "has_current_setup": True,
+            }
+        if event_type in {"TP1_REACHED", "STOP_REACHED"}:
+            return {
+                "state": "EARLIER",
+                "current_lifecycle_state": str(lifecycle or bucket),
+                "reason": "This is a lifecycle milestone, not a current entry action.",
+                "has_current_setup": True,
+            }
+        return {
+            "state": "EARLIER",
+            "current_lifecycle_state": str(lifecycle or bucket),
+            "reason": "The setup has moved into another lifecycle stage.",
+            "has_current_setup": True,
+        }
+
+    def audit_events(self, current_setups: list[dict[str, Any]] | None = None, limit: int = 1000) -> dict[str, Any]:
+        events = self.all_events(limit=limit)
+        indexes = self._current_setup_indexes(current_setups or [])
+        by_type = Counter(str(event.get("event_type") or "UNKNOWN") for event in events)
+        unique_tickers = {str(event.get("symbol") or "").upper() for event in events if event.get("symbol")}
+        unique_setup_ids = {str(first_present(event.get("setup_id"), event.get("entity_id"), "")) for event in events if first_present(event.get("setup_id"), event.get("entity_id"), "")}
+        actionability = Counter()
+        planned_entry_counts = Counter()
+        duplicate_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for event in events:
+            setup = self._matching_setup(event, indexes)
+            classification = self.classify_event_actionability(event, setup)
+            actionability[classification["state"]] += 1
+            if event.get("event_type") == "PLANNED_ENTRY_REACHED":
+                if setup_too_far(setup or {}):
+                    planned_entry_counts["now_too_far"] += 1
+                if invalidated(setup or {}):
+                    planned_entry_counts["invalidated"] += 1
+                if target_reached(setup or {}):
+                    planned_entry_counts["already_at_or_beyond_tp1"] += 1
+                if not setup:
+                    planned_entry_counts["no_matching_current_setup"] += 1
+                key = "|".join([
+                    "PLANNED_ENTRY_REACHED",
+                    str(first_present(event.get("setup_id"), event.get("entity_id"), "")),
+                    str(event.get("symbol") or "").upper(),
+                    normalize_direction(event.get("direction")),
+                    str(finite_number(event.get("relevant_level")) if finite_number(event.get("relevant_level")) is not None else "NA"),
+                ])
+                duplicate_groups[key].append({
+                    "event_id": event.get("event_id") or event.get("id"),
+                    "ticker": event.get("symbol"),
+                    "direction": event.get("direction"),
+                    "plannedEntry": event.get("relevant_level"),
+                    "setupId": first_present(event.get("setup_id"), event.get("entity_id")),
+                    "signalTimestamp": event.get("source_event_time"),
+                    "candleTime": (event.get("metadata") or {}).get("scan_timestamp"),
+                    "lifecycleState": event.get("current_state") or event.get("status"),
+                    "created_at": event.get("created_at"),
+                    "read_at": event.get("read_at"),
+                })
+        duplicates = [
+            {"dedupe_key": key, "count": len(group), "events": group[:8]}
+            for key, group in duplicate_groups.items()
+            if len(group) > 1
+        ]
+        duplicates.sort(key=lambda item: item["count"], reverse=True)
+        unread = sum(1 for event in events if not event.get("read_at"))
+        return {
+            "version": SMART_NOTIFICATION_VERSION,
+            "total_notifications": len(events),
+            "total_unread": unread,
+            "count_by_notification_type": dict(sorted(by_type.items())),
+            "unique_tickers": len(unique_tickers),
+            "unique_setup_ids": len(unique_setup_ids),
+            "planned_entry_reached": by_type.get("PLANNED_ENTRY_REACHED", 0),
+            "actionability_counts": dict(sorted(actionability.items())),
+            "planned_entry_breakdown": dict(sorted(planned_entry_counts.items())),
+            "suspected_duplicate_groups": duplicates,
+            "duplicate_group_count": len(duplicates),
+            "duplicate_records_beyond_first": sum(item["count"] - 1 for item in duplicates),
+            "dedupe_identity_fields": ["notificationType", "setupId", "ticker", "direction", "plannedEntry", "signalTimestamp"],
+        }
+
+    def duplicate_cleanup_preview(self, current_setups: list[dict[str, Any]] | None = None, limit: int = 1000) -> dict[str, Any]:
+        audit = self.audit_events(current_setups=current_setups, limit=limit)
+        duplicate_groups = audit.get("suspected_duplicate_groups") or []
+        return {
+            "version": SMART_NOTIFICATION_VERSION,
+            "action": "preview_duplicate_cleanup",
+            "destructive": False,
+            "duplicate_groups": len(duplicate_groups),
+            "records_that_would_be_retained": len(duplicate_groups),
+            "records_that_would_be_archived_or_marked_resolved": sum(max(0, int(group.get("count") or 0) - 1) for group in duplicate_groups),
+            "dedupe_key_used": audit.get("dedupe_identity_fields"),
+            "groups": duplicate_groups[:25],
         }
 
     def evaluate_scan(self, rows: list[dict[str, Any]], meta: dict[str, Any] | None = None) -> dict[str, Any]:
