@@ -284,6 +284,52 @@
     box-shadow: var(--card-shadow);
     padding: 14px 16px;
   }
+  .scanner-health-toggle {
+    display: none;
+  }
+  .scanner-health-content {
+    display: block;
+  }
+  .scanner-health-summary {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    min-width: 0;
+  }
+  .scanner-health-summary-text {
+    min-width: 0;
+  }
+  .scanner-health-title {
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 950;
+    letter-spacing: 0.08em;
+    line-height: 1.1;
+    text-transform: uppercase;
+  }
+  .scanner-health-meta {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 750;
+    line-height: 1.25;
+    margin-top: 2px;
+  }
+  .scanner-health-indicator {
+    border-radius: 999px;
+    flex: 0 0 auto;
+    height: 9px;
+    width: 9px;
+  }
+  .scanner-health-indicator.complete { background: var(--long); box-shadow: 0 0 0 4px rgba(34,197,94,0.12); }
+  .scanner-health-indicator.partial { background: var(--warn); box-shadow: 0 0 0 4px rgba(245,158,11,0.12); }
+  .scanner-health-indicator.failed { background: #ff2d55; box-shadow: 0 0 0 4px rgba(255,45,85,0.12); }
+  .scanner-health-indicator.waiting { background: var(--muted); box-shadow: 0 0 0 4px rgba(148,163,184,0.12); }
+  .scanner-health-chevron {
+    color: var(--muted);
+    font-size: 18px;
+    font-weight: 900;
+    margin-left: auto;
+  }
   .snapshot-title {
     color: var(--text);
     font-size: 12px;
@@ -1943,6 +1989,28 @@
     #autoScanCountdown {
       display: none;
     }
+    #scanner-panel {
+      display: flex;
+      flex-direction: column;
+    }
+    #scanner-panel .controls {
+      order: 1;
+    }
+    #scanner-panel main {
+      order: 2;
+    }
+    #marketCoverage {
+      order: 3;
+    }
+    #marketSnapshot {
+      order: 4;
+    }
+    #marketIntelligence {
+      order: 5;
+    }
+    #topOpportunities {
+      order: 6;
+    }
     #dataStatus {
       justify-content: flex-start;
       min-height: 36px;
@@ -1969,6 +2037,45 @@
       margin-top: 10px;
       padding: 0 12px;
       max-width: 100%;
+    }
+    #marketCoverage {
+      margin-top: 0;
+      padding-bottom: calc(86px + env(safe-area-inset-bottom));
+    }
+    .scanner-health-card {
+      border-radius: 9px;
+      overflow: hidden;
+      padding: 0;
+    }
+    .scanner-health-toggle {
+      appearance: none;
+      align-items: center;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      color: inherit;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      min-height: 48px;
+      padding: 9px 10px;
+      text-align: left;
+      width: 100%;
+    }
+    .scanner-health-toggle:focus-visible {
+      outline: 2px solid rgba(139,92,246,0.9);
+      outline-offset: -2px;
+    }
+    .scanner-health-meta {
+      overflow-wrap: anywhere;
+    }
+    .scanner-health-content {
+      display: none;
+      padding: 0 10px 10px;
+    }
+    .scanner-health-card.expanded .scanner-health-content {
+      display: block;
     }
     .market-intelligence {
       margin-top: 10px;
@@ -3936,6 +4043,7 @@ const SMART_NOTIFICATION_VERSION = 'smart-notifications-v1';
 const POSITION_INTELLIGENCE_VERSION = 1;
 const SELECTED_TAB_KEY = 'kairos_selected_tab';
 const MOBILE_FILTERS_OPEN_KEY = 'kairos_mobile_filters_open_session';
+const SCANNER_HEALTH_OPEN_KEY = 'kairos_scanner_health_open_session';
 const POSITION_ALERT_KEYS = {
   ENTRY_REACHED: { label: 'Entry Reached', defaultOn: false },
   MOVE_STARTED: { label: 'Move Started', defaultOn: false },
@@ -4423,6 +4531,27 @@ function initializeMobileScannerFilters() {
     });
   });
   updateMobileFilterSummary();
+}
+
+function scannerHealthExpandedForViewport() {
+  if (window.matchMedia && !window.matchMedia('(max-width: 768px)').matches) return true;
+  try {
+    return sessionStorage.getItem(SCANNER_HEALTH_OPEN_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function toggleScannerHealth() {
+  const card = document.querySelector('.scanner-health-card');
+  const button = document.querySelector('.scanner-health-toggle');
+  if (!card || !button) return;
+  const nextOpen = !card.classList.contains('expanded');
+  card.classList.toggle('expanded', nextOpen);
+  button.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+  const chevron = button.querySelector('.scanner-health-chevron');
+  if (chevron) chevron.textContent = nextOpen ? '-' : '+';
+  try { sessionStorage.setItem(SCANNER_HEALTH_OPEN_KEY, nextOpen ? 'true' : 'false'); } catch {}
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
@@ -5801,6 +5930,16 @@ function partialResultLabel(meta = {}) {
   return `${Number.isFinite(count) ? `${count} ` : ''}${reason}`;
 }
 
+function scannerHealthStatus(meta = {}, operationalFailures = 0) {
+  const status = String(meta.status || '').toLowerCase();
+  if (['failed', 'error'].includes(status)) return { label: 'Failed', className: 'failed' };
+  if (Number(operationalFailures || 0) > 0 || meta.partial_result) return { label: 'Partial', className: 'partial' };
+  const attempted = Number(meta.symbols_attempted ?? meta.configured_universe_count ?? 0);
+  const terminal = Number(meta.symbols_terminally_evaluated ?? meta.symbols_successfully_processed ?? 0);
+  if (!attempted && !terminal) return { label: 'Waiting', className: 'waiting' };
+  return { label: 'Complete', className: 'complete' };
+}
+
 function renderMarketCoveragePanel(rows = [], meta = {}) {
   const el = document.getElementById('marketCoverage');
   if (!el) return;
@@ -5856,11 +5995,26 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
     .map(([reason, count]) => `${reason}: ${count}`)
     .join(' · ') || '—';
   const universeLabel = currentScannerUniverse() === 'default' ? 'My Watchlist' : currentScannerUniverse() === 'finviz' ? 'Finviz' : 'Discovered';
+  const healthOpen = scannerHealthExpandedForViewport();
+  const healthStatus = scannerHealthStatus(meta, operationalFailures);
+  const scannedCount = terminallyEvaluated ?? attempted;
+  const healthMeta = `${scannedCount} scanned · ${withSetup} setups · ${formatTelemetryPercent(resultYieldValue)} yield · ${healthStatus.label}`;
 
   el.innerHTML = `
-    <div class="snapshot-card">
-      <div class="snapshot-title">Market Coverage</div>
-      <div class="snapshot-groups">
+    <div class="snapshot-card scanner-health-card ${healthOpen ? 'expanded' : ''}">
+      <button class="scanner-health-toggle" type="button" aria-expanded="${healthOpen ? 'true' : 'false'}" onclick="toggleScannerHealth()">
+        <span class="scanner-health-summary">
+          <span class="scanner-health-indicator ${escapeHtml(healthStatus.className)}"></span>
+          <span class="scanner-health-summary-text">
+            <span class="scanner-health-title">Scanner Health</span>
+            <span class="scanner-health-meta">${escapeHtml(healthMeta)}</span>
+          </span>
+        </span>
+        <span class="scanner-health-chevron" aria-hidden="true">${healthOpen ? '-' : '+'}</span>
+      </button>
+      <div class="scanner-health-content">
+        <div class="snapshot-title">Market Coverage</div>
+        <div class="snapshot-groups">
         <div>
           <div class="snapshot-group-title">Coverage</div>
           <div class="snapshot-badges">
@@ -5927,6 +6081,7 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
         Buckets: ${escapeHtml(rankingBucketText)}.
         Largest blockers: ${escapeHtml(topReasons)}.
         Multi-session p95 requires runtime sampling and is not inferred from a single scan response.
+      </div>
       </div>
     </div>`;
 }
