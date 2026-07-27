@@ -1718,19 +1718,44 @@
       padding-bottom: calc(76px + env(safe-area-inset-bottom));
     }
   header {
-      gap: 8px;
-      padding: 12px 14px;
+      display: grid;
+      gap: 4px 8px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      padding: 8px 12px;
     }
     header h1 {
-      flex: 1 1 100%;
+      flex: initial;
       font-size: 15px;
+      grid-column: 1;
+      grid-row: 1;
       min-width: 0;
       overflow-wrap: anywhere;
     }
     .header-meta {
+      font-size: 9px;
+      grid-column: 1 / -1;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .notification-shell {
+      grid-column: 2;
+      grid-row: 1;
+      justify-self: end;
+      margin-left: 0;
+    }
+    .notification-bell {
+      border-radius: 8px;
       font-size: 10px;
-      line-height: 1.35;
-      overflow-wrap: anywhere;
+      gap: 5px;
+      min-height: 30px;
+      padding: 5px 7px;
+    }
+    .notification-bell > span:first-child {
+      max-width: 78px;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .tab-bar {
       display: none;
@@ -1817,8 +1842,8 @@
       align-items: stretch;
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 9px;
-      padding: 10px 12px;
+      gap: 8px;
+      padding: 8px 12px;
     }
     .mobile-filter-shell {
       border: 1px solid rgba(148,163,184,0.16);
@@ -1837,9 +1862,30 @@
       justify-content: space-between;
       letter-spacing: 0.06em;
       list-style: none;
-      min-height: 38px;
-      padding: 10px 12px;
+      min-height: 36px;
+      padding: 8px 10px;
       text-transform: uppercase;
+    }
+    .mobile-filter-summary-text {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+    .mobile-filter-title {
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 950;
+      line-height: 1;
+    }
+    .mobile-filter-selected {
+      color: var(--muted);
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+      text-transform: none;
+      white-space: normal;
     }
     .mobile-filter-summary::-webkit-details-marker { display: none; }
     .mobile-filter-summary::after {
@@ -1867,7 +1913,20 @@
       grid-column: 1 / -1;
     }
     .scanner-primary-actions {
-      display: contents;
+      display: grid;
+      gap: 8px;
+      grid-column: 1 / -1;
+      grid-template-columns: 1fr 1fr;
+    }
+    #scanBtn {
+      grid-column: 1 / -1;
+      min-height: 52px;
+      padding: 12px 14px;
+    }
+    #autoScanBtn,
+    .scanner-primary-actions .btn-secondary {
+      min-height: 40px;
+      padding: 8px 10px;
     }
     .control-hint {
       line-height: 1.35;
@@ -1881,8 +1940,13 @@
       min-width: 0;
       overflow-wrap: anywhere;
     }
+    #autoScanCountdown {
+      display: none;
+    }
     #dataStatus {
       justify-content: flex-start;
+      min-height: 36px;
+      padding: 7px 9px;
       width: 100%;
     }
     #dataStatus > div {
@@ -1891,6 +1955,15 @@
     .data-status-main,
     .data-status-sub {
       white-space: normal;
+    }
+    .data-status-main {
+      font-size: 10.5px;
+      line-height: 1.2;
+    }
+    .data-status-sub {
+      font-size: 9.5px;
+      line-height: 1.25;
+      margin-top: 1px;
     }
     .market-snapshot {
       margin-top: 10px;
@@ -2157,7 +2230,7 @@
   }
   @media (max-width: 480px) {
     body { font-size: 12px; }
-    header { padding: 10px 12px; }
+    header { padding: 7px 10px; }
     header h1 { font-size: 14px; }
     .header-meta { font-size: 9px; }
     .tab-bar { gap: 4px; padding: 0 8px; }
@@ -2172,6 +2245,22 @@
       padding: 8px 12px;
       width: 100%;
     }
+    #scanBtn {
+      min-height: 52px;
+    }
+    .scanner-primary-actions {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  @media (max-width: 360px) {
+    .scanner-primary-actions {
+      grid-template-columns: 1fr;
+    }
+    #scanBtn {
+      grid-column: auto;
+    }
+  }
+  @media (max-width: 480px) {
     .market-snapshot,
     main,
     #journal-panel,
@@ -3019,8 +3108,13 @@
       <input type="search" id="tickerInput" placeholder="Search AAPL or Apple..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
       <div class="control-hint">Scan refreshes all cards. Type AAPL or Apple here to filter the loaded cards.</div>
     </div>
-    <details id="mobileScannerFilters" class="mobile-filter-shell" open>
-      <summary class="mobile-filter-summary">Filters</summary>
+    <details id="mobileScannerFilters" class="mobile-filter-shell">
+      <summary class="mobile-filter-summary">
+        <span class="mobile-filter-summary-text">
+          <span class="mobile-filter-title">Filters</span>
+          <span id="mobileFilterSelected" class="mobile-filter-selected">Opportunities · All Directions · All Setup Quality · All Contracts</span>
+        </span>
+      </summary>
       <div class="mobile-filter-content">
         <select id="universeFilter" onchange="handleUniverseChange()">
           <option value="discovered" selected>Discovered</option>
@@ -3841,6 +3935,7 @@ const STOCK_ALERT_DIAGNOSTICS_KEY = 'kairos_stock_alert_diagnostics_v1';
 const SMART_NOTIFICATION_VERSION = 'smart-notifications-v1';
 const POSITION_INTELLIGENCE_VERSION = 1;
 const SELECTED_TAB_KEY = 'kairos_selected_tab';
+const MOBILE_FILTERS_OPEN_KEY = 'kairos_mobile_filters_open_session';
 const POSITION_ALERT_KEYS = {
   ENTRY_REACHED: { label: 'Entry Reached', defaultOn: false },
   MOVE_STARTED: { label: 'Move Started', defaultOn: false },
@@ -3923,6 +4018,8 @@ let scannerRequestGeneration = 0;
 let scannerWarmingPollTimer = null;
 let scannerWarmingPollAttempts = 0;
 let mobileFiltersCollapsedAfterScan = false;
+let mobileFilterUserActive = false;
+let mobileFilterUserActiveTimer = null;
 const SCANNER_SCAN_TIMEOUT_MS = 120000;
 const SCANNER_WARMING_POLL_INTERVAL_MS = 15000;
 const SCANNER_WARMING_MAX_POLLS = 20;
@@ -4265,17 +4362,67 @@ function bindMobileNavigationDismissal() {
 
 function collapseMobileScannerFiltersAfterScan() {
   if (mobileFiltersCollapsedAfterScan) return;
+  if (mobileFilterUserActive) return;
   const filters = document.getElementById('mobileScannerFilters');
   if (!filters) return;
   if (window.matchMedia && !window.matchMedia('(max-width: 768px)').matches) return;
   filters.open = false;
   mobileFiltersCollapsedAfterScan = true;
+  try { sessionStorage.setItem(MOBILE_FILTERS_OPEN_KEY, 'false'); } catch {}
 }
 
 function expandMobileScannerFilters() {
   const filters = document.getElementById('mobileScannerFilters');
   if (filters) filters.open = true;
   mobileFiltersCollapsedAfterScan = false;
+  try { sessionStorage.setItem(MOBILE_FILTERS_OPEN_KEY, 'true'); } catch {}
+}
+
+function markMobileFilterUserActive() {
+  mobileFilterUserActive = true;
+  clearTimeout(mobileFilterUserActiveTimer);
+  mobileFilterUserActiveTimer = setTimeout(() => { mobileFilterUserActive = false; }, 1200);
+}
+
+function scannerFilterSummaryText() {
+  const ids = ['statusFilter', 'directionFilter', 'qualityFilter', 'contractTypeFilter'];
+  return ids.map(id => document.getElementById(id)?.selectedOptions?.[0]?.textContent || '').filter(Boolean).join(' · ');
+}
+
+function updateMobileFilterSummary() {
+  const el = document.getElementById('mobileFilterSelected');
+  if (el) el.textContent = scannerFilterSummaryText() || 'Filters available';
+}
+
+function initializeMobileScannerFilters() {
+  const filters = document.getElementById('mobileScannerFilters');
+  if (!filters) return;
+  const applyViewportState = () => {
+    const isMobile = !window.matchMedia || window.matchMedia('(max-width: 768px)').matches;
+    if (!isMobile) {
+      filters.open = true;
+      return;
+    }
+    try {
+      filters.open = sessionStorage.getItem(MOBILE_FILTERS_OPEN_KEY) === 'true';
+    } catch {
+      filters.open = false;
+    }
+  };
+  applyViewportState();
+  window.addEventListener('resize', applyViewportState);
+  filters.addEventListener('toggle', () => {
+    const isMobile = !window.matchMedia || window.matchMedia('(max-width: 768px)').matches;
+    if (!isMobile) return;
+    try { sessionStorage.setItem(MOBILE_FILTERS_OPEN_KEY, filters.open ? 'true' : 'false'); } catch {}
+  });
+  ['universeFilter', 'statusFilter', 'directionFilter', 'qualityFilter', 'contractTypeFilter', 'sortFilter'].forEach(id => {
+    document.getElementById(id)?.addEventListener('change', () => {
+      markMobileFilterUserActive();
+      updateMobileFilterSummary();
+    });
+  });
+  updateMobileFilterSummary();
 }
 
 // ── Trending List ───────────────────────────────────────────────────────────
@@ -4967,15 +5114,16 @@ function updateDataStatus(meta = {}) {
   const status = cacheStatusFromMeta(meta);
   const age = formatScanAge(meta.age_seconds);
   const nextText = nextScanAt ? formatScheduledScan(nextScanAt).replace(/^Next scan /, 'next scan ') : '';
+  const scheduleText = nextText
+    ? (isMarketHours() ? `Waiting for ${nextText}` : `Market closed — ${nextText}`)
+    : '';
   const staleReason = meta.last_refresh_error
     ? 'Last scan failed'
-    : nextText
-      ? `Scanner data is stale · ${isMarketHours() ? 'waiting for next scheduled scan' : `market closed — ${nextText}`}`
-      : 'Scanner data is stale';
+    : scheduleText || 'Scanner data is stale';
   const labels = {
-    fresh: { icon: '🟢', label: 'Fresh', sub: age ? `Last updated ${age}` : 'Ready to scan' },
-    warming: { icon: '🟡', label: 'Warming', sub: age ? `Last updated ${age} · refreshing` : 'Building market cache' },
-    stale: { icon: '🔴', label: 'Stale', sub: age ? `${staleReason} · Last updated ${age}` : staleReason },
+    fresh: { icon: '🟢', label: age ? `Fresh · Updated ${age}` : 'Fresh', sub: scheduleText || 'Ready to scan' },
+    warming: { icon: '🟡', label: age ? `Warming · Updated ${age}` : 'Warming', sub: age ? 'Refreshing market cache' : 'Building market cache' },
+    stale: { icon: '🔴', label: age ? `Stale · Updated ${age}` : 'Stale', sub: staleReason },
   };
   const config = labels[status] || labels.warming;
   el.innerHTML = `
@@ -5835,6 +5983,7 @@ function renderMarketSnapshot(rows) {
 function renderScannerResults() {
   const results = document.getElementById('results');
   const summary = document.getElementById('summary');
+  updateMobileFilterSummary();
   const filters = {
     status: document.getElementById('statusFilter')?.value || 'all',
     direction: document.getElementById('directionFilter')?.value || 'all',
@@ -14813,6 +14962,7 @@ updateDeveloperReplayAccess();
 renderNotificationCenter();
 loadNotifications(false);
 bindTickerSearch();
+initializeMobileScannerFilters();
 bindMobileNavigationDismissal();
 syncMobileNavigation(document.querySelector('.tab-btn.active')?.dataset?.tab || 'scanner');
 setAutoScanButtonState();
