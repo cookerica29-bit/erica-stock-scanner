@@ -1823,10 +1823,20 @@
     margin-bottom: 10px;
   }
   .guided-chart-status {
+    align-items: center;
     color: var(--text);
+    display: flex;
+    flex-wrap: wrap;
     font-size: 14px;
     font-weight: 900;
+    gap: 8px;
   }
+  .guided-chart-symbol { color: var(--text); }
+  .guided-chart-direction { font-weight: 950; text-transform: uppercase; }
+  .guided-chart-direction.short { color: #ef4444; }
+  .guided-chart-direction.long { color: #22c55e; }
+  .guided-chart-state { color: var(--muted); }
+  .guided-chart-state.enter-now { color: #ef4444; }
   .guided-chart-next {
     color: #bfdbfe;
     font-size: 12px;
@@ -1855,21 +1865,22 @@
     color: #bfdbfe;
   }
   .guided-chart-grid {
+    align-items: start;
     display: grid;
-    gap: 12px;
-    grid-template-columns: minmax(0, 1.5fr) minmax(220px, 0.8fr);
+    gap: 14px;
+    grid-template-columns: minmax(520px, 2.35fr) minmax(240px, 0.8fr);
   }
   .guided-chart-canvas {
     background: rgba(15,23,42,0.45);
     border: 1px solid rgba(148,163,184,0.1);
     border-radius: 8px;
-    min-height: 260px;
+    min-height: 340px;
     overflow: hidden;
     position: relative;
   }
   .guided-chart-svg {
     display: block;
-    height: 260px;
+    height: 340px;
     width: 100%;
   }
   .guided-candle-wick,
@@ -1881,19 +1892,27 @@
   .guided-risk-zone { fill: rgba(153,83,68,0.18); }
   .guided-reward-zone { fill: rgba(22,101,52,0.18); }
   .guided-level-line { stroke-width: 1.4; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
-  .guided-level-entry { stroke: #facc15; }
-  .guided-level-current { stroke: #93c5fd; stroke-width: 2; stroke-dasharray: none; }
-  .guided-level-stop { stroke: #f87171; }
-  .guided-level-target { stroke: #4ade80; }
+  .guided-level-entry { stroke: #ffffff; }
+  .guided-level-current { stroke: #facc15; stroke-width: 2; stroke-dasharray: none; }
+  .guided-level-stop { stroke: #ef4444; }
+  .guided-level-target { stroke: #22c55e; }
   .guided-level-label {
-    fill: #e5e7eb;
+    fill: #f8fafc;
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 900;
   }
   .guided-level-price {
     fill: #cbd5e1;
     font-size: 10px;
   }
+  .guided-level-label.guided-level-current,
+  .guided-level-price.guided-level-current { fill: #facc15; }
+  .guided-level-label.guided-level-entry,
+  .guided-level-price.guided-level-entry { fill: #ffffff; }
+  .guided-level-label.guided-level-stop,
+  .guided-level-price.guided-level-stop { fill: #f87171; }
+  .guided-level-label.guided-level-target,
+  .guided-level-price.guided-level-target { fill: #4ade80; }
   .guided-plan-list,
   .guided-explain-list {
     display: grid;
@@ -2524,8 +2543,11 @@
       justify-content: flex-start;
       width: 100%;
     }
+    .guided-chart-canvas {
+      min-height: 260px;
+    }
     .guided-chart-svg {
-      height: 240px;
+      height: 260px;
     }
     .price-row,
     .coach-head,
@@ -7525,10 +7547,17 @@ function guidedSubjectFromPositionModel(model = {}) {
 
 function renderGuidedChartShell(key, plan, subject, context, signalAge = '') {
   const signalTime = formatSignalTimestamp(plan.signalTimestamp);
+  const directionKey = String(plan.direction || '').toLowerCase() === 'short' ? 'short' : 'long';
+  const stateKey = String(plan.status || '').toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
   return `
     <div class="guided-chart-head">
       <div>
-        <div class="guided-chart-status">${escapeHtml(plan.symbol)} — ${escapeHtml(simpleDirection(plan.direction))} · ${escapeHtml(plan.status)}</div>
+        <div class="guided-chart-status">
+          <span class="guided-chart-symbol">${escapeHtml(plan.symbol)}</span>
+          <span class="guided-chart-direction ${escapeHtml(directionKey)}">${escapeHtml(simpleDirection(plan.direction))}</span>
+          <span class="guided-chart-state ${escapeHtml(stateKey)}">${escapeHtml(plan.status)}</span>
+          <span class="guided-chart-state">Entry ${escapeHtml(fmtMoney(plan.entry))}</span>
+        </div>
         <div class="guided-chart-next"><strong>What happens next:</strong> ${escapeHtml(guidedNextStep(subject, context))}</div>
         <div class="guided-chart-next">${escapeHtml(guidedPriceContext(plan))}</div>
         ${guidedVerificationNote(subject, context) ? `<div class="guided-chart-next">${escapeHtml(guidedVerificationNote(subject, context))}</div>` : ''}
@@ -7788,7 +7817,7 @@ function renderGuidedTradeChartSvg(plan = {}, candles = [], meta = {}) {
     ['Current Price', plan.current, 'guided-level-current'],
     ['Planned Entry', plan.entry, 'guided-level-entry'],
     ['Stop Loss', plan.stop, 'guided-level-stop'],
-    ...plan.targets.map(([label, value]) => [label === 'TP1' ? 'First Target' : label, value, 'guided-level-target']),
+    ...plan.targets.map(([label, value]) => [label, value, 'guided-level-target']),
   ].filter(([, value]) => value !== null && value !== undefined)
     .sort((a, b) => y(a[1]) - y(b[1]))
     .map((row, index, arr) => {
@@ -7800,8 +7829,8 @@ function renderGuidedTradeChartSvg(plan = {}, candles = [], meta = {}) {
     });
   const levelSvg = labelRows.map(([label, value, cls, labelY]) => `
     <line class="guided-level-line ${cls}" x1="${left}" x2="${width - 12}" y1="${y(value).toFixed(1)}" y2="${y(value).toFixed(1)}"></line>
-    <text class="guided-level-label" x="${width - right + 10}" y="${Number(labelY).toFixed(1)}">${escapeHtml(label)}</text>
-    <text class="guided-level-price" x="${width - right + 10}" y="${(Number(labelY) + 11).toFixed(1)}">${escapeHtml(fmtMoney(value))}</text>`).join('');
+    <text class="guided-level-label ${cls}" x="${width - right + 10}" y="${Number(labelY).toFixed(1)}">${escapeHtml(label)}</text>
+    <text class="guided-level-price ${cls}" x="${width - right + 10}" y="${(Number(labelY) + 11).toFixed(1)}">${escapeHtml(fmtMoney(value))}</text>`).join('');
   const riskRectY = Math.min(riskY1, riskY2);
   const riskRectH = Math.max(2, Math.abs(riskY2 - riskY1));
   const rewardRect = rewardY == null ? '' : `<rect class="guided-reward-zone" x="${left}" y="${Math.min(riskY1, rewardY).toFixed(1)}" width="${plotW}" height="${Math.max(2, Math.abs(rewardY - riskY1)).toFixed(1)}"></rect>`;
