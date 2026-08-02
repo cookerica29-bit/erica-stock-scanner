@@ -317,6 +317,68 @@
   .data-status-dot.stale { background: #ff2d55; box-shadow: 0 0 0 4px rgba(255,45,85,0.12); }
   .data-status-main { color: var(--text); font-size: 11px; font-weight: 900; white-space: nowrap; }
   .data-status-sub { color: var(--muted); font-size: 10px; margin-top: 2px; white-space: nowrap; }
+  .discovery-warmup-card {
+    grid-column: 1 / -1;
+    background: rgba(53,66,88,0.86);
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
+    box-shadow: var(--card-shadow);
+    color: var(--text);
+    padding: 18px;
+    text-align: left;
+  }
+  .discovery-warmup-card h3 {
+    font-size: 16px;
+    margin: 0 0 6px;
+  }
+  .discovery-warmup-card p {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.45;
+    margin: 0;
+  }
+  .discovery-progress-grid {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    margin-top: 14px;
+  }
+  .discovery-progress-item {
+    background: rgba(15,23,42,0.28);
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    padding: 9px 10px;
+  }
+  .discovery-progress-item .label {
+    color: var(--muted);
+    display: block;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .discovery-progress-item .value {
+    color: var(--text);
+    display: block;
+    font-size: 13px;
+    font-weight: 900;
+    margin-top: 3px;
+  }
+  .discovery-health-note {
+    align-items: center;
+    color: var(--long);
+    display: flex;
+    font-size: 12px;
+    font-weight: 900;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .discovery-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+  }
 
   /* ── Scanner panel ─────────────────────────────────────────────────────── */
   main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; width: 100%; }
@@ -4969,15 +5031,6 @@ function abortActiveScannerRequest() {
   }
 }
 
-function isDiscoveredWarmingMeta(meta = {}) {
-  const universe = String(meta.universe || meta.cache_key || '').toLowerCase();
-  const status = String(meta.status || '').toLowerCase();
-  return universe === 'discovered'
-    && status === 'warming'
-    && !meta.generated_at
-    && (meta.cache === 'miss' || meta.has_cache === false || meta.refreshing === true);
-}
-
 function isCompletedScanMeta(meta = {}) {
   if (!meta || String(meta.status || '').toLowerCase() === 'warming') return false;
   if (meta.partial_result === true || meta.partial_result === false) return true;
@@ -5408,9 +5461,66 @@ function formatScanAge(seconds) {
   return `${Math.round(minutes / 60)}h ago`;
 }
 
+function formatElapsedDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return '';
+  if (value < 60) return `${Math.round(value)}s`;
+  const minutes = Math.floor(value / 60);
+  const remaining = Math.round(value % 60);
+  if (minutes < 60) return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return mins ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+function discoveryStatusFromMeta(meta = {}) {
+  return meta.discovery_status || meta.discoveryStatus || (meta.universe === 'discovered' ? meta : {});
+}
+
+function discoveryElapsedSeconds(meta = {}) {
+  const discovery = discoveryStatusFromMeta(meta);
+  const direct = firstPresent(meta.refresh_duration, discovery.last_duration, discovery.metrics?.discovery_duration_ms != null ? Number(discovery.metrics.discovery_duration_ms) / 1000 : null);
+  if (Number.isFinite(Number(direct))) return Number(direct);
+  const started = firstPresent(discovery.started_at, discovery.metrics?.discovery_started_at, meta.refresh_started_at, meta.scan_started_at);
+  if (!started) return null;
+  const startedMs = Date.parse(started);
+  if (!Number.isFinite(startedMs)) return null;
+  return Math.max(0, (Date.now() - startedMs) / 1000);
+}
+
+function isDiscoveredWarmingMeta(meta = {}) {
+  const universe = String(meta.universe || meta.cache_key || '').toLowerCase();
+  const status = String(meta.status || '').toLowerCase();
+  const discovery = discoveryStatusFromMeta(meta);
+  const discoveryStatus = String(discovery.status || '').toLowerCase();
+  return universe === 'discovered'
+    && !meta.generated_at
+    && (meta.cache === 'miss' || meta.has_cache === false || meta.refreshing === true)
+    && (status === 'warming' || meta.refreshing === true || ['warming', 'refreshing'].includes(discoveryStatus) || discovery.running === true);
+}
+
+function isDiscoveryUniverseWarmup(meta = {}) {
+  const discovery = discoveryStatusFromMeta(meta);
+  const discoveryStatus = String(discovery.status || '').toLowerCase();
+  return isDiscoveredWarmingMeta(meta)
+    && (discovery.running === true || ['warming', 'refreshing'].includes(discoveryStatus))
+    && discovery.has_cache === false;
+}
+
+function isDiscoveredFirstScanWarming(meta = {}) {
+  const discovery = discoveryStatusFromMeta(meta);
+  const discoveryStatus = String(discovery.status || '').toLowerCase();
+  const discoveryStillRunning = discovery.running === true || ['warming', 'refreshing'].includes(discoveryStatus);
+  return isDiscoveredWarmingMeta(meta)
+    && !discoveryStillRunning
+    && (discoveryStatus === 'ready' || discovery.has_cache === true || Number(discovery.selected_count || 0) > 0 || meta.refreshing === true);
+}
+
 function scanStatusText(meta) {
   if (!meta) return '';
   if (meta.last_refresh_error && !meta.refreshing) return 'Refresh failed';
+  if (isDiscoveryUniverseWarmup(meta)) return 'Discovery warming...';
+  if (isDiscoveredFirstScanWarming(meta)) return 'Loading discovered scanner results...';
   if (meta.refreshing) return 'Refreshing cached data...';
   if (meta.cache === 'miss' && meta.refreshing) return 'Kairos is warming data...';
   return '';
@@ -5549,6 +5659,31 @@ function updateDataStatus(meta = {}) {
       </div>`;
     return;
   }
+  if (isDiscoveryUniverseWarmup(meta)) {
+    const discovery = discoveryStatusFromMeta(meta);
+    const elapsed = formatElapsedDuration(discoveryElapsedSeconds(meta));
+    const selected = Number(discovery.selected_count || 0);
+    const sub = elapsed
+      ? `Building expanded universe · elapsed ${elapsed}${selected ? ` · ${selected} selected` : ''}`
+      : 'Building the expanded stock universe';
+    el.innerHTML = `
+      <span class="data-status-dot warming"></span>
+      <div>
+        <div class="data-status-main">🟡 Discovery warming</div>
+        <div class="data-status-sub">${escapeHtml(sub)}</div>
+      </div>`;
+    return;
+  }
+  if (isDiscoveredFirstScanWarming(meta)) {
+    const elapsed = formatElapsedDuration(discoveryElapsedSeconds(meta));
+    el.innerHTML = `
+      <span class="data-status-dot warming"></span>
+      <div>
+        <div class="data-status-main">🟡 Loading discovered scanner</div>
+        <div class="data-status-sub">${escapeHtml(elapsed ? `First expanded scan running · elapsed ${elapsed}` : 'Discovery ready; scanner results are loading')}</div>
+      </div>`;
+    return;
+  }
   const status = cacheStatusFromMeta(meta);
   const age = formatScanAge(firstPresent(meta.cache_age_seconds, meta.age_seconds));
   const nextText = nextScanAt ? formatScheduledScan(nextScanAt).replace(/^Next scan /, 'next scan ') : '';
@@ -5572,10 +5707,67 @@ function updateDataStatus(meta = {}) {
     </div>`;
 }
 
+function discoveryProgressItems(meta = latestScannerMeta || {}) {
+  const discovery = discoveryStatusFromMeta(meta);
+  const counts = discovery.pipeline_counts || {};
+  const metrics = discovery.metrics || {};
+  const stage3 = discovery.stage3 || {};
+  const stage4 = discovery.stage4 || {};
+  const elapsed = formatElapsedDuration(discoveryElapsedSeconds(meta));
+  const stage = (() => {
+    const status = String(discovery.status || meta.status || '').toLowerCase();
+    if (isDiscoveredFirstScanWarming(meta)) return 'First expanded scan';
+    if (stage4.elapsed_seconds != null || counts.options_liquidity_passed != null || metrics.stage4_options_liquidity != null) return 'Options liquidity';
+    if (stage3.elapsed_seconds != null || counts.dollar_volume_passed != null) return 'Dollar volume';
+    if (counts.hygiene_passed != null) return 'Symbol hygiene';
+    if (counts.raw_assets != null || metrics.raw_alpaca_asset_count != null) return 'Asset discovery';
+    if (status === 'error') return 'Discovery error';
+    return discovery.running ? 'Discovery running' : 'Discovery warming';
+  })();
+  return [
+    ['Stage', stage],
+    ['Raw assets', firstPresent(counts.raw_assets, metrics.raw_alpaca_asset_count)],
+    ['Hygiene passed', firstPresent(counts.hygiene_passed, metrics.hygiene_passed_count)],
+    ['Liquidity passed', firstPresent(counts.options_liquidity_passed, metrics.options_liquidity_passed_count)],
+    ['Selected symbols', firstPresent(discovery.selected_count, counts.selected, metrics.final_admitted_symbol_count)],
+    ['Elapsed', elapsed],
+  ].filter(([, value]) => value !== undefined && value !== null && String(value) !== '');
+}
+
+function switchScannerUniverse(universe) {
+  const control = document.getElementById('universeFilter');
+  if (!control) return;
+  control.value = normalizedScannerUniverse(universe);
+  handleUniverseChange();
+}
+
+function renderDiscoveryWarmupCard(meta = latestScannerMeta || {}) {
+  const firstScan = isDiscoveredFirstScanWarming(meta);
+  const title = firstScan ? 'Loading discovered scanner' : 'Discovery warming';
+  const body = firstScan
+    ? 'The expanded universe is ready. Kairos is running the first discovered-universe scan now.'
+    : 'Building the expanded stock universe. This can take several minutes after a restart.';
+  const progress = discoveryProgressItems(meta).map(([label, value]) => `
+    <div class="discovery-progress-item">
+      <span class="label">${escapeHtml(label)}</span>
+      <span class="value">${escapeHtml(String(value))}</span>
+    </div>`).join('');
+  return `
+    <div class="discovery-warmup-card">
+      <h3>${escapeHtml(title)}</h3>
+      <p>${escapeHtml(body)}</p>
+      ${progress ? `<div class="discovery-progress-grid">${progress}</div>` : ''}
+      <div class="discovery-health-note"><span class="scanner-health-indicator complete"></span>Core scanner remains healthy</div>
+      <div class="discovery-actions">
+        <button type="button" class="btn-secondary" onclick="switchScannerUniverse('default')">View core universe while waiting</button>
+      </div>
+    </div>`;
+}
+
 function scannerWarmingMessage(meta = latestScannerMeta || {}) {
-  if (meta?.universe === 'discovered' || meta?.cache_key === 'discovered') {
-    return 'Discovering the market...';
-  }
+  if (isDiscoveryUniverseWarmup(meta)) return 'Discovery warming';
+  if (isDiscoveredFirstScanWarming(meta)) return 'Loading discovered scanner';
+  if (meta?.universe === 'discovered' || meta?.cache_key === 'discovered') return 'Discovery warming';
   return 'Kairos is warming market data. Try Scan again in a moment.';
 }
 
@@ -5637,7 +5829,8 @@ function renderScannerWarming(data = {}) {
 function scheduleScannerWarmingPoll() {
   clearScannerWarmingPoll();
   if (scannerWarmingPollAttempts >= SCANNER_WARMING_MAX_POLLS) {
-    setScannerLoadingState(false, 'Discovery is still warming. Try Scan again shortly.');
+    setScannerLoadingState(false, 'Discovery is still warming. Results will appear when the expanded universe is ready.');
+    loadCacheStatus();
     return;
   }
   scannerWarmingPollAttempts += 1;
@@ -5660,6 +5853,13 @@ async function loadCacheStatus() {
       return;
     }
     updateDataStatus(status);
+    if (isDiscoveredWarmingMeta(status)) {
+      latestScannerMeta = status;
+      if (!scannerRows.length && !scannerNearMiss.length) renderScannerResults();
+      if (!scannerWarmingPollTimer && !scannerRequestController) {
+        scheduleScannerWarmingPoll();
+      }
+    }
   } catch {
     updateDataStatus({ universe: requestedUniverse, status: 'warming', refreshing: true });
   }
@@ -6488,8 +6688,11 @@ function renderScannerResults() {
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
-    const warming = scannerRows.length === 0 && scannerNearMiss.length === 0 && document.getElementById('dataStatus')?.textContent?.includes('Warming');
-    results.innerHTML = `<div class="empty">${warming ? scannerWarmingMessage(latestScannerMeta || {}) : `No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.`}</div>`;
+    const warmingMeta = latestScannerMeta || {};
+    const warming = scannerRows.length === 0 && scannerNearMiss.length === 0 && isDiscoveredWarmingMeta(warmingMeta);
+    results.innerHTML = warming
+      ? renderDiscoveryWarmupCard(warmingMeta)
+      : `<div class="empty">No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.</div>`;
   } else {
     results.innerHTML = rows.map(renderCard).join('');
   }

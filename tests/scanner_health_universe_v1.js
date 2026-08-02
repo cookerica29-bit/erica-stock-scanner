@@ -115,6 +115,61 @@ context.updateDataStatus({
 assert.ok(getElement('dataStatus').innerHTML.includes('Scanner health is updating'));
 assert.ok(!getElement('dataStatus').innerHTML.includes('Stale · Updated'));
 
+const discoveryWarmingMeta = {
+  universe: 'discovered',
+  cache: 'miss',
+  status: 'warming',
+  refreshing: true,
+  has_cache: false,
+  discovery_status: {
+    status: 'refreshing',
+    running: true,
+    has_cache: false,
+    selected_count: 18,
+    started_at: new Date(Date.now() - 125000).toISOString(),
+    pipeline_counts: { raw_assets: 14162, hygiene_passed: 5683, options_liquidity_passed: 1039 },
+  },
+};
+context.updateDataStatus(discoveryWarmingMeta);
+assert.ok(getElement('dataStatus').innerHTML.includes('Discovery warming'));
+assert.ok(getElement('dataStatus').innerHTML.includes('Building expanded universe'));
+assert.strictEqual(context.isDiscoveryUniverseWarmup(discoveryWarmingMeta), true);
+assert.strictEqual(context.isDiscoveredFirstScanWarming(discoveryWarmingMeta), false);
+context.__fixtureMeta = discoveryWarmingMeta;
+vm.runInContext('latestScannerMeta = __fixtureMeta; scannerRows = []; scannerNearMiss = [];', context);
+vm.runInContext(`
+  renderMarketCoveragePanel = () => {};
+  renderMarketSnapshot = () => {};
+  renderMarketIntelligencePanel = () => {};
+  renderTopOpportunities = () => {};
+`, context);
+context.renderScannerResults();
+assert.ok(getElement('results').innerHTML.includes('Discovery warming'));
+assert.ok(getElement('results').innerHTML.includes('Building the expanded stock universe'));
+assert.ok(getElement('results').innerHTML.includes('Raw assets'));
+assert.ok(getElement('results').innerHTML.includes('14162'));
+assert.ok(getElement('results').innerHTML.includes('Core scanner remains healthy'));
+assert.ok(getElement('results').innerHTML.includes('View core universe while waiting'));
+
+const discoveredFirstScanMeta = {
+  universe: 'discovered',
+  cache: 'miss',
+  status: 'warming',
+  refreshing: true,
+  has_cache: false,
+  refresh_duration: 49.7,
+  discovery_status: { status: 'ready', running: false, has_cache: true, selected_count: 750 },
+};
+context.updateDataStatus(discoveredFirstScanMeta);
+assert.ok(getElement('dataStatus').innerHTML.includes('Loading discovered scanner'));
+assert.strictEqual(context.isDiscoveryUniverseWarmup(discoveredFirstScanMeta), false);
+assert.strictEqual(context.isDiscoveredFirstScanWarming(discoveredFirstScanMeta), true);
+context.__fixtureMeta = discoveredFirstScanMeta;
+vm.runInContext('latestScannerMeta = __fixtureMeta; scannerRows = []; scannerNearMiss = [];', context);
+context.renderScannerResults();
+assert.ok(getElement('results').innerHTML.includes('Loading discovered scanner'));
+assert.ok(getElement('results').innerHTML.includes('first discovered-universe scan'));
+
 context.updateDataStatus({
   universe: 'discovered',
   status: 'fresh',
@@ -123,6 +178,12 @@ context.updateDataStatus({
   generated_at: '2026-07-27T20:45:00Z',
 });
 assert.ok(getElement('dataStatus').innerHTML.includes('Fresh · Updated'));
+
+getElement('universeFilter').value = 'discovered';
+let changedUniverse = '';
+context.handleUniverseChange = () => { changedUniverse = getElement('universeFilter').value; };
+context.switchScannerUniverse('default');
+assert.strictEqual(changedUniverse, 'default');
 
 getElement('universeFilter').value = 'default';
 assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=default');
@@ -158,6 +219,18 @@ context.fetchWithTimeout = (url) => {
 await context.loadCacheStatus();
 assert.strictEqual(statusUrl, '/api/cache/status?universe=discovered');
 assert.ok(getElement('dataStatus').innerHTML.includes('Fresh · Updated'));
+
+let pollScheduled = false;
+context.scheduleScannerWarmingPoll = () => { pollScheduled = true; };
+context.fetchWithTimeout = (url) => {
+  statusUrl = url;
+  return Promise.resolve({ ok: true, json: () => Promise.resolve(discoveryWarmingMeta) });
+};
+vm.runInContext('scannerRows = []; scannerNearMiss = []; scannerWarmingPollTimer = null; scannerRequestController = null;', context);
+await context.loadCacheStatus();
+assert.strictEqual(statusUrl, '/api/cache/status?universe=discovered');
+assert.strictEqual(pollScheduled, true);
+assert.ok(getElement('results').innerHTML.includes('Discovery warming'));
 
 const completedPayload = {
   rows: [{ ticker: 'DOW', direction: 'SHORT', quality: { grade: 'A' }, trade_eval: {} }],
