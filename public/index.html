@@ -578,6 +578,12 @@
     min-width: 0;
     transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
   }
+  #results > .card.guided-chart-expanded,
+  #near-miss-results > .card.guided-chart-expanded {
+    grid-column: 1 / -1;
+    overflow: visible;
+    width: 100%;
+  }
   .card:hover,
   .index-row:hover,
   .execution-card:hover {
@@ -7605,6 +7611,8 @@ function renderGuidedPlanRows(plan = {}) {
 }
 
 function handleGuidedChartToggle(details) {
+  const card = details?.closest?.('.card');
+  if (card) card.classList.toggle('guided-chart-expanded', Boolean(details?.open));
   if (!details?.open || details.dataset.loaded === 'true') return;
   details.dataset.loaded = 'true';
   loadGuidedTradeChart(details.dataset.guidedChartKey || '', '4H');
