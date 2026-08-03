@@ -1256,7 +1256,12 @@ def _option_pricing_from_chain(
     option_type = descriptor["type"]
     strike = descriptor["strike"]
     if chain is None:
-        data = _empty_option_pricing("unavailable", "provider_timeout", descriptor)
+        failure = _option_chain_failure_details(ticker, expiry)
+        data = _empty_option_pricing("unavailable", failure.get("reason") or "provider_timeout", descriptor)
+        if failure.get("available_expirations"):
+            data["available_expirations"] = failure.get("available_expirations")
+        if failure.get("error"):
+            data["provider_error"] = failure.get("error")
     else:
         row, reason, details = _find_option_contract_row(chain, option_type, strike)
         if row is None:
@@ -1275,7 +1280,7 @@ def _should_cache_option_pricing_result(data: dict) -> bool:
         return False
     if data.get("status") == "ready":
         return True
-    return data.get("reason") not in {"provider_timeout", "provider_rate_limit"}
+    return data.get("reason") not in {"provider_timeout", "provider_rate_limit", "provider_fetch_error"}
 
 
 def _fetch_option_pricing(descriptor: dict, *, force_refresh: bool = False) -> dict:
@@ -1368,16 +1373,21 @@ def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict
             diagnostics["latencies_ms"].append(provider_ms)
             if chain is not None:
                 break
+            failure = _option_chain_failure_details(ticker, expiry)
+            if failure.get("reason") == "invalid_expiration":
+                break
             if attempt == 0:
                 diagnostics["provider_retries"] += 1
                 time.sleep(0.75 + random.uniform(0.0, 0.6))
+        failure = _option_chain_failure_details(ticker, expiry) if chain is None else {}
         diagnostics["request_details"].append({
             "symbol": ticker,
             "expiration": expiry,
             "contracts": len(group),
             "attempts": attempts,
             "latency_ms": provider_ms,
-            "result": "ready" if chain is not None else "provider_timeout",
+            "result": "ready" if chain is not None else failure.get("reason", "provider_timeout"),
+            "available_expirations": failure.get("available_expirations") or [],
         })
         fetched_at = datetime.utcnow().replace(tzinfo=timezone.utc)
         for descriptor in group:
@@ -2043,6 +2053,37 @@ def _cached_option_chain_for_ticker(ticker: str, expiry: str):
         return chain is not None, chain
 
 
+def _classify_option_chain_exception(exc: Exception) -> dict:
+    text = str(exc or "")
+    lower = text.lower()
+    reason = "provider_fetch_error"
+    if "expiration" in lower and "cannot be found" in lower:
+        reason = "invalid_expiration"
+    elif _is_yahoo_rate_limit_error(exc):
+        reason = "provider_rate_limit"
+    available = []
+    marker = "Available expirations are:"
+    if marker in text:
+        raw = text.split(marker, 1)[1].strip()
+        raw = raw.strip("[]")
+        available = [item.strip().strip("'\"") for item in raw.split(",") if item.strip()]
+    return {
+        "reason": reason,
+        "error": text,
+        "available_expirations": available[:20],
+    }
+
+
+def _option_chain_failure_details(ticker: str, expiry: str) -> dict:
+    ticker = str(ticker or "").upper()
+    expiry = str(expiry or "").strip()
+    with _cache_lock:
+        cached = _option_chain_cache.get(ticker) or {}
+        failures = cached.get("chain_failures") or {}
+        details = failures.get(expiry) or {}
+    return dict(details)
+
+
 def _fetch_option_chain(ticker: str, expiry: str):
     ticker = str(ticker or "").upper()
     now = datetime.utcnow()
@@ -2053,12 +2094,23 @@ def _fetch_option_chain(ticker: str, expiry: str):
             chain = yf.Ticker(ticker).option_chain(expiry)
     except Exception as e:
         logger.warning(f"[options] chain fetch failed for {ticker} {expiry}: {e}")
+        details = _classify_option_chain_exception(e)
+        with _cache_lock:
+            cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
+            cached.setdefault("chains", {})
+            failures = cached.setdefault("chain_failures", {})
+            failures[str(expiry or "").strip()] = {
+                **details,
+                "failed_at": now,
+            }
         return None
 
     with _cache_lock:
         cached = _option_chain_cache.setdefault(ticker, {"fetched_at": now, "expirations": [], "chains": {}})
         cached["fetched_at"] = now
         cached.setdefault("chains", {})[expiry] = chain
+        failures = cached.setdefault("chain_failures", {})
+        failures.pop(str(expiry or "").strip(), None)
     return chain
 
 

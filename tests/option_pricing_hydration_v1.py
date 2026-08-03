@@ -393,6 +393,50 @@ def test_worker_records_latency_distribution_diagnostics():
         scanner._analysis_cache.clear()
 
 
+def test_invalid_expiration_is_reported_without_retrying():
+    original_yf = scanner.yf
+    original_sleep = scanner.time.sleep
+    original_random = scanner.random.uniform
+    scanner._option_chain_cache.clear()
+    scanner._option_quote_cache.clear()
+    try:
+        scanner.time.sleep = lambda *_args, **_kwargs: None
+        scanner.random.uniform = lambda *_args, **_kwargs: 0
+
+        class FakeTicker:
+            def __init__(self, ticker):
+                self.ticker = ticker
+
+            def option_chain(self, expiry):
+                raise ValueError(
+                    "Expiration `2026-09-11` cannot be found. "
+                    "Available expirations are: [2026-08-21, 2026-09-18]"
+                )
+
+        scanner.yf = SimpleNamespace(Ticker=FakeTicker)
+        descriptor = {
+            "ticker": "BADX",
+            "type": "CALL",
+            "expiry": "2026-09-11",
+            "strike": 100.0,
+            "key": scanner._option_pricing_key("BADX", "2026-09-11", 100.0, "CALL"),
+        }
+        results, diagnostics = scanner._option_pricing_batch_for_descriptors([descriptor])
+        pricing = results[descriptor["key"]]
+        assert diagnostics["chain_requests_attempted"] == 1
+        assert diagnostics["provider_retries"] == 0
+        assert pricing["status"] == "unavailable"
+        assert pricing["reason"] == "invalid_expiration"
+        assert pricing["available_expirations"] == ["2026-08-21", "2026-09-18"]
+        assert diagnostics["slowest_requests"][0]["result"] == "invalid_expiration"
+    finally:
+        scanner.yf = original_yf
+        scanner.time.sleep = original_sleep
+        scanner.random.uniform = original_random
+        scanner._option_chain_cache.clear()
+        scanner._option_quote_cache.clear()
+
+
 if __name__ == "__main__":
     test_live_ask_contract_cost_and_cache_update()
     test_last_price_fallback_and_missing_contract_reason()
@@ -403,4 +447,5 @@ if __name__ == "__main__":
     test_batch_pricing_fetches_one_chain_for_multiple_contracts()
     test_provider_timeout_is_retried_by_chain_and_not_cached()
     test_worker_records_latency_distribution_diagnostics()
+    test_invalid_expiration_is_reported_without_retrying()
     print("Option pricing hydration v1 tests passed")
