@@ -186,7 +186,7 @@ context.switchScannerUniverse('default');
 assert.strictEqual(changedUniverse, 'default');
 
 getElement('universeFilter').value = 'default';
-assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=default');
+assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=default&view=summary');
 assert.strictEqual(context.scannerCacheStatusUrl(), '/api/cache/status?universe=default');
 context.updateDataStatus({
   universe: 'default',

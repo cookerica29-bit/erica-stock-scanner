@@ -4586,6 +4586,8 @@ let scannerRequestController = null;
 let scannerRequestGeneration = 0;
 let scannerWarmingPollTimer = null;
 let scannerWarmingPollAttempts = 0;
+const scannerDetailCache = new Map();
+const scannerDetailRequests = new Map();
 let mobileFiltersCollapsedAfterScan = false;
 let mobileFilterUserActive = false;
 let mobileFilterUserActiveTimer = null;
@@ -5090,7 +5092,7 @@ function stripContractDataForIneligibleGrade(row = {}) {
 }
 
 function normalizeScanRowsForClient(rows = []) {
-  return (Array.isArray(rows) ? rows : []).map(stripContractDataForIneligibleGrade);
+  return (Array.isArray(rows) ? rows : []).map(normalizeScanRowForClient).map(stripContractDataForIneligibleGrade);
 }
 
 function currentScannerUniverse() {
@@ -5103,19 +5105,152 @@ function normalizedScannerUniverse(value = currentScannerUniverse()) {
   return 'discovered';
 }
 
+function scannerSummaryEnabledForUniverse(universe = currentScannerUniverse()) {
+  return normalizedScannerUniverse(universe) === 'default';
+}
+
 function scannerScanUrl({ refresh = false } = {}) {
   const params = new URLSearchParams();
   const universe = normalizedScannerUniverse();
   if (universe && universe !== 'discovered') params.set('universe', universe);
+  if (scannerSummaryEnabledForUniverse(universe)) params.set('view', 'summary');
   if (refresh) params.set('refresh', 'true');
   const query = params.toString();
   return `${API}/api/scan${query ? `?${query}` : ''}`;
+}
+
+function normalizeScanRowForClient(row = {}) {
+  if (!row || typeof row !== 'object') return row;
+  const summaryLike = Boolean(row.setup_id || row.scan_generation || row.lazy_hydration || row.view === 'summary' || row.scan_view === 'summary' || latestScannerMeta?.view === 'summary');
+  if (!summaryLike) return row;
+  const normalized = { ...row };
+  normalized.__scanView = row.__scanView || row.scan_view || row.view || latestScannerMeta?.view || '';
+  normalized.__scanUniverse = row.__scanUniverse || normalizedScannerUniverse(latestScannerMeta?.universe || latestScannerMeta?.cache_key || currentScannerUniverse());
+  if (row.option && typeof row.option === 'object') normalized.option = { ...row.option };
+  if (row.option_pricing && typeof row.option_pricing === 'object') normalized.option_pricing = { ...row.option_pricing };
+  const option = normalized.option || {};
+  const pricing = normalized.option_pricing || {};
+  const type = firstPresent(option.type, pricing.type);
+  const strike = firstPresent(option.strike, pricing.strike);
+  const expiry = firstPresent(option.expiry, option.expiration, pricing.expiry, pricing.expiration);
+  const estimatedCost = firstPresent(option.estimated_contract_cost, pricing.estimated_contract_cost);
+  if (!normalized.best_contract && (type || strike != null || expiry || estimatedCost != null || normalized.pricing_status)) {
+    normalized.best_contract = {
+      available: Boolean(type && strike != null && expiry && String(normalized.pricing_status || pricing.status || '').toLowerCase() !== 'unavailable'),
+      type,
+      strike,
+      expiry,
+      expiration: firstPresent(option.expiration, option.expiry, pricing.expiration, pricing.expiry),
+      requested_expiration: firstPresent(option.requested_expiration, pricing.requested_expiration),
+      resolved_expiration: firstPresent(option.resolved_expiration, pricing.resolved_expiration),
+      bid: firstPresent(option.bid, pricing.bid),
+      ask: firstPresent(option.ask, pricing.ask),
+      mid: firstPresent(option.mid, option.mark, pricing.mid, pricing.mark),
+      mark: firstPresent(option.mark, option.mid, pricing.mark, pricing.mid),
+      spread: firstPresent(option.spread, pricing.spread),
+      volume: firstPresent(option.volume, pricing.volume),
+      open_interest: firstPresent(option.open_interest, pricing.open_interest),
+      symbol: firstPresent(option.symbol, pricing.symbol),
+      estimated_contract_cost: estimatedCost,
+      source: firstPresent(option.source, pricing.source, normalized.pricing_status ? 'summary_payload' : ''),
+    };
+  }
+  return normalized;
 }
 
 function scannerCacheStatusUrl(universe = currentScannerUniverse()) {
   const params = new URLSearchParams();
   params.set('universe', normalizedScannerUniverse(universe));
   return `${API}/api/cache/status?${params.toString()}`;
+}
+
+function scannerDetailKey(setup = {}) {
+  const setupId = firstPresent(setup.setup_id, setup.setupId, setup.lazy_hydration?.setup_id);
+  const generation = firstPresent(setup.scan_generation, setup.scanGeneration, setup.lazy_hydration?.scan_generation);
+  if (!setupId || !generation) return '';
+  return `${setupId}|${generation}`;
+}
+
+function scannerDetailUrl(setup = {}) {
+  const ticker = String(setup.ticker || '').trim().toUpperCase();
+  const setupId = firstPresent(setup.setup_id, setup.setupId, setup.lazy_hydration?.setup_id);
+  const generation = firstPresent(setup.scan_generation, setup.scanGeneration, setup.lazy_hydration?.scan_generation);
+  if (!ticker || !setupId || !generation) return '';
+  const params = new URLSearchParams();
+  params.set('universe', normalizedScannerUniverse(setup.__scanUniverse || latestScannerMeta?.universe || latestScannerMeta?.cache_key || currentScannerUniverse()));
+  params.set('detail', 'full');
+  params.set('setup_id', setupId);
+  params.set('generation', generation);
+  return `${API}/api/scan/${encodeURIComponent(ticker)}?${params.toString()}`;
+}
+
+function rowNeedsFullDetail(setup = {}) {
+  return Boolean(setup?.setup_id || setup?.lazy_hydration?.setup_id) && !setup.trade_eval && !setup.quality;
+}
+
+function replaceScannerRowWithDetail(summary = {}, detail = {}) {
+  const key = scannerDetailKey(summary);
+  if (!key || !detail || typeof detail !== 'object') return;
+  const merged = normalizeScanRowForClient({
+    ...detail,
+    setup_id: firstPresent(detail.setup_id, summary.setup_id),
+    scan_generation: firstPresent(detail.scan_generation, summary.scan_generation),
+    __scanUniverse: summary.__scanUniverse,
+  });
+  const replaceIn = rows => rows.map(row => scannerDetailKey(row) === key ? merged : row);
+  scannerRows = replaceIn(scannerRows);
+  scannerNearMiss = replaceIn(scannerNearMiss);
+}
+
+async function fetchScannerDetail(setup = {}) {
+  if (!rowNeedsFullDetail(setup)) return setup;
+  const key = scannerDetailKey(setup);
+  if (!key) return setup;
+  if (scannerDetailCache.has(key)) return scannerDetailCache.get(key);
+  if (scannerDetailRequests.has(key)) return scannerDetailRequests.get(key);
+  const url = scannerDetailUrl(setup);
+  if (!url) return setup;
+  const request = (async () => {
+    const response = await fetchWithTimeout(url, {}, 12000);
+    let payload = null;
+    try { payload = await response.json(); } catch {}
+    if (response.status === 409) {
+      scannerDetailCache.clear();
+      showToast('This setup changed. Refreshing scanner list.', 'error');
+      runScan().catch(error => console.warn('[Scanner Detail] stale-generation refresh failed:', error));
+      const error = new Error('stale_generation');
+      error.reason = 'stale_generation';
+      error.payload = payload;
+      throw error;
+    }
+    if (response.status === 404) {
+      const error = new Error('setup_not_found');
+      error.reason = 'setup_not_found';
+      error.payload = payload;
+      throw error;
+    }
+    if (!response.ok) {
+      const error = new Error(`detail_${response.status}`);
+      error.reason = 'detail_request_failed';
+      error.payload = payload;
+      throw error;
+    }
+    const detail = normalizeScanRowForClient(payload?.setup || {});
+    scannerDetailCache.set(key, detail);
+    replaceScannerRowWithDetail(setup, detail);
+    return detail;
+  })().finally(() => {
+    scannerDetailRequests.delete(key);
+  });
+  scannerDetailRequests.set(key, request);
+  return request;
+}
+
+function scannerDetailErrorMessage(error) {
+  const reason = error?.reason || error?.message || '';
+  if (reason === 'setup_not_found') return 'Setup detail is no longer available for this scan.';
+  if (reason === 'stale_generation') return 'This setup changed. Kairos is refreshing the scanner list.';
+  return 'Full setup detail could not be loaded. The summary card remains available.';
 }
 
 function handleUniverseChange() {
@@ -5125,6 +5260,8 @@ function handleUniverseChange() {
   scannerRows = [];
   scannerNearMiss = [];
   latestScannerMeta = null;
+  scannerDetailCache.clear();
+  scannerDetailRequests.clear();
   contractRefreshAttempts = 0;
   contractPendingTimedOutKeys = new Set();
   renderScannerResults();
@@ -5233,6 +5370,8 @@ async function runScan(options = {}) {
     scannerWarmingPollAttempts = 0;
     contractRefreshAttempts = 0;
     contractPendingTimedOutKeys = new Set();
+    scannerDetailCache.clear();
+    scannerDetailRequests.clear();
     setScannerLoadingState(true, '<span class="spinner"></span>Scanning...');
     if (results) results.innerHTML = renderLoadingSkeletonCards(4);
     if (summary) summary.textContent = '';
@@ -5665,6 +5804,7 @@ function contractRawLifecycleState(setup) {
   const pricingStatus = String(setup?.pricing_status || setup?.option_pricing?.status || '').toLowerCase();
   if (pricingStatus === 'pending') return 'pending';
   if (pricingStatus === 'not_requested') return 'not_requested';
+  if (pricingStatus === 'stale') return 'available';
   if (pricingStatus === 'unavailable') return 'confirmed_unavailable';
   const contract = setup?.best_contract;
   if (contract && contract.available === true) {
@@ -5704,9 +5844,11 @@ function pricingStatus(setup = {}) {
 function optionPricingRequestPayload(setup = {}) {
   const option = setup.option || {};
   const plan = setup.option_plan || {};
-  const type = firstPresent(option.type, plan.type);
-  const strike = firstPresent(option.strike, plan.preferred_strike);
-  const expiry = firstPresent(option.expiry, option.expiration);
+  const pricing = setup.option_pricing || {};
+  const lazy = setup.lazy_hydration || {};
+  const type = firstPresent(lazy.type, option.type, pricing.type, plan.type);
+  const strike = firstPresent(lazy.strike, option.strike, pricing.strike, plan.preferred_strike);
+  const expiry = firstPresent(lazy.expiration, lazy.resolved_expiration, option.resolved_expiration, pricing.resolved_expiration, option.expiry, option.expiration, pricing.expiry, pricing.expiration);
   if (!setup.ticker || !type || strike === undefined || strike === null || !expiry) return null;
   return {
     ticker: setup.ticker,
@@ -6177,7 +6319,7 @@ function gradeClass(grade) {
 }
 
 function setupRank(s) {
-  return gradeRank(s.quality?.grade);
+  return gradeRank(firstPresent(s.setupGrade, s.setup_grade, s.quality?.grade));
 }
 
 function getLocationBucket(s) {
@@ -6202,7 +6344,7 @@ function normalizedLocation(value) {
 }
 
 function setupLocation(s) {
-  return normalizedLocation(s.stockLocation || getLocationBucket(s));
+  return normalizedLocation(firstPresent(s.stockLocation, s.setupLocation, s.location, getLocationBucket(s)));
 }
 
 function setupPhase(s) {
@@ -7107,6 +7249,12 @@ function renderPriorityWatchlist() {
 }
 
 function simpleStatus(setup) {
+  const explicitBucket = String(firstPresent(setup.status_bucket, setup.normalized_status_bucket, '') || '').toUpperCase();
+  if (explicitBucket === 'ENTER_NOW') return { label: 'ENTER NOW', className: 'enter-now' };
+  if (explicitBucket === 'EARLY_ENTRY') return { label: 'EARLY ENTRY', className: 'early-entry' };
+  if (explicitBucket === 'ALMOST_READY') return { label: 'ALMOST READY', className: 'almost-ready' };
+  if (explicitBucket === 'WAITING') return { label: 'WAIT', className: 'wait' };
+  if (explicitBucket === 'SKIP') return { label: 'SKIP', className: 'skip' };
   const grade = setupGradeValue(setup);
   const entryStatus = setup.entryStatus || 'Waiting';
   const setupStatus = String(setup.setup_status || '').toUpperCase();
@@ -7142,6 +7290,12 @@ function hasValidTradePlan(setup) {
 }
 
 function setupProgressState(setup) {
+  const explicitBucket = String(firstPresent(setup.status_bucket, setup.normalized_status_bucket, '') || '').toUpperCase();
+  if (explicitBucket === 'ENTER_NOW') return { stage: 5, label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', percent: 100 };
+  if (explicitBucket === 'EARLY_ENTRY') return { stage: 4.5, label: 'Early Entry', bucket: 'EARLY_ENTRY', className: 'early-entry', percent: 97 };
+  if (explicitBucket === 'ALMOST_READY') return { stage: 4, label: 'Almost Ready', bucket: 'ALMOST_READY', className: 'almost-ready', percent: 95 };
+  if (explicitBucket === 'WAITING') return { stage: 3, label: 'Setup Building', bucket: 'WAITING', className: 'wait', percent: 60 };
+  if (explicitBucket === 'SKIP') return { stage: 0, label: 'SKIP', bucket: 'SKIP', className: 'skip', percent: 0 };
   const status = simpleStatus(setup);
   const entryStatus = setup.entryStatus || 'Waiting';
   const setupStatus = setupStatusValue(setup);
@@ -8454,6 +8608,20 @@ function bestContractDisplay(setup) {
       label: '🎯 Option Plan',
       main: 'Updating...',
       sub: 'Options data is refreshing.',
+    };
+  }
+  if (lifecycle === 'not_requested') {
+    const option = setup.option || {};
+    const pricing = setup.option_pricing || {};
+    const strikeValue = Number(firstPresent(option.strike, pricing.strike));
+    const strike = Number.isFinite(strikeValue) ? strikeValue.toFixed(strikeValue % 1 === 0 ? 0 : 2) : '—';
+    const type = contractTypePlainText(firstPresent(option.type, pricing.type));
+    const expiry = formatShortDate(firstPresent(option.resolved_expiration, pricing.resolved_expiration, option.expiry, option.expiration, pricing.expiry, pricing.expiration));
+    return {
+      className: 'pending',
+      label: '🎯 Option Plan',
+      main: `${expiry} • $${strike} ${type}`.trim(),
+      sub: 'Pricing not loaded yet.',
     };
   }
   if (guidance.state === 'potential') {
@@ -10511,13 +10679,37 @@ function renderCollapsedWhyBlock(items) {
 }
 
 function renderMoreDetailsBlock(setup, details = {}) {
+  const detailKey = scannerDetailKey(setup);
+  const summaryOnly = rowNeedsFullDetail(setup);
+  const targetId = detailKey ? `scannerDetail-${stableHash(detailKey)}` : '';
+  const toggle = summaryOnly && detailKey
+    ? ` ontoggle="handleScannerDetailToggle(this)"`
+    : '';
+  const dataAttrs = summaryOnly && detailKey
+    ? ` data-detail-key="${escapeHtml(detailKey)}" data-ticker="${escapeHtml(String(setup.ticker || ''))}"`
+    : '';
+  return `
+    <details class="coach-box" style="margin-top:12px;"${toggle}${dataAttrs}>
+      <summary class="coach-title" style="cursor:pointer;">More details</summary>
+      <div class="scanner-detail-body" id="${escapeHtml(targetId)}">
+        ${summaryOnly ? renderScannerDetailPlaceholder(setup) : renderMoreDetailsContent(setup, details)}
+      </div>
+    </details>`;
+}
+
+function renderScannerDetailPlaceholder(setup = {}) {
+  return `
+    <div class="coach-warning" style="margin-top:10px;margin-bottom:0;">
+      Full setup details load when this section opens.
+    </div>`;
+}
+
+function renderMoreDetailsContent(setup, details = {}) {
   const ev = setup.trade_eval || {};
   const q = setup.quality || {};
   const simple = simpleStatus(setup);
   const legacyStatus = ev.trade_stage || '';
   return `
-    <details class="coach-box" style="margin-top:12px;">
-      <summary class="coach-title" style="cursor:pointer;">More details</summary>
       <div class="coach-grid" style="margin-top:10px;">
         <div class="coach-metric"><div class="coach-label">Status</div><div class="coach-value">${simple.label}</div></div>
         <div class="coach-metric"><div class="coach-label">Trend</div><div class="coach-value">${details.trend || 'Mixed'}</div></div>
@@ -10546,7 +10738,53 @@ function renderMoreDetailsBlock(setup, details = {}) {
           ${setup.tp2 != null ? renderLevelTile('Target 2', fmtMoney(setup.tp2)) : ''}
           ${setup.tp3 != null ? renderLevelTile('Target 3', fmtMoney(setup.tp3)) : ''}
         </div>` : ''}
-    </details>`;
+    `;
+}
+
+function cardDetailsContext(setup = {}) {
+  const q = setup.quality || {};
+  const ev = setup.trade_eval || {};
+  const trend = setup.stockTrend || setup.trendDirection || 'Mixed';
+  const setupTf = setup.setupTimeframeDirection || (setup.trend === 'LONG' ? 'Bullish' : setup.trend === 'SHORT' ? 'Bearish' : 'Mixed');
+  const phase = setup.stockPhase || setup.phase || 'Transition';
+  const setupStatus = setup.stockSetupStatus || setup.setupStatus || 'Pullback Active';
+  const setupReason = setup.stockSetupStatusReason || setup.setupStatusReason || q.coach_note || 'waiting for cleaner structure';
+  const setupGradeReason = setup.setupGradeReason || setupReason;
+  const confirmationStarted = Boolean(setup.confirmationStarted || ev.trigger_confirmed || ev.rejection_confirmed);
+  const confirmationReason = setup.confirmationReason || (confirmationStarted ? 'confirmation started' : 'waiting for confirmation');
+  const location = setup.stockLocation || formatLocationLabel(ev.location, ev.location_percentile).replace(/[🟢🔴🟡]/g, '').split('·')[0].trim();
+  const distanceText = setup.distanceFromEntryAtr != null
+    ? `${fmtNumber(setup.distanceFromEntryAtr)} ATR / ${fmtNumber(setup.distanceFromEntryPercent)}% from entry`
+    : 'No entry distance available yet';
+  return {
+    trend,
+    setupTf,
+    phase,
+    setupStatus,
+    setupGradeReason,
+    confirmationStarted,
+    confirmationReason,
+    location,
+    distanceText,
+  };
+}
+
+async function handleScannerDetailToggle(detailsEl) {
+  if (!detailsEl?.open || detailsEl.dataset.loaded === 'true') return;
+  const detailKey = detailsEl.dataset.detailKey || '';
+  const target = document.getElementById(`scannerDetail-${stableHash(detailKey)}`);
+  const setup = [...scannerRows, ...scannerNearMiss].find(row => scannerDetailKey(row) === detailKey);
+  if (!target || !setup) return;
+  detailsEl.dataset.loaded = 'loading';
+  target.innerHTML = '<div class="coach-warning" style="margin-top:10px;margin-bottom:0;">Loading full setup details...</div>';
+  try {
+    const full = await fetchScannerDetail(setup);
+    detailsEl.dataset.loaded = 'true';
+    target.innerHTML = renderMoreDetailsContent(full, cardDetailsContext(full));
+  } catch (error) {
+    detailsEl.dataset.loaded = 'error';
+    target.innerHTML = `<div class="coach-warning" style="margin-top:10px;margin-bottom:0;">${escapeHtml(scannerDetailErrorMessage(error))}</div>`;
+  }
 }
 
 function simpleWhyItems(setup, status, trend, setupTf, phase, setupStatus, entryStatus, location) {
@@ -10726,9 +10964,39 @@ function renderCard(s) {
       })}
     </div>
     <div class="card-footer">
-      <button class="btn-log btn-sm" onclick="openLogModal(decodeURIComponent('${encoded}'))">Log Review</button>
+      <button class="btn-log btn-sm" onclick="openLogModalForSetup(decodeURIComponent('${encoded}'), this)">Log Review</button>
     </div>
   </div>`;
+}
+
+async function openLogModalForSetup(encodedSetup, button = null) {
+  let setup = null;
+  try {
+    setup = JSON.parse(encodedSetup);
+  } catch {
+    openLogModal(encodedSetup);
+    return;
+  }
+  if (!rowNeedsFullDetail(setup)) {
+    openLogModal(encodedSetup);
+    return;
+  }
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Loading...';
+  }
+  try {
+    const full = await fetchScannerDetail(setup);
+    openLogModal(JSON.stringify(full));
+  } catch (error) {
+    showToast(scannerDetailErrorMessage(error), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText || 'Log Review';
+    }
+  }
 }
 
 function formatLocationLabel(location, percentile) {
@@ -11431,6 +11699,15 @@ function renderFurtherAnalysisTab() {
   }
 
   const setup = rows.find(row => row.__furtherId === selectedFurtherAnalysisSetupId) || rows[0];
+  if (rowNeedsFullDetail(setup)) {
+    body.innerHTML = '<div class="analytics-empty">Loading full setup analysis...</div>';
+    fetchScannerDetail(setup)
+      .then(() => renderFurtherAnalysisTab())
+      .catch(error => {
+        body.innerHTML = `<div class="analytics-empty">${escapeHtml(scannerDetailErrorMessage(error))}</div>`;
+      });
+    return;
+  }
   const criteria = window.KairosFurtherAnalysis?.setupCriteria
     ? window.KairosFurtherAnalysis.setupCriteria(setup)
     : { grade: setup.setupGrade, direction: setup.direction, timeframe: setup.timeframe };
