@@ -200,6 +200,11 @@ assert.ok(elements.topOpportunities.innerHTML.includes('Best Within My Budget'))
 assert.ok(elements.topOpportunities.innerHTML.includes('TER'));
 assert.ok(elements.topOpportunities.innerHTML.includes('FE'));
 
+elements.tradingBudgetFilter.value = '100';
+context.renderTopOpportunities([premiumOnly]);
+assert.ok(elements.topOpportunities.innerHTML.includes('No currently priced opportunities fit this budget.'));
+elements.tradingBudgetFilter.value = '250';
+
 const cardHtml = context.renderCard(budgetFriendly);
 assert.ok(cardHtml.includes('Budget Friendly'));
 assert.ok(cardHtml.includes('Est. $85.00'));

@@ -6293,11 +6293,15 @@ function topBudgetSetup(rows = [], budget = tradingBudgetValue()) {
 
 function renderBudgetOpportunityPanel(title, row, budget = tradingBudgetValue()) {
   if (!row) {
+    const isBudgetPanel = title.toLowerCase().includes('budget');
+    const message = isBudgetPanel
+      ? 'No currently priced opportunities fit this budget.'
+      : 'Kairos did not find a matching opportunity in the current view.';
     return `
       <div class="budget-opportunity-panel" role="status">
         <div class="budget-panel-title">${escapeHtml(title)}</div>
         <div class="budget-panel-main">No setup available</div>
-        <div class="budget-panel-meta">Kairos did not find a matching opportunity in the current view.</div>
+        <div class="budget-panel-meta">${escapeHtml(message)}</div>
       </div>`;
   }
   const status = setupProgressState(row).label;
