@@ -476,6 +476,374 @@ def _attach_notification_metrics(result: dict) -> dict:
     return result
 
 
+SUMMARY_SCAN_VIEW_VERSION = "scan-summary-v1"
+SUMMARY_BUDGET_THRESHOLDS = (100, 250, 500, 1000)
+SUMMARY_HEAVY_ROW_FIELDS = {
+    "trade_eval",
+    "quality",
+    "market_regime_details",
+    "marketRegimeDetails",
+    "_scan_timing",
+    "checklist",
+}
+
+
+def _first_present(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _safe_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None
+
+
+def _summary_contract_cost(contract: dict) -> Optional[float]:
+    if not isinstance(contract, dict):
+        return None
+    explicit = _safe_number(contract.get("estimated_contract_cost"))
+    if explicit is not None and explicit > 0:
+        return round(explicit, 2)
+    ask = _safe_number(contract.get("ask"))
+    if ask is not None and ask > 0:
+        return round(ask * 100, 2)
+    midpoint = _safe_number(_first_present(contract.get("mid"), contract.get("mark")))
+    if midpoint is not None and midpoint > 0:
+        return round(midpoint * 100, 2)
+    return None
+
+
+def _summary_selected_contract(row: dict) -> dict:
+    option = row.get("option") if isinstance(row.get("option"), dict) else {}
+    pricing = row.get("option_pricing") if isinstance(row.get("option_pricing"), dict) else {}
+    best_contract = row.get("best_contract") if isinstance(row.get("best_contract"), dict) else {}
+    selected = {
+        "type": _first_present(pricing.get("type"), option.get("type"), best_contract.get("type")),
+        "strike": _first_present(pricing.get("strike"), option.get("strike"), best_contract.get("strike")),
+        "expiration": _first_present(
+            pricing.get("expiration"),
+            pricing.get("expiry"),
+            option.get("expiration"),
+            option.get("expiry"),
+            best_contract.get("expiration"),
+            best_contract.get("expiry"),
+        ),
+        "expiry": _first_present(
+            pricing.get("expiry"),
+            pricing.get("expiration"),
+            option.get("expiry"),
+            option.get("expiration"),
+            best_contract.get("expiry"),
+            best_contract.get("expiration"),
+        ),
+        "requested_expiration": _first_present(
+            pricing.get("requested_expiration"),
+            option.get("requested_expiration"),
+            best_contract.get("requested_expiration"),
+            option.get("expiry"),
+            option.get("expiration"),
+        ),
+        "resolved_expiration": _first_present(
+            pricing.get("resolved_expiration"),
+            option.get("resolved_expiration"),
+            best_contract.get("resolved_expiration"),
+            pricing.get("expiration"),
+            option.get("expiration"),
+            option.get("expiry"),
+        ),
+        "bid": _first_present(pricing.get("bid"), option.get("bid"), best_contract.get("bid")),
+        "ask": _first_present(pricing.get("ask"), option.get("ask"), best_contract.get("ask")),
+        "mid": _first_present(pricing.get("mid"), pricing.get("mark"), option.get("mid"), option.get("mark"), best_contract.get("mid"), best_contract.get("mark")),
+        "mark": _first_present(pricing.get("mark"), pricing.get("mid"), option.get("mark"), option.get("mid"), best_contract.get("mark"), best_contract.get("mid")),
+        "spread": _first_present(pricing.get("spread"), option.get("spread"), best_contract.get("spread")),
+        "volume": _first_present(pricing.get("volume"), option.get("volume"), best_contract.get("volume")),
+        "open_interest": _first_present(pricing.get("open_interest"), option.get("open_interest"), option.get("openInterest"), best_contract.get("open_interest"), best_contract.get("openInterest")),
+        "estimated_contract_cost": _first_present(
+            pricing.get("estimated_contract_cost"),
+            option.get("estimated_contract_cost"),
+            best_contract.get("estimated_contract_cost"),
+        ),
+        "pricing_status": _first_present(row.get("pricing_status"), pricing.get("status"), option.get("pricing_status")),
+        "pricing_quality": _first_present(row.get("pricing_quality"), pricing.get("quality"), option.get("pricing_quality")),
+        "symbol": _first_present(pricing.get("contract_symbol"), option.get("symbol"), best_contract.get("symbol")),
+        "source": _first_present(pricing.get("source"), option.get("pricing_source"), option.get("source"), best_contract.get("source")),
+        "quote_timestamp": _first_present(pricing.get("quote_timestamp"), option.get("quote_timestamp")),
+    }
+    cost = _summary_contract_cost(selected)
+    if cost is not None:
+        selected["estimated_contract_cost"] = cost
+    return selected
+
+
+def _summary_accessibility(contract: dict, pricing_status: str = "") -> dict:
+    status = str(pricing_status or "").lower()
+    if status == "pending":
+        return {"key": "unavailable", "label": "Pricing pending", "short_label": "Pending", "cost": None}
+    if status == "not_requested":
+        return {"key": "unavailable", "label": "Pricing not loaded", "short_label": "Not loaded", "cost": None}
+    if status == "stale":
+        return {"key": "unavailable", "label": "Stale pricing", "short_label": "Stale", "cost": None}
+    cost = _summary_contract_cost(contract)
+    if cost is None:
+        return {"key": "unavailable", "label": "Accessibility unavailable", "short_label": "Unavailable", "cost": None}
+    spread = _safe_number(contract.get("spread"))
+    open_interest = _safe_number(_first_present(contract.get("open_interest"), contract.get("openInterest")))
+    volume = _safe_number(contract.get("volume"))
+    spread_pct_from_cost = ((spread * 100) / cost) * 100 if spread is not None and cost > 0 else None
+    has_tight_spread = spread_pct_from_cost is not None and spread_pct_from_cost <= 20
+    has_liquidity = (open_interest is not None and open_interest >= 100) or (volume is not None and volume >= 25)
+    if cost <= 250 and (has_tight_spread or has_liquidity):
+        return {"key": "easy", "label": "Easy", "short_label": "Easy", "cost": cost}
+    if cost <= 600 or has_tight_spread or has_liquidity:
+        return {"key": "moderate", "label": "Moderate", "short_label": "Moderate", "cost": cost}
+    return {"key": "premium", "label": "Premium", "short_label": "Premium", "cost": cost}
+
+
+def _summary_setup_id(row: dict, generation: Optional[str] = None) -> str:
+    existing = row.get("setup_id")
+    if existing:
+        return str(existing)
+    parts = [
+        row.get("ticker") or row.get("symbol") or "",
+        row.get("timeframe") or "",
+        row.get("direction") or "",
+        row.get("signal_timestamp") or row.get("scannedAt") or "",
+        row.get("entry") or "",
+        row.get("sl") or "",
+        generation or "",
+    ]
+    return "|".join(str(part) for part in parts)
+
+
+def _summary_status_bucket(row: dict) -> Optional[str]:
+    ranking = row.get("ranking") if isinstance(row.get("ranking"), dict) else {}
+    return _first_present(ranking.get("status_bucket"), row.get("status_bucket"), row.get("scanner_status"), row.get("entryStatus"))
+
+
+def _summary_row(row: dict, generation: Optional[str]) -> dict:
+    ranking = row.get("ranking") if isinstance(row.get("ranking"), dict) else {}
+    contract = _summary_selected_contract(row)
+    pricing_status = str(contract.get("pricing_status") or row.get("pricing_status") or "").lower()
+    setup_id = _summary_setup_id(row, generation)
+    status_bucket = _summary_status_bucket(row)
+    earnings = row.get("earnings") if isinstance(row.get("earnings"), dict) else {}
+    summary = {
+        "ticker": row.get("ticker") or row.get("symbol"),
+        "setup_id": setup_id,
+        "scan_generation": generation,
+        "timeframe": row.get("timeframe"),
+        "direction": row.get("direction"),
+        "price": row.get("price"),
+        "current_price": _first_present(row.get("current_price"), row.get("price")),
+        "entry": row.get("entry"),
+        "planned_entry": row.get("entry"),
+        "sl": row.get("sl"),
+        "stop": row.get("sl"),
+        "tp1": row.get("tp1"),
+        "tp2": row.get("tp2"),
+        "tp3": row.get("tp3"),
+        "setupGrade": row.get("setupGrade"),
+        "setupGradeReason": row.get("setupGradeReason"),
+        "display_status": status_bucket,
+        "status_bucket": status_bucket,
+        "normalized_status_bucket": status_bucket,
+        "entryStatus": row.get("entryStatus"),
+        "setupStatus": row.get("setupStatus"),
+        "setupStatusReason": row.get("setupStatusReason"),
+        "stockTrend": row.get("stockTrend"),
+        "trendDirection": row.get("trendDirection"),
+        "dailyTrendDirection": row.get("dailyTrendDirection"),
+        "h4TrendDirection": row.get("h4TrendDirection"),
+        "stockLocation": row.get("stockLocation"),
+        "confirmationStarted": row.get("confirmationStarted"),
+        "confirmationReason": row.get("confirmationReason"),
+        "distanceFromEntryAtr": row.get("distanceFromEntryAtr"),
+        "distanceFromEntryPercent": row.get("distanceFromEntryPercent"),
+        "entryVisible": row.get("entryVisible"),
+        "signal_timestamp": row.get("signal_timestamp"),
+        "current_quote_price": row.get("current_quote_price"),
+        "ranking": {
+            "rank": ranking.get("rank"),
+            "tier": ranking.get("tier"),
+            "score": ranking.get("score"),
+            "status_bucket": ranking.get("status_bucket"),
+            "priority_bucket": ranking.get("priority_bucket"),
+            "version": ranking.get("version"),
+        },
+        "earnings": {
+            "status": earnings.get("status"),
+            "date": earnings.get("date"),
+            "days_until": earnings.get("days_until"),
+            "source": earnings.get("source"),
+            "loaded": earnings.get("loaded"),
+            "loading": earnings.get("loading"),
+        },
+        "option": contract,
+        "option_pricing": {
+            "status": contract.get("pricing_status"),
+            "quality": contract.get("pricing_quality"),
+            "estimated_contract_cost": contract.get("estimated_contract_cost"),
+            "premium": contract.get("ask"),
+            "bid": contract.get("bid"),
+            "ask": contract.get("ask"),
+            "mid": contract.get("mid"),
+            "mark": contract.get("mark"),
+            "spread": contract.get("spread"),
+            "volume": contract.get("volume"),
+            "open_interest": contract.get("open_interest"),
+            "quote_timestamp": contract.get("quote_timestamp"),
+            "source": contract.get("source"),
+            "symbol": contract.get("symbol"),
+            "type": contract.get("type"),
+            "strike": contract.get("strike"),
+            "expiration": contract.get("expiration"),
+            "expiry": contract.get("expiry"),
+            "requested_expiration": contract.get("requested_expiration"),
+            "resolved_expiration": contract.get("resolved_expiration"),
+        },
+        "pricing_status": contract.get("pricing_status"),
+        "pricing_quality": contract.get("pricing_quality"),
+        "accessibility": _summary_accessibility(contract, pricing_status),
+        "lazy_hydration": {
+            "ticker": row.get("ticker") or row.get("symbol"),
+            "type": contract.get("type"),
+            "strike": contract.get("strike"),
+            "expiration": contract.get("resolved_expiration") or contract.get("expiration") or contract.get("expiry"),
+            "requested_expiration": contract.get("requested_expiration"),
+            "setup_id": setup_id,
+            "scan_generation": generation,
+        },
+    }
+    return {key: value for key, value in summary.items() if key not in SUMMARY_HEAVY_ROW_FIELDS}
+
+
+def _summary_contract_cost_for_budget(row: dict) -> Optional[float]:
+    contract = row.get("option") if isinstance(row.get("option"), dict) else {}
+    return _summary_contract_cost(contract)
+
+
+def _summary_budget_counts(rows: list[dict]) -> dict:
+    counts = {}
+    for threshold in SUMMARY_BUDGET_THRESHOLDS:
+        counts[f"under_{threshold}"] = len([
+            row for row in rows
+            if (_summary_contract_cost_for_budget(row) is not None and _summary_contract_cost_for_budget(row) <= threshold)
+        ])
+    return counts
+
+
+def _summary_today_counts(rows: list[dict]) -> dict:
+    buckets = Counter(str(row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
+    accessibility = Counter(str((row.get("accessibility") or {}).get("key") or "") for row in rows)
+    return {
+        "enter_now": buckets.get("ENTER_NOW", 0),
+        "early_entry": buckets.get("EARLY_ENTRY", 0),
+        "almost_ready": buckets.get("ALMOST_READY", 0),
+        "waiting": buckets.get("WAITING", 0),
+        "budget_friendly": accessibility.get("easy", 0),
+        "premium_only": accessibility.get("premium", 0),
+    }
+
+
+def _summarize_scan_response(result: dict) -> dict:
+    started = time.perf_counter()
+    meta = dict(result.get("meta") or {})
+    generation = meta.get("generated_at") or meta.get("ranking_generated_at")
+    rows = [_summary_row(row, generation) for row in result.get("rows") or [] if isinstance(row, dict)]
+    near_miss = [_summary_row(row, generation) for row in result.get("near_miss") or [] if isinstance(row, dict)]
+    all_rows = [*rows, *near_miss]
+    summary_meta = {
+        **meta,
+        "view": "summary",
+        "summary_version": SUMMARY_SCAN_VIEW_VERSION,
+        "scan_generation": generation,
+        "qualified_count": len(rows),
+        "near_miss_count": len(near_miss),
+        "today_market_counts": _summary_today_counts(all_rows),
+        "budget_counts": _summary_budget_counts(all_rows),
+        "summary_generation_ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+    return {
+        "rows": rows,
+        "near_miss": near_miss,
+        "meta": summary_meta,
+    }
+
+
+def _scan_snapshot_for_universe(universe: str) -> Optional[dict]:
+    selected_universe = str(universe or "discovered").strip().lower()
+    if selected_universe == "discovered":
+        ready, symbols, _status = _discovery_symbols_ready()
+        if not ready:
+            return None
+        return analysis_cache_snapshot(symbols, universe="discovered")
+    if selected_universe == "default":
+        return analysis_cache_snapshot(universe="default")
+    if selected_universe == "finviz":
+        return analysis_cache_snapshot(discover=True, universe="finviz")
+    return None
+
+
+def _detail_lookup_from_cache(ticker: str, universe: str, setup_id: str = "", generation: str = "") -> dict:
+    snapshot = _scan_snapshot_for_universe(universe)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail={"reason": "cache_missing", "message": "No scan cache is available for this universe."})
+    current_generation = _format_timestamp(_coerce_utc_datetime(snapshot.get("generated_at"))) or _format_timestamp(snapshot.get("generated_at"))
+    if generation and generation != current_generation:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "stale_generation",
+                "requested_generation": generation,
+                "current_generation": current_generation,
+            },
+        )
+    ticker_key = str(ticker or "").upper()
+    matches = []
+    for row in [*(snapshot.get("rows") or []), *(snapshot.get("near_miss") or [])]:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("ticker") or row.get("symbol") or "").upper() != ticker_key:
+            continue
+        row_setup_id = _summary_setup_id(row, current_generation)
+        if setup_id and setup_id != row_setup_id and setup_id != str(row.get("setup_id") or ""):
+            continue
+        matches.append((row_setup_id, row))
+    if not matches:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "reason": "setup_not_found",
+                "ticker": ticker_key,
+                "setup_id": setup_id or None,
+                "generation": current_generation,
+            },
+        )
+    if not setup_id and len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "ambiguous_ticker",
+                "ticker": ticker_key,
+                "matches": [{"setup_id": match_id} for match_id, _row in matches],
+                "generation": current_generation,
+            },
+        )
+    match_id, row = matches[0]
+    return {
+        "setup": row,
+        "setup_id": match_id,
+        "scan_generation": current_generation,
+        "universe": str(universe or "discovered").strip().lower(),
+        "detail": "full",
+    }
+
+
 def _notification_current_setups(universe: str = "discovered") -> list[dict]:
     requested = (universe or "discovered").lower()
     kwargs = {"discover": requested == "discovered", "universe": "discovered" if requested == "discovered" else requested}
@@ -589,11 +957,16 @@ def api_scan(
     refresh: bool = Query(default=False),
     discover: bool = Query(default=False),
     universe: str = Query(default="discovered"),
+    view: str = Query(default="full"),
 ):
     """Scan the full watchlist or a custom comma-separated list of tickers."""
+    requested_view = str(view or "full").strip().lower()
+    if requested_view not in {"full", "summary"}:
+        raise HTTPException(status_code=422, detail="Unsupported scan view")
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-        return _attach_notification_metrics(scan_cached(watchlist, force_refresh=refresh))
+        result = _attach_notification_metrics(scan_cached(watchlist, force_refresh=refresh))
+        return _summarize_scan_response(result) if requested_view == "summary" else result
 
     selected_universe = str(universe or "discovered").strip().lower()
     if discover:
@@ -601,7 +974,8 @@ def api_scan(
     if selected_universe == "discovered":
         ready, symbols, status = _discovery_symbols_ready()
         if not ready:
-            return _discovery_scan_not_ready_response(status)
+            result = _discovery_scan_not_ready_response(status)
+            return _summarize_scan_response(result) if requested_view == "summary" else result
         result = scan_cached(
             symbols,
             force_refresh=refresh,
@@ -615,7 +989,8 @@ def api_scan(
     else:
         use_finviz = selected_universe == "finviz"
         result = scan_cached(force_refresh=refresh, discover=use_finviz)
-    return _attach_notification_metrics(result)
+    result = _attach_notification_metrics(result)
+    return _summarize_scan_response(result) if requested_view == "summary" else result
 
 
 @app.get("/api/notifications")
@@ -693,7 +1068,15 @@ def api_smart_notification_duplicate_cleanup_preview(
 
 
 @app.get("/api/scan/{ticker}")
-def api_scan_single(ticker: str):
+def api_scan_single(
+    ticker: str,
+    universe: str = Query(default="default"),
+    detail: str = Query(default="live"),
+    setup_id: str = Query(default=""),
+    generation: str = Query(default=""),
+):
+    if str(detail or "").strip().lower() == "full":
+        return _detail_lookup_from_cache(ticker, universe, setup_id=setup_id, generation=generation)
     result = scan_ticker(ticker)
     if result is None:
         return {"setup": None, "reason": "No valid setup found"}
