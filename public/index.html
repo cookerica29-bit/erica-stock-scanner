@@ -1898,6 +1898,7 @@
   .guided-risk-zone { fill: rgba(153,83,68,0.18); }
   .guided-reward-zone { fill: rgba(22,101,52,0.18); }
   .guided-level-line { stroke-width: 1.4; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+  .guided-level-leader { fill: none; opacity: 0.78; stroke-width: 1; vector-effect: non-scaling-stroke; }
   .guided-level-entry { stroke: #ffffff; }
   .guided-level-current { stroke: #facc15; stroke-width: 2; stroke-dasharray: none; }
   .guided-level-stop { stroke: #ef4444; }
@@ -7821,24 +7822,63 @@ function renderGuidedTradeChartSvg(plan = {}, candles = [], meta = {}) {
       <line class="guided-candle-wick ${up ? 'guided-candle-up' : 'guided-candle-down'}" x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${y(high).toFixed(1)}" y2="${y(low).toFixed(1)}"></line>
       <rect class="guided-candle-body ${up ? 'guided-candle-up' : 'guided-candle-down'}" x="${(cx - candleW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="1"></rect>`;
   }).join('');
+  const labelPriority = {
+    'Stop Loss': 1,
+    'Current Price': 2,
+    'Planned Entry': 3,
+    TP1: 4,
+    TP2: 5,
+    TP3: 6,
+  };
+  const labelMinY = top + 4;
+  const labelMaxY = height - bottom - 15;
+  const labelGap = 27;
+  const labelX = width - right + 10;
+  const leaderStartX = width - right - 4;
+  const leaderEndX = labelX - 5;
+  const clampLabelY = value => Math.min(labelMaxY, Math.max(labelMinY, value));
   const labelRows = [
     ['Current Price', plan.current, 'guided-level-current'],
     ['Planned Entry', plan.entry, 'guided-level-entry'],
     ['Stop Loss', plan.stop, 'guided-level-stop'],
     ...plan.targets.map(([label, value]) => [label, value, 'guided-level-target']),
   ].filter(([, value]) => value !== null && value !== undefined)
-    .sort((a, b) => y(a[1]) - y(b[1]))
-    .map((row, index, arr) => {
-      let labelY = y(row[1]);
-      if (index > 0 && labelY - Number(arr[index - 1].labelY || y(arr[index - 1][1])) < 15) labelY = Number(arr[index - 1].labelY || y(arr[index - 1][1])) + 15;
-      const adjustedLabelY = Math.min(height - 16, Math.max(14, labelY));
-      row.labelY = adjustedLabelY;
-      return [...row, adjustedLabelY];
-    });
-  const levelSvg = labelRows.map(([label, value, cls, labelY]) => `
-    <line class="guided-level-line ${cls}" x1="${left}" x2="${width - 12}" y1="${y(value).toFixed(1)}" y2="${y(value).toFixed(1)}"></line>
-    <text class="guided-level-label ${cls}" x="${width - right + 10}" y="${Number(labelY).toFixed(1)}">${escapeHtml(label)}</text>
-    <text class="guided-level-price ${cls}" x="${width - right + 10}" y="${(Number(labelY) + 11).toFixed(1)}">${escapeHtml(fmtMoney(value))}</text>`).join('');
+    .map(([label, value, cls]) => {
+      const actualY = y(value);
+      return {
+        label,
+        value,
+        cls,
+        actualY,
+        labelY: clampLabelY(actualY),
+        priority: labelPriority[label] || 99,
+      };
+    })
+    .sort((a, b) => (a.labelY - b.labelY) || (a.priority - b.priority));
+  for (let i = 1; i < labelRows.length; i += 1) {
+    labelRows[i].labelY = Math.max(labelRows[i].labelY, labelRows[i - 1].labelY + labelGap);
+  }
+  for (let i = labelRows.length - 2; i >= 0; i -= 1) {
+    if (labelRows[i + 1].labelY > labelMaxY) labelRows[i + 1].labelY = labelMaxY;
+    labelRows[i].labelY = Math.min(labelRows[i].labelY, labelRows[i + 1].labelY - labelGap);
+  }
+  for (let i = 0; i < labelRows.length; i += 1) {
+    labelRows[i].labelY = clampLabelY(labelRows[i].labelY);
+    if (i > 0 && labelRows[i].labelY - labelRows[i - 1].labelY < labelGap) {
+      labelRows[i].labelY = Math.min(labelMaxY, labelRows[i - 1].labelY + labelGap);
+    }
+  }
+  const levelSvg = labelRows.map(({ label, value, cls, actualY, labelY }) => {
+    const offset = Math.abs(labelY - actualY) > 4;
+    const leader = offset
+      ? `<polyline class="guided-level-leader ${cls}" points="${leaderStartX.toFixed(1)},${actualY.toFixed(1)} ${leaderEndX.toFixed(1)},${(labelY + 5).toFixed(1)}"></polyline>`
+      : '';
+    return `
+    <line class="guided-level-line ${cls}" x1="${left}" x2="${width - 12}" y1="${actualY.toFixed(1)}" y2="${actualY.toFixed(1)}"></line>
+    ${leader}
+    <text class="guided-level-label ${cls}" x="${labelX}" y="${Number(labelY).toFixed(1)}">${escapeHtml(label)}</text>
+    <text class="guided-level-price ${cls}" x="${labelX}" y="${(Number(labelY) + 11).toFixed(1)}">${escapeHtml(fmtMoney(value))}</text>`;
+  }).join('');
   const riskRectY = Math.min(riskY1, riskY2);
   const riskRectH = Math.max(2, Math.abs(riskY2 - riskY1));
   const rewardRect = rewardY == null ? '' : `<rect class="guided-reward-zone" x="${left}" y="${Math.min(riskY1, rewardY).toFixed(1)}" width="${plotW}" height="${Math.max(2, Math.abs(rewardY - riskY1)).toFixed(1)}"></rect>`;
