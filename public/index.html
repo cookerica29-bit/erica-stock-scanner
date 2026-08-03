@@ -4520,6 +4520,7 @@ let scannerRows = [];
 let scannerNearMiss = [];
 let indexWatchRows = [];
 let latestScannerMeta = null;
+const optionPricingLazyRequestedKeys = new Set();
 let contractTierSelections = (() => {
   try {
     const saved = localStorage.getItem(CONTRACT_TIER_SELECTION_KEY);
@@ -5663,6 +5664,8 @@ function contractPendingKey(setup) {
 function contractRawLifecycleState(setup) {
   const pricingStatus = String(setup?.pricing_status || setup?.option_pricing?.status || '').toLowerCase();
   if (pricingStatus === 'pending') return 'pending';
+  if (pricingStatus === 'not_requested') return 'not_requested';
+  if (pricingStatus === 'unavailable') return 'confirmed_unavailable';
   const contract = setup?.best_contract;
   if (contract && contract.available === true) {
     const hasContractText = firstPresent(contract.expiry, contract.expiration)
@@ -5692,6 +5695,78 @@ function contractLifecycleState(setup) {
 
 function rowsHavePendingContracts(rows = []) {
   return rows.some(setup => contractRawLifecycleState(setup) === 'pending');
+}
+
+function pricingStatus(setup = {}) {
+  return String(setup.pricing_status || setup.option_pricing?.status || '').toLowerCase();
+}
+
+function optionPricingRequestPayload(setup = {}) {
+  const option = setup.option || {};
+  const plan = setup.option_plan || {};
+  const type = firstPresent(option.type, plan.type);
+  const strike = firstPresent(option.strike, plan.preferred_strike);
+  const expiry = firstPresent(option.expiry, option.expiration);
+  if (!setup.ticker || !type || strike === undefined || strike === null || !expiry) return null;
+  return {
+    ticker: setup.ticker,
+    direction: setup.direction,
+    type,
+    strike,
+    expiration: expiry,
+    expiry,
+  };
+}
+
+function optionPricingRequestKey(setup = {}) {
+  const payload = optionPricingRequestPayload(setup);
+  if (!payload) return '';
+  return [
+    String(payload.ticker || '').trim().toUpperCase(),
+    String(payload.expiry || '').trim(),
+    Number(payload.strike).toFixed(4),
+    String(payload.type || '').trim().toUpperCase(),
+  ].join('|');
+}
+
+async function queueOptionPricingForSetups(setups = [], reason = 'lazy') {
+  const contracts = [];
+  for (const setup of setups || []) {
+    if (pricingStatus(setup) !== 'not_requested') continue;
+    const key = optionPricingRequestKey(setup);
+    const payload = optionPricingRequestPayload(setup);
+    if (!key || !payload || optionPricingLazyRequestedKeys.has(key)) continue;
+    optionPricingLazyRequestedKeys.add(key);
+    contracts.push(payload);
+    if (contracts.length >= 10) break;
+  }
+  if (!contracts.length) return null;
+  try {
+    const res = await fetchWithTimeout(`${API}/api/option-pricing/hydrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ universe: normalizedScannerUniverse(), reason, contracts }),
+    }, 8000);
+    if (!res.ok) throw new Error(`Option pricing hydrate failed with HTTP ${res.status}`);
+    const payload = await res.json();
+    if (payload.accepted || Number(payload.queued || 0) > 0) {
+      contractRefreshAttempts = 0;
+      scheduleContractRefreshPoll();
+    }
+    return payload;
+  } catch (error) {
+    console.warn('[Option Pricing] lazy hydration request failed:', error);
+    contracts.forEach(contract => {
+      const key = [
+        String(contract.ticker || '').trim().toUpperCase(),
+        String(contract.expiry || contract.expiration || '').trim(),
+        Number(contract.strike).toFixed(4),
+        String(contract.type || '').trim().toUpperCase(),
+      ].join('|');
+      optionPricingLazyRequestedKeys.delete(key);
+    });
+    return null;
+  }
 }
 
 function markPendingContractsTimedOut(rows = [], targetSet = contractPendingTimedOutKeys) {
@@ -6926,6 +7001,9 @@ function renderScannerResults() {
   renderMarketSnapshot(snapshotSetups);
   renderMarketIntelligencePanel(snapshotSetups, latestScannerMeta || {});
   renderTopOpportunities(visibleSetups);
+  if (Number.isFinite(tradingBudgetValue())) {
+    queueOptionPricingForSetups(visibleSetups, 'budget_view');
+  }
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
@@ -7829,6 +7907,8 @@ function handleGuidedChartToggle(details) {
   if (card) card.classList.toggle('guided-chart-expanded', Boolean(details?.open));
   if (!details?.open || details.dataset.loaded === 'true') return;
   details.dataset.loaded = 'true';
+  const registered = guidedTradeChartRegistry.get(details.dataset.guidedChartKey || '');
+  if (registered?.subject) queueOptionPricingForSetups([registered.subject], 'card_open');
   loadGuidedTradeChart(details.dataset.guidedChartKey || '', '4H');
   loadTradeIntelligenceForChart(details.dataset.guidedChartKey || '');
 }
@@ -8663,6 +8743,9 @@ function handleTradingBudgetChange() {
   const control = document.getElementById('tradingBudgetFilter');
   if (control) localStorage.setItem(TRADING_BUDGET_KEY, control.value || 'NO_LIMIT');
   renderScannerResults();
+  if (Number.isFinite(tradingBudgetValue())) {
+    queueOptionPricingForSetups(visibleScannerRowsForContractPoll(), 'budget_view');
+  }
 }
 
 function initializeTradingBudgetControl() {
@@ -8733,6 +8816,12 @@ function accessibilityScore(setup = {}) {
   if (pricingStatus === 'pending') {
     return { key: 'unavailable', label: 'Pricing pending', shortLabel: 'Pending', cost: null, reason: 'Option quote hydration is still running.' };
   }
+  if (pricingStatus === 'not_requested') {
+    return { key: 'unavailable', label: 'Pricing not loaded', shortLabel: 'Not loaded', cost: null, reason: 'Option quote pricing has not been requested yet.' };
+  }
+  if (pricingStatus === 'stale') {
+    return { key: 'unavailable', label: 'Stale pricing', shortLabel: 'Stale', cost: null, reason: 'Option quote is older than the live-pricing window.' };
+  }
   const cost = selectedEstimatedContractCost(setup);
   const contract = selectedContractTier(setup)?.contract || setup.best_contract || {};
   const spread = Number(firstPresent(contract.spread, contract.bid_ask_spread, pricing.spread));
@@ -8758,8 +8847,14 @@ function accessibilityScore(setup = {}) {
 
 function budgetBadge(setup = {}) {
   const score = accessibilityScore(setup);
-  const pending = String(setup.pricing_status || setup.option_pricing?.status || '').toLowerCase() === 'pending';
-  const costText = pending ? 'Pricing...' : score.cost == null ? 'Premium unavailable' : `Est. ${fmtMoney(score.cost)}`;
+  const status = String(setup.pricing_status || setup.option_pricing?.status || '').toLowerCase();
+  const costText = status === 'pending'
+    ? 'Pricing loading...'
+    : status === 'not_requested'
+    ? 'Pricing not loaded'
+    : status === 'stale'
+    ? 'Stale quote'
+    : score.cost == null ? 'Premium unavailable' : `Est. ${fmtMoney(score.cost)}`;
   const label = score.key === 'easy'
     ? 'Budget Friendly'
     : score.key === 'premium'

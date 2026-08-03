@@ -97,6 +97,7 @@ def test_last_price_fallback_and_missing_contract_reason():
         unavailable = scanner._fetch_option_pricing(missing)
         assert unavailable["status"] == "unavailable"
         assert unavailable["reason"] == "contract_not_found"
+        assert unavailable["nearest_available_strikes"] == [50.0]
         assert unavailable["estimated_contract_cost"] is None
     finally:
         scanner._option_chain_for_ticker = original
@@ -176,15 +177,16 @@ def test_auto_pricing_cap_marks_unqueued_rows_truthfully():
         scanner._store_analysis_cache(("default",), [first, second], [], {})
         rows = scanner.analysis_cache_snapshot(universe="default")["rows"]
         assert rows[0]["pricing_status"] == "pending"
-        assert rows[1]["pricing_status"] == "unavailable"
-        assert rows[1]["option_pricing"]["reason"] == "not_queued"
+        assert rows[1]["pricing_status"] == "not_requested"
+        assert rows[1]["option_pricing"]["reason"] == "outside_auto_hydration_cap"
         scan_payload = scanner.scan_cached(universe="default")
         assert scan_payload["rows"][0]["pricing_status"] == "pending"
-        assert scan_payload["rows"][1]["pricing_status"] == "unavailable"
-        assert scan_payload["rows"][1]["option_pricing"]["reason"] == "not_queued"
+        assert scan_payload["rows"][1]["pricing_status"] == "not_requested"
+        assert scan_payload["rows"][1]["option_pricing"]["reason"] == "outside_auto_hydration_cap"
         diagnostics = scanner.option_pricing_diagnostics(universe="default")
         assert diagnostics["queue_depth"] == 1
-        assert diagnostics["unavailable_reasons"]["not_queued"] == 1
+        assert diagnostics["not_requested"] == 1
+        assert diagnostics["unavailable_reasons"]["outside_auto_hydration_cap"] == 1
     finally:
         scanner.OPTION_PRICING_AUTO_LIMIT = original_limit
         scanner._submit_background_job = original_submit
@@ -192,9 +194,67 @@ def test_auto_pricing_cap_marks_unqueued_rows_truthfully():
         scanner._analysis_cache.clear()
 
 
+def test_lazy_queue_promotes_not_requested_contract_to_pending():
+    original_limit = scanner.OPTION_PRICING_AUTO_LIMIT
+    original_submit = scanner._submit_background_job
+    scanner._option_quote_cache.clear()
+    scanner._analysis_cache.clear()
+    submitted = []
+    try:
+        scanner.OPTION_PRICING_AUTO_LIMIT = 0
+        scanner._submit_background_job = lambda *args, **kwargs: submitted.append(args) or False
+        row = {
+            "ticker": "LZY",
+            "direction": "SHORT",
+            "ranking": {"rank": 10, "status_bucket": "WAITING"},
+            "option": {"type": "PUT", "strike": 40.0, "expiry": "2026-09-18"},
+        }
+        scanner._store_analysis_cache(("default",), [row], [], {})
+        assert scanner.analysis_cache_snapshot(universe="default")["rows"][0]["pricing_status"] == "not_requested"
+        result = scanner.queue_option_pricing_for_contracts([{
+            "ticker": "LZY",
+            "type": "PUT",
+            "strike": 40.0,
+            "expiry": "2026-09-18",
+        }], universe="default")
+        assert result["queued"] == 0
+        assert result["reason"] == "duplicate_or_executor_unavailable"
+        assert submitted
+        queued = scanner.analysis_cache_snapshot(universe="default")["rows"][0]
+        assert queued["pricing_status"] == "pending"
+        assert queued["option_pricing"]["reason"] == "queued"
+    finally:
+        scanner.OPTION_PRICING_AUTO_LIMIT = original_limit
+        scanner._submit_background_job = original_submit
+        scanner._option_quote_cache.clear()
+        scanner._analysis_cache.clear()
+
+
+def test_missing_option_type_is_not_used_for_missing_plan_inputs():
+    descriptor, reason = scanner._option_pricing_descriptor({
+        "ticker": "MISS",
+        "direction": "LONG",
+        "entry": None,
+        "tp1": None,
+        "option_plan": {"available": False, "reason": "missing TP1", "source": "kairos_trade_plan"},
+    })
+    assert descriptor is None
+    assert reason == "option_plan_unavailable:missing_tp1"
+
+    descriptor, reason = scanner._option_pricing_descriptor({
+        "ticker": "PROP",
+        "direction": "SHORT",
+        "option": {"strike": 45.0, "expiry": "2026-09-18"},
+    })
+    assert reason is None
+    assert descriptor["type"] == "PUT"
+
+
 if __name__ == "__main__":
     test_live_ask_contract_cost_and_cache_update()
     test_last_price_fallback_and_missing_contract_reason()
     test_analysis_cache_rows_update_without_changing_stock_plan()
     test_auto_pricing_cap_marks_unqueued_rows_truthfully()
+    test_lazy_queue_promotes_not_requested_contract_to_pending()
+    test_missing_option_type_is_not_used_for_missing_plan_inputs()
     print("Option pricing hydration v1 tests passed")

@@ -15,6 +15,7 @@ from scanner import (
     analysis_cache_snapshot,
     analysis_cache_status,
     option_pricing_diagnostics,
+    queue_option_pricing_for_contracts,
     build_bos_displacement_shadow_report,
     _batch_download,
     scan_cached,
@@ -773,6 +774,31 @@ def api_dev_option_pricing(
     if selected_universe == "finviz":
         return option_pricing_diagnostics(discover=True, universe="finviz")
     raise HTTPException(status_code=422, detail="Unsupported scanner universe")
+
+
+@app.post("/api/option-pricing/hydrate")
+def api_option_pricing_hydrate(payload: dict = Body(default_factory=dict)):
+    selected_universe = str((payload or {}).get("universe") or "discovered").strip().lower()
+    contracts = (payload or {}).get("contracts")
+    if not isinstance(contracts, list):
+        raise HTTPException(status_code=422, detail="contracts must be a list")
+    if selected_universe == "discovered":
+        ready, symbols, discovery_status = _discovery_symbols_ready()
+        if not ready:
+            return {
+                "accepted": False,
+                "reason": "discovery_not_ready",
+                "discovery_status": discovery_status,
+                "queued": 0,
+            }
+        result = queue_option_pricing_for_contracts(contracts, symbols, universe="discovered")
+    elif selected_universe == "default":
+        result = queue_option_pricing_for_contracts(contracts, universe="default")
+    elif selected_universe == "finviz":
+        result = queue_option_pricing_for_contracts(contracts, discover=True, universe="finviz")
+    else:
+        raise HTTPException(status_code=422, detail="Unsupported scanner universe")
+    return {"version": "option-pricing-async-v1", "universe": selected_universe, **result}
 
 
 @app.post("/api/discovery/run")

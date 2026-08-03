@@ -1077,21 +1077,35 @@ def _option_pricing_key(symbol: str, expiry: str, strike: float, option_type: st
     )
 
 
+def _option_type_from_available_direction(row: dict) -> Optional[str]:
+    raw = str(row.get("direction") or row.get("tradeDirection") or "").strip().upper()
+    if raw == "LONG":
+        return "CALL"
+    if raw == "SHORT":
+        return "PUT"
+    return None
+
+
 def _option_pricing_descriptor(row: dict) -> tuple[Optional[dict], Optional[str]]:
     ticker = str(row.get("ticker") or "").strip().upper()
     if not ticker:
         return None, "missing_symbol"
     option = row.get("option") if isinstance(row.get("option"), dict) else {}
     plan = row.get("option_plan") if isinstance(row.get("option_plan"), dict) else {}
-    option_type = str(option.get("type") or plan.get("type") or "").strip().upper()
-    if option_type not in {"CALL", "PUT"}:
-        return None, "missing_option_type"
     expiry = str(option.get("expiry") or option.get("expiration") or "").strip()
-    if not expiry:
-        return None, "missing_expiration"
     strike = _safe_float(option.get("strike"))
     if strike is None:
         strike = _safe_float(plan.get("preferred_strike"))
+    if not expiry and strike is None and plan.get("available") is False:
+        reason = str(plan.get("reason") or plan.get("unavailable_reason") or "option_plan_unavailable").strip().lower().replace(" ", "_")
+        return None, f"option_plan_unavailable:{reason or 'unknown'}"
+    option_type = str(option.get("type") or plan.get("type") or "").strip().upper()
+    if option_type not in {"CALL", "PUT"} and expiry and strike is not None:
+        option_type = _option_type_from_available_direction(row) or ""
+    if option_type not in {"CALL", "PUT"}:
+        return None, "missing_option_type"
+    if not expiry:
+        return None, "missing_expiration"
     if strike is None:
         return None, "missing_strike"
     return {
@@ -1104,9 +1118,10 @@ def _option_pricing_descriptor(row: dict) -> tuple[Optional[dict], Optional[str]
 
 
 def _empty_option_pricing(status: str, reason: str, descriptor: Optional[dict] = None) -> dict:
+    quality = status if status in {"pending", "stale", "not_requested"} else "unavailable"
     payload = {
         "status": status,
-        "quality": status if status in {"pending", "stale"} else "unavailable",
+        "quality": quality,
         "reason": reason,
         "estimated_contract_cost": None,
         "premium": None,
@@ -1206,34 +1221,40 @@ def _option_pricing_from_chain_row(ticker: str, expiry: str, strike: float, opti
     }
 
 
-def _find_option_contract_row(chain, option_type: str, strike: float) -> tuple[Optional[pd.Series], Optional[str]]:
+def _find_option_contract_row(chain, option_type: str, strike: float) -> tuple[Optional[pd.Series], Optional[str], dict]:
     if chain is None:
-        return None, "provider_timeout"
+        return None, "provider_timeout", {}
     contracts = chain.calls if option_type == "CALL" else chain.puts
     if contracts is None or contracts.empty:
-        return None, "contract_not_found"
+        return None, "contract_not_found", {"available_strikes": []}
     if "strike" not in contracts.columns:
-        return None, "missing_strike"
+        return None, "missing_strike", {}
     frame = contracts.copy()
     frame["strike_numeric"] = pd.to_numeric(frame["strike"], errors="coerce")
     exact = frame[(frame["strike_numeric"] - float(strike)).abs() < 0.0001]
     if exact.empty:
-        return None, "contract_not_found"
-    return exact.iloc[0], None
+        available = sorted([float(x) for x in frame["strike_numeric"].dropna().unique()])
+        nearest = sorted(available, key=lambda value: abs(value - float(strike)))[:5]
+        return None, "contract_not_found", {
+            "available_strikes_sample": available[:10],
+            "nearest_available_strikes": nearest,
+        }
+    return exact.iloc[0], None, {}
 
 
-def _fetch_option_pricing(descriptor: dict) -> dict:
+def _fetch_option_pricing(descriptor: dict, *, force_refresh: bool = False) -> dict:
     key = descriptor["key"]
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
-    with _cache_lock:
-        cached = _option_quote_cache.get(key)
-        if cached:
-            fetched_at = cached.get("fetched_at")
-            age = now - fetched_at if fetched_at else OPTION_QUOTE_CACHE_TTL + timedelta(seconds=1)
-            if age < OPTION_QUOTE_CACHE_TTL:
-                data = dict(cached.get("data") or {})
-                data["cache"] = "hit"
-                return data
+    if not force_refresh:
+        with _cache_lock:
+            cached = _option_quote_cache.get(key)
+            if cached:
+                fetched_at = cached.get("fetched_at")
+                age = now - fetched_at if fetched_at else OPTION_QUOTE_CACHE_TTL + timedelta(seconds=1)
+                if age < OPTION_QUOTE_CACHE_TTL:
+                    data = dict(cached.get("data") or {})
+                    data["cache"] = "hit"
+                    return data
 
     ticker = descriptor["ticker"]
     expiry = descriptor["expiry"]
@@ -1246,10 +1267,12 @@ def _fetch_option_pricing(descriptor: dict) -> dict:
         data = _empty_option_pricing("unavailable", "provider_timeout", descriptor)
         data["provider_latency_ms"] = provider_ms
     else:
-        row, reason = _find_option_contract_row(chain, option_type, strike)
+        row, reason, details = _find_option_contract_row(chain, option_type, strike)
         if row is None:
             data = _empty_option_pricing("unavailable", reason or "contract_not_found", descriptor)
             data["provider_latency_ms"] = provider_ms
+            if details:
+                data.update(details)
         else:
             data = _option_pricing_from_chain_row(ticker, expiry, strike, option_type, row, now, "miss")
             data["provider_latency_ms"] = provider_ms
@@ -1333,7 +1356,7 @@ def _hydrate_option_pricing_from_cache(rows: list) -> list:
             hydrated.append(_apply_option_pricing_to_row(row, data))
         else:
             existing = row.get("option_pricing") if isinstance(row.get("option_pricing"), dict) else {}
-            if existing.get("status") in {"ready", "pending", "stale", "unavailable"}:
+            if existing.get("status") in {"ready", "pending", "not_requested", "stale", "unavailable"}:
                 hydrated.append(row)
                 continue
             hydrated.append(_apply_option_pricing_to_row(row))
@@ -1349,6 +1372,8 @@ def _pricing_priority(row: dict) -> tuple:
 
 def _auto_pricing_keys(rows: list, near_miss: list, limit: Optional[int] = None) -> set:
     limit = OPTION_PRICING_AUTO_LIMIT if limit is None else limit
+    if limit <= 0:
+        return set()
     selected = set()
     all_rows = [*(rows or []), *(near_miss or [])]
     for row in sorted([r for r in all_rows if isinstance(r, dict)], key=_pricing_priority):
@@ -1378,7 +1403,7 @@ def _mark_nonqueued_option_pricing(rows: list, auto_pricing_keys: set) -> list:
         if descriptor["key"] in auto_pricing_keys:
             marked.append(_apply_option_pricing_to_row(row))
         else:
-            marked.append(_apply_option_pricing_to_row(row, _empty_option_pricing("unavailable", "not_queued", descriptor)))
+            marked.append(_apply_option_pricing_to_row(row, _empty_option_pricing("not_requested", "outside_auto_hydration_cap", descriptor)))
     return marked
 
 
@@ -1404,6 +1429,7 @@ def _option_pricing_diagnostics_for_rows(rows: list, near_miss: list) -> dict:
         "setups_eligible_for_pricing": len([row for row in all_rows if isinstance(row, dict) and _option_pricing_descriptor(row)[0] is not None]),
         "ready": summary.get("status_ready", 0),
         "pending": summary.get("status_pending", 0),
+        "not_requested": summary.get("status_not_requested", 0),
         "stale": summary.get("status_stale", 0),
         "unavailable": summary.get("status_unavailable", 0),
         "live_asks_found": summary.get("quality_live_ask", 0),
@@ -1445,12 +1471,98 @@ def _enqueue_option_pricing_for_cache(key: tuple, generated_at: datetime, rows: 
     )
 
 
+def queue_option_pricing_for_contracts(
+    contracts: list,
+    watchlist: Optional[list] = None,
+    *,
+    discover: bool = False,
+    universe: str = "default",
+    max_contracts: int = 10,
+) -> dict:
+    key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
+    with _cache_lock:
+        cached = _analysis_cache.get(key)
+        generated_at = cached.get("generated_at") if cached else None
+    if not cached or not generated_at:
+        return {"accepted": False, "reason": "cache_missing", "queued": 0}
+
+    descriptors = []
+    seen = set()
+    errors = Counter()
+    for item in contracts or []:
+        if not isinstance(item, dict):
+            errors["invalid_contract"] += 1
+            continue
+        row = {
+            "ticker": item.get("ticker") or item.get("symbol"),
+            "direction": item.get("direction"),
+            "option": {
+                "type": item.get("type") or item.get("option_type"),
+                "strike": item.get("strike"),
+                "expiry": item.get("expiry") or item.get("expiration"),
+            },
+        }
+        descriptor, reason = _option_pricing_descriptor(row)
+        if descriptor is None:
+            errors[reason or "missing_required_fields"] += 1
+            continue
+        if descriptor["key"] in seen:
+            continue
+        seen.add(descriptor["key"])
+        descriptors.append(descriptor)
+        if len(descriptors) >= max_contracts:
+            break
+
+    if not descriptors:
+        return {"accepted": False, "reason": "no_valid_contracts", "queued": 0, "errors": dict(errors)}
+
+    with _cache_lock:
+        cached = _analysis_cache.get(key)
+        if not cached or cached.get("generated_at") != generated_at:
+            return {"accepted": False, "reason": "obsolete_generation", "queued": 0}
+        descriptor_keys = {descriptor["key"] for descriptor in descriptors}
+        for bucket in ("rows", "near_miss"):
+            updated = []
+            for row in cached.get(bucket, []):
+                row_descriptor, _reason = _option_pricing_descriptor(row) if isinstance(row, dict) else (None, None)
+                if row_descriptor and row_descriptor.get("key") in descriptor_keys:
+                    updated.append(_apply_option_pricing_to_row(row))
+                else:
+                    updated.append(row)
+            cached[bucket] = updated
+        cached["option_pricing"] = {
+            **(cached.get("option_pricing") or {}),
+            "last_lazy_queued_at": _utc_now(),
+            "lazy_contracts_queued": len(descriptors),
+            **_option_pricing_diagnostics_for_rows(cached.get("rows") or [], cached.get("near_miss") or []),
+        }
+
+    accepted = _submit_background_job(
+        ("option_pricing_lazy", _analysis_state_key(key), _format_utc_timestamp(generated_at), tuple(sorted(seen))),
+        _run_option_pricing_for_cache,
+        key,
+        generated_at,
+        descriptors,
+    )
+    return {
+        "accepted": accepted,
+        "reason": None if accepted else "duplicate_or_executor_unavailable",
+        "queued": len(descriptors) if accepted else 0,
+        "contracts": descriptors,
+        "errors": dict(errors),
+    }
+
+
 def _run_option_pricing_for_cache(key: tuple, generated_at: datetime, descriptors: list) -> None:
     started = time.perf_counter()
-    successes = failures = cache_hits = 0
+    successes = failures = cache_hits = retries = 0
     latencies = []
     for descriptor in descriptors:
         pricing = _fetch_option_pricing(descriptor)
+        if pricing.get("status") == "unavailable" and pricing.get("reason") == "provider_timeout":
+            retries += 1
+            time.sleep(1.0)
+            pricing = _fetch_option_pricing(descriptor, force_refresh=True)
         if pricing.get("cache") == "hit":
             cache_hits += 1
         if pricing.get("status") == "ready":
@@ -1482,6 +1594,7 @@ def _run_option_pricing_for_cache(key: tuple, generated_at: datetime, descriptor
                 "contracts_requested": len(descriptors),
                 "contracts_successfully_matched": successes,
                 "provider_errors": failures,
+                "provider_retries": retries,
                 "cache_hits": cache_hits,
                 "cache_hit_rate": round(cache_hits / len(descriptors), 4) if descriptors else None,
                 "average_hydration_time_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,

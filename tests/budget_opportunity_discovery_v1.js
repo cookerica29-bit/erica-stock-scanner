@@ -192,6 +192,11 @@ const pendingPricing = setup({
   pricing_status: 'pending',
   option_pricing: { status: 'pending', quality: 'pending' },
 });
+const notRequestedPricing = setup({
+  ticker: 'NRQ',
+  pricing_status: 'not_requested',
+  option_pricing: { status: 'not_requested', quality: 'not_requested', reason: 'outside_auto_hydration_cap' },
+});
 const zeroQuote = setup({
   ticker: 'ZERO',
   best_contract: {
@@ -215,11 +220,13 @@ assert.strictEqual(context.setupFitsTradingBudget(premiumTop, 250), true, 'Budge
 assert.strictEqual(context.accessibilityScore(budgetFriendly).key, 'easy');
 assert.strictEqual(context.accessibilityScore(hydratedAffordable).key, 'easy');
 assert.strictEqual(context.accessibilityScore(pendingPricing).label, 'Pricing pending');
+assert.strictEqual(context.accessibilityScore(notRequestedPricing).label, 'Pricing not loaded');
 assert.strictEqual(context.selectedEstimatedContractCost(zeroQuote), null);
 assert.strictEqual(context.setupFitsTradingBudget(zeroQuote, 100), false);
 assert.strictEqual(context.accessibilityScore(premiumOnly).key, 'premium');
 assert.strictEqual(context.renderBudgetBadge(budgetFriendly).includes('Budget Friendly'), true);
-assert.strictEqual(context.renderBudgetBadge(pendingPricing).includes('Pricing...'), true);
+assert.strictEqual(context.renderBudgetBadge(pendingPricing).includes('Pricing loading...'), true);
+assert.strictEqual(context.renderBudgetBadge(notRequestedPricing).includes('Pricing not loaded'), true);
 
 const defaultSorted = context.sortScannerCardsForDisplay([budgetFriendly, premiumTop], 'RANK');
 assert.strictEqual(defaultSorted[0].ticker, 'TER', 'Best Overall ranking remains unchanged');
