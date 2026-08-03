@@ -1332,6 +1332,10 @@ def _hydrate_option_pricing_from_cache(rows: list) -> list:
                 data["quality"] = "stale_quote"
             hydrated.append(_apply_option_pricing_to_row(row, data))
         else:
+            existing = row.get("option_pricing") if isinstance(row.get("option_pricing"), dict) else {}
+            if existing.get("status") in {"ready", "pending", "stale", "unavailable"}:
+                hydrated.append(row)
+                continue
             hydrated.append(_apply_option_pricing_to_row(row))
     return hydrated
 

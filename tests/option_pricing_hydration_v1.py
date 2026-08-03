@@ -178,6 +178,10 @@ def test_auto_pricing_cap_marks_unqueued_rows_truthfully():
         assert rows[0]["pricing_status"] == "pending"
         assert rows[1]["pricing_status"] == "unavailable"
         assert rows[1]["option_pricing"]["reason"] == "not_queued"
+        scan_payload = scanner.scan_cached(universe="default")
+        assert scan_payload["rows"][0]["pricing_status"] == "pending"
+        assert scan_payload["rows"][1]["pricing_status"] == "unavailable"
+        assert scan_payload["rows"][1]["option_pricing"]["reason"] == "not_queued"
         diagnostics = scanner.option_pricing_diagnostics(universe="default")
         assert diagnostics["queue_depth"] == 1
         assert diagnostics["unavailable_reasons"]["not_queued"] == 1
