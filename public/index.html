@@ -264,7 +264,7 @@
     font-size: 9px;
     margin-top: 2px;
   }
-  #universeFilter, #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter, #sortFilter { min-width: 150px; }
+  #universeFilter, #statusFilter, #directionFilter, #qualityFilter, #contractTypeFilter, #sortFilter, #tradingBudgetFilter { min-width: 150px; }
   .mobile-filter-shell { display: contents; }
   .mobile-filter-summary { display: none; }
   .mobile-filter-content { display: contents; }
@@ -719,6 +719,22 @@
   .priority-yellow { color: #fbbf24; }
   .priority-red { color: var(--short); }
   .priority-muted { color: var(--muted); }
+  .budget-badge {
+    align-items: center;
+    border: 1px solid rgba(148,163,184,0.18);
+    border-radius: 999px;
+    display: inline-flex;
+    font-size: 10px;
+    font-weight: 900;
+    gap: 5px;
+    letter-spacing: 0.02em;
+    padding: 5px 8px;
+    white-space: nowrap;
+  }
+  .budget-badge.easy { background: rgba(34,197,94,0.11); border-color: rgba(34,197,94,0.28); color: #86efac; }
+  .budget-badge.moderate { background: rgba(245,158,11,0.11); border-color: rgba(245,158,11,0.28); color: #fcd34d; }
+  .budget-badge.premium { background: rgba(147,51,234,0.12); border-color: rgba(168,85,247,0.32); color: #d8b4fe; }
+  .budget-badge.unavailable { background: rgba(148,163,184,0.08); border-color: rgba(148,163,184,0.16); color: var(--muted); }
   .top-opportunities {
     max-width: 1400px;
     margin: 14px auto 0;
@@ -818,6 +834,74 @@
     border-radius: 14px;
     box-shadow: var(--card-shadow);
     padding: 14px 16px;
+  }
+  .budget-opportunity-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .budget-opportunity-panel {
+    background: rgba(65,80,106,0.44);
+    border: 1px solid rgba(148,163,184,0.14);
+    border-radius: 8px;
+    cursor: pointer;
+    padding: 10px;
+    text-align: left;
+    width: 100%;
+  }
+  .budget-opportunity-panel:hover,
+  .budget-opportunity-panel:focus-visible {
+    border-color: rgba(124,92,255,0.5);
+    outline: none;
+  }
+  .budget-panel-title {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 950;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .budget-panel-main {
+    align-items: center;
+    color: var(--text);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 18px;
+    font-weight: 950;
+    gap: 8px;
+    margin-top: 5px;
+  }
+  .budget-panel-meta {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: 5px;
+  }
+  .budget-summary-row {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    margin-bottom: 10px;
+  }
+  .budget-summary-tile {
+    background: rgba(15,23,42,0.18);
+    border: 1px solid rgba(148,163,184,0.1);
+    border-radius: 8px;
+    padding: 8px;
+  }
+  .budget-summary-label {
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .budget-summary-value {
+    color: var(--text);
+    font-size: 17px;
+    font-weight: 950;
+    margin-top: 3px;
   }
   .top-opportunity-list {
     display: grid;
@@ -2546,6 +2630,10 @@
       grid-template-columns: 1fr;
       flex-direction: column;
     }
+    .budget-opportunity-grid,
+    .budget-summary-row {
+      grid-template-columns: 1fr;
+    }
     .guided-timeframes {
       justify-content: flex-start;
       width: 100%;
@@ -3565,8 +3653,16 @@
           <option value="CALL">Calls</option>
           <option value="PUT">Puts</option>
         </select>
+        <select id="tradingBudgetFilter" onchange="handleTradingBudgetChange()">
+          <option value="NO_LIMIT" selected>No Budget Limit</option>
+          <option value="100">Under $100</option>
+          <option value="250">Under $250</option>
+          <option value="500">Under $500</option>
+          <option value="1000">Under $1,000</option>
+        </select>
         <select id="sortFilter" onchange="renderScannerResults()">
           <option value="RANK" selected>Opportunity Rank</option>
+          <option value="BUDGET">Best Within Budget</option>
           <option value="STATUS">Status</option>
           <option value="GRADE">Grade</option>
           <option value="TICKER">Ticker</option>
@@ -4418,6 +4514,7 @@ const POSITION_ALERT_KEYS = {
 };
 const FURTHER_ANALYSIS_SELECTED_KEY = 'kairos_further_analysis_selected_setup';
 const CONTRACT_TIER_SELECTION_KEY = 'kairos_contract_tier_selection_v1';
+const TRADING_BUDGET_KEY = 'kairos_trading_budget_v1';
 const ENTER_NOW_FUNNEL_HISTORY_LIMIT = 20;
 let scannerRows = [];
 let scannerNearMiss = [];
@@ -4857,7 +4954,7 @@ function markMobileFilterUserActive() {
 }
 
 function scannerFilterSummaryText() {
-  const ids = ['statusFilter', 'directionFilter', 'qualityFilter', 'contractTypeFilter'];
+  const ids = ['statusFilter', 'directionFilter', 'qualityFilter', 'contractTypeFilter', 'tradingBudgetFilter'];
   return ids.map(id => document.getElementById(id)?.selectedOptions?.[0]?.textContent || '').filter(Boolean).join(' · ');
 }
 
@@ -4888,7 +4985,7 @@ function initializeMobileScannerFilters() {
     if (!isMobile) return;
     try { sessionStorage.setItem(MOBILE_FILTERS_OPEN_KEY, filters.open ? 'true' : 'false'); } catch {}
   });
-  ['universeFilter', 'statusFilter', 'directionFilter', 'qualityFilter', 'contractTypeFilter', 'sortFilter'].forEach(id => {
+  ['universeFilter', 'statusFilter', 'directionFilter', 'qualityFilter', 'contractTypeFilter', 'tradingBudgetFilter', 'sortFilter'].forEach(id => {
     document.getElementById(id)?.addEventListener('change', () => {
       markMobileFilterUserActive();
       updateMobileFilterSummary();
@@ -5609,6 +5706,7 @@ function currentScannerFilters() {
     direction: document.getElementById('directionFilter')?.value || 'all',
     quality: document.getElementById('qualityFilter')?.value || 'all',
     contractType: document.getElementById('contractTypeFilter')?.value || 'all',
+    tradingBudget: document.getElementById('tradingBudgetFilter')?.value || 'NO_LIMIT',
     tickerSearch: tickerQueryParts(document.getElementById('tickerInput')?.value || ''),
   };
 }
@@ -6111,6 +6209,23 @@ function opportunityRemainingValue(row) {
 
 function sortScannerCardsForDisplay(rows, sortMode = 'RANK') {
   return rows.slice().sort((a, b) => {
+    if (sortMode === 'BUDGET') {
+      const budget = tradingBudgetValue();
+      const aFit = setupFitsTradingBudget(a, budget);
+      const bFit = setupFitsTradingBudget(b, budget);
+      if (aFit !== bFit) return aFit ? -1 : 1;
+      const aAffordable = bestAffordableContract(a, budget)?.cost ?? selectedEstimatedContractCost(a);
+      const bAffordable = bestAffordableContract(b, budget)?.cost ?? selectedEstimatedContractCost(b);
+      const aHasCost = Number.isFinite(aAffordable);
+      const bHasCost = Number.isFinite(bAffordable);
+      if (aHasCost !== bHasCost) return aHasCost ? -1 : 1;
+      const rankDiff = opportunityRankValue(a) - opportunityRankValue(b);
+      if (rankDiff) return rankDiff;
+      if (aHasCost && bHasCost) {
+        const costDiff = aAffordable - bAffordable;
+        if (costDiff) return costDiff;
+      }
+    }
     if (sortMode === 'RANK') {
       const rankDiff = opportunityRankValue(a) - opportunityRankValue(b);
       if (rankDiff) return rankDiff;
@@ -6161,18 +6276,103 @@ function focusSetupCard(ticker) {
   setTimeout(() => card.classList.remove('a-plus-alert'), 1600);
 }
 
+function topRankedSetup(rows = []) {
+  return rows.slice().sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b))[0] || null;
+}
+
+function topBudgetSetup(rows = [], budget = tradingBudgetValue()) {
+  const pool = Number.isFinite(budget) ? rows.filter(row => setupFitsTradingBudget(row, budget)) : rows.slice();
+  return pool.sort((a, b) => {
+    const rankDiff = opportunityRankValue(a) - opportunityRankValue(b);
+    if (rankDiff) return rankDiff;
+    const aCost = bestAffordableContract(a, budget)?.cost ?? selectedEstimatedContractCost(a) ?? Infinity;
+    const bCost = bestAffordableContract(b, budget)?.cost ?? selectedEstimatedContractCost(b) ?? Infinity;
+    return aCost - bCost;
+  })[0] || null;
+}
+
+function renderBudgetOpportunityPanel(title, row, budget = tradingBudgetValue()) {
+  if (!row) {
+    return `
+      <div class="budget-opportunity-panel" role="status">
+        <div class="budget-panel-title">${escapeHtml(title)}</div>
+        <div class="budget-panel-main">No setup available</div>
+        <div class="budget-panel-meta">Kairos did not find a matching opportunity in the current view.</div>
+      </div>`;
+  }
+  const status = setupProgressState(row).label;
+  const direction = renderDirectionText(row.direction);
+  const overallCost = selectedEstimatedContractCost(row);
+  const affordable = bestAffordableContract(row, budget);
+  const isBudgetPanel = title.toLowerCase().includes('budget');
+  const displayCost = isBudgetPanel && affordable ? affordable.cost : overallCost;
+  const costText = Number.isFinite(displayCost) ? fmtMoney(displayCost) : 'Cost unavailable';
+  const note = isBudgetPanel && Number.isFinite(budget)
+    ? (affordable
+      ? `${affordable.source} estimate fits ${tradingBudgetLabel(budget)}.`
+      : `No available contract estimate fits ${tradingBudgetLabel(budget)}.`)
+    : `${accessibilityScore(row).label} · Estimated contract ${Number.isFinite(overallCost) ? fmtMoney(overallCost) : 'unavailable'}.`;
+  return `
+    <button type="button" class="budget-opportunity-panel" onclick="focusSetupCard('${escapeHtml(String(row.ticker || ''))}')">
+      <div class="budget-panel-title">${escapeHtml(title)}</div>
+      <div class="budget-panel-main">
+        <span>${escapeHtml(row.ticker || '—')}</span>
+        <span class="direction-value ${directionClass(row.direction)}">${escapeHtml(direction)}</span>
+        <span>${escapeHtml(status)}</span>
+      </div>
+      <div class="budget-panel-meta">Estimated contract: ${escapeHtml(costText)}</div>
+      <div class="budget-panel-meta">${escapeHtml(note)}</div>
+    </button>`;
+}
+
+function opportunityBudgetSummary(rows = []) {
+  return rows.reduce((acc, row) => {
+    const bucket = setupProgressState(row).bucket;
+    if (bucket === 'ENTER_NOW') acc.enterNow += 1;
+    if (bucket === 'ALMOST_READY') acc.almostReady += 1;
+    if (bucket === 'EARLY_ENTRY') acc.earlyEntry += 1;
+    const accessibility = accessibilityScore(row).key;
+    if (accessibility === 'easy') acc.budgetFriendly += 1;
+    if (accessibility === 'premium') acc.premiumOnly += 1;
+    return acc;
+  }, { enterNow: 0, almostReady: 0, earlyEntry: 0, budgetFriendly: 0, premiumOnly: 0 });
+}
+
+function renderBudgetSummaryTiles(rows = []) {
+  const summary = opportunityBudgetSummary(rows);
+  const tiles = [
+    ['Enter Now', summary.enterNow],
+    ['Almost Ready', summary.almostReady],
+    ['Early Entry', summary.earlyEntry],
+    ['Budget Friendly', summary.budgetFriendly],
+    ['Premium Only', summary.premiumOnly],
+  ];
+  return `
+    <div class="budget-summary-row" aria-label="Today's market opportunity summary">
+      ${tiles.map(([label, value]) => `
+        <div class="budget-summary-tile">
+          <div class="budget-summary-label">${escapeHtml(label)}</div>
+          <div class="budget-summary-value">${escapeHtml(String(value))}</div>
+        </div>`).join('')}
+    </div>`;
+}
+
 function renderTopOpportunities(rows = []) {
   const el = document.getElementById('topOpportunities');
   if (!el) return;
-  const ranked = rows
-    .filter(row => row?.ranking && row.ranking.tier !== 'LOW_PRIORITY')
-    .slice()
-    .sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b))
-    .slice(0, 5);
-  if (!ranked.length) {
+  if (!rows.length) {
     el.innerHTML = '';
     return;
   }
+  const rankedPool = rows
+    .filter(row => row?.ranking && row.ranking.tier !== 'LOW_PRIORITY')
+    .slice()
+    .sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b));
+  const displayPool = rankedPool.length ? rankedPool : rows.slice().sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b));
+  const ranked = rankedPool.slice(0, 5);
+  const budget = tradingBudgetValue();
+  const bestOverall = topRankedSetup(displayPool);
+  const bestWithinBudget = topBudgetSetup(displayPool, budget);
   const items = ranked.map(row => {
     const ranking = row.ranking || {};
     const reasons = (ranking.positive_reasons || []).slice(0, 3).join(' · ') || humanRankingTier(ranking.tier);
@@ -6187,7 +6387,7 @@ function renderTopOpportunities(rows = []) {
             <span class="direction-value ${directionClass(row.direction)}">${renderDirectionText(row.direction)}</span>
             ${renderSetupGradePill(setupGradeValue(row))}
           </div>
-          <div class="top-meta">${escapeHtml(status)} · ${escapeHtml(humanRankingTier(ranking.tier))} · Score ${escapeHtml(String(ranking.score ?? '—'))}</div>
+          <div class="top-meta">${escapeHtml(status)} · ${escapeHtml(humanRankingTier(ranking.tier))} · Score ${escapeHtml(String(ranking.score ?? '—'))} · ${renderBudgetBadge(row)}</div>
         </div>
         <div>
           <div class="top-reasons"><strong>Why:</strong> ${escapeHtml(reasons)}</div>
@@ -6202,8 +6402,14 @@ function renderTopOpportunities(rows = []) {
   }).join('');
   el.innerHTML = `
     <div class="top-opportunity-card">
+      <div class="snapshot-title">Today's Market</div>
+      ${renderBudgetSummaryTiles(rows)}
+      <div class="budget-opportunity-grid">
+        ${renderBudgetOpportunityPanel('Best Overall', bestOverall, budget)}
+        ${renderBudgetOpportunityPanel(`Best Within My Budget · ${tradingBudgetLabel(budget)}`, bestWithinBudget, budget)}
+      </div>
       <div class="snapshot-title">Top Opportunities</div>
-      <div class="top-opportunity-list">${items}</div>
+      <div class="top-opportunity-list">${items || '<div class="data-status-sub">No ranked top opportunities in the current view.</div>'}</div>
     </div>`;
 }
 
@@ -6733,6 +6939,7 @@ function renderScannerResults() {
     document.getElementById('directionFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('qualityFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('contractTypeFilter')?.selectedOptions?.[0]?.textContent,
+    document.getElementById('tradingBudgetFilter')?.selectedOptions?.[0]?.textContent,
     document.getElementById('sortFilter')?.selectedOptions?.[0]?.textContent,
     filters.tickerSearch.length ? `Ticker: ${filters.tickerSearch.join(',')}` : '',
   ].filter(Boolean).join(' · ');
@@ -8416,6 +8623,127 @@ function contractTierLabel(key = '') {
     budget: 'Budget',
   };
   return labels[String(key || '').trim().toLowerCase()] || '';
+}
+
+function tradingBudgetValue() {
+  const raw = document.getElementById('tradingBudgetFilter')?.value || localStorage.getItem(TRADING_BUDGET_KEY) || 'NO_LIMIT';
+  if (raw === 'NO_LIMIT') return Infinity;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : Infinity;
+}
+
+function tradingBudgetLabel(value = tradingBudgetValue()) {
+  if (!Number.isFinite(value)) return 'No Limit';
+  const amount = Number(value).toLocaleString(undefined, {
+    maximumFractionDigits: Number(value) % 1 === 0 ? 0 : 2,
+    minimumFractionDigits: 0,
+  });
+  return `Under $${amount}`;
+}
+
+function handleTradingBudgetChange() {
+  const control = document.getElementById('tradingBudgetFilter');
+  if (control) localStorage.setItem(TRADING_BUDGET_KEY, control.value || 'NO_LIMIT');
+  renderScannerResults();
+}
+
+function initializeTradingBudgetControl() {
+  const control = document.getElementById('tradingBudgetFilter');
+  if (!control) return;
+  const saved = localStorage.getItem(TRADING_BUDGET_KEY);
+  if (saved && Array.from(control.options).some(option => option.value === saved)) control.value = saved;
+}
+
+function contractCostCandidates(setup = {}) {
+  const tiers = contractTierOptions(setup).map(tier => ({
+    source: tier.name,
+    tier: tier.key,
+    cost: candidateContractCost(tier.contract),
+    contract: tier.contract,
+  })).filter(item => Number.isFinite(item.cost));
+  if (tiers.length) return tiers;
+  const selectedCost = contractEntryCost(setup);
+  if (Number.isFinite(selectedCost)) {
+    return [{
+      source: 'Estimated',
+      tier: '',
+      cost: selectedCost,
+      contract: setup.best_contract || {},
+    }];
+  }
+  return [];
+}
+
+function selectedEstimatedContractCost(setup = {}) {
+  const selected = selectedContractTier(setup);
+  if (selected) {
+    const cost = candidateContractCost(selected.contract);
+    if (Number.isFinite(cost)) return cost;
+  }
+  const cost = contractEntryCost(setup);
+  return Number.isFinite(cost) ? cost : null;
+}
+
+function bestAffordableContract(setup = {}, budget = tradingBudgetValue()) {
+  const candidates = contractCostCandidates(setup);
+  if (!candidates.length) return null;
+  const sorted = candidates.slice().sort((a, b) => a.cost - b.cost);
+  if (!Number.isFinite(budget)) {
+    const selected = selectedContractTier(setup);
+    if (selected) {
+      const selectedCost = candidateContractCost(selected.contract);
+      if (Number.isFinite(selectedCost)) return { source: selected.name, tier: selected.key, cost: selectedCost, contract: selected.contract };
+    }
+    return sorted[0];
+  }
+  return sorted.find(item => item.cost <= budget) || null;
+}
+
+function setupFitsTradingBudget(setup = {}, budget = tradingBudgetValue()) {
+  if (!Number.isFinite(budget)) return true;
+  return Boolean(bestAffordableContract(setup, budget));
+}
+
+function accessibilityScore(setup = {}) {
+  const cost = selectedEstimatedContractCost(setup);
+  const contract = selectedContractTier(setup)?.contract || setup.best_contract || {};
+  const spread = Number(firstPresent(contract.spread, contract.bid_ask_spread));
+  const spreadPct = Number(firstPresent(contract.spread_pct, contract.diagnostics?.spread_pct));
+  const openInterest = Number(firstPresent(contract.open_interest, contract.openInterest));
+  const volume = Number(contract.volume);
+  const spreadPctFromPremium = Number.isFinite(spread) && Number.isFinite(cost) && cost > 0
+    ? ((spread * 100) / cost) * 100
+    : NaN;
+  const hasTightSpread = (Number.isFinite(spreadPct) && spreadPct <= 20) || (Number.isFinite(spreadPctFromPremium) && spreadPctFromPremium <= 20);
+  const hasLiquidity = (Number.isFinite(openInterest) && openInterest >= 100) || (Number.isFinite(volume) && volume >= 25);
+  if (!Number.isFinite(cost)) {
+    return { key: 'unavailable', label: 'Accessibility unavailable', shortLabel: 'Unavailable', cost: null, reason: 'Estimated premium unavailable.' };
+  }
+  if (cost <= 250 && (hasTightSpread || hasLiquidity)) {
+    return { key: 'easy', label: '🟢 Easy', shortLabel: 'Easy', cost, reason: 'Lower estimated premium with usable execution data.' };
+  }
+  if (cost <= 600 || hasTightSpread || hasLiquidity) {
+    return { key: 'moderate', label: '🟡 Moderate', shortLabel: 'Moderate', cost, reason: 'Tradable, but cost or liquidity needs review.' };
+  }
+  return { key: 'premium', label: '🔴 Premium', shortLabel: 'Premium', cost, reason: 'Higher estimated premium or weaker execution data.' };
+}
+
+function budgetBadge(setup = {}) {
+  const score = accessibilityScore(setup);
+  const costText = score.cost == null ? 'Premium unavailable' : `Est. ${fmtMoney(score.cost)}`;
+  const label = score.key === 'easy'
+    ? 'Budget Friendly'
+    : score.key === 'premium'
+    ? 'Premium Trade'
+    : score.key === 'moderate'
+    ? 'Moderate Cost'
+    : 'Cost Unavailable';
+  return { ...score, displayLabel: label, costText };
+}
+
+function renderBudgetBadge(setup = {}) {
+  const badge = budgetBadge(setup);
+  return `<span class="budget-badge ${escapeHtml(badge.key)}" title="${escapeHtml(badge.reason)}">${escapeHtml(badge.displayLabel)} · ${escapeHtml(badge.costText)}</span>`;
 }
 
 function renderBestContractBlock(setup) {
@@ -10238,6 +10566,7 @@ function renderCard(s) {
       </div>
       <div class="card-header-right">
         ${renderReadinessBadge(s)}
+        ${renderBudgetBadge(s)}
       </div>
     </div>
     <div class="card-body">
@@ -17025,6 +17354,7 @@ function exportCSV() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+initializeTradingBudgetControl();
 initializeScannerDefaults();
 initializeJournalServerSync();
 updateDeveloperReplayAccess();

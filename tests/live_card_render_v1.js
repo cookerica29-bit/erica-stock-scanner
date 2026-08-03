@@ -319,7 +319,8 @@ assert.ok(enterWaiting.includes('★★★★☆'));
 assert.ok(!enterWaiting.includes('Suggested Contract'));
 assert.ok(!enterWaiting.includes('Best Quality'));
 assert.ok(!enterWaiting.includes('top pick'));
-assert.ok(!enterWaiting.includes('$120.00'));
+assert.ok(enterWaiting.includes('Budget Friendly'));
+assert.ok(enterWaiting.includes('Est. $120.00'));
 assert.ok(!enterWaiting.includes('Kairos Confidence'));
 assert.ok(!enterWaiting.includes('View contract details'));
 assert.ok(enterWaiting.includes('data-plan-visual="risk-reward"'));
@@ -825,10 +826,10 @@ warmingElements.contractTypeFilter.value = 'all';
 warmingElements.contractTypeFilter.selectedOptions = [{ textContent: 'All Contracts' }];
 warmingElements.tickerInput.value = '';
 context.document.getElementById = id => warmingElements[id] || elementStub();
-vm.runInContext('scannerRows = []; scannerNearMiss = []; latestScannerMeta = { cache_key: "discovered", universe: "discovered", status: "warming" };', context);
+vm.runInContext('scannerRows = []; scannerNearMiss = []; latestScannerMeta = { cache_key: "discovered", universe: "discovered", status: "warming", refreshing: true, running: true, has_cache: false };', context);
 context.renderScannerResults();
 assert.ok(
-  warmingElements.results.innerHTML.includes('Discovering the market...'),
+  warmingElements.results.innerHTML.includes('Discovery warming'),
   'Discovered warming state should use discovered-specific user-facing copy'
 );
 context.document.getElementById = originalGetElementById;
