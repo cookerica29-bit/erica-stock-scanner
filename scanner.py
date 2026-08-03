@@ -12,7 +12,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from market_data import (
@@ -1078,6 +1078,18 @@ def _option_pricing_key(symbol: str, expiry: str, strike: float, option_type: st
     )
 
 
+def _parse_expiration_date(value) -> Optional[date]:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _option_plan_expiration_bounds(plan: dict) -> tuple[Optional[int], Optional[int]]:
+    suggested = plan.get("suggested_expiration") if isinstance(plan.get("suggested_expiration"), dict) else {}
+    return _safe_int(suggested.get("min_dte")), _safe_int(suggested.get("max_dte"))
+
+
 def _option_type_from_available_direction(row: dict) -> Optional[str]:
     raw = str(row.get("direction") or row.get("tradeDirection") or "").strip().upper()
     if raw == "LONG":
@@ -1109,10 +1121,23 @@ def _option_pricing_descriptor(row: dict) -> tuple[Optional[dict], Optional[str]
         return None, "missing_expiration"
     if strike is None:
         return None, "missing_strike"
+    min_dte, max_dte = _option_plan_expiration_bounds(plan)
+    requested_expiration_date = _parse_expiration_date(expiry)
+    requested_dte = (requested_expiration_date - datetime.now().date()).days if requested_expiration_date else None
     return {
         "ticker": ticker,
         "type": option_type,
         "expiry": expiry,
+        "requested_expiration": expiry,
+        "requested_dte": requested_dte,
+        "expiration_source": (
+            option.get("expiration_source")
+            or option.get("expiry_source")
+            or plan.get("expiration_source")
+            or "option_contract"
+        ),
+        "expiration_min_dte": min_dte,
+        "expiration_max_dte": max_dte,
         "strike": strike,
         "key": _option_pricing_key(ticker, expiry, strike, option_type),
     }, None
@@ -1272,6 +1297,20 @@ def _option_pricing_from_chain(
             data = _option_pricing_from_chain_row(ticker, expiry, strike, option_type, row, fetched_at, cache_state)
     if provider_latency_ms is not None:
         data["provider_latency_ms"] = provider_latency_ms
+    data["requested_expiration"] = descriptor.get("requested_expiration") or descriptor.get("expiry")
+    data["requested_dte"] = descriptor.get("requested_dte")
+    data["expiration_source"] = descriptor.get("expiration_source")
+    data["resolved_expiration"] = descriptor.get("expiry")
+    data["resolved_dte"] = descriptor.get("resolved_dte")
+    data["resolution_reason"] = descriptor.get("resolution_reason") or "requested_expiration_used"
+    data["allowed_min_dte"] = descriptor.get("allowed_min_dte")
+    data["allowed_max_dte"] = descriptor.get("allowed_max_dte")
+    data["option_plan_min_dte"] = descriptor.get("expiration_min_dte")
+    data["option_plan_max_dte"] = descriptor.get("expiration_max_dte")
+    data["key"] = descriptor.get("key")
+    data["requested_key"] = descriptor.get("requested_key") or descriptor.get("key")
+    if descriptor.get("available_expirations") and not data.get("available_expirations"):
+        data["available_expirations"] = descriptor.get("available_expirations")
     return data
 
 
@@ -1284,6 +1323,12 @@ def _should_cache_option_pricing_result(data: dict) -> bool:
 
 
 def _fetch_option_pricing(descriptor: dict, *, force_refresh: bool = False) -> dict:
+    resolved_descriptor, resolution = _resolve_option_pricing_expiration(descriptor)
+    if resolved_descriptor is None:
+        data = _empty_option_pricing("unavailable", resolution.get("resolution_reason") or "no_valid_expiration_in_dte_range", descriptor)
+        data.update(resolution)
+        return data
+    descriptor = resolved_descriptor
     key = descriptor["key"]
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
     if not force_refresh:
@@ -1305,6 +1350,71 @@ def _fetch_option_pricing(descriptor: dict, *, force_refresh: bool = False) -> d
         with _cache_lock:
             _option_quote_cache[key] = {"fetched_at": now, "data": dict(data)}
     return data
+
+
+def _resolve_option_pricing_expiration(descriptor: dict) -> tuple[Optional[dict], dict]:
+    ticker = str(descriptor.get("ticker") or "").upper()
+    requested = str(descriptor.get("expiry") or "").strip()
+    requested_date = _parse_expiration_date(requested)
+    today = datetime.now().date()
+    plan_min_dte = _safe_int(descriptor.get("expiration_min_dte"))
+    plan_max_dte = _safe_int(descriptor.get("expiration_max_dte"))
+    min_dte = 14
+    max_dte = 60
+    diagnostics = {
+        "requested_expiration": requested,
+        "requested_dte": descriptor.get("requested_dte"),
+        "expiration_source": descriptor.get("expiration_source"),
+        "available_expirations": [],
+        "resolved_expiration": requested,
+        "resolved_dte": descriptor.get("requested_dte"),
+        "resolution_reason": "requested_expiration_used",
+        "allowed_min_dte": min_dte,
+        "allowed_max_dte": max_dte,
+        "option_plan_min_dte": plan_min_dte,
+        "option_plan_max_dte": plan_max_dte,
+    }
+    if not ticker or not requested_date:
+        diagnostics["resolution_reason"] = "missing_requested_expiration"
+        return None, diagnostics
+
+    expirations = _option_expirations_for_ticker(ticker)
+    diagnostics["available_expirations"] = list(expirations or [])[:20]
+    parsed = []
+    for expiry in expirations or []:
+        expiry_date = _parse_expiration_date(expiry)
+        if not expiry_date:
+            continue
+        dte = (expiry_date - today).days
+        if min_dte <= dte <= max_dte:
+            parsed.append((str(expiry), expiry_date, dte))
+
+    if not parsed:
+        diagnostics["resolved_expiration"] = None
+        diagnostics["resolved_dte"] = None
+        diagnostics["resolution_reason"] = "no_valid_expiration_in_dte_range"
+        return None, diagnostics
+
+    exact = next((item for item in parsed if item[0] == requested), None)
+    selected = exact or min(parsed, key=lambda item: (abs((item[1] - requested_date).days), -item[2]))
+    resolved_expiry, _resolved_date, resolved_dte = selected
+    resolved = dict(descriptor)
+    resolved["requested_key"] = descriptor.get("requested_key") or descriptor.get("key")
+    resolved["requested_expiration"] = descriptor.get("requested_expiration") or requested
+    resolved["requested_dte"] = descriptor.get("requested_dte")
+    resolved["available_expirations"] = diagnostics["available_expirations"]
+    resolved["resolved_dte"] = resolved_dte
+    resolved["allowed_min_dte"] = min_dte
+    resolved["allowed_max_dte"] = max_dte
+    resolved["expiry"] = resolved_expiry
+    resolved["key"] = _option_pricing_key(ticker, resolved_expiry, descriptor.get("strike"), descriptor.get("type"))
+    resolved["resolution_reason"] = "requested_expiration_listed" if exact else "nearest_listed_expiration_inside_dte_range"
+    diagnostics.update({
+        "resolved_expiration": resolved_expiry,
+        "resolved_dte": resolved_dte,
+        "resolution_reason": resolved["resolution_reason"],
+    })
+    return resolved, diagnostics
 
 
 def _latency_percentile(values: list[float], percentile: float) -> Optional[float]:
@@ -1330,6 +1440,9 @@ def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict
         "chain_groups": 0,
         "duplicate_chain_requests_eliminated": 0,
         "provider_retries": 0,
+        "expiration_resolution_attempted": 0,
+        "expiration_resolution_adjusted": 0,
+        "expiration_resolution_failed": 0,
         "cache_hits": 0,
         "fresh_cache_hits": 0,
         "stale_cache_available": 0,
@@ -1338,8 +1451,35 @@ def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict
     }
     grouped = {}
     for descriptor in descriptors or []:
+        requested_key = descriptor.get("key")
+        if not requested_key or requested_key in results:
+            continue
+        diagnostics["expiration_resolution_attempted"] += 1
+        resolved_descriptor, resolution = _resolve_option_pricing_expiration(descriptor)
+        if resolved_descriptor is None:
+            data = _empty_option_pricing("unavailable", resolution.get("resolution_reason") or "no_valid_expiration_in_dte_range", descriptor)
+            data.update(resolution)
+            results[requested_key] = data
+            diagnostics["expiration_resolution_failed"] += 1
+            diagnostics["request_details"].append({
+                "symbol": descriptor.get("ticker"),
+                "expiration": descriptor.get("expiry"),
+                "contracts": 1,
+                "attempts": 0,
+                "latency_ms": None,
+                "result": data.get("reason"),
+                "available_expirations": resolution.get("available_expirations") or [],
+                "resolved_expiration": resolution.get("resolved_expiration"),
+            })
+            continue
+        if resolved_descriptor.get("expiry") != descriptor.get("expiry"):
+            diagnostics["expiration_resolution_adjusted"] += 1
+        descriptor = resolved_descriptor
         key = descriptor.get("key")
         if not key or key in results:
+            if requested_key in results:
+                continue
+            results[requested_key] = results.get(key)
             continue
         with _cache_lock:
             cached = _option_quote_cache.get(key)
@@ -1350,6 +1490,7 @@ def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict
                 data = dict(cached.get("data") or {})
                 data["cache"] = "hit"
                 results[key] = data
+                results[requested_key] = data
                 diagnostics["cache_hits"] += 1
                 diagnostics["fresh_cache_hits"] += 1
                 continue
@@ -1358,7 +1499,13 @@ def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict
         grouped.setdefault(group_key, []).append(descriptor)
 
     diagnostics["chain_groups"] = len(grouped)
-    diagnostics["duplicate_chain_requests_eliminated"] = max(0, len(descriptors or []) - diagnostics["fresh_cache_hits"] - len(grouped))
+    diagnostics["duplicate_chain_requests_eliminated"] = max(
+        0,
+        diagnostics["expiration_resolution_attempted"]
+        - diagnostics["expiration_resolution_failed"]
+        - diagnostics["fresh_cache_hits"]
+        - len(grouped),
+    )
 
     for (ticker, expiry), group in grouped.items():
         chain = None
@@ -1393,6 +1540,8 @@ def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict
         for descriptor in group:
             data = _option_pricing_from_chain(descriptor, chain, fetched_at, provider_latency_ms=provider_ms)
             results[descriptor["key"]] = data
+            if descriptor.get("requested_key"):
+                results[descriptor["requested_key"]] = data
             if _should_cache_option_pricing_result(data):
                 with _cache_lock:
                     _option_quote_cache[descriptor["key"]] = {"fetched_at": fetched_at, "data": dict(data)}
@@ -1436,6 +1585,16 @@ def _apply_option_pricing_to_row(row: dict, pricing: Optional[dict] = None, reas
             "pricing_source": pricing.get("source"),
             "quote_timestamp": pricing.get("quote_timestamp"),
             "estimated_contract_cost": pricing.get("estimated_contract_cost"),
+            "expiry": pricing.get("expiry") or pricing.get("resolved_expiration"),
+            "expiration": pricing.get("expiration") or pricing.get("resolved_expiration"),
+            "requested_expiration": pricing.get("requested_expiration"),
+            "requested_dte": pricing.get("requested_dte"),
+            "expiration_source": pricing.get("expiration_source"),
+            "resolved_expiration": pricing.get("resolved_expiration"),
+            "resolved_dte": pricing.get("resolved_dte"),
+            "resolution_reason": pricing.get("resolution_reason"),
+            "allowed_min_dte": pricing.get("allowed_min_dte"),
+            "allowed_max_dte": pricing.get("allowed_max_dte"),
         })
         item["option"] = option
         item["best_contract"] = {
@@ -1458,6 +1617,14 @@ def _apply_option_pricing_to_row(row: dict, pricing: Optional[dict] = None, reas
             "estimated_contract_cost": pricing.get("estimated_contract_cost"),
             "pricing_quality": pricing.get("quality"),
             "quote_timestamp": pricing.get("quote_timestamp"),
+            "requested_expiration": pricing.get("requested_expiration"),
+            "requested_dte": pricing.get("requested_dte"),
+            "resolved_expiration": pricing.get("resolved_expiration"),
+            "resolved_dte": pricing.get("resolved_dte"),
+            "expiration_source": pricing.get("expiration_source"),
+            "resolution_reason": pricing.get("resolution_reason"),
+            "allowed_min_dte": pricing.get("allowed_min_dte"),
+            "allowed_max_dte": pricing.get("allowed_max_dte"),
         }
     return item
 
@@ -1707,7 +1874,12 @@ def _run_option_pricing_for_cache(key: tuple, generated_at: datetime, descriptor
                 updated = []
                 for row in cached.get(bucket, []):
                     row_descriptor, _reason = _option_pricing_descriptor(row) if isinstance(row, dict) else (None, None)
-                    if row_descriptor and row_descriptor.get("key") == descriptor.get("key"):
+                    pricing_keys = {
+                        descriptor.get("key"),
+                        pricing.get("key"),
+                        pricing.get("requested_key"),
+                    }
+                    if row_descriptor and row_descriptor.get("key") in pricing_keys:
                         updated.append(_apply_option_pricing_to_row(row, pricing))
                     else:
                         updated.append(row)
@@ -1721,6 +1893,9 @@ def _run_option_pricing_for_cache(key: tuple, generated_at: datetime, descriptor
                 "contracts_successfully_matched": successes,
                 "provider_errors": failures,
                 "provider_retries": batch_diagnostics.get("provider_retries", 0),
+                "expiration_resolution_attempted": batch_diagnostics.get("expiration_resolution_attempted", 0),
+                "expiration_resolution_adjusted": batch_diagnostics.get("expiration_resolution_adjusted", 0),
+                "expiration_resolution_failed": batch_diagnostics.get("expiration_resolution_failed", 0),
                 "cache_hits": batch_diagnostics.get("cache_hits", 0),
                 "cache_hit_rate": round((batch_diagnostics.get("cache_hits", 0) or 0) / len(descriptors), 4) if descriptors else None,
                 "average_hydration_time_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,

@@ -25,8 +25,10 @@ def _chain(row: dict, option_type: str = "CALL"):
 
 def test_live_ask_contract_cost_and_cache_update():
     original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
     scanner._option_quote_cache.clear()
     try:
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-18"]
         scanner._option_chain_for_ticker = lambda ticker, expiry: _chain({
             "contractSymbol": "ABC260918C00100000",
             "strike": 100.0,
@@ -59,13 +61,16 @@ def test_live_ask_contract_cost_and_cache_update():
         assert hydrated["best_contract"]["estimated_contract_cost"] == 185.0
     finally:
         scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
         scanner._option_quote_cache.clear()
 
 
 def test_last_price_fallback_and_missing_contract_reason():
     original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
     scanner._option_quote_cache.clear()
     try:
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-18"]
         scanner._option_chain_for_ticker = lambda ticker, expiry: _chain({
             "contractSymbol": "XYZ260918P00050000",
             "strike": 50.0,
@@ -101,16 +106,19 @@ def test_last_price_fallback_and_missing_contract_reason():
         assert unavailable["estimated_contract_cost"] is None
     finally:
         scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
         scanner._option_quote_cache.clear()
 
 
 def test_analysis_cache_rows_update_without_changing_stock_plan():
     original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
     original_submit = scanner._submit_background_job
     scanner._option_quote_cache.clear()
     scanner._analysis_cache.clear()
     try:
         scanner._submit_background_job = lambda *args, **kwargs: False
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-18"]
         scanner._option_chain_for_ticker = lambda ticker, expiry: _chain({
             "contractSymbol": "MO260918C00068000",
             "strike": 68.0,
@@ -149,6 +157,7 @@ def test_analysis_cache_rows_update_without_changing_stock_plan():
         assert diagnostics["live_asks_found"] == 1
     finally:
         scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
         scanner._submit_background_job = original_submit
         scanner._option_quote_cache.clear()
         scanner._analysis_cache.clear()
@@ -252,6 +261,7 @@ def test_missing_option_type_is_not_used_for_missing_plan_inputs():
 
 def test_batch_pricing_fetches_one_chain_for_multiple_contracts():
     original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
     original_sleep = scanner.time.sleep
     original_random = scanner.random.uniform
     scanner._option_quote_cache.clear()
@@ -259,6 +269,7 @@ def test_batch_pricing_fetches_one_chain_for_multiple_contracts():
     try:
         scanner.time.sleep = lambda *_args, **_kwargs: None
         scanner.random.uniform = lambda *_args, **_kwargs: 0
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-18"]
 
         def fake_chain(ticker, expiry):
             calls.append((ticker, expiry))
@@ -306,6 +317,7 @@ def test_batch_pricing_fetches_one_chain_for_multiple_contracts():
         assert results[descriptors[1]["key"]]["estimated_contract_cost"] == 80.0
     finally:
         scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
         scanner.time.sleep = original_sleep
         scanner.random.uniform = original_random
         scanner._option_quote_cache.clear()
@@ -313,6 +325,7 @@ def test_batch_pricing_fetches_one_chain_for_multiple_contracts():
 
 def test_provider_timeout_is_retried_by_chain_and_not_cached():
     original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
     original_sleep = scanner.time.sleep
     original_random = scanner.random.uniform
     scanner._option_quote_cache.clear()
@@ -320,6 +333,7 @@ def test_provider_timeout_is_retried_by_chain_and_not_cached():
     try:
         scanner.time.sleep = lambda *_args, **_kwargs: None
         scanner.random.uniform = lambda *_args, **_kwargs: 0
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-18"]
 
         def fake_chain(ticker, expiry):
             calls.append((ticker, expiry))
@@ -342,6 +356,7 @@ def test_provider_timeout_is_retried_by_chain_and_not_cached():
         assert descriptor["key"] not in scanner._option_quote_cache
     finally:
         scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
         scanner.time.sleep = original_sleep
         scanner.random.uniform = original_random
         scanner._option_quote_cache.clear()
@@ -349,6 +364,7 @@ def test_provider_timeout_is_retried_by_chain_and_not_cached():
 
 def test_worker_records_latency_distribution_diagnostics():
     original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
     original_submit = scanner._submit_background_job
     original_sleep = scanner.time.sleep
     original_random = scanner.random.uniform
@@ -358,6 +374,7 @@ def test_worker_records_latency_distribution_diagnostics():
         scanner._submit_background_job = lambda *args, **kwargs: False
         scanner.time.sleep = lambda *_args, **_kwargs: None
         scanner.random.uniform = lambda *_args, **_kwargs: 0
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-18"]
         scanner._option_chain_for_ticker = lambda ticker, expiry: _chain({
             "contractSymbol": "LAT260918C00020000",
             "strike": 20.0,
@@ -386,6 +403,7 @@ def test_worker_records_latency_distribution_diagnostics():
         assert diagnostics["slowest_requests"][0]["symbol"] == "LAT"
     finally:
         scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
         scanner._submit_background_job = original_submit
         scanner.time.sleep = original_sleep
         scanner.random.uniform = original_random
@@ -393,8 +411,130 @@ def test_worker_records_latency_distribution_diagnostics():
         scanner._analysis_cache.clear()
 
 
+def test_preferred_expiration_resolves_to_provider_listed_date():
+    original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
+    scanner._option_quote_cache.clear()
+    calls = []
+    try:
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-04", "2026-09-18", "2026-09-25"]
+
+        def fake_chain(ticker, expiry):
+            calls.append((ticker, expiry))
+            return _chain({
+                "contractSymbol": "RES260918P00100000",
+                "strike": 100.0,
+                "bid": 1.5,
+                "ask": 1.75,
+                "lastPrice": 1.6,
+                "volume": 50,
+                "openInterest": 250,
+            }, option_type="PUT")
+
+        scanner._option_chain_for_ticker = fake_chain
+        descriptor = {
+            "ticker": "RES",
+            "type": "PUT",
+            "expiry": "2026-09-11",
+            "requested_expiration": "2026-09-11",
+            "requested_dte": 39,
+            "expiration_source": "fallback_target_dte",
+            "strike": 100.0,
+            "key": scanner._option_pricing_key("RES", "2026-09-11", 100.0, "PUT"),
+        }
+        results, diagnostics = scanner._option_pricing_batch_for_descriptors([descriptor])
+        pricing = results[descriptor["key"]]
+        assert calls == [("RES", "2026-09-18")]
+        assert diagnostics["expiration_resolution_attempted"] == 1
+        assert diagnostics["expiration_resolution_adjusted"] == 1
+        assert pricing["status"] == "ready"
+        assert pricing["requested_expiration"] == "2026-09-11"
+        assert pricing["resolved_expiration"] == "2026-09-18"
+        assert pricing["resolution_reason"] == "nearest_listed_expiration_inside_dte_range"
+        assert pricing["estimated_contract_cost"] == 175.0
+    finally:
+        scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
+        scanner._option_quote_cache.clear()
+
+
+def test_no_valid_provider_expiration_inside_allowed_dte_range():
+    original_expirations = scanner._option_expirations_for_ticker
+    scanner._option_quote_cache.clear()
+    try:
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-12-18"]
+        descriptor = {
+            "ticker": "NOVAL",
+            "type": "CALL",
+            "expiry": "2026-09-11",
+            "requested_expiration": "2026-09-11",
+            "strike": 100.0,
+            "key": scanner._option_pricing_key("NOVAL", "2026-09-11", 100.0, "CALL"),
+        }
+        results, diagnostics = scanner._option_pricing_batch_for_descriptors([descriptor])
+        pricing = results[descriptor["key"]]
+        assert diagnostics["expiration_resolution_failed"] == 1
+        assert pricing["status"] == "unavailable"
+        assert pricing["reason"] == "no_valid_expiration_in_dte_range"
+        assert pricing["available_expirations"] == ["2026-12-18"]
+    finally:
+        scanner._option_expirations_for_ticker = original_expirations
+        scanner._option_quote_cache.clear()
+
+
+def test_resolved_expiration_updates_cached_row_without_stock_plan_change():
+    original = scanner._option_chain_for_ticker
+    original_expirations = scanner._option_expirations_for_ticker
+    original_submit = scanner._submit_background_job
+    scanner._option_quote_cache.clear()
+    scanner._analysis_cache.clear()
+    try:
+        scanner._submit_background_job = lambda *args, **kwargs: False
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-18"]
+        scanner._option_chain_for_ticker = lambda ticker, expiry: _chain({
+            "contractSymbol": "ROW260918C00068000",
+            "strike": 68.0,
+            "bid": 1.7,
+            "ask": 1.85,
+            "lastPrice": 1.76,
+            "volume": 120,
+            "openInterest": 600,
+        })
+        key = ("default",)
+        row = {
+            "ticker": "ROW",
+            "direction": "LONG",
+            "entry": 68.39,
+            "sl": 66.90,
+            "tp1": 71.37,
+            "ranking": {"rank": 1, "status_bucket": "ENTER_NOW"},
+            "option": {"type": "CALL", "strike": 68.0, "expiry": "2026-09-11"},
+        }
+        cached = scanner._store_analysis_cache(key, [row], [], {})
+        descriptor, reason = scanner._option_pricing_descriptor(row)
+        assert reason is None
+        scanner._run_option_pricing_for_cache(key, cached["generated_at"], [descriptor])
+        hydrated = scanner.analysis_cache_snapshot(universe="default")["rows"][0]
+        assert hydrated["entry"] == 68.39
+        assert hydrated["sl"] == 66.90
+        assert hydrated["tp1"] == 71.37
+        assert hydrated["pricing_status"] == "ready"
+        assert hydrated["option"]["expiry"] == "2026-09-18"
+        assert hydrated["option"]["requested_expiration"] == "2026-09-11"
+        assert hydrated["best_contract"]["resolved_expiration"] == "2026-09-18"
+        diagnostics = scanner.option_pricing_diagnostics(universe="default")
+        assert diagnostics["expiration_resolution_adjusted"] == 1
+    finally:
+        scanner._option_chain_for_ticker = original
+        scanner._option_expirations_for_ticker = original_expirations
+        scanner._submit_background_job = original_submit
+        scanner._option_quote_cache.clear()
+        scanner._analysis_cache.clear()
+
+
 def test_invalid_expiration_is_reported_without_retrying():
     original_yf = scanner.yf
+    original_expirations = scanner._option_expirations_for_ticker
     original_sleep = scanner.time.sleep
     original_random = scanner.random.uniform
     scanner._option_chain_cache.clear()
@@ -402,6 +542,7 @@ def test_invalid_expiration_is_reported_without_retrying():
     try:
         scanner.time.sleep = lambda *_args, **_kwargs: None
         scanner.random.uniform = lambda *_args, **_kwargs: 0
+        scanner._option_expirations_for_ticker = lambda ticker: ["2026-09-11"]
 
         class FakeTicker:
             def __init__(self, ticker):
@@ -431,6 +572,7 @@ def test_invalid_expiration_is_reported_without_retrying():
         assert diagnostics["slowest_requests"][0]["result"] == "invalid_expiration"
     finally:
         scanner.yf = original_yf
+        scanner._option_expirations_for_ticker = original_expirations
         scanner.time.sleep = original_sleep
         scanner.random.uniform = original_random
         scanner._option_chain_cache.clear()
@@ -447,5 +589,8 @@ if __name__ == "__main__":
     test_batch_pricing_fetches_one_chain_for_multiple_contracts()
     test_provider_timeout_is_retried_by_chain_and_not_cached()
     test_worker_records_latency_distribution_diagnostics()
+    test_preferred_expiration_resolves_to_provider_listed_date()
+    test_no_valid_provider_expiration_inside_allowed_dte_range()
+    test_resolved_expiration_updates_cached_row_without_stock_plan_change()
     test_invalid_expiration_is_reported_without_retrying()
     print("Option pricing hydration v1 tests passed")
