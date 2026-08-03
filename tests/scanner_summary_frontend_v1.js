@@ -84,7 +84,7 @@ vm.createContext(context);
 vm.runInContext(inline, context);
 
 elements.universeFilter = { ...elementStub(), value: 'discovered' };
-assert.strictEqual(context.scannerScanUrl(), '/api/scan');
+assert.strictEqual(context.scannerScanUrl(), '/api/scan?view=summary');
 elements.universeFilter.value = 'default';
 assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=default&view=summary');
 assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?universe=default&view=summary&refresh=true');

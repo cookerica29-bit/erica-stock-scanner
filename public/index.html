@@ -5106,7 +5106,7 @@ function normalizedScannerUniverse(value = currentScannerUniverse()) {
 }
 
 function scannerSummaryEnabledForUniverse(universe = currentScannerUniverse()) {
-  return normalizedScannerUniverse(universe) === 'default';
+  return ['default', 'discovered'].includes(normalizedScannerUniverse(universe));
 }
 
 function scannerScanUrl({ refresh = false } = {}) {

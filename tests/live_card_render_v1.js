@@ -150,8 +150,8 @@ const universeElements = {
 };
 context.document.getElementById = id => universeElements[id] || elementStub();
 assert.strictEqual(context.currentScannerUniverse(), 'discovered');
-assert.strictEqual(context.scannerScanUrl(), '/api/scan');
-assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?refresh=true');
+assert.strictEqual(context.scannerScanUrl(), '/api/scan?view=summary');
+assert.strictEqual(context.scannerScanUrl({ refresh: true }), '/api/scan?view=summary&refresh=true');
 universeElements.universeFilter.value = 'default';
 assert.strictEqual(context.currentScannerUniverse(), 'default');
 assert.strictEqual(context.scannerScanUrl(), '/api/scan?universe=default&view=summary');
@@ -876,7 +876,7 @@ vm.runInContext('scannerRows = [{ ticker: "PENDING", direction: "LONG", setupGra
 context.scheduleContractRefreshPoll();
 assert.strictEqual(typeof scheduledContractPoll, 'function');
 scheduledContractPoll();
-assert.strictEqual(contractPollUrl, '/api/scan');
+assert.strictEqual(contractPollUrl, '/api/scan?view=summary');
 context.fetchWithTimeout = originalFetchWithTimeoutForContractPoll;
 context.setTimeout = originalSetTimeoutForContractPoll;
 context.document.getElementById = originalGetElementById;
@@ -1572,7 +1572,7 @@ const completedNoSetupPayload = {
 let scannerLifecyclePollScheduled = false;
 context.setTimeout = () => { scannerLifecyclePollScheduled = true; return 1; };
 context.fetchWithTimeout = (url) => {
-  assert.strictEqual(url, '/api/scan');
+  assert.strictEqual(url, '/api/scan?view=summary');
   return Promise.resolve({ ok: true, json: () => Promise.resolve(completedNoSetupPayload) });
 };
 await context.runScan();
@@ -1589,7 +1589,7 @@ let warmingFetchCount = 0;
 context.__scannerLifecycleRenderCount = 0;
 context.setTimeout = cb => { warmingPollCallback = cb; return 1; };
 context.fetchWithTimeout = (url) => {
-  assert.strictEqual(url, '/api/scan', 'warming poll must not use refresh=true');
+  assert.strictEqual(url, '/api/scan?view=summary', 'warming poll must not use refresh=true');
   warmingFetchCount += 1;
   const payload = warmingFetchCount === 1
     ? { rows: [], near_miss: [], meta: { status: 'warming', universe: 'discovered', cache_key: 'discovered', cache: 'miss', has_cache: false, refreshing: true, generated_at: null } }

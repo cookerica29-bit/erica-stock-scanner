@@ -102,7 +102,7 @@ vm.runInContext(inline, context);
 async function main() {
 getElement('universeFilter').value = 'discovered';
 assert.strictEqual(context.normalizedScannerUniverse(), 'discovered');
-assert.strictEqual(context.scannerScanUrl(), '/api/scan');
+assert.strictEqual(context.scannerScanUrl(), '/api/scan?view=summary');
 assert.strictEqual(context.scannerCacheStatusUrl(), '/api/cache/status?universe=discovered');
 
 context.updateDataStatus({
