@@ -170,15 +170,56 @@ const premiumOnly = setup({
     ...contract({ premium: 8.75, strike: 80, spread: 3.0, openInterest: 5, volume: 0 }),
   },
 });
+const hydratedAffordable = setup({
+  ticker: 'HYD',
+  option_pricing: {
+    status: 'ready',
+    quality: 'live_ask',
+    ask: 1.85,
+    estimated_contract_cost: 185,
+    open_interest: 300,
+    volume: 100,
+  },
+  pricing_status: 'ready',
+  pricing_quality: 'live_ask',
+  best_contract: {
+    available: false,
+    source: 'option_plan',
+  },
+});
+const pendingPricing = setup({
+  ticker: 'PND',
+  pricing_status: 'pending',
+  option_pricing: { status: 'pending', quality: 'pending' },
+});
+const zeroQuote = setup({
+  ticker: 'ZERO',
+  best_contract: {
+    available: true,
+    type: 'CALL',
+    strike: 25,
+    expiry: '2026-08-21',
+    ask: 0,
+    mid: 0,
+    estimated_contract_cost: 0,
+  },
+});
 
 assert.strictEqual(context.tradingBudgetValue(), 250);
 assert.strictEqual(context.tradingBudgetLabel(250), 'Under $250');
 assert.strictEqual(context.selectedEstimatedContractCost(premiumTop), 925);
 assert.strictEqual(context.bestAffordableContract(premiumTop, 250).cost, 85);
+assert.strictEqual(context.selectedEstimatedContractCost(hydratedAffordable), 185);
+assert.strictEqual(context.setupFitsTradingBudget(hydratedAffordable, 250), true);
 assert.strictEqual(context.setupFitsTradingBudget(premiumTop, 250), true, 'Budget candidate keeps premium setup eligible for budget view');
 assert.strictEqual(context.accessibilityScore(budgetFriendly).key, 'easy');
+assert.strictEqual(context.accessibilityScore(hydratedAffordable).key, 'easy');
+assert.strictEqual(context.accessibilityScore(pendingPricing).label, 'Pricing pending');
+assert.strictEqual(context.selectedEstimatedContractCost(zeroQuote), null);
+assert.strictEqual(context.setupFitsTradingBudget(zeroQuote, 100), false);
 assert.strictEqual(context.accessibilityScore(premiumOnly).key, 'premium');
 assert.strictEqual(context.renderBudgetBadge(budgetFriendly).includes('Budget Friendly'), true);
+assert.strictEqual(context.renderBudgetBadge(pendingPricing).includes('Pricing...'), true);
 
 const defaultSorted = context.sortScannerCardsForDisplay([budgetFriendly, premiumTop], 'RANK');
 assert.strictEqual(defaultSorted[0].ticker, 'TER', 'Best Overall ranking remains unchanged');

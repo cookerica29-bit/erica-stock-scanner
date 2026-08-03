@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from scanner import (
     analysis_cache_snapshot,
     analysis_cache_status,
+    option_pricing_diagnostics,
     build_bos_displacement_shadow_report,
     _batch_download,
     scan_cached,
@@ -747,6 +748,31 @@ def api_cache_status(
         "qualified_count": meta.get("qualified_rows"),
         "near_miss_count": meta.get("near_miss_rows"),
     }
+
+
+@app.get("/api/dev/option-pricing")
+def api_dev_option_pricing(
+    universe: str = Query(default="discovered"),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    selected_universe = str(universe or "discovered").strip().lower()
+    if selected_universe == "discovered":
+        ready, symbols, discovery_status = _discovery_symbols_ready()
+        if not ready:
+            return {
+                "version": "option-pricing-async-v1",
+                "universe": "discovered",
+                "has_cache": False,
+                "discovery_status": discovery_status,
+                "message": "Discovery universe is not ready.",
+            }
+        return option_pricing_diagnostics(symbols, universe="discovered")
+    if selected_universe == "default":
+        return option_pricing_diagnostics(universe="default")
+    if selected_universe == "finviz":
+        return option_pricing_diagnostics(discover=True, universe="finviz")
+    raise HTTPException(status_code=422, detail="Unsupported scanner universe")
 
 
 @app.post("/api/discovery/run")

@@ -174,6 +174,9 @@ OPTION_EXPIRATION_EMPTY_RETRY_DELAY_SECONDS = 1.5
 OPTION_YAHOO_RATE_LIMIT_COOLDOWN = timedelta(minutes=10)
 _best_contract_cache = {}
 BEST_CONTRACT_CACHE_TTL = timedelta(minutes=8)
+_option_quote_cache = {}
+OPTION_QUOTE_CACHE_TTL = timedelta(minutes=3)
+OPTION_PRICING_AUTO_LIMIT = 40
 _option_chain_fetch_semaphore = threading.BoundedSemaphore(4)
 _option_yahoo_backoff_until = None
 _earnings_cache = {}
@@ -906,6 +909,10 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "symbols_per_second": (scan_meta.get("performance") or {}).get("symbols_per_second"),
         "provider_metrics": scan_meta.get("provider_metrics", {}),
         "cache_stats": scan_meta.get("cache_stats", {}),
+        "option_pricing": {
+            **(cached.get("option_pricing") or {}),
+            **_option_pricing_diagnostics_for_rows(rows, near_miss),
+        },
         "performance": scan_meta.get("performance", {}),
         "processed_rows": len(rows) + len(near_miss),
         "qualified_rows": len(rows),
@@ -954,15 +961,57 @@ def analysis_cache_snapshot(watchlist: Optional[list] = None, *, discover: bool 
         }
 
 
+def option_pricing_diagnostics(watchlist: Optional[list] = None, *, discover: bool = False, universe: str = "default") -> dict:
+    key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
+    with _cache_lock:
+        cached = _analysis_cache.get(key)
+        quote_cache_size = len(_option_quote_cache)
+    if not cached:
+        return {
+            "version": "option-pricing-async-v1",
+            "universe": _analysis_cache_label(key),
+            "has_cache": False,
+            "quote_cache_size": quote_cache_size,
+            "setups_eligible_for_pricing": 0,
+            "ready": 0,
+            "pending": 0,
+            "unavailable": 0,
+        }
+    rows = cached.get("rows") or []
+    near_miss = cached.get("near_miss") or []
+    return {
+        "version": "option-pricing-async-v1",
+        "universe": _analysis_cache_label(key),
+        "has_cache": True,
+        "generated_at": _format_utc_timestamp(cached.get("generated_at")),
+        "quote_cache_size": quote_cache_size,
+        **(cached.get("option_pricing") or {}),
+        **_option_pricing_diagnostics_for_rows(rows, near_miss),
+    }
+
+
 def _store_analysis_cache(key: tuple, rows: list, near_miss: list, scan_meta: Optional[dict] = None) -> dict:
+    rows = _hydrate_option_pricing_from_cache(rows)
+    near_miss = _hydrate_option_pricing_from_cache(near_miss)
+    auto_pricing_keys = _auto_pricing_keys(rows, near_miss)
+    rows = _mark_nonqueued_option_pricing(rows, auto_pricing_keys)
+    near_miss = _mark_nonqueued_option_pricing(near_miss, auto_pricing_keys)
+    generated_at = _utc_now()
     cached = {
         "rows": rows,
         "near_miss": near_miss,
-        "generated_at": _utc_now(),
+        "generated_at": generated_at,
         "scan_meta": scan_meta or {},
+        "option_pricing": {
+            "version": "option-pricing-async-v1",
+            "queued_at": _format_utc_timestamp(generated_at),
+            "auto_limit": OPTION_PRICING_AUTO_LIMIT,
+            **_option_pricing_diagnostics_for_rows(rows, near_miss),
+        },
     }
     with _cache_lock:
         _analysis_cache[key] = cached
+    _enqueue_option_pricing_for_cache(key, generated_at, rows, near_miss)
     return cached
 
 
@@ -1016,7 +1065,423 @@ def _hydrate_earnings_from_cache(rows: list) -> list:
 
 
 def _hydrate_scan_rows_from_cache(rows: list) -> list:
-    return _hydrate_earnings_from_cache(_hydrate_best_contracts_from_cache(rows))
+    return _hydrate_option_pricing_from_cache(_hydrate_earnings_from_cache(_hydrate_best_contracts_from_cache(rows)))
+
+
+def _option_pricing_key(symbol: str, expiry: str, strike: float, option_type: str) -> tuple:
+    return (
+        str(symbol or "").strip().upper(),
+        str(expiry or "").strip(),
+        round(float(strike), 4),
+        str(option_type or "").strip().upper(),
+    )
+
+
+def _option_pricing_descriptor(row: dict) -> tuple[Optional[dict], Optional[str]]:
+    ticker = str(row.get("ticker") or "").strip().upper()
+    if not ticker:
+        return None, "missing_symbol"
+    option = row.get("option") if isinstance(row.get("option"), dict) else {}
+    plan = row.get("option_plan") if isinstance(row.get("option_plan"), dict) else {}
+    option_type = str(option.get("type") or plan.get("type") or "").strip().upper()
+    if option_type not in {"CALL", "PUT"}:
+        return None, "missing_option_type"
+    expiry = str(option.get("expiry") or option.get("expiration") or "").strip()
+    if not expiry:
+        return None, "missing_expiration"
+    strike = _safe_float(option.get("strike"))
+    if strike is None:
+        strike = _safe_float(plan.get("preferred_strike"))
+    if strike is None:
+        return None, "missing_strike"
+    return {
+        "ticker": ticker,
+        "type": option_type,
+        "expiry": expiry,
+        "strike": strike,
+        "key": _option_pricing_key(ticker, expiry, strike, option_type),
+    }, None
+
+
+def _empty_option_pricing(status: str, reason: str, descriptor: Optional[dict] = None) -> dict:
+    payload = {
+        "status": status,
+        "quality": status if status in {"pending", "stale"} else "unavailable",
+        "reason": reason,
+        "estimated_contract_cost": None,
+        "premium": None,
+        "bid": None,
+        "ask": None,
+        "mid": None,
+        "mark": None,
+        "last": None,
+        "volume": None,
+        "open_interest": None,
+        "quote_timestamp": None,
+        "source": None,
+        "cache": None,
+    }
+    if descriptor:
+        payload.update({
+            "symbol": descriptor.get("ticker"),
+            "type": descriptor.get("type"),
+            "expiration": descriptor.get("expiry"),
+            "expiry": descriptor.get("expiry"),
+            "strike": descriptor.get("strike"),
+        })
+    return payload
+
+
+def _valid_positive_price(value) -> Optional[float]:
+    parsed = _safe_float(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def _option_pricing_from_chain_row(ticker: str, expiry: str, strike: float, option_type: str, row: pd.Series, fetched_at: datetime, cache_state: str = "miss") -> dict:
+    bid = _safe_float(row.get("bid"))
+    ask = _safe_float(row.get("ask"))
+    last_price = _safe_float(row.get("lastPrice"))
+    valid_bid = bid is not None and bid >= 0
+    valid_ask = ask is not None and ask > 0 and (not valid_bid or ask >= bid)
+    mid = round((bid + ask) / 2, 2) if valid_bid and valid_ask else None
+    premium = None
+    quality = "unavailable"
+    reason = None
+    if valid_ask:
+        premium = ask
+        quality = "live_ask"
+    elif mid is not None and mid > 0:
+        premium = mid
+        quality = "live_mid"
+    elif _valid_positive_price(last_price) is not None:
+        premium = float(last_price)
+        quality = "last_price_fallback"
+    else:
+        reason = "quote_missing"
+    spread = round(ask - bid, 2) if valid_bid and valid_ask else None
+    last_trade = row.get("lastTradeDate")
+    last_trade_timestamp = None
+    try:
+        if last_trade is not None and str(last_trade) != "NaT":
+            last_trade_timestamp = pd.Timestamp(last_trade).to_pydatetime()
+            if last_trade_timestamp.tzinfo is None:
+                last_trade_timestamp = last_trade_timestamp.replace(tzinfo=timezone.utc)
+            else:
+                last_trade_timestamp = last_trade_timestamp.astimezone(timezone.utc)
+    except Exception:
+        last_trade_timestamp = None
+    if premium is None:
+        return _empty_option_pricing("unavailable", reason or "invalid_quote", {
+            "ticker": ticker,
+            "type": option_type,
+            "expiry": expiry,
+            "strike": strike,
+        })
+    return {
+        "status": "ready",
+        "quality": quality,
+        "reason": None,
+        "estimated_contract_cost": round(premium * 100, 2),
+        "premium": premium,
+        "bid": bid if valid_bid else None,
+        "ask": ask if valid_ask else None,
+        "mid": mid,
+        "mark": mid if mid is not None else premium,
+        "last": last_price if _valid_positive_price(last_price) is not None else None,
+        "volume": _safe_int(row.get("volume")),
+        "open_interest": _safe_int(row.get("openInterest")),
+        "spread": spread,
+        "quote_timestamp": _format_utc_timestamp(fetched_at),
+        "last_trade_timestamp": _format_utc_timestamp(last_trade_timestamp) if last_trade_timestamp else None,
+        "source": "yfinance_option_chain",
+        "cache": cache_state,
+        "symbol": ticker,
+        "type": option_type,
+        "expiration": expiry,
+        "expiry": expiry,
+        "strike": strike,
+        "contract_symbol": _option_symbol_from_row(ticker, expiry, strike, option_type, row),
+    }
+
+
+def _find_option_contract_row(chain, option_type: str, strike: float) -> tuple[Optional[pd.Series], Optional[str]]:
+    if chain is None:
+        return None, "provider_timeout"
+    contracts = chain.calls if option_type == "CALL" else chain.puts
+    if contracts is None or contracts.empty:
+        return None, "contract_not_found"
+    if "strike" not in contracts.columns:
+        return None, "missing_strike"
+    frame = contracts.copy()
+    frame["strike_numeric"] = pd.to_numeric(frame["strike"], errors="coerce")
+    exact = frame[(frame["strike_numeric"] - float(strike)).abs() < 0.0001]
+    if exact.empty:
+        return None, "contract_not_found"
+    return exact.iloc[0], None
+
+
+def _fetch_option_pricing(descriptor: dict) -> dict:
+    key = descriptor["key"]
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    with _cache_lock:
+        cached = _option_quote_cache.get(key)
+        if cached:
+            fetched_at = cached.get("fetched_at")
+            age = now - fetched_at if fetched_at else OPTION_QUOTE_CACHE_TTL + timedelta(seconds=1)
+            if age < OPTION_QUOTE_CACHE_TTL:
+                data = dict(cached.get("data") or {})
+                data["cache"] = "hit"
+                return data
+
+    ticker = descriptor["ticker"]
+    expiry = descriptor["expiry"]
+    option_type = descriptor["type"]
+    strike = descriptor["strike"]
+    started = time.perf_counter()
+    chain = _option_chain_for_ticker(ticker, expiry)
+    provider_ms = round((time.perf_counter() - started) * 1000, 1)
+    if chain is None:
+        data = _empty_option_pricing("unavailable", "provider_timeout", descriptor)
+        data["provider_latency_ms"] = provider_ms
+    else:
+        row, reason = _find_option_contract_row(chain, option_type, strike)
+        if row is None:
+            data = _empty_option_pricing("unavailable", reason or "contract_not_found", descriptor)
+            data["provider_latency_ms"] = provider_ms
+        else:
+            data = _option_pricing_from_chain_row(ticker, expiry, strike, option_type, row, now, "miss")
+            data["provider_latency_ms"] = provider_ms
+    with _cache_lock:
+        _option_quote_cache[key] = {"fetched_at": now, "data": dict(data)}
+    return data
+
+
+def _apply_option_pricing_to_row(row: dict, pricing: Optional[dict] = None, reason: Optional[str] = None) -> dict:
+    item = dict(row)
+    descriptor, descriptor_reason = _option_pricing_descriptor(item)
+    if pricing is None:
+        if descriptor is None:
+            pricing = _empty_option_pricing("unavailable", reason or descriptor_reason or "missing_required_fields")
+        else:
+            pricing = _empty_option_pricing("pending", reason or "queued", descriptor)
+    item["pricing_status"] = pricing.get("status")
+    item["pricing_quality"] = pricing.get("quality")
+    item["option_pricing"] = dict(pricing)
+    if pricing.get("status") == "ready":
+        option = dict(item.get("option") or {})
+        option.update({
+            "bid": pricing.get("bid"),
+            "ask": pricing.get("ask"),
+            "mid": pricing.get("mid"),
+            "mark": pricing.get("mark"),
+            "lastPrice": pricing.get("last"),
+            "volume": pricing.get("volume"),
+            "open_interest": pricing.get("open_interest"),
+            "pricing_status": pricing.get("status"),
+            "pricing_quality": pricing.get("quality"),
+            "pricing_source": pricing.get("source"),
+            "quote_timestamp": pricing.get("quote_timestamp"),
+            "estimated_contract_cost": pricing.get("estimated_contract_cost"),
+        })
+        item["option"] = option
+        item["best_contract"] = {
+            **(item.get("best_contract") or {}),
+            "available": True,
+            "execution": "Priced",
+            "source": "option_quote",
+            "type": pricing.get("type"),
+            "strike": pricing.get("strike"),
+            "expiry": pricing.get("expiry"),
+            "expiration": pricing.get("expiration"),
+            "symbol": pricing.get("contract_symbol"),
+            "bid": pricing.get("bid"),
+            "ask": pricing.get("ask"),
+            "mid": pricing.get("mid"),
+            "mark": pricing.get("mark"),
+            "last": pricing.get("last"),
+            "volume": pricing.get("volume"),
+            "open_interest": pricing.get("open_interest"),
+            "estimated_contract_cost": pricing.get("estimated_contract_cost"),
+            "pricing_quality": pricing.get("quality"),
+            "quote_timestamp": pricing.get("quote_timestamp"),
+        }
+    return item
+
+
+def _hydrate_option_pricing_from_cache(rows: list) -> list:
+    hydrated = []
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    with _cache_lock:
+        quote_cache = dict(_option_quote_cache)
+    for row in rows:
+        if not isinstance(row, dict):
+            hydrated.append(row)
+            continue
+        descriptor, reason = _option_pricing_descriptor(row)
+        if descriptor is None:
+            hydrated.append(_apply_option_pricing_to_row(row, reason=reason))
+            continue
+        cached = quote_cache.get(descriptor["key"])
+        if cached:
+            data = dict(cached.get("data") or {})
+            fetched_at = cached.get("fetched_at")
+            if fetched_at and now - fetched_at >= OPTION_QUOTE_CACHE_TTL:
+                data["status"] = "stale"
+                data["quality"] = "stale_quote"
+            hydrated.append(_apply_option_pricing_to_row(row, data))
+        else:
+            hydrated.append(_apply_option_pricing_to_row(row))
+    return hydrated
+
+
+def _pricing_priority(row: dict) -> tuple:
+    status = str((row.get("ranking") or {}).get("status_bucket") or "").upper()
+    priority = {"ENTER_NOW": 0, "EARLY_ENTRY": 1, "ALMOST_READY": 2}.get(status, 3)
+    rank = _safe_int((row.get("ranking") or {}).get("rank")) or 9999
+    return priority, rank, str(row.get("ticker") or "")
+
+
+def _auto_pricing_keys(rows: list, near_miss: list, limit: Optional[int] = None) -> set:
+    limit = OPTION_PRICING_AUTO_LIMIT if limit is None else limit
+    selected = set()
+    all_rows = [*(rows or []), *(near_miss or [])]
+    for row in sorted([r for r in all_rows if isinstance(r, dict)], key=_pricing_priority):
+        descriptor, _reason = _option_pricing_descriptor(row)
+        if descriptor is None:
+            continue
+        selected.add(descriptor["key"])
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _mark_nonqueued_option_pricing(rows: list, auto_pricing_keys: set) -> list:
+    marked = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            marked.append(row)
+            continue
+        descriptor, reason = _option_pricing_descriptor(row)
+        if descriptor is None:
+            marked.append(_apply_option_pricing_to_row(row, reason=reason))
+            continue
+        pricing = row.get("option_pricing") if isinstance(row.get("option_pricing"), dict) else {}
+        if pricing.get("status") in {"ready", "stale"}:
+            marked.append(row)
+            continue
+        if descriptor["key"] in auto_pricing_keys:
+            marked.append(_apply_option_pricing_to_row(row))
+        else:
+            marked.append(_apply_option_pricing_to_row(row, _empty_option_pricing("unavailable", "not_queued", descriptor)))
+    return marked
+
+
+def _option_pricing_diagnostics_for_rows(rows: list, near_miss: list) -> dict:
+    all_rows = [*(rows or []), *(near_miss or [])]
+    summary = Counter()
+    reasons = Counter()
+    queue_depth = 0
+    for row in all_rows:
+        pricing = row.get("option_pricing") if isinstance(row, dict) else {}
+        if not isinstance(pricing, dict):
+            continue
+        status = pricing.get("status") or "unknown"
+        quality = pricing.get("quality") or "unknown"
+        summary[f"status_{status}"] += 1
+        summary[f"quality_{quality}"] += 1
+        if status == "pending":
+            queue_depth += 1
+        if pricing.get("reason"):
+            reasons[str(pricing.get("reason"))] += 1
+    return {
+        "version": "option-pricing-async-v1",
+        "setups_eligible_for_pricing": len([row for row in all_rows if isinstance(row, dict) and _option_pricing_descriptor(row)[0] is not None]),
+        "ready": summary.get("status_ready", 0),
+        "pending": summary.get("status_pending", 0),
+        "stale": summary.get("status_stale", 0),
+        "unavailable": summary.get("status_unavailable", 0),
+        "live_asks_found": summary.get("quality_live_ask", 0),
+        "midpoint_fallbacks": summary.get("quality_live_mid", 0),
+        "last_price_fallbacks": summary.get("quality_last_price_fallback", 0),
+        "stale_quotes": summary.get("quality_stale_quote", 0),
+        "unavailable_quotes": summary.get("quality_unavailable", 0),
+        "queue_depth": queue_depth,
+        "unavailable_reasons": dict(sorted(reasons.items())),
+    }
+
+
+def _enqueue_option_pricing_for_cache(key: tuple, generated_at: datetime, rows: list, near_miss: list) -> None:
+    all_rows = [*(rows or []), *(near_miss or [])]
+    prioritized = []
+    seen = set()
+    for row in sorted([r for r in all_rows if isinstance(r, dict)], key=_pricing_priority):
+        descriptor, reason = _option_pricing_descriptor(row)
+        if descriptor is None:
+            continue
+        pricing = row.get("option_pricing") if isinstance(row.get("option_pricing"), dict) else {}
+        if pricing.get("status") != "pending":
+            continue
+        quote_key = descriptor["key"]
+        if quote_key in seen:
+            continue
+        seen.add(quote_key)
+        prioritized.append(descriptor)
+        if len(prioritized) >= OPTION_PRICING_AUTO_LIMIT:
+            break
+    if not prioritized:
+        return
+    _submit_background_job(
+        ("option_pricing", _analysis_state_key(key), _format_utc_timestamp(generated_at)),
+        _run_option_pricing_for_cache,
+        key,
+        generated_at,
+        prioritized,
+    )
+
+
+def _run_option_pricing_for_cache(key: tuple, generated_at: datetime, descriptors: list) -> None:
+    started = time.perf_counter()
+    successes = failures = cache_hits = 0
+    latencies = []
+    for descriptor in descriptors:
+        pricing = _fetch_option_pricing(descriptor)
+        if pricing.get("cache") == "hit":
+            cache_hits += 1
+        if pricing.get("status") == "ready":
+            successes += 1
+        else:
+            failures += 1
+        latency = _safe_float(pricing.get("provider_latency_ms"))
+        if latency is not None:
+            latencies.append(latency)
+        with _cache_lock:
+            cached = _analysis_cache.get(key)
+            if not cached or cached.get("generated_at") != generated_at:
+                logger.info("[option pricing] obsolete generation ignored key=%s", _analysis_state_key(key))
+                return
+            for bucket in ("rows", "near_miss"):
+                updated = []
+                for row in cached.get(bucket, []):
+                    row_descriptor, _reason = _option_pricing_descriptor(row) if isinstance(row, dict) else (None, None)
+                    if row_descriptor and row_descriptor.get("key") == descriptor.get("key"):
+                        updated.append(_apply_option_pricing_to_row(row, pricing))
+                    else:
+                        updated.append(row)
+                cached[bucket] = updated
+            cached["option_pricing"] = {
+                **(cached.get("option_pricing") or {}),
+                "version": "option-pricing-async-v1",
+                "last_run_at": _utc_now(),
+                "last_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "contracts_requested": len(descriptors),
+                "contracts_successfully_matched": successes,
+                "provider_errors": failures,
+                "cache_hits": cache_hits,
+                "cache_hit_rate": round(cache_hits / len(descriptors), 4) if descriptors else None,
+                "average_hydration_time_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+            }
 
 
 def _refresh_analysis_cache(

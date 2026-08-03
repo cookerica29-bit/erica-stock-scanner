@@ -5661,6 +5661,8 @@ function contractPendingKey(setup) {
 }
 
 function contractRawLifecycleState(setup) {
+  const pricingStatus = String(setup?.pricing_status || setup?.option_pricing?.status || '').toLowerCase();
+  if (pricingStatus === 'pending') return 'pending';
   const contract = setup?.best_contract;
   if (contract && contract.available === true) {
     const hasContractText = firstPresent(contract.expiry, contract.expiration)
@@ -8214,6 +8216,18 @@ function renderOptionPlanBlock(setup = {}) {
 }
 
 function contractPremium(setup) {
+  const pricing = setup.option_pricing || {};
+  const pricingStatus = String(setup.pricing_status || pricing.status || '').toLowerCase();
+  const pricingQuality = String(setup.pricing_quality || pricing.quality || '').toLowerCase();
+  const pricingValue = Number(firstPresent(pricing.ask, pricing.mark, pricing.mid, pricing.last));
+  if (
+    pricingStatus === 'ready'
+    && pricingQuality !== 'stale_quote'
+    && Number.isFinite(pricingValue)
+    && pricingValue > 0
+  ) {
+    return pricingValue;
+  }
   const contract = setup.best_contract || {};
   const option = setup.option || {};
   const suggested = setup.suggested_contract || {};
@@ -8512,11 +8526,11 @@ function candidateContractIdentity(contract = {}) {
 
 function candidateContractCost(contract = {}) {
   const explicit = Number(contract.estimated_contract_cost);
-  if (Number.isFinite(explicit)) return explicit;
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
   const ask = Number(contract.ask);
-  if (Number.isFinite(ask)) return ask * 100;
+  if (Number.isFinite(ask) && ask > 0) return ask * 100;
   const mid = Number(firstPresent(contract.mid, contract.mark));
-  return Number.isFinite(mid) ? mid * 100 : NaN;
+  return Number.isFinite(mid) && mid > 0 ? mid * 100 : NaN;
 }
 
 function candidateContractLabel(contract = {}) {
@@ -8667,7 +8681,7 @@ function contractCostCandidates(setup = {}) {
   })).filter(item => Number.isFinite(item.cost));
   if (tiers.length) return tiers;
   const selectedCost = contractEntryCost(setup);
-  if (Number.isFinite(selectedCost)) {
+  if (Number.isFinite(selectedCost) && selectedCost > 0) {
     return [{
       source: 'Estimated',
       tier: '',
@@ -8679,13 +8693,18 @@ function contractCostCandidates(setup = {}) {
 }
 
 function selectedEstimatedContractCost(setup = {}) {
+  const pricing = setup.option_pricing || {};
+  const pricingCost = Number(pricing.estimated_contract_cost);
+  if (String(setup.pricing_status || pricing.status || '').toLowerCase() === 'ready' && Number.isFinite(pricingCost) && pricingCost > 0) {
+    return pricingCost;
+  }
   const selected = selectedContractTier(setup);
   if (selected) {
     const cost = candidateContractCost(selected.contract);
     if (Number.isFinite(cost)) return cost;
   }
   const cost = contractEntryCost(setup);
-  return Number.isFinite(cost) ? cost : null;
+  return Number.isFinite(cost) && cost > 0 ? cost : null;
 }
 
 function bestAffordableContract(setup = {}, budget = tradingBudgetValue()) {
@@ -8709,12 +8728,17 @@ function setupFitsTradingBudget(setup = {}, budget = tradingBudgetValue()) {
 }
 
 function accessibilityScore(setup = {}) {
+  const pricing = setup.option_pricing || {};
+  const pricingStatus = String(setup.pricing_status || pricing.status || '').toLowerCase();
+  if (pricingStatus === 'pending') {
+    return { key: 'unavailable', label: 'Pricing pending', shortLabel: 'Pending', cost: null, reason: 'Option quote hydration is still running.' };
+  }
   const cost = selectedEstimatedContractCost(setup);
   const contract = selectedContractTier(setup)?.contract || setup.best_contract || {};
-  const spread = Number(firstPresent(contract.spread, contract.bid_ask_spread));
-  const spreadPct = Number(firstPresent(contract.spread_pct, contract.diagnostics?.spread_pct));
-  const openInterest = Number(firstPresent(contract.open_interest, contract.openInterest));
-  const volume = Number(contract.volume);
+  const spread = Number(firstPresent(contract.spread, contract.bid_ask_spread, pricing.spread));
+  const spreadPct = Number(firstPresent(contract.spread_pct, contract.diagnostics?.spread_pct, pricing.spread_pct));
+  const openInterest = Number(firstPresent(contract.open_interest, contract.openInterest, pricing.open_interest));
+  const volume = Number(firstPresent(contract.volume, pricing.volume));
   const spreadPctFromPremium = Number.isFinite(spread) && Number.isFinite(cost) && cost > 0
     ? ((spread * 100) / cost) * 100
     : NaN;
@@ -8734,7 +8758,8 @@ function accessibilityScore(setup = {}) {
 
 function budgetBadge(setup = {}) {
   const score = accessibilityScore(setup);
-  const costText = score.cost == null ? 'Premium unavailable' : `Est. ${fmtMoney(score.cost)}`;
+  const pending = String(setup.pricing_status || setup.option_pricing?.status || '').toLowerCase() === 'pending';
+  const costText = pending ? 'Pricing...' : score.cost == null ? 'Premium unavailable' : `Est. ${fmtMoney(score.cost)}`;
   const label = score.key === 'easy'
     ? 'Budget Friendly'
     : score.key === 'premium'
