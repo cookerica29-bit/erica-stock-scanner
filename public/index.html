@@ -1898,7 +1898,7 @@
   .guided-risk-zone { fill: rgba(153,83,68,0.18); }
   .guided-reward-zone { fill: rgba(22,101,52,0.18); }
   .guided-level-line { stroke-width: 1.4; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
-  .guided-level-leader { fill: none; opacity: 0.78; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .guided-level-leader { fill: none; opacity: 0.62; stroke-width: 1; vector-effect: non-scaling-stroke; }
   .guided-level-entry { stroke: #ffffff; }
   .guided-level-current { stroke: #facc15; stroke-width: 2; stroke-dasharray: none; }
   .guided-level-stop { stroke: #ef4444; }
@@ -7822,22 +7822,18 @@ function renderGuidedTradeChartSvg(plan = {}, candles = [], meta = {}) {
       <line class="guided-candle-wick ${up ? 'guided-candle-up' : 'guided-candle-down'}" x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${y(high).toFixed(1)}" y2="${y(low).toFixed(1)}"></line>
       <rect class="guided-candle-body ${up ? 'guided-candle-up' : 'guided-candle-down'}" x="${(cx - candleW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="1"></rect>`;
   }).join('');
-  const labelPriority = {
-    'Stop Loss': 1,
-    'Current Price': 2,
-    'Planned Entry': 3,
-    TP1: 4,
-    TP2: 5,
-    TP3: 6,
-  };
   const labelMinY = top + 4;
   const labelMaxY = height - bottom - 15;
-  const labelGap = 27;
+  const labelGap = 31;
   const labelX = width - right + 10;
-  const leaderStartX = width - right - 4;
-  const leaderEndX = labelX - 5;
+  const labelBaselineOffset = -7;
+  const priceBaselineGap = 18;
+  const labelBlockTop = labelY => labelY - 11;
+  const labelBlockBottom = labelY => labelY + priceBaselineGap + 3;
+  const leaderStartX = labelX - 12;
+  const leaderEndX = labelX - 4;
   const clampLabelY = value => Math.min(labelMaxY, Math.max(labelMinY, value));
-  const labelRows = [
+  const rows = [
     ['Current Price', plan.current, 'guided-level-current'],
     ['Planned Entry', plan.entry, 'guided-level-entry'],
     ['Stop Loss', plan.stop, 'guided-level-stop'],
@@ -7850,34 +7846,48 @@ function renderGuidedTradeChartSvg(plan = {}, candles = [], meta = {}) {
         value,
         cls,
         actualY,
-        labelY: clampLabelY(actualY),
-        priority: labelPriority[label] || 99,
+        labelY: clampLabelY(actualY + labelBaselineOffset),
       };
-    })
-    .sort((a, b) => (a.labelY - b.labelY) || (a.priority - b.priority));
-  for (let i = 1; i < labelRows.length; i += 1) {
-    labelRows[i].labelY = Math.max(labelRows[i].labelY, labelRows[i - 1].labelY + labelGap);
-  }
-  for (let i = labelRows.length - 2; i >= 0; i -= 1) {
-    if (labelRows[i + 1].labelY > labelMaxY) labelRows[i + 1].labelY = labelMaxY;
-    labelRows[i].labelY = Math.min(labelRows[i].labelY, labelRows[i + 1].labelY - labelGap);
-  }
-  for (let i = 0; i < labelRows.length; i += 1) {
-    labelRows[i].labelY = clampLabelY(labelRows[i].labelY);
-    if (i > 0 && labelRows[i].labelY - labelRows[i - 1].labelY < labelGap) {
-      labelRows[i].labelY = Math.min(labelMaxY, labelRows[i - 1].labelY + labelGap);
+    });
+  const staticRows = rows.filter(row => row.label !== 'Current Price');
+  const currentRow = rows.find(row => row.label === 'Current Price');
+  if (currentRow) {
+    const overlaps = staticRows.filter(row =>
+      labelBlockTop(currentRow.labelY) < labelBlockBottom(row.labelY) + 4
+      && labelBlockBottom(currentRow.labelY) > labelBlockTop(row.labelY) - 4
+    );
+    if (overlaps.length) {
+      const clusterTop = Math.min(...overlaps.map(row => labelBlockTop(row.labelY)));
+      const clusterBottom = Math.max(...overlaps.map(row => labelBlockBottom(row.labelY)));
+      const aboveY = clampLabelY(clusterTop - labelGap);
+      const belowY = clampLabelY(clusterBottom + 11);
+      const aboveFits = labelBlockTop(aboveY) >= top;
+      const belowFits = labelBlockBottom(belowY) <= height - bottom + 2;
+      if (aboveFits && belowFits) {
+        currentRow.labelY = Math.abs(aboveY - currentRow.actualY) <= Math.abs(belowY - currentRow.actualY) ? aboveY : belowY;
+      } else if (aboveFits) {
+        currentRow.labelY = aboveY;
+      } else if (belowFits) {
+        currentRow.labelY = belowY;
+      } else {
+        currentRow.labelY = Math.abs(aboveY - currentRow.actualY) <= Math.abs(belowY - currentRow.actualY) ? aboveY : belowY;
+      }
     }
   }
+  const labelRows = rows.sort((a, b) => {
+    const order = { 'Stop Loss': 1, 'Current Price': 2, 'Planned Entry': 3, TP1: 4, TP2: 5, TP3: 6 };
+    return (a.actualY - b.actualY) || ((order[a.label] || 99) - (order[b.label] || 99));
+  });
   const levelSvg = labelRows.map(({ label, value, cls, actualY, labelY }) => {
-    const offset = Math.abs(labelY - actualY) > 4;
+    const offset = label === 'Current Price' && Math.abs(labelY - (actualY + labelBaselineOffset)) > 4;
     const leader = offset
-      ? `<polyline class="guided-level-leader ${cls}" points="${leaderStartX.toFixed(1)},${actualY.toFixed(1)} ${leaderEndX.toFixed(1)},${(labelY + 5).toFixed(1)}"></polyline>`
+      ? `<polyline class="guided-level-leader ${cls}" points="${leaderStartX.toFixed(1)},${actualY.toFixed(1)} ${leaderEndX.toFixed(1)},${(labelY + 6).toFixed(1)}"></polyline>`
       : '';
     return `
     <line class="guided-level-line ${cls}" x1="${left}" x2="${width - 12}" y1="${actualY.toFixed(1)}" y2="${actualY.toFixed(1)}"></line>
     ${leader}
     <text class="guided-level-label ${cls}" x="${labelX}" y="${Number(labelY).toFixed(1)}">${escapeHtml(label)}</text>
-    <text class="guided-level-price ${cls}" x="${labelX}" y="${(Number(labelY) + 11).toFixed(1)}">${escapeHtml(fmtMoney(value))}</text>`;
+    <text class="guided-level-price ${cls}" x="${labelX}" y="${(Number(labelY) + priceBaselineGap).toFixed(1)}">${escapeHtml(fmtMoney(value))}</text>`;
   }).join('');
   const riskRectY = Math.min(riskY1, riskY2);
   const riskRectH = Math.max(2, Math.abs(riskY2 - riskY1));
