@@ -250,6 +250,149 @@ def test_missing_option_type_is_not_used_for_missing_plan_inputs():
     assert descriptor["type"] == "PUT"
 
 
+def test_batch_pricing_fetches_one_chain_for_multiple_contracts():
+    original = scanner._option_chain_for_ticker
+    original_sleep = scanner.time.sleep
+    original_random = scanner.random.uniform
+    scanner._option_quote_cache.clear()
+    calls = []
+    try:
+        scanner.time.sleep = lambda *_args, **_kwargs: None
+        scanner.random.uniform = lambda *_args, **_kwargs: 0
+
+        def fake_chain(ticker, expiry):
+            calls.append((ticker, expiry))
+            return SimpleNamespace(
+                calls=pd.DataFrame([{
+                    "contractSymbol": "BAT260918C00100000",
+                    "strike": 100.0,
+                    "bid": 1.0,
+                    "ask": 1.1,
+                    "lastPrice": 1.05,
+                    "volume": 100,
+                    "openInterest": 500,
+                }, {
+                    "contractSymbol": "BAT260918C00105000",
+                    "strike": 105.0,
+                    "bid": 0.7,
+                    "ask": 0.8,
+                    "lastPrice": 0.75,
+                    "volume": 80,
+                    "openInterest": 400,
+                }]),
+                puts=pd.DataFrame(),
+            )
+
+        scanner._option_chain_for_ticker = fake_chain
+        descriptors = [{
+            "ticker": "BAT",
+            "type": "CALL",
+            "expiry": "2026-09-18",
+            "strike": 100.0,
+            "key": scanner._option_pricing_key("BAT", "2026-09-18", 100.0, "CALL"),
+        }, {
+            "ticker": "BAT",
+            "type": "CALL",
+            "expiry": "2026-09-18",
+            "strike": 105.0,
+            "key": scanner._option_pricing_key("BAT", "2026-09-18", 105.0, "CALL"),
+        }]
+        results, diagnostics = scanner._option_pricing_batch_for_descriptors(descriptors)
+        assert calls == [("BAT", "2026-09-18")]
+        assert diagnostics["chain_groups"] == 1
+        assert diagnostics["duplicate_chain_requests_eliminated"] == 1
+        assert diagnostics["chain_requests_attempted"] == 1
+        assert results[descriptors[0]["key"]]["estimated_contract_cost"] == 110.0
+        assert results[descriptors[1]["key"]]["estimated_contract_cost"] == 80.0
+    finally:
+        scanner._option_chain_for_ticker = original
+        scanner.time.sleep = original_sleep
+        scanner.random.uniform = original_random
+        scanner._option_quote_cache.clear()
+
+
+def test_provider_timeout_is_retried_by_chain_and_not_cached():
+    original = scanner._option_chain_for_ticker
+    original_sleep = scanner.time.sleep
+    original_random = scanner.random.uniform
+    scanner._option_quote_cache.clear()
+    calls = []
+    try:
+        scanner.time.sleep = lambda *_args, **_kwargs: None
+        scanner.random.uniform = lambda *_args, **_kwargs: 0
+
+        def fake_chain(ticker, expiry):
+            calls.append((ticker, expiry))
+            return None
+
+        scanner._option_chain_for_ticker = fake_chain
+        descriptor = {
+            "ticker": "TOUT",
+            "type": "PUT",
+            "expiry": "2026-09-18",
+            "strike": 30.0,
+            "key": scanner._option_pricing_key("TOUT", "2026-09-18", 30.0, "PUT"),
+        }
+        results, diagnostics = scanner._option_pricing_batch_for_descriptors([descriptor])
+        assert len(calls) == 2
+        assert diagnostics["provider_retries"] == 1
+        assert diagnostics["chain_requests_attempted"] == 2
+        assert results[descriptor["key"]]["status"] == "unavailable"
+        assert results[descriptor["key"]]["reason"] == "provider_timeout"
+        assert descriptor["key"] not in scanner._option_quote_cache
+    finally:
+        scanner._option_chain_for_ticker = original
+        scanner.time.sleep = original_sleep
+        scanner.random.uniform = original_random
+        scanner._option_quote_cache.clear()
+
+
+def test_worker_records_latency_distribution_diagnostics():
+    original = scanner._option_chain_for_ticker
+    original_submit = scanner._submit_background_job
+    original_sleep = scanner.time.sleep
+    original_random = scanner.random.uniform
+    scanner._option_quote_cache.clear()
+    scanner._analysis_cache.clear()
+    try:
+        scanner._submit_background_job = lambda *args, **kwargs: False
+        scanner.time.sleep = lambda *_args, **_kwargs: None
+        scanner.random.uniform = lambda *_args, **_kwargs: 0
+        scanner._option_chain_for_ticker = lambda ticker, expiry: _chain({
+            "contractSymbol": "LAT260918C00020000",
+            "strike": 20.0,
+            "bid": 0.9,
+            "ask": 1.0,
+            "lastPrice": 0.95,
+            "volume": 100,
+            "openInterest": 500,
+        })
+        key = ("default",)
+        row = {
+            "ticker": "LAT",
+            "direction": "LONG",
+            "ranking": {"rank": 1, "status_bucket": "ENTER_NOW"},
+            "option": {"type": "CALL", "strike": 20.0, "expiry": "2026-09-18"},
+        }
+        cached = scanner._store_analysis_cache(key, [row], [], {})
+        descriptor, reason = scanner._option_pricing_descriptor(row)
+        assert reason is None
+        scanner._run_option_pricing_for_cache(key, cached["generated_at"], [descriptor])
+        diagnostics = scanner.option_pricing_diagnostics(universe="default")
+        assert diagnostics["chain_groups"] == 1
+        assert diagnostics["chain_requests_attempted"] == 1
+        assert diagnostics["latency_p50_ms"] is not None
+        assert diagnostics["latency_p95_ms"] is not None
+        assert diagnostics["slowest_requests"][0]["symbol"] == "LAT"
+    finally:
+        scanner._option_chain_for_ticker = original
+        scanner._submit_background_job = original_submit
+        scanner.time.sleep = original_sleep
+        scanner.random.uniform = original_random
+        scanner._option_quote_cache.clear()
+        scanner._analysis_cache.clear()
+
+
 if __name__ == "__main__":
     test_live_ask_contract_cost_and_cache_update()
     test_last_price_fallback_and_missing_contract_reason()
@@ -257,4 +400,7 @@ if __name__ == "__main__":
     test_auto_pricing_cap_marks_unqueued_rows_truthfully()
     test_lazy_queue_promotes_not_requested_contract_to_pending()
     test_missing_option_type_is_not_used_for_missing_plan_inputs()
+    test_batch_pricing_fetches_one_chain_for_multiple_contracts()
+    test_provider_timeout_is_retried_by_chain_and_not_cached()
+    test_worker_records_latency_distribution_diagnostics()
     print("Option pricing hydration v1 tests passed")

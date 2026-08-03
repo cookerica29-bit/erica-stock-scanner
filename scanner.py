@@ -6,6 +6,7 @@ import io
 import logging
 import math
 import os
+import random
 import resource
 import threading
 import time
@@ -1242,6 +1243,41 @@ def _find_option_contract_row(chain, option_type: str, strike: float) -> tuple[O
     return exact.iloc[0], None, {}
 
 
+def _option_pricing_from_chain(
+    descriptor: dict,
+    chain,
+    fetched_at: datetime,
+    *,
+    provider_latency_ms: Optional[float] = None,
+    cache_state: str = "miss",
+) -> dict:
+    ticker = descriptor["ticker"]
+    expiry = descriptor["expiry"]
+    option_type = descriptor["type"]
+    strike = descriptor["strike"]
+    if chain is None:
+        data = _empty_option_pricing("unavailable", "provider_timeout", descriptor)
+    else:
+        row, reason, details = _find_option_contract_row(chain, option_type, strike)
+        if row is None:
+            data = _empty_option_pricing("unavailable", reason or "contract_not_found", descriptor)
+            if details:
+                data.update(details)
+        else:
+            data = _option_pricing_from_chain_row(ticker, expiry, strike, option_type, row, fetched_at, cache_state)
+    if provider_latency_ms is not None:
+        data["provider_latency_ms"] = provider_latency_ms
+    return data
+
+
+def _should_cache_option_pricing_result(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("status") == "ready":
+        return True
+    return data.get("reason") not in {"provider_timeout", "provider_rate_limit"}
+
+
 def _fetch_option_pricing(descriptor: dict, *, force_refresh: bool = False) -> dict:
     key = descriptor["key"]
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -1256,29 +1292,112 @@ def _fetch_option_pricing(descriptor: dict, *, force_refresh: bool = False) -> d
                     data["cache"] = "hit"
                     return data
 
-    ticker = descriptor["ticker"]
-    expiry = descriptor["expiry"]
-    option_type = descriptor["type"]
-    strike = descriptor["strike"]
     started = time.perf_counter()
-    chain = _option_chain_for_ticker(ticker, expiry)
+    chain = _option_chain_for_ticker(descriptor["ticker"], descriptor["expiry"])
     provider_ms = round((time.perf_counter() - started) * 1000, 1)
-    if chain is None:
-        data = _empty_option_pricing("unavailable", "provider_timeout", descriptor)
-        data["provider_latency_ms"] = provider_ms
-    else:
-        row, reason, details = _find_option_contract_row(chain, option_type, strike)
-        if row is None:
-            data = _empty_option_pricing("unavailable", reason or "contract_not_found", descriptor)
-            data["provider_latency_ms"] = provider_ms
-            if details:
-                data.update(details)
-        else:
-            data = _option_pricing_from_chain_row(ticker, expiry, strike, option_type, row, now, "miss")
-            data["provider_latency_ms"] = provider_ms
-    with _cache_lock:
-        _option_quote_cache[key] = {"fetched_at": now, "data": dict(data)}
+    data = _option_pricing_from_chain(descriptor, chain, now, provider_latency_ms=provider_ms)
+    if _should_cache_option_pricing_result(data):
+        with _cache_lock:
+            _option_quote_cache[key] = {"fetched_at": now, "data": dict(data)}
     return data
+
+
+def _latency_percentile(values: list[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return round(ordered[0], 1)
+    rank = (len(ordered) - 1) * percentile
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return round(ordered[int(rank)], 1)
+    weighted = ordered[lower] * (upper - rank) + ordered[upper] * (rank - lower)
+    return round(weighted, 1)
+
+
+def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict]:
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    results = {}
+    diagnostics = {
+        "chain_requests_attempted": 0,
+        "chain_groups": 0,
+        "duplicate_chain_requests_eliminated": 0,
+        "provider_retries": 0,
+        "cache_hits": 0,
+        "fresh_cache_hits": 0,
+        "stale_cache_available": 0,
+        "latencies_ms": [],
+        "request_details": [],
+    }
+    grouped = {}
+    for descriptor in descriptors or []:
+        key = descriptor.get("key")
+        if not key or key in results:
+            continue
+        with _cache_lock:
+            cached = _option_quote_cache.get(key)
+        if cached:
+            fetched_at = cached.get("fetched_at")
+            age = now - fetched_at if fetched_at else OPTION_QUOTE_CACHE_TTL + timedelta(seconds=1)
+            if age < OPTION_QUOTE_CACHE_TTL:
+                data = dict(cached.get("data") or {})
+                data["cache"] = "hit"
+                results[key] = data
+                diagnostics["cache_hits"] += 1
+                diagnostics["fresh_cache_hits"] += 1
+                continue
+            diagnostics["stale_cache_available"] += 1
+        group_key = (descriptor["ticker"], descriptor["expiry"])
+        grouped.setdefault(group_key, []).append(descriptor)
+
+    diagnostics["chain_groups"] = len(grouped)
+    diagnostics["duplicate_chain_requests_eliminated"] = max(0, len(descriptors or []) - diagnostics["fresh_cache_hits"] - len(grouped))
+
+    for (ticker, expiry), group in grouped.items():
+        chain = None
+        provider_ms = None
+        attempts = 0
+        for attempt in range(2):
+            attempts += 1
+            started = time.perf_counter()
+            chain = _option_chain_for_ticker(ticker, expiry)
+            provider_ms = round((time.perf_counter() - started) * 1000, 1)
+            diagnostics["chain_requests_attempted"] += 1
+            diagnostics["latencies_ms"].append(provider_ms)
+            if chain is not None:
+                break
+            if attempt == 0:
+                diagnostics["provider_retries"] += 1
+                time.sleep(0.75 + random.uniform(0.0, 0.6))
+        diagnostics["request_details"].append({
+            "symbol": ticker,
+            "expiration": expiry,
+            "contracts": len(group),
+            "attempts": attempts,
+            "latency_ms": provider_ms,
+            "result": "ready" if chain is not None else "provider_timeout",
+        })
+        fetched_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+        for descriptor in group:
+            data = _option_pricing_from_chain(descriptor, chain, fetched_at, provider_latency_ms=provider_ms)
+            results[descriptor["key"]] = data
+            if _should_cache_option_pricing_result(data):
+                with _cache_lock:
+                    _option_quote_cache[descriptor["key"]] = {"fetched_at": fetched_at, "data": dict(data)}
+
+    latencies = diagnostics["latencies_ms"]
+    diagnostics["latency_p50_ms"] = _latency_percentile(latencies, 0.50)
+    diagnostics["latency_p95_ms"] = _latency_percentile(latencies, 0.95)
+    diagnostics["latency_min_ms"] = round(min(latencies), 1) if latencies else None
+    diagnostics["latency_max_ms"] = round(max(latencies), 1) if latencies else None
+    diagnostics["slowest_requests"] = sorted(
+        diagnostics["request_details"],
+        key=lambda item: item.get("latency_ms") if item.get("latency_ms") is not None else -1,
+        reverse=True,
+    )[:10]
+    return results, diagnostics
 
 
 def _apply_option_pricing_to_row(row: dict, pricing: Optional[dict] = None, reason: Optional[str] = None) -> dict:
@@ -1555,16 +1674,13 @@ def queue_option_pricing_for_contracts(
 
 def _run_option_pricing_for_cache(key: tuple, generated_at: datetime, descriptors: list) -> None:
     started = time.perf_counter()
-    successes = failures = cache_hits = retries = 0
+    successes = failures = 0
     latencies = []
+    pricing_results, batch_diagnostics = _option_pricing_batch_for_descriptors(descriptors)
     for descriptor in descriptors:
-        pricing = _fetch_option_pricing(descriptor)
-        if pricing.get("status") == "unavailable" and pricing.get("reason") == "provider_timeout":
-            retries += 1
-            time.sleep(1.0)
-            pricing = _fetch_option_pricing(descriptor, force_refresh=True)
+        pricing = pricing_results.get(descriptor.get("key")) or _empty_option_pricing("unavailable", "pricing_not_attempted", descriptor)
         if pricing.get("cache") == "hit":
-            cache_hits += 1
+            pass
         if pricing.get("status") == "ready":
             successes += 1
         else:
@@ -1594,10 +1710,20 @@ def _run_option_pricing_for_cache(key: tuple, generated_at: datetime, descriptor
                 "contracts_requested": len(descriptors),
                 "contracts_successfully_matched": successes,
                 "provider_errors": failures,
-                "provider_retries": retries,
-                "cache_hits": cache_hits,
-                "cache_hit_rate": round(cache_hits / len(descriptors), 4) if descriptors else None,
+                "provider_retries": batch_diagnostics.get("provider_retries", 0),
+                "cache_hits": batch_diagnostics.get("cache_hits", 0),
+                "cache_hit_rate": round((batch_diagnostics.get("cache_hits", 0) or 0) / len(descriptors), 4) if descriptors else None,
                 "average_hydration_time_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+                "chain_groups": batch_diagnostics.get("chain_groups", 0),
+                "chain_requests_attempted": batch_diagnostics.get("chain_requests_attempted", 0),
+                "duplicate_chain_requests_eliminated": batch_diagnostics.get("duplicate_chain_requests_eliminated", 0),
+                "fresh_cache_hits": batch_diagnostics.get("fresh_cache_hits", 0),
+                "stale_cache_available": batch_diagnostics.get("stale_cache_available", 0),
+                "latency_p50_ms": batch_diagnostics.get("latency_p50_ms"),
+                "latency_p95_ms": batch_diagnostics.get("latency_p95_ms"),
+                "latency_min_ms": batch_diagnostics.get("latency_min_ms"),
+                "latency_max_ms": batch_diagnostics.get("latency_max_ms"),
+                "slowest_requests": batch_diagnostics.get("slowest_requests") or [],
             }
 
 
