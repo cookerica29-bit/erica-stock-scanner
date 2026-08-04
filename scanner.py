@@ -187,6 +187,9 @@ EARNINGS_FAILURE_PRESERVE_TTL = timedelta(days=1)
 EARNINGS_SCAN_DEFER_TTL = timedelta(minutes=10)
 _cache_lock = threading.RLock()
 _cache_stats = Counter()
+MAX_MARKET_DATA_FAILURE_DETAILS = 25
+_market_data_failures = []
+_market_data_failure_summary = Counter()
 _background_executor = ThreadPoolExecutor(max_workers=3)
 _background_jobs = set()
 _background_jobs_lock = threading.Lock()
@@ -276,6 +279,8 @@ def _cache_snapshot(reset: bool = True) -> dict:
         snapshot = dict(_cache_stats)
         if reset:
             _cache_stats.clear()
+            _market_data_failures.clear()
+            _market_data_failure_summary.clear()
     return snapshot
 
 
@@ -285,6 +290,80 @@ def _cache_average(stats: Optional[dict], name: str) -> Optional[float]:
     if count <= 0:
         return None
     return round(float(stats.get(f"{name}_sum", 0) or 0) / count, 1)
+
+
+def _market_data_failure_category(error_summary: str, *, empty_frame: bool = False, insufficient_candles: bool = False) -> str:
+    text = str(error_summary or "").lower()
+    if "too many requests" in text or "rate limit" in text or "429" in text:
+        return "rate_limited"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "not found" in text or "404" in text or "delisted" in text:
+        return "not_found"
+    if insufficient_candles:
+        return "insufficient_candles"
+    if empty_frame:
+        return "no_price_data"
+    if "unsupported" in text:
+        return "unsupported"
+    return "provider_error"
+
+
+def _market_data_endpoint_path(provider_name: str, interval: str) -> str:
+    provider = str(provider_name or "").strip().lower()
+    if provider == ALPACA_PROVIDER_NAME:
+        return f"{ALPACA_PROVIDER_NAME}:GET /v2/stocks/bars:{_timeframe_label_for_interval(interval)}"
+    return f"{provider or 'unknown'}:download:{_timeframe_label_for_interval(interval)}"
+
+
+def _record_market_data_failure(
+    *,
+    symbol: str,
+    provider: str,
+    interval: str,
+    endpoint: str,
+    error_summary: str,
+    retry_count: int = 0,
+    empty_frame: bool = False,
+    insufficient_candles: bool = False,
+) -> None:
+    clean_symbol = str(symbol or "").strip().upper()
+    if not clean_symbol:
+        return
+    category = _market_data_failure_category(
+        error_summary,
+        empty_frame=empty_frame,
+        insufficient_candles=insufficient_candles,
+    )
+    item = {
+        "symbol": clean_symbol,
+        "provider": str(provider or "unknown").strip().lower() or "unknown",
+        "timeframe": _timeframe_label_for_interval(interval),
+        "endpoint": endpoint,
+        "reason": category,
+        "raw_error_summary": str(error_summary or category)[:240],
+        "timestamp": _format_utc_timestamp(_utc_now()),
+        "retry_count": int(retry_count or 0),
+    }
+    with _cache_lock:
+        _market_data_failure_summary[category] += 1
+        if len(_market_data_failures) < MAX_MARKET_DATA_FAILURE_DETAILS:
+            _market_data_failures.append(item)
+
+
+def _market_data_failure_diagnostics() -> dict:
+    with _cache_lock:
+        summary = dict(_market_data_failure_summary)
+        failures = [dict(item) for item in _market_data_failures]
+    total = int(sum(summary.values()))
+    return {
+        "version": "market-data-failures-v1",
+        "total": total,
+        "summary": summary,
+        "failures": failures,
+        "failures_truncated": total > len(failures),
+        "max_failures_returned": MAX_MARKET_DATA_FAILURE_DETAILS,
+    }
 
 
 def _cache_hit_rate(cache_stats: Optional[dict]) -> Optional[float]:
@@ -333,6 +412,7 @@ def _scan_partial_reasons(
     tradeability_skipped: int,
     processing_failures: Optional[list[dict]] = None,
     provider_metrics: Optional[dict] = None,
+    market_data_failures: Optional[dict] = None,
 ) -> list[dict]:
     reasons = []
     failures = list(processing_failures or [])
@@ -349,7 +429,11 @@ def _scan_partial_reasons(
         })
 
     provider = provider_metrics or {}
-    provider_failed = int(provider.get("alpaca_bar_symbols_failed", 0) or 0)
+    failure_diagnostics = market_data_failures or {}
+    provider_failed = max(
+        int(provider.get("alpaca_bar_symbols_failed", 0) or 0),
+        int(failure_diagnostics.get("total") or 0),
+    )
     if provider_failed > 0:
         reasons.append({
             "stage": "market_data",
@@ -768,6 +852,7 @@ def build_discovered_scan_coverage_snapshot(
         "provider_failures": dict(sorted(_coverage_provider_failure_distribution(all_rows, scan_meta).items())),
         "provider_diagnostics": {
             **(scan_meta.get("provider_metrics") or {}),
+            "market_data_failures": scan_meta.get("market_data_failures") or {},
             "bar_cache_hits": cache_stats.get("prices_hit", 0),
             "bar_cache_misses": cache_stats.get("prices_miss", 0),
             "option_eligibility_from_discovery": scan_meta.get("option_eligibility_from_discovery", 0),
@@ -893,6 +978,7 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "partial_result": scan_meta.get("partial_result"),
         "partial_result_reasons": scan_meta.get("partial_result_reasons", []),
         "partial_result_reason": scan_meta.get("partial_result_reason"),
+        "market_data_failures": scan_meta.get("market_data_failures", {}),
         "scan_duration_ms": scan_meta.get("scan_duration_ms"),
         "scan_started_at": scan_meta.get("scan_started_at"),
         "scan_completed_at": scan_meta.get("scan_completed_at"),
@@ -4959,7 +5045,7 @@ def _price_provider_for_interval(interval: str):
     return build_market_data_provider(provider_name)
 
 
-def _download_price_batch_raw(tickers: list, period: str, interval: str, provider=None) -> dict:
+def _download_price_batch_raw(tickers: list, period: str, interval: str, provider=None, *, record_failures: bool = True) -> dict:
     """
     Download OHLCV data for multiple tickers through the configured provider.
     Returns {ticker: DataFrame}.  Falls back gracefully on any per-ticker error.
@@ -4967,6 +5053,7 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str, provide
     if not tickers:
         return {}
     active_provider = provider or _price_provider_for_interval(interval)
+    endpoint = _market_data_endpoint_path(active_provider.name, interval)
     fetch_start = time.perf_counter()
     try:
         _cache_record("api_prices", "call")
@@ -4978,6 +5065,16 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str, provide
         _cache_record("api_prices", "error")
         _cache_record_value("api_prices_duration_ms", round((time.perf_counter() - fetch_start) * 1000, 1))
         logger.warning("[batch_download] provider=%s period=%s interval=%s symbols=%s error=%s", active_provider.name, period, interval, len(tickers), e)
+        if record_failures:
+            for ticker in tickers:
+                _record_market_data_failure(
+                    symbol=ticker,
+                    provider=active_provider.name,
+                    interval=interval,
+                    endpoint=endpoint,
+                    error_summary=f"{type(e).__name__}: {e}",
+                    retry_count=0,
+                )
         return {}
     _cache_record_value("api_prices_duration_ms", round((time.perf_counter() - fetch_start) * 1000, 1))
 
@@ -4985,6 +5082,7 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str, provide
     single = len(tickers) == 1
 
     for t in tickers:
+        usable_count = 0
         try:
             if single:
                 df = _flatten_columns(raw.copy())
@@ -4992,10 +5090,35 @@ def _download_price_batch_raw(tickers: list, period: str, interval: str, provide
                 df = raw[t].copy()  # group_by='ticker' gives (Ticker, PriceType)
                 df = _flatten_columns(df)
             df = df.dropna(how="all")
-            if len(df) >= 10:
+            usable_count = len(df)
+            if usable_count >= 10:
                 result[t] = df
-        except Exception:
-            pass
+        except Exception as exc:
+            if record_failures:
+                _record_market_data_failure(
+                    symbol=t,
+                    provider=active_provider.name,
+                    interval=interval,
+                    endpoint=endpoint,
+                    error_summary=f"{type(exc).__name__}: {exc}",
+                    retry_count=0,
+                )
+            continue
+        if record_failures and t not in result:
+            _record_market_data_failure(
+                symbol=t,
+                provider=active_provider.name,
+                interval=interval,
+                endpoint=endpoint,
+                error_summary=(
+                    "provider returned no usable candles"
+                    if usable_count <= 0
+                    else f"provider returned {usable_count} usable candles; minimum required is 10"
+                ),
+                retry_count=0,
+                empty_frame=usable_count <= 0,
+                insufficient_candles=0 < usable_count < 10,
+            )
 
     return result
 
@@ -5009,7 +5132,7 @@ def _refresh_price_cache(tickers: list, period: str, interval: str, provider_nam
     if not symbols:
         return
     provider = build_market_data_provider(provider_name)
-    fetched = _download_price_batch_raw(symbols, period, interval, provider=provider)
+    fetched = _download_price_batch_raw(symbols, period, interval, provider=provider, record_failures=False)
     now = datetime.utcnow()
     with _cache_lock:
         for ticker, df in fetched.items():
@@ -7003,7 +7126,9 @@ def scan_all(
             tradeability_skipped=len(skipped_symbols),
             processing_failures=processing_failures,
             provider_metrics=provider_metrics,
+            market_data_failures=_market_data_failure_diagnostics(),
         )
+        market_data_failures = _market_data_failure_diagnostics()
         provider_failed_count = int(provider_metrics.get("alpaca_bar_symbols_failed", 0) or 0)
         operational_failed_count = sum(int(reason.get("count") or 0) for reason in partial_reasons)
         no_setup_count = min(
@@ -7137,6 +7262,7 @@ def scan_all(
             "processing_no_setup_count": no_setup_count,
             "processing_internal_failure_count": internal_failure_count,
             "provider_symbol_failure_count": provider_failed_count,
+            "market_data_failures": market_data_failures,
             "processing_failures": processing_failures[:50],
             "contract_evaluated": evaluated_contracts,
             "contract_evaluation_pool": len(all_results),
@@ -7199,6 +7325,7 @@ def scan_all(
                 "p95_symbol_duration_ms": _percentile(symbol_durations, 0.95),
                 "slowest_symbols": slow_symbols,
                 "failure_breakdown_by_stage": partial_reasons,
+                "market_data_failures": market_data_failures,
             },
         }
         intelligence_meta = build_market_intelligence(all_results, scan_meta, generated_at=scan_completed_at)
