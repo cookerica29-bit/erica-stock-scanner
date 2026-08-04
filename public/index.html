@@ -6500,12 +6500,14 @@ function topRankedSetup(rows = []) {
 }
 
 function topBudgetSetup(rows = [], budget = tradingBudgetValue()) {
-  const pool = Number.isFinite(budget) ? rows.filter(row => setupFitsTradingBudget(row, budget)) : rows.slice();
+  const pool = Number.isFinite(budget) ? rows.filter(row => optionPricingPresentation(row).budgetEligibleFor(budget)) : rows.slice();
   return pool.sort((a, b) => {
     const rankDiff = opportunityRankValue(a) - opportunityRankValue(b);
     if (rankDiff) return rankDiff;
-    const aCost = bestAffordableContract(a, budget)?.cost ?? selectedEstimatedContractCost(a) ?? Infinity;
-    const bCost = bestAffordableContract(b, budget)?.cost ?? selectedEstimatedContractCost(b) ?? Infinity;
+    const aPricing = optionPricingPresentation(a);
+    const bPricing = optionPricingPresentation(b);
+    const aCost = aPricing.bestAffordableCost(budget) ?? aPricing.displayCost ?? Infinity;
+    const bCost = bPricing.bestAffordableCost(budget) ?? bPricing.displayCost ?? Infinity;
     return aCost - bCost;
   })[0] || null;
 }
@@ -6524,17 +6526,17 @@ function renderBudgetOpportunityPanel(title, row, budget = tradingBudgetValue())
       </div>`;
   }
   const status = setupProgressState(row).label;
-  const direction = renderDirectionText(row.direction);
-  const overallCost = selectedEstimatedContractCost(row);
-  const affordable = bestAffordableContract(row, budget);
+  const direction = simpleDirection(row.direction);
+  const pricing = optionPricingPresentation(row);
+  const affordableCost = pricing.bestAffordableCost(budget);
   const isBudgetPanel = title.toLowerCase().includes('budget');
-  const displayCost = isBudgetPanel && affordable ? affordable.cost : overallCost;
-  const costText = Number.isFinite(displayCost) ? fmtMoney(displayCost) : 'Cost unavailable';
+  const displayCost = isBudgetPanel && Number.isFinite(affordableCost) ? affordableCost : pricing.displayCost;
+  const costText = pricing.estimatedCostText(displayCost);
   const note = isBudgetPanel && Number.isFinite(budget)
-    ? (affordable
-      ? `${affordable.source} estimate fits ${tradingBudgetLabel(budget)}.`
+    ? (Number.isFinite(affordableCost)
+      ? `${pricing.budgetSourceLabel(budget)} estimate fits ${tradingBudgetLabel(budget)}.`
       : `No available contract estimate fits ${tradingBudgetLabel(budget)}.`)
-    : `${accessibilityScore(row).label} · Estimated contract ${Number.isFinite(overallCost) ? fmtMoney(overallCost) : 'unavailable'}.`;
+    : pricing.explanatoryText;
   return `
     <button type="button" class="budget-opportunity-panel" onclick="focusSetupCard('${escapeHtml(String(row.ticker || ''))}')">
       <div class="budget-panel-title">${escapeHtml(title)}</div>
@@ -6607,7 +6609,7 @@ function renderTopOpportunities(rows = []) {
         <div>
           <div class="top-main">
             <span class="top-ticker">${escapeHtml(row.ticker || '—')}</span>
-            <span class="direction-value ${directionClass(row.direction)}">${renderDirectionText(row.direction)}</span>
+            <span class="direction-value ${directionClass(row.direction)}">${escapeHtml(simpleDirection(row.direction))}</span>
             ${renderSetupGradePill(setupGradeValue(row))}
           </div>
           <div class="top-meta">${escapeHtml(status)} · ${escapeHtml(humanRankingTier(ranking.tier))} · Score ${escapeHtml(String(ranking.score ?? '—'))} · ${renderBudgetBadge(row)}</div>
@@ -8924,6 +8926,8 @@ function initializeTradingBudgetControl() {
 }
 
 function contractCostCandidates(setup = {}) {
+  const pricingStatus = String(setup.pricing_status || setup.option_pricing?.status || '').toLowerCase();
+  if (pricingStatus === 'pending' || pricingStatus === 'not_requested' || pricingStatus === 'unavailable') return [];
   const tiers = contractTierOptions(setup).map(tier => ({
     source: tier.name,
     tier: tier.key,
@@ -8943,18 +8947,132 @@ function contractCostCandidates(setup = {}) {
   return [];
 }
 
-function selectedEstimatedContractCost(setup = {}) {
+function optionPricingPresentation(setup = {}) {
   const pricing = setup.option_pricing || {};
+  const status = String(setup.pricing_status || pricing.status || '').toLowerCase();
+  const quality = String(setup.pricing_quality || pricing.quality || '').toLowerCase();
   const pricingCost = Number(pricing.estimated_contract_cost);
-  if (String(setup.pricing_status || pricing.status || '').toLowerCase() === 'ready' && Number.isFinite(pricingCost) && pricingCost > 0) {
-    return pricingCost;
-  }
   const selected = selectedContractTier(setup);
-  if (selected) {
-    const cost = candidateContractCost(selected.contract);
-    if (Number.isFinite(cost)) return cost;
+  const selectedCost = selected ? candidateContractCost(selected.contract) : null;
+  const fallbackCost = contractEntryCost(setup);
+  const liveCost = status === 'ready' && Number.isFinite(pricingCost) && pricingCost > 0
+    ? pricingCost
+    : null;
+  const staleCost = status === 'stale'
+    ? (Number.isFinite(pricingCost) && pricingCost > 0
+      ? pricingCost
+      : Number.isFinite(selectedCost) && selectedCost > 0
+      ? selectedCost
+      : Number.isFinite(fallbackCost) && fallbackCost > 0
+      ? fallbackCost
+      : null)
+    : null;
+  const displayCost = Number.isFinite(liveCost)
+    ? liveCost
+    : Number.isFinite(staleCost)
+    ? staleCost
+    : (status ? null : (Number.isFinite(selectedCost) && selectedCost > 0 ? selectedCost : (Number.isFinite(fallbackCost) && fallbackCost > 0 ? fallbackCost : null)));
+  const candidates = contractCostCandidates(setup);
+  const affordable = budget => {
+    if (!Number.isFinite(budget)) return candidates[0] || (Number.isFinite(displayCost) ? { source: 'Estimated', cost: displayCost } : null);
+    return candidates.slice().sort((a, b) => a.cost - b.cost).find(item => item.cost <= budget) || null;
+  };
+  const costTier = Number.isFinite(displayCost)
+    ? displayCost <= 250 ? { key: 'easy', label: 'Budget Friendly', accessibilityLabel: '🟢 Easy' }
+    : displayCost <= 600 ? { key: 'moderate', label: 'Moderate Cost', accessibilityLabel: '🟡 Moderate' }
+    : { key: 'premium', label: 'Premium Trade', accessibilityLabel: '🔴 Premium' }
+    : { key: 'unavailable', label: 'Cost Unavailable', accessibilityLabel: 'Accessibility unavailable' };
+  if (status === 'pending') {
+    return {
+      status,
+      quality,
+      displayCost: null,
+      costText: 'Pricing loading...',
+      statusLabel: 'Pricing loading...',
+      accessibilityKey: 'unavailable',
+      accessibilityLabel: 'Pricing pending',
+      badgeLabel: 'Cost Unavailable',
+      badgeCostText: 'Pricing loading...',
+      cssClass: 'unavailable',
+      explanatoryText: 'Pricing loading…',
+      reason: 'Option quote hydration is still running.',
+      budgetEligibleFor: () => false,
+      bestAffordableCost: () => null,
+      budgetSourceLabel: () => 'Option quote',
+      estimatedCostText: () => 'Pricing loading…',
+    };
   }
-  const cost = contractEntryCost(setup);
+  if (status === 'not_requested') {
+    return {
+      status,
+      quality,
+      displayCost: null,
+      costText: 'Pricing not loaded',
+      statusLabel: 'Pricing not loaded',
+      accessibilityKey: 'unavailable',
+      accessibilityLabel: 'Pricing not loaded',
+      badgeLabel: 'Cost Unavailable',
+      badgeCostText: 'Pricing not loaded',
+      cssClass: 'unavailable',
+      explanatoryText: 'Pricing not loaded.',
+      reason: 'Option quote pricing has not been requested yet.',
+      budgetEligibleFor: () => false,
+      bestAffordableCost: () => null,
+      budgetSourceLabel: () => 'Option quote',
+      estimatedCostText: () => 'Pricing not loaded',
+    };
+  }
+  if (status === 'unavailable' || !Number.isFinite(displayCost)) {
+    return {
+      status: status || 'unavailable',
+      quality,
+      displayCost: null,
+      costText: 'Cost unavailable',
+      statusLabel: 'Cost unavailable',
+      accessibilityKey: 'unavailable',
+      accessibilityLabel: 'Accessibility unavailable',
+      badgeLabel: 'Cost Unavailable',
+      badgeCostText: status === 'stale' ? 'Stale quote unavailable' : 'Premium unavailable',
+      cssClass: 'unavailable',
+      explanatoryText: 'Cost unavailable.',
+      reason: pricing.reason || 'Estimated premium unavailable.',
+      budgetEligibleFor: () => false,
+      bestAffordableCost: () => null,
+      budgetSourceLabel: () => 'Option quote',
+      estimatedCostText: () => 'Cost unavailable',
+    };
+  }
+  const stale = status === 'stale';
+  return {
+    status: status || 'ready',
+    quality,
+    displayCost,
+    costText: fmtMoney(displayCost),
+    statusLabel: stale ? 'Stale estimate' : 'Estimated contract',
+    accessibilityKey: costTier.key,
+    accessibilityLabel: costTier.accessibilityLabel,
+    badgeLabel: stale ? 'Stale Estimate' : costTier.label,
+    badgeCostText: stale ? `Stale ${fmtMoney(displayCost)}` : `Est. ${fmtMoney(displayCost)}`,
+    cssClass: stale ? 'stale' : costTier.key,
+    explanatoryText: stale
+      ? `Stale estimate · Refreshing price ${fmtMoney(displayCost)}.`
+      : `${costTier.accessibilityLabel} · Estimated contract ${fmtMoney(displayCost)}.`,
+    reason: stale
+      ? 'Option quote is older than the live-pricing window.'
+      : 'Estimated option contract cost is available.',
+    budgetEligibleFor: budget => {
+      if (!Number.isFinite(budget)) return true;
+      const item = affordable(budget);
+      return Boolean(item);
+    },
+    bestAffordableCost: budget => affordable(budget)?.cost ?? null,
+    budgetSourceLabel: budget => affordable(budget)?.source || (stale ? 'Stale' : 'Estimated'),
+    estimatedCostText: cost => Number.isFinite(cost) ? fmtMoney(cost) : (stale ? `Stale ${fmtMoney(displayCost)}` : 'Cost unavailable'),
+  };
+}
+
+function selectedEstimatedContractCost(setup = {}) {
+  const cost = optionPricingPresentation(setup).displayCost;
   return Number.isFinite(cost) && cost > 0 ? cost : null;
 }
 
@@ -8975,21 +9093,23 @@ function bestAffordableContract(setup = {}, budget = tradingBudgetValue()) {
 
 function setupFitsTradingBudget(setup = {}, budget = tradingBudgetValue()) {
   if (!Number.isFinite(budget)) return true;
-  return Boolean(bestAffordableContract(setup, budget));
+  return optionPricingPresentation(setup).budgetEligibleFor(budget);
 }
 
 function accessibilityScore(setup = {}) {
+  const presentation = optionPricingPresentation(setup);
+  if (presentation.status === 'pending') {
+    return { key: presentation.accessibilityKey, label: 'Pricing pending', shortLabel: 'Pending', cost: null, reason: presentation.reason };
+  }
+  if (presentation.status === 'not_requested') {
+    return { key: presentation.accessibilityKey, label: 'Pricing not loaded', shortLabel: 'Not loaded', cost: null, reason: presentation.reason };
+  }
+  if (presentation.status === 'stale' && Number.isFinite(presentation.displayCost)) {
+    return { key: presentation.accessibilityKey, label: presentation.accessibilityLabel, shortLabel: 'Stale', cost: presentation.displayCost, reason: presentation.reason };
+  }
   const pricing = setup.option_pricing || {};
   const pricingStatus = String(setup.pricing_status || pricing.status || '').toLowerCase();
-  if (pricingStatus === 'pending') {
-    return { key: 'unavailable', label: 'Pricing pending', shortLabel: 'Pending', cost: null, reason: 'Option quote hydration is still running.' };
-  }
-  if (pricingStatus === 'not_requested') {
-    return { key: 'unavailable', label: 'Pricing not loaded', shortLabel: 'Not loaded', cost: null, reason: 'Option quote pricing has not been requested yet.' };
-  }
-  if (pricingStatus === 'stale') {
-    return { key: 'unavailable', label: 'Stale pricing', shortLabel: 'Stale', cost: null, reason: 'Option quote is older than the live-pricing window.' };
-  }
+  if (pricingStatus === 'unavailable') return { key: 'unavailable', label: 'Accessibility unavailable', shortLabel: 'Unavailable', cost: null, reason: presentation.reason };
   const cost = selectedEstimatedContractCost(setup);
   const contract = selectedContractTier(setup)?.contract || setup.best_contract || {};
   const spread = Number(firstPresent(contract.spread, contract.bid_ask_spread, pricing.spread));
@@ -9014,23 +9134,15 @@ function accessibilityScore(setup = {}) {
 }
 
 function budgetBadge(setup = {}) {
+  const presentation = optionPricingPresentation(setup);
   const score = accessibilityScore(setup);
-  const status = String(setup.pricing_status || setup.option_pricing?.status || '').toLowerCase();
-  const costText = status === 'pending'
-    ? 'Pricing loading...'
-    : status === 'not_requested'
-    ? 'Pricing not loaded'
-    : status === 'stale'
-    ? 'Stale quote'
-    : score.cost == null ? 'Premium unavailable' : `Est. ${fmtMoney(score.cost)}`;
-  const label = score.key === 'easy'
-    ? 'Budget Friendly'
-    : score.key === 'premium'
-    ? 'Premium Trade'
-    : score.key === 'moderate'
-    ? 'Moderate Cost'
-    : 'Cost Unavailable';
-  return { ...score, displayLabel: label, costText };
+  return {
+    ...score,
+    key: presentation.cssClass,
+    displayLabel: presentation.badgeLabel,
+    costText: presentation.badgeCostText,
+    reason: presentation.reason,
+  };
 }
 
 function renderBudgetBadge(setup = {}) {

@@ -197,6 +197,48 @@ const notRequestedPricing = setup({
   pricing_status: 'not_requested',
   option_pricing: { status: 'not_requested', quality: 'not_requested', reason: 'outside_auto_hydration_cap' },
 });
+const notRequestedWithRawAsk = setup({
+  ticker: 'RAW',
+  pricing_status: 'not_requested',
+  option_pricing: { status: 'not_requested', quality: 'not_requested', reason: 'outside_auto_hydration_cap' },
+  best_contract: {
+    available: true,
+    ...contract({ premium: 0.75, strike: 30, type: 'CALL', spread: 0.05 }),
+  },
+});
+const liveBudgetFriendly = setup({
+  ticker: 'LIV',
+  direction: 'LONG',
+  pricing_status: 'ready',
+  pricing_quality: 'live_ask',
+  option_pricing: { status: 'ready', quality: 'live_ask', ask: 0.75, estimated_contract_cost: 75, open_interest: 300, volume: 100 },
+  best_contract: { available: false, source: 'option_plan' },
+});
+const livePremiumTrade = setup({
+  ticker: 'XOM',
+  direction: 'LONG',
+  pricing_status: 'ready',
+  pricing_quality: 'live_ask',
+  option_pricing: { status: 'ready', quality: 'live_ask', ask: 5.85, estimated_contract_cost: 585, open_interest: 300, volume: 100 },
+  best_contract: { available: false, source: 'option_plan' },
+});
+const stalePremiumTrade = setup({
+  ticker: 'XOM',
+  direction: 'LONG',
+  pricing_status: 'stale',
+  pricing_quality: 'stale_quote',
+  option_pricing: { status: 'stale', quality: 'stale_quote', estimated_contract_cost: 585, open_interest: 300, volume: 100 },
+  best_contract: {
+    available: true,
+    ...contract({ premium: 5.85, strike: 105, type: 'CALL', spread: 0.15, openInterest: 300, volume: 100 }),
+  },
+});
+const unavailablePricing = setup({
+  ticker: 'NA',
+  pricing_status: 'unavailable',
+  option_pricing: { status: 'unavailable', quality: 'unavailable', reason: 'contract_not_found' },
+  best_contract: { available: false },
+});
 const zeroQuote = setup({
   ticker: 'ZERO',
   best_contract: {
@@ -221,6 +263,22 @@ assert.strictEqual(context.accessibilityScore(budgetFriendly).key, 'easy');
 assert.strictEqual(context.accessibilityScore(hydratedAffordable).key, 'easy');
 assert.strictEqual(context.accessibilityScore(pendingPricing).label, 'Pricing pending');
 assert.strictEqual(context.accessibilityScore(notRequestedPricing).label, 'Pricing not loaded');
+assert.strictEqual(context.selectedEstimatedContractCost(liveBudgetFriendly), 75);
+assert.strictEqual(context.budgetBadge(liveBudgetFriendly).displayLabel, 'Budget Friendly');
+assert.strictEqual(context.setupFitsTradingBudget(liveBudgetFriendly, 100), true);
+assert.strictEqual(context.selectedEstimatedContractCost(livePremiumTrade), 585);
+assert.strictEqual(context.budgetBadge(livePremiumTrade).displayLabel, 'Moderate Cost');
+assert.strictEqual(context.setupFitsTradingBudget(livePremiumTrade, 500), false);
+assert.strictEqual(context.selectedEstimatedContractCost(stalePremiumTrade), 585);
+assert.strictEqual(context.budgetBadge(stalePremiumTrade).displayLabel, 'Stale Estimate');
+assert.strictEqual(context.budgetBadge(stalePremiumTrade).costText, 'Stale $585.00');
+assert.strictEqual(context.renderBudgetBadge(stalePremiumTrade).includes('Cost Unavailable'), false);
+assert.strictEqual(context.selectedEstimatedContractCost(notRequestedWithRawAsk), null);
+assert.strictEqual(context.budgetBadge(notRequestedWithRawAsk).costText, 'Pricing not loaded');
+assert.strictEqual(context.setupFitsTradingBudget(notRequestedWithRawAsk, 100), false);
+assert.strictEqual(context.budgetBadge(pendingPricing).costText, 'Pricing loading...');
+assert.strictEqual(context.budgetBadge(unavailablePricing).displayLabel, 'Cost Unavailable');
+assert.strictEqual(context.setupFitsTradingBudget(unavailablePricing, 1000), false);
 assert.strictEqual(context.selectedEstimatedContractCost(zeroQuote), null);
 assert.strictEqual(context.setupFitsTradingBudget(zeroQuote, 100), false);
 assert.strictEqual(context.accessibilityScore(premiumOnly).key, 'premium');
@@ -247,6 +305,11 @@ assert.ok(elements.topOpportunities.innerHTML.includes('Best Overall'));
 assert.ok(elements.topOpportunities.innerHTML.includes('Best Within My Budget'));
 assert.ok(elements.topOpportunities.innerHTML.includes('TER'));
 assert.ok(elements.topOpportunities.innerHTML.includes('FE'));
+assert.ok(!elements.topOpportunities.innerHTML.includes('&lt;span class=&quot;direction-value'), 'Winner panels must not render escaped direction HTML');
+assert.ok(!elements.topOpportunities.innerHTML.includes('<span class="direction-value direction-short"><span'), 'Top rows must not nest direction markup');
+context.renderTopOpportunities([liveBudgetFriendly, livePremiumTrade]);
+assert.ok(elements.topOpportunities.innerHTML.includes('<span class="direction-value direction-long">Long</span>'));
+assert.ok(!elements.topOpportunities.innerHTML.includes('&lt;span class=&quot;direction-value'), 'Long winner direction must render as styled text, not raw markup');
 
 elements.tradingBudgetFilter.value = '100';
 context.renderTopOpportunities([premiumOnly]);
