@@ -111,6 +111,21 @@ _discovery_universe_cache = {
 }
 _discovery_universe_lock = threading.RLock()
 _discovery_universe_executor = ThreadPoolExecutor(max_workers=1)
+_discovered_scan_handoff_lock = threading.RLock()
+_discovered_scan_handoff_state = {
+    "version": "discovered-scan-handoff-v1",
+    "handoff_triggered_at": None,
+    "handoff_reason": None,
+    "refresh_job_id": None,
+    "refresh_started_at": None,
+    "refresh_completed_at": None,
+    "refresh_failed_at": None,
+    "refresh_attempt_count": 0,
+    "stale_job_recovered": False,
+    "scanner_cache_generation": None,
+    "last_checked_at": None,
+    "last_result": None,
+}
 _journal_repository = SQLiteJournalRepository(default_journal_db_path())
 _notification_repository = SQLiteNotificationRepository(default_journal_db_path())
 _verified_history_repository = SQLiteVerifiedHistoryRepository(default_journal_db_path())
@@ -257,6 +272,78 @@ def _discovery_coverage_context() -> dict:
     }
 
 
+def _discovered_scan_handoff_snapshot() -> dict:
+    with _discovered_scan_handoff_lock:
+        return dict(_discovered_scan_handoff_state)
+
+
+def _update_discovered_scan_handoff_from_meta(meta: dict) -> None:
+    meta = meta or {}
+    now = _utc_now()
+    updates = {
+        "last_checked_at": _format_timestamp(now),
+        "refresh_job_id": meta.get("refresh_job_id"),
+        "refresh_started_at": meta.get("refresh_started_at"),
+    }
+    if meta.get("has_cache") and meta.get("generated_at"):
+        updates.update({
+            "refresh_completed_at": meta.get("last_refresh_success_at") or meta.get("generated_at"),
+            "scanner_cache_generation": meta.get("generated_at"),
+            "last_result": "cache_ready",
+        })
+    elif meta.get("refreshing"):
+        updates["last_result"] = "refresh_running"
+    elif meta.get("last_refresh_error"):
+        updates.update({
+            "refresh_failed_at": _format_timestamp(now),
+            "last_result": "refresh_failed",
+        })
+        if "timeout" in str(meta.get("last_refresh_error") or "").lower():
+            updates["stale_job_recovered"] = True
+    with _discovered_scan_handoff_lock:
+        _discovered_scan_handoff_state.update({k: v for k, v in updates.items() if v is not None})
+
+
+def _maybe_enqueue_discovered_scan_handoff(reason: str = "discovery_ready_no_scanner_cache") -> tuple[bool, str]:
+    ready, symbols, discovery_status = _discovery_symbols_ready()
+    if not ready:
+        with _discovered_scan_handoff_lock:
+            _discovered_scan_handoff_state.update({
+                "last_checked_at": _format_timestamp(_utc_now()),
+                "last_result": f"discovery_not_ready:{discovery_status.get('status')}",
+            })
+        return False, "discovery not ready"
+
+    meta = analysis_cache_status(symbols, universe="discovered")
+    _update_discovered_scan_handoff_from_meta(meta)
+    if meta.get("has_cache"):
+        return False, "scanner cache ready"
+    if meta.get("refreshing"):
+        return False, "scanner refresh already running"
+
+    started_at = _utc_now()
+    with _discovered_scan_handoff_lock:
+        _discovered_scan_handoff_state.update({
+            "handoff_triggered_at": _format_timestamp(started_at),
+            "handoff_reason": reason,
+            "refresh_attempt_count": int(_discovered_scan_handoff_state.get("refresh_attempt_count") or 0) + 1,
+            "last_checked_at": _format_timestamp(started_at),
+            "last_result": "submitted",
+        })
+    logger.info("discovered_scan_handoff_started reason=%s selected_count=%s", reason, len(symbols))
+    result = scan_cached(
+        symbols,
+        force_refresh=False,
+        universe="discovered",
+        max_symbols=None,
+        coverage_context=_discovery_coverage_context(),
+        trusted_options_symbols=set(symbols),
+    )
+    meta = (result or {}).get("meta") or analysis_cache_status(symbols, universe="discovered")
+    _update_discovered_scan_handoff_from_meta(meta)
+    return bool(meta.get("refreshing")), meta.get("refresh_job_id") or "submitted"
+
+
 def _run_discovery_universe_job(job_id: str) -> None:
     started = time.perf_counter()
     started_at = _utc_now()
@@ -299,6 +386,7 @@ def _run_discovery_universe_job(job_id: str) -> None:
             counts.get("selected"),
             metrics.get("effective_cap"),
         )
+        _maybe_enqueue_discovered_scan_handoff("discovery_completed_no_scanner_cache")
     except Exception as exc:
         with _discovery_universe_lock:
             _discovery_universe_cache.update({
@@ -372,6 +460,11 @@ def _register_discovery_background_refresh() -> None:
         DISCOVERY_UNIVERSE_TTL_SECONDS,
         _submit_discovery_universe_job_if_needed,
     )
+    register_background_periodic_task(
+        "discovered_scan_handoff",
+        30,
+        lambda: _maybe_enqueue_discovered_scan_handoff("periodic_discovery_ready_no_scanner_cache"),
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -396,6 +489,7 @@ def startup_market_cache_refresh():
     _register_discovery_background_refresh()
     start_market_cache_refresh()
     _submit_discovery_universe_job_if_needed()
+    _maybe_enqueue_discovered_scan_handoff("startup_discovery_ready_no_scanner_cache")
 
 
 @app.get("/")
@@ -1107,10 +1201,23 @@ def api_cache_status(
         if not ready:
             meta = _discovery_scan_not_ready_response(discovery_status).get("meta") or {}
         else:
+            _maybe_enqueue_discovered_scan_handoff("cache_status_discovery_ready_no_scanner_cache")
             meta = analysis_cache_status(
                 symbols,
                 universe="discovered",
             )
+            _update_discovered_scan_handoff_from_meta(meta)
+            if not meta.get("has_cache"):
+                meta = {
+                    **meta,
+                    "status": "scanner_warming",
+                    "message": "Discovery ready; scanning the 1,000-symbol universe.",
+                    "discovery_status": discovery_status,
+                }
+        meta = {
+            **meta,
+            "handoff": _discovered_scan_handoff_snapshot(),
+        }
     elif selected_universe == "default":
         meta = analysis_cache_status(universe="default")
     elif selected_universe == "finviz":

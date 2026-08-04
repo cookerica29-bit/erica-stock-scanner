@@ -40,6 +40,23 @@ def reset_discovery_cache():
         })
 
 
+def reset_handoff_state():
+    with main._discovered_scan_handoff_lock:
+        main._discovered_scan_handoff_state.update({
+            "handoff_triggered_at": None,
+            "handoff_reason": None,
+            "refresh_job_id": None,
+            "refresh_started_at": None,
+            "refresh_completed_at": None,
+            "refresh_failed_at": None,
+            "refresh_attempt_count": 0,
+            "stale_job_recovered": False,
+            "scanner_cache_generation": None,
+            "last_checked_at": None,
+            "last_result": None,
+        })
+
+
 class InlineExecutor:
     def submit(self, fn, *args, **kwargs):
         fn(*args, **kwargs)
@@ -138,9 +155,11 @@ def test_discovery_run_populates_cache_with_valid_token():
     previous_token = os.environ.get("DISCOVERY_ADMIN_TOKEN")
     previous_executor = main._discovery_universe_executor
     previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
     os.environ["DISCOVERY_ADMIN_TOKEN"] = "secret"
     main._discovery_universe_executor = InlineExecutor()
     main.build_ranked_discovery_universe = fake_discovery_result
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
     reset_discovery_cache()
     try:
         client = TestClient(main.app)
@@ -171,6 +190,7 @@ def test_discovery_run_populates_cache_with_valid_token():
     finally:
         main._discovery_universe_executor = previous_executor
         main.build_ranked_discovery_universe = previous_builder
+        main._maybe_enqueue_discovered_scan_handoff = previous_handoff
         reset_discovery_cache()
         if previous_token is None:
             os.environ.pop("DISCOVERY_ADMIN_TOKEN", None)
@@ -361,8 +381,10 @@ def test_discovery_cache_refresh_needed_for_missing_and_stale_cache():
 def test_discovery_auto_submit_skips_fresh_cache_and_running_job():
     previous_executor = main._discovery_universe_executor
     previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
     main._discovery_universe_executor = InlineExecutor()
     main.build_ranked_discovery_universe = fake_discovery_result
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
     reset_discovery_cache()
     try:
         accepted, job_id = main._submit_discovery_universe_job_if_needed()
@@ -387,6 +409,7 @@ def test_discovery_auto_submit_skips_fresh_cache_and_running_job():
     finally:
         main._discovery_universe_executor = previous_executor
         main.build_ranked_discovery_universe = previous_builder
+        main._maybe_enqueue_discovered_scan_handoff = previous_handoff
         reset_discovery_cache()
 
 
@@ -394,20 +417,191 @@ def test_startup_registers_and_submits_discovery_refresh():
     previous_register = main.register_background_periodic_task
     previous_submit = main._submit_discovery_universe_job_if_needed
     previous_start_market_cache = main.start_market_cache_refresh
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
     calls = []
     main.register_background_periodic_task = lambda key, ttl, callback: calls.append(("register", key, ttl, callback))
     main._submit_discovery_universe_job_if_needed = lambda: calls.append(("submit",)) or (True, "job")
     main.start_market_cache_refresh = lambda: calls.append(("market_cache",))
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": calls.append(("handoff", reason)) or (False, "stubbed")
     try:
         main.startup_market_cache_refresh()
         assert calls[0][0:3] == ("register", "discovery_universe", main.DISCOVERY_UNIVERSE_TTL_SECONDS)
         assert callable(calls[0][3])
-        assert calls[1] == ("market_cache",)
-        assert calls[2] == ("submit",)
+        assert calls[1][0:3] == ("register", "discovered_scan_handoff", 30)
+        assert callable(calls[1][3])
+        assert calls[2] == ("market_cache",)
+        assert calls[3] == ("submit",)
+        assert calls[4] == ("handoff", "startup_discovery_ready_no_scanner_cache")
     finally:
         main.register_background_periodic_task = previous_register
         main._submit_discovery_universe_job_if_needed = previous_submit
         main.start_market_cache_refresh = previous_start_market_cache
+        main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+
+
+def test_discovered_scan_handoff_queues_when_discovery_ready_and_scan_cache_missing():
+    reset_discovery_cache()
+    reset_handoff_state()
+    previous_status = main.analysis_cache_status
+    previous_scan_cached = main.scan_cached
+    calls = []
+    now = __import__("datetime").datetime.utcnow()
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            "symbols": ["AAPL", "MSFT"],
+            "generated_at": now,
+            "expires_at": now + __import__("datetime").timedelta(hours=1),
+            "running": False,
+            "last_error": None,
+        })
+
+    def fake_status(watchlist=None, **kwargs):
+        return {
+            "has_cache": False,
+            "status": "warming",
+            "refreshing": False,
+            "generated_at": None,
+            "last_refresh_error": None,
+        }
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        return {
+            "rows": [],
+            "near_miss": [],
+            "meta": {
+                "has_cache": False,
+                "status": "warming",
+                "refreshing": True,
+                "refresh_job_id": "universe:discovered:1:test",
+                "refresh_started_at": "2026-08-03T00:00:00Z",
+            },
+        }
+
+    main.analysis_cache_status = fake_status
+    main.scan_cached = fake_scan_cached
+    try:
+        accepted, job = main._maybe_enqueue_discovered_scan_handoff("test_missing_cache")
+        assert accepted is True
+        assert job == "universe:discovered:1:test"
+        assert len(calls) == 1
+        assert calls[0][0] == ["AAPL", "MSFT"]
+        assert calls[0][1]["universe"] == "discovered"
+        assert calls[0][1]["max_symbols"] is None
+        snapshot = main._discovered_scan_handoff_snapshot()
+        assert snapshot["handoff_reason"] == "test_missing_cache"
+        assert snapshot["refresh_attempt_count"] == 1
+        assert snapshot["refresh_job_id"] == "universe:discovered:1:test"
+    finally:
+        main.analysis_cache_status = previous_status
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_handoff_state()
+
+
+def test_discovered_scan_handoff_does_not_duplicate_running_or_ready_cache():
+    reset_discovery_cache()
+    reset_handoff_state()
+    previous_status = main.analysis_cache_status
+    previous_scan_cached = main.scan_cached
+    calls = []
+    now = __import__("datetime").datetime.utcnow()
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            "symbols": ["AAPL"],
+            "generated_at": now,
+            "expires_at": now + __import__("datetime").timedelta(hours=1),
+            "running": False,
+            "last_error": None,
+        })
+
+    main.scan_cached = lambda *args, **kwargs: calls.append((args, kwargs))
+    try:
+        main.analysis_cache_status = lambda *args, **kwargs: {
+            "has_cache": False,
+            "status": "warming",
+            "refreshing": True,
+            "refresh_job_id": "already-running",
+        }
+        accepted, reason = main._maybe_enqueue_discovered_scan_handoff("test_running")
+        assert accepted is False
+        assert reason == "scanner refresh already running"
+        assert calls == []
+
+        main.analysis_cache_status = lambda *args, **kwargs: {
+            "has_cache": True,
+            "status": "fresh",
+            "refreshing": False,
+            "generated_at": "2026-08-03T00:00:00Z",
+        }
+        accepted, reason = main._maybe_enqueue_discovered_scan_handoff("test_ready")
+        assert accepted is False
+        assert reason == "scanner cache ready"
+        assert calls == []
+        assert main._discovered_scan_handoff_snapshot()["scanner_cache_generation"] == "2026-08-03T00:00:00Z"
+    finally:
+        main.analysis_cache_status = previous_status
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_handoff_state()
+
+
+def test_discovered_cache_status_triggers_handoff_and_exposes_diagnostics():
+    reset_discovery_cache()
+    reset_handoff_state()
+    previous_status = main.analysis_cache_status
+    previous_scan_cached = main.scan_cached
+    calls = []
+    now = __import__("datetime").datetime.utcnow()
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            "symbols": ["AAPL"],
+            "generated_at": now,
+            "expires_at": now + __import__("datetime").timedelta(hours=1),
+            "running": False,
+            "last_error": None,
+        })
+
+    def fake_status(watchlist=None, **kwargs):
+        return {
+            "has_cache": False,
+            "status": "warming",
+            "refreshing": bool(calls),
+            "generated_at": None,
+            "refresh_job_id": "handoff-job" if calls else None,
+            "refresh_started_at": "2026-08-03T00:00:00Z" if calls else None,
+        }
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        return {
+            "rows": [],
+            "near_miss": [],
+            "meta": {
+                "has_cache": False,
+                "status": "warming",
+                "refreshing": True,
+                "refresh_job_id": "handoff-job",
+                "refresh_started_at": "2026-08-03T00:00:00Z",
+            },
+        }
+
+    main.analysis_cache_status = fake_status
+    main.scan_cached = fake_scan_cached
+    try:
+        client = TestClient(main.app)
+        payload = client.get("/api/cache/status?universe=discovered").json()
+        assert len(calls) == 1
+        assert payload["status"] == "scanner_warming"
+        assert payload["refreshing"] is True
+        assert payload["handoff"]["handoff_reason"] == "cache_status_discovery_ready_no_scanner_cache"
+        assert payload["handoff"]["refresh_job_id"] == "handoff-job"
+        assert payload["message"] == "Discovery ready; scanning the 1,000-symbol universe."
+    finally:
+        main.analysis_cache_status = previous_status
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_handoff_state()
 
 
 def test_coverage_baseline_endpoint_warms_without_completed_discovered_scan():
@@ -467,6 +661,9 @@ def main_test() -> int:
     test_discovery_cache_refresh_needed_for_missing_and_stale_cache()
     test_discovery_auto_submit_skips_fresh_cache_and_running_job()
     test_startup_registers_and_submits_discovery_refresh()
+    test_discovered_scan_handoff_queues_when_discovery_ready_and_scan_cache_missing()
+    test_discovered_scan_handoff_does_not_duplicate_running_or_ready_cache()
+    test_discovered_cache_status_triggers_handoff_and_exposes_diagnostics()
     test_coverage_baseline_endpoint_warms_without_completed_discovered_scan()
     test_coverage_baseline_endpoint_returns_latest_snapshot_without_starting_work()
     print("Discovery endpoints v1 tests passed")

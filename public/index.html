@@ -5762,7 +5762,7 @@ function isDiscoveredWarmingMeta(meta = {}) {
   return universe === 'discovered'
     && !meta.generated_at
     && (meta.cache === 'miss' || meta.has_cache === false || meta.refreshing === true)
-    && (status === 'warming' || meta.refreshing === true || ['warming', 'refreshing'].includes(discoveryStatus) || discovery.running === true);
+    && (['warming', 'scanner_warming'].includes(status) || meta.refreshing === true || ['warming', 'refreshing'].includes(discoveryStatus) || discovery.running === true);
 }
 
 function isDiscoveryUniverseWarmup(meta = {}) {
@@ -5786,7 +5786,7 @@ function scanStatusText(meta) {
   if (!meta) return '';
   if (meta.last_refresh_error && !meta.refreshing) return 'Refresh failed';
   if (isDiscoveryUniverseWarmup(meta)) return 'Discovery warming...';
-  if (isDiscoveredFirstScanWarming(meta)) return 'Loading discovered scanner results...';
+  if (isDiscoveredFirstScanWarming(meta)) return 'Discovery ready; scanning expanded universe...';
   if (meta.refreshing) return 'Refreshing cached data...';
   if (meta.cache === 'miss' && meta.refreshing) return 'Kairos is warming data...';
   return '';
@@ -6025,8 +6025,8 @@ function updateDataStatus(meta = {}) {
     el.innerHTML = `
       <span class="data-status-dot warming"></span>
       <div>
-        <div class="data-status-main">🟡 Loading discovered scanner</div>
-        <div class="data-status-sub">${escapeHtml(elapsed ? `First expanded scan running · elapsed ${elapsed}` : 'Discovery ready; scanner results are loading')}</div>
+        <div class="data-status-main">🟡 Discovery ready</div>
+        <div class="data-status-sub">${escapeHtml(elapsed ? `Scanning the 1,000-symbol universe · elapsed ${elapsed}` : 'Scanning the 1,000-symbol universe')}</div>
       </div>`;
     return;
   }
@@ -6089,9 +6089,9 @@ function switchScannerUniverse(universe) {
 
 function renderDiscoveryWarmupCard(meta = latestScannerMeta || {}) {
   const firstScan = isDiscoveredFirstScanWarming(meta);
-  const title = firstScan ? 'Loading discovered scanner' : 'Discovery warming';
+  const title = firstScan ? 'Discovery ready' : 'Discovery warming';
   const body = firstScan
-    ? 'The expanded universe is ready. Kairos is running the first discovered-universe scan now.'
+    ? 'Scanning the 1,000-symbol universe. Results will appear automatically when the scan completes.'
     : 'Building the expanded stock universe. This can take several minutes after a restart.';
   const progress = discoveryProgressItems(meta).map(([label, value]) => `
     <div class="discovery-progress-item">
@@ -6112,7 +6112,7 @@ function renderDiscoveryWarmupCard(meta = latestScannerMeta || {}) {
 
 function scannerWarmingMessage(meta = latestScannerMeta || {}) {
   if (isDiscoveryUniverseWarmup(meta)) return 'Discovery warming';
-  if (isDiscoveredFirstScanWarming(meta)) return 'Loading discovered scanner';
+  if (isDiscoveredFirstScanWarming(meta)) return 'Discovery ready; scanning expanded universe';
   if (meta?.universe === 'discovered' || meta?.cache_key === 'discovered') return 'Discovery warming';
   return 'Kairos is warming market data. Try Scan again in a moment.';
 }

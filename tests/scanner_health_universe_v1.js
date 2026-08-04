@@ -161,14 +161,15 @@ const discoveredFirstScanMeta = {
   discovery_status: { status: 'ready', running: false, has_cache: true, selected_count: 750 },
 };
 context.updateDataStatus(discoveredFirstScanMeta);
-assert.ok(getElement('dataStatus').innerHTML.includes('Loading discovered scanner'));
+assert.ok(getElement('dataStatus').innerHTML.includes('Discovery ready'));
+assert.ok(getElement('dataStatus').innerHTML.includes('Scanning the 1,000-symbol universe'));
 assert.strictEqual(context.isDiscoveryUniverseWarmup(discoveredFirstScanMeta), false);
 assert.strictEqual(context.isDiscoveredFirstScanWarming(discoveredFirstScanMeta), true);
 context.__fixtureMeta = discoveredFirstScanMeta;
 vm.runInContext('latestScannerMeta = __fixtureMeta; scannerRows = []; scannerNearMiss = [];', context);
 context.renderScannerResults();
-assert.ok(getElement('results').innerHTML.includes('Loading discovered scanner'));
-assert.ok(getElement('results').innerHTML.includes('first discovered-universe scan'));
+assert.ok(getElement('results').innerHTML.includes('Discovery ready'));
+assert.ok(getElement('results').innerHTML.includes('Scanning the 1,000-symbol universe'));
 
 context.updateDataStatus({
   universe: 'discovered',
