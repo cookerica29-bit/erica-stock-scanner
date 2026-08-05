@@ -16,6 +16,7 @@ from scanner import (
     analysis_cache_status,
     option_pricing_diagnostics,
     queue_option_pricing_for_contracts,
+    stock_early_entry_shadow_diagnostics,
     build_bos_displacement_shadow_report,
     _batch_download,
     scan_cached,
@@ -1264,6 +1265,12 @@ def api_dev_option_pricing(
     if selected_universe == "finviz":
         return option_pricing_diagnostics(discover=True, universe="finviz")
     raise HTTPException(status_code=422, detail="Unsupported scanner universe")
+
+
+@app.get("/api/dev/stock-early-entry-memory")
+def api_dev_stock_early_entry_memory(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return stock_early_entry_shadow_diagnostics()
 
 
 @app.post("/api/option-pricing/hydrate")

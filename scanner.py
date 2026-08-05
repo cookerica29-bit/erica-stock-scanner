@@ -13,7 +13,9 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
+import json
 
 from market_data import (
     ALPACA_PROVIDER_NAME,
@@ -203,6 +205,13 @@ ANALYSIS_CACHE_STALE_SECONDS = 180
 ANALYSIS_REFRESH_TIMEOUT_SECONDS = 300
 _coverage_baseline_snapshot = None
 _coverage_baseline_lock = threading.RLock()
+STOCK_EARLY_ENTRY_MEMORY_VERSION = "stock-early-entry-memory-v1"
+STOCK_EARLY_ENTRY_MEMORY_PATH = os.getenv("STOCK_EARLY_ENTRY_MEMORY_PATH") or "/tmp/kairos_stock_early_entry_memory_v1.json"
+STOCK_EARLY_ENTRY_EXPIRE_BARS = int(os.getenv("STOCK_EARLY_ENTRY_EXPIRE_BARS") or "20")
+STOCK_EARLY_ENTRY_RETEST_BARS = int(os.getenv("STOCK_EARLY_ENTRY_RETEST_BARS") or "4")
+_stock_early_entry_memory_lock = threading.RLock()
+_stock_early_entry_memory_loaded = False
+_stock_early_entry_memory = {}
 
 
 def _parse_background_analysis_scan_workers(value: Optional[str], default: int = 4) -> int:
@@ -260,6 +269,53 @@ def _age_seconds(value, *, now: Optional[datetime] = None) -> Optional[float]:
         return None
     current = _coerce_utc_datetime(now) or _utc_now()
     return max(0, (current - dt).total_seconds())
+
+
+def _timeframe_minutes(value) -> Optional[int]:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return None
+    aliases = {
+        "D": 1440,
+        "1D": 1440,
+        "DAILY": 1440,
+        "DAY": 1440,
+        "W": 10080,
+        "1W": 10080,
+        "WEEKLY": 10080,
+        "4H": 240,
+        "H4": 240,
+        "1H": 60,
+        "H1": 60,
+        "30M": 30,
+        "M30": 30,
+    }
+    if raw in aliases:
+        return aliases[raw]
+    unit = raw[-1]
+    number = raw[:-1]
+    parsed = _safe_int(number)
+    if parsed is None or parsed <= 0:
+        return None
+    if unit == "M":
+        return parsed
+    if unit == "H":
+        return parsed * 60
+    if unit == "D":
+        return parsed * 1440
+    if unit == "W":
+        return parsed * 10080
+    return None
+
+
+def _estimated_bars_between(start_value, end_value, timeframe: str) -> Optional[int]:
+    start = _coerce_utc_datetime(start_value)
+    end = _coerce_utc_datetime(end_value)
+    minutes = _timeframe_minutes(timeframe)
+    if start is None or end is None or not minutes:
+        return None
+    elapsed_minutes = max(0, (end - start).total_seconds() / 60)
+    return int(elapsed_minutes // minutes)
 
 
 def _cache_record(name: str, outcome: str) -> None:
@@ -979,6 +1035,7 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "partial_result_reasons": scan_meta.get("partial_result_reasons", []),
         "partial_result_reason": scan_meta.get("partial_result_reason"),
         "market_data_failures": scan_meta.get("market_data_failures", {}),
+        "early_entry_shadow": scan_meta.get("early_entry_shadow") or stock_early_entry_shadow_diagnostics(),
         "scan_duration_ms": scan_meta.get("scan_duration_ms"),
         "scan_started_at": scan_meta.get("scan_started_at"),
         "scan_completed_at": scan_meta.get("scan_completed_at"),
@@ -1084,11 +1141,14 @@ def _store_analysis_cache(key: tuple, rows: list, near_miss: list, scan_meta: Op
     rows = _mark_nonqueued_option_pricing(rows, auto_pricing_keys)
     near_miss = _mark_nonqueued_option_pricing(near_miss, auto_pricing_keys)
     generated_at = _utc_now()
+    scan_meta = dict(scan_meta or {})
+    early_entry_shadow = update_stock_early_entry_shadow(rows, near_miss, scan_meta, generated_at=generated_at)
+    scan_meta["early_entry_shadow"] = early_entry_shadow
     cached = {
         "rows": rows,
         "near_miss": near_miss,
         "generated_at": generated_at,
-        "scan_meta": scan_meta or {},
+        "scan_meta": scan_meta,
         "option_pricing": {
             "version": "option-pricing-async-v1",
             "queued_at": _format_utc_timestamp(generated_at),
@@ -2476,6 +2536,458 @@ def _safe_int(value):
         return int(value)
     except Exception:
         return None
+
+
+def _stock_early_entry_memory_path() -> Path:
+    return Path(STOCK_EARLY_ENTRY_MEMORY_PATH)
+
+
+def _load_stock_early_entry_memory_locked() -> dict:
+    global _stock_early_entry_memory_loaded, _stock_early_entry_memory
+    if _stock_early_entry_memory_loaded:
+        return _stock_early_entry_memory
+    path = _stock_early_entry_memory_path()
+    loaded = {}
+    try:
+        if path.exists():
+            parsed = json.loads(path.read_text())
+            if isinstance(parsed, dict):
+                loaded = parsed.get("memories") if isinstance(parsed.get("memories"), dict) else parsed
+    except Exception as exc:
+        logger.warning("[early-entry-shadow] failed to load memory path=%s error=%s", path, exc)
+        loaded = {}
+    _stock_early_entry_memory = loaded
+    _stock_early_entry_memory_loaded = True
+    return _stock_early_entry_memory
+
+
+def _save_stock_early_entry_memory_locked() -> None:
+    path = _stock_early_entry_memory_path()
+    payload = {
+        "version": STOCK_EARLY_ENTRY_MEMORY_VERSION,
+        "updated_at": _format_utc_timestamp(_utc_now()),
+        "memories": _stock_early_entry_memory,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    except Exception as exc:
+        logger.warning("[early-entry-shadow] failed to persist memory path=%s error=%s", path, exc)
+
+
+def reset_stock_early_entry_shadow_memory() -> None:
+    """Test helper. Production callers should let memory persist naturally."""
+    global _stock_early_entry_memory_loaded, _stock_early_entry_memory
+    with _stock_early_entry_memory_lock:
+        _stock_early_entry_memory = {}
+        _stock_early_entry_memory_loaded = True
+
+
+def _stock_early_setup_generation(row: dict) -> str:
+    return str(
+        row.get("setup_generation")
+        or row.get("signal_timestamp")
+        or row.get("candleTime")
+        or row.get("timestamp")
+        or row.get("scannedAt")
+        or ""
+    )
+
+
+def stock_early_entry_memory_key(row: dict) -> Optional[str]:
+    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+    timeframe = str(row.get("timeframe") or row.get("scanner_timeframe") or "").strip().upper()
+    direction = str(row.get("direction") or "").strip().upper()
+    entry = _safe_float(row.get("entry"))
+    stop = _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop"))
+    tp1 = _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target"))
+    generation = _stock_early_setup_generation(row)
+    if not ticker or not timeframe or direction not in {"LONG", "SHORT"} or entry is None or stop is None or tp1 is None or not generation:
+        return None
+    return "|".join([
+        ticker,
+        timeframe,
+        direction,
+        f"{entry:.4f}",
+        f"{stop:.4f}",
+        f"{tp1:.4f}",
+        generation,
+        STOCK_EARLY_ENTRY_MEMORY_VERSION,
+    ])
+
+
+def _stock_early_price_evidence(row: dict) -> dict:
+    price = _safe_float(row.get("price") if row.get("price") is not None else row.get("current_price"))
+    high = _safe_float(
+        row.get("current_bar_high")
+        if row.get("current_bar_high") is not None
+        else row.get("high") if row.get("high") is not None
+        else row.get("latest_high")
+    )
+    low = _safe_float(
+        row.get("current_bar_low")
+        if row.get("current_bar_low") is not None
+        else row.get("low") if row.get("low") is not None
+        else row.get("latest_low")
+    )
+    return {
+        "price": price,
+        "high": high if high is not None else price,
+        "low": low if low is not None else price,
+        "used_price_fallback": high is None or low is None,
+    }
+
+
+def _stock_early_confirmation_complete(row: dict) -> bool:
+    ev = row.get("trade_eval") or {}
+    return bool(ev.get("trigger_confirmed") or ev.get("a_plus_ready"))
+
+
+def _stock_early_entry_touched(row: dict) -> bool:
+    direction = str(row.get("direction") or "").upper()
+    entry = _safe_float(row.get("entry"))
+    evidence = _stock_early_price_evidence(row)
+    price = evidence.get("price")
+    high = evidence.get("high")
+    low = evidence.get("low")
+    if direction == "LONG" and entry is not None:
+        return (low is not None and low <= entry) or (price is not None and price >= entry)
+    if direction == "SHORT" and entry is not None:
+        return (high is not None and high >= entry) or (price is not None and price <= entry)
+    return False
+
+
+def _stock_early_tp1_reached(row: dict) -> bool:
+    direction = str(row.get("direction") or "").upper()
+    tp1 = _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target"))
+    evidence = _stock_early_price_evidence(row)
+    if direction == "LONG" and tp1 is not None:
+        return evidence.get("high") is not None and evidence["high"] >= tp1
+    if direction == "SHORT" and tp1 is not None:
+        return evidence.get("low") is not None and evidence["low"] <= tp1
+    return False
+
+
+def _stock_early_stop_reached(row: dict) -> bool:
+    direction = str(row.get("direction") or "").upper()
+    stop = _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop"))
+    evidence = _stock_early_price_evidence(row)
+    if direction == "LONG" and stop is not None:
+        return evidence.get("low") is not None and evidence["low"] <= stop
+    if direction == "SHORT" and stop is not None:
+        return evidence.get("high") is not None and evidence["high"] >= stop
+    return False
+
+
+def _stock_early_bar_marker(row: dict, observed_at: str) -> str:
+    return str(
+        row.get("current_bar")
+        or row.get("bar_index")
+        or row.get("current_candle_time")
+        or row.get("latest_candle_time")
+        or row.get("signal_timestamp")
+        or observed_at
+    )
+
+
+def _stock_early_transition(memory: dict, state: str, reason: str, observed_at: str, bar_marker: str, row: dict) -> None:
+    previous = memory.get("state")
+    if previous == state:
+        return
+    event = {
+        "from": previous,
+        "to": state,
+        "reason": reason,
+        "timestamp": observed_at,
+        "bar": bar_marker,
+        "price": _stock_early_price_evidence(row).get("price"),
+    }
+    memory["previous_state"] = previous
+    memory["state"] = state
+    memory["last_transition_at"] = observed_at
+    memory["last_transition_bar"] = bar_marker
+    history = list(memory.get("transitions") or [])
+    history.append(event)
+    memory["transitions"] = history[-20:]
+
+
+def _stock_early_record_event(memory: dict, field: str, observed_at: str, bar_marker: str, row: dict) -> None:
+    if memory.get(field):
+        return
+    memory[field] = observed_at
+    memory[f"{field}_bar"] = bar_marker
+    memory[f"{field}_price"] = _stock_early_price_evidence(row).get("price")
+
+
+def _stock_early_terminal(state: str) -> bool:
+    return state in {"ENTRY_TRIGGERED", "MISSED_ENTRY", "TP1_BEFORE_CONFIRMATION", "INVALIDATED", "EXPIRED"}
+
+
+def _stock_early_elapsed_bars(memory: dict, row: dict, observed_at: str, start_field: str = "first_seen_at") -> Optional[int]:
+    explicit = _safe_int(row.get("bars_since_signal") or row.get("bars_elapsed"))
+    if explicit is not None and start_field == "first_seen_at":
+        return explicit
+    return _estimated_bars_between(memory.get(start_field), observed_at, row.get("timeframe") or "")
+
+
+def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_generation: str, is_early_entry: bool) -> dict:
+    key = stock_early_entry_memory_key(row)
+    bar_marker = _stock_early_bar_marker(row, observed_at)
+    confirmation_complete = _stock_early_confirmation_complete(row)
+    touched = _stock_early_entry_touched(row)
+    tp1_reached = _stock_early_tp1_reached(row)
+    stop_reached = _stock_early_stop_reached(row)
+    evidence = _stock_early_price_evidence(row)
+
+    if not memory:
+        memory = {
+            "version": STOCK_EARLY_ENTRY_MEMORY_VERSION,
+            "candidate_id": key,
+            "ticker": str(row.get("ticker") or "").upper(),
+            "timeframe": str(row.get("timeframe") or "").upper(),
+            "direction": str(row.get("direction") or "").upper(),
+            "entry": _safe_float(row.get("entry")),
+            "stop": _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop")),
+            "tp1": _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target")),
+            "setup_generation": _stock_early_setup_generation(row),
+            "first_seen_at": observed_at,
+            "first_seen_bar": bar_marker,
+            "state": None,
+            "previous_state": None,
+            "transitions": [],
+        }
+        _stock_early_transition(memory, "EARLY_ENTRY_BUILDING", "early_entry_first_printed", observed_at, bar_marker, row)
+
+    memory["last_seen_at"] = observed_at
+    memory["last_seen_scan_generation"] = scan_generation
+    memory["last_seen_bar"] = bar_marker
+    memory["last_price"] = evidence.get("price")
+    memory["used_price_fallback"] = bool(evidence.get("used_price_fallback"))
+    memory["production_bucket"] = _ranking_status_bucket(row)
+    memory["production_entry_status"] = row.get("entryStatus")
+    memory["trigger_confirmed"] = confirmation_complete
+    memory["b_plus_tradeable"] = bool((row.get("trade_eval") or {}).get("b_plus_tradeable"))
+
+    state = str(memory.get("state") or "EARLY_ENTRY_BUILDING")
+    if _stock_early_terminal(state):
+        return memory
+
+    if stop_reached and not memory.get("valid_entry_at"):
+        _stock_early_record_event(memory, "invalidation_at", observed_at, bar_marker, row)
+        _stock_early_transition(memory, "INVALIDATED", "stop_or_invalidation_before_valid_entry", observed_at, bar_marker, row)
+        return memory
+
+    if tp1_reached and not confirmation_complete:
+        _stock_early_record_event(memory, "tp1_before_confirmation_at", observed_at, bar_marker, row)
+        _stock_early_transition(memory, "TP1_BEFORE_CONFIRMATION", "tp1_reached_before_full_confirmation", observed_at, bar_marker, row)
+        return memory
+
+    if touched:
+        _stock_early_record_event(memory, "first_entry_touch_at", observed_at, bar_marker, row)
+        if not confirmation_complete and not memory.get("confirmation_at"):
+            _stock_early_transition(memory, "EARLY_TOUCH", "planned_entry_touched_before_confirmation", observed_at, bar_marker, row)
+
+    if confirmation_complete:
+        confirmation_was_new = not memory.get("confirmation_at")
+        _stock_early_record_event(memory, "confirmation_at", observed_at, bar_marker, row)
+        if memory.get("first_entry_touch_at") and memory.get("first_entry_touch_at") < memory.get("confirmation_at"):
+            if confirmation_was_new:
+                _stock_early_transition(memory, "WAITING_FOR_RETEST", "confirmation_after_early_touch_requires_later_retest", observed_at, bar_marker, row)
+            confirmation_bar = memory.get("confirmation_at_bar")
+            bars_since_confirmation = _stock_early_elapsed_bars(memory, row, observed_at, "confirmation_at")
+            too_far = str(row.get("entryStatus") or "") == "Too Far"
+            if bars_since_confirmation is not None and bars_since_confirmation > STOCK_EARLY_ENTRY_RETEST_BARS:
+                _stock_early_transition(memory, "MISSED_ENTRY", "no_valid_retest_within_window", observed_at, bar_marker, row)
+                return memory
+            if too_far:
+                _stock_early_transition(memory, "MISSED_ENTRY", "price_moved_too_far_without_retest", observed_at, bar_marker, row)
+                return memory
+            retest_is_later_bar = touched and str(bar_marker) != str(confirmation_bar)
+            if retest_is_later_bar:
+                _stock_early_record_event(memory, "valid_entry_at", observed_at, bar_marker, row)
+                memory["retest_at"] = observed_at
+                memory["retest_at_bar"] = bar_marker
+                _stock_early_transition(memory, "ENTRY_TRIGGERED", "valid_retest_after_confirmation", observed_at, bar_marker, row)
+                return memory
+            return memory
+        if touched:
+            _stock_early_record_event(memory, "valid_entry_at", observed_at, bar_marker, row)
+            _stock_early_transition(memory, "ENTRY_TRIGGERED", "confirmation_complete_entry_available", observed_at, bar_marker, row)
+            return memory
+        _stock_early_transition(memory, "WAITING_FOR_CONFIRMATION", "confirmation_complete_waiting_for_entry_touch", observed_at, bar_marker, row)
+        return memory
+
+    if not is_early_entry:
+        elapsed_bars = _stock_early_elapsed_bars(memory, row, observed_at)
+        if elapsed_bars is not None and elapsed_bars > STOCK_EARLY_ENTRY_EXPIRE_BARS:
+            _stock_early_transition(memory, "EXPIRED", "early_entry_no_longer_present_after_age_limit", observed_at, bar_marker, row)
+            return memory
+
+    elapsed_bars = _stock_early_elapsed_bars(memory, row, observed_at)
+    if elapsed_bars is not None and elapsed_bars > STOCK_EARLY_ENTRY_EXPIRE_BARS:
+        _stock_early_transition(memory, "EXPIRED", "confirmation_never_completed_within_age_limit", observed_at, bar_marker, row)
+    return memory
+
+
+def _stock_early_public_shadow(memory: Optional[dict]) -> Optional[dict]:
+    if not memory:
+        return None
+    fields = [
+        "version",
+        "candidate_id",
+        "state",
+        "previous_state",
+        "ticker",
+        "timeframe",
+        "direction",
+        "entry",
+        "stop",
+        "tp1",
+        "setup_generation",
+        "first_seen_at",
+        "first_entry_touch_at",
+        "confirmation_at",
+        "retest_at",
+        "valid_entry_at",
+        "tp1_before_confirmation_at",
+        "invalidation_at",
+        "last_seen_at",
+        "last_transition_at",
+        "last_transition_bar",
+        "last_price",
+        "production_bucket",
+        "production_entry_status",
+        "trigger_confirmed",
+        "b_plus_tradeable",
+        "used_price_fallback",
+    ]
+    public = {field: memory.get(field) for field in fields if field in memory}
+    public["transitions"] = list(memory.get("transitions") or [])[-8:]
+    return public
+
+
+def _stock_early_memory_diagnostics(memories: dict, touched_keys: Optional[set] = None) -> dict:
+    touched_keys = touched_keys or set()
+    all_memories = [m for m in (memories or {}).values() if isinstance(m, dict)]
+    touched_memories = [m for k, m in (memories or {}).items() if not touched_keys or k in touched_keys]
+    states = Counter(str(m.get("state") or "UNKNOWN") for m in all_memories)
+    current_states = Counter(str(m.get("state") or "UNKNOWN") for m in touched_memories)
+    terminal = [m for m in all_memories if _stock_early_terminal(str(m.get("state") or ""))]
+    confirmation_delays = []
+    retest_delays = []
+    for memory in all_memories:
+        tf = memory.get("timeframe") or ""
+        if memory.get("confirmation_at"):
+            bars = _estimated_bars_between(memory.get("first_seen_at"), memory.get("confirmation_at"), tf)
+            if bars is not None:
+                confirmation_delays.append(bars)
+        if memory.get("retest_at") and memory.get("confirmation_at"):
+            bars = _estimated_bars_between(memory.get("confirmation_at"), memory.get("retest_at"), tf)
+            if bars is not None:
+                retest_delays.append(bars)
+
+    def _median(values: list[int]) -> Optional[float]:
+        if not values:
+            return None
+        nums = sorted(values)
+        mid = len(nums) // 2
+        if len(nums) % 2:
+            return float(nums[mid])
+        return round((nums[mid - 1] + nums[mid]) / 2, 2)
+
+    total = len(all_memories)
+    entry_triggered = states.get("ENTRY_TRIGGERED", 0)
+    return {
+        "version": STOCK_EARLY_ENTRY_MEMORY_VERSION,
+        "memory_path": STOCK_EARLY_ENTRY_MEMORY_PATH,
+        "total_memories": total,
+        "current_scan_memories": len(touched_memories),
+        "states": dict(sorted(states.items())),
+        "current_scan_states": dict(sorted(current_states.items())),
+        "new_early_entry_setups": sum(1 for m in touched_memories if m.get("first_seen_at") == m.get("last_seen_at")),
+        "early_touches": sum(1 for m in all_memories if m.get("first_entry_touch_at")),
+        "confirmations_before_touch": sum(1 for m in all_memories if m.get("confirmation_at") and not m.get("first_entry_touch_at")),
+        "confirmations_after_touch": sum(1 for m in all_memories if m.get("confirmation_at") and m.get("first_entry_touch_at") and m.get("first_entry_touch_at") < m.get("confirmation_at")),
+        "waiting_for_retest": states.get("WAITING_FOR_RETEST", 0),
+        "valid_enter_now_transitions": entry_triggered,
+        "missed_entries": states.get("MISSED_ENTRY", 0),
+        "tp1_before_confirmation": states.get("TP1_BEFORE_CONFIRMATION", 0),
+        "invalidations": states.get("INVALIDATED", 0),
+        "expirations": states.get("EXPIRED", 0),
+        "terminal_outcomes": len(terminal),
+        "still_developing": total - len(terminal),
+        "entry_triggered_conversion_rate": round(entry_triggered / total, 4) if total else None,
+        "touched_before_confirmation_rate": round(
+            sum(1 for m in all_memories if m.get("first_entry_touch_at") and (not m.get("confirmation_at") or m.get("first_entry_touch_at") < m.get("confirmation_at"))) / total,
+            4,
+        ) if total else None,
+        "median_bars_early_to_confirmation": _median(confirmation_delays),
+        "max_bars_early_to_confirmation": max(confirmation_delays) if confirmation_delays else None,
+        "median_bars_confirmation_to_retest": _median(retest_delays),
+        "max_bars_confirmation_to_retest": max(retest_delays) if retest_delays else None,
+        "recent_terminal_samples": [
+            _stock_early_public_shadow(m)
+            for m in sorted(terminal, key=lambda item: str(item.get("last_transition_at") or ""), reverse=True)[:10]
+        ],
+        "recent_developing_samples": [
+            _stock_early_public_shadow(m)
+            for m in sorted(
+                [m for m in all_memories if not _stock_early_terminal(str(m.get("state") or ""))],
+                key=lambda item: str(item.get("last_seen_at") or ""),
+                reverse=True,
+            )[:20]
+        ],
+    }
+
+
+def update_stock_early_entry_shadow(rows: list, near_miss: list, scan_meta: Optional[dict], *, generated_at: Optional[datetime] = None) -> dict:
+    observed_at = _format_utc_timestamp(generated_at or _utc_now())
+    scan_generation = str((scan_meta or {}).get("ranking_generated_at") or (scan_meta or {}).get("scan_completed_at") or observed_at)
+    all_rows = [row for row in [*(rows or []), *(near_miss or [])] if isinstance(row, dict)]
+    touched_keys = set()
+    changed = False
+    with _stock_early_entry_memory_lock:
+        memories = _load_stock_early_entry_memory_locked()
+        existing_keys = set(memories.keys())
+        for row in all_rows:
+            key = stock_early_entry_memory_key(row)
+            if not key:
+                continue
+            bucket = _ranking_status_bucket(row)
+            has_existing = key in memories
+            if bucket != "EARLY_ENTRY" and not has_existing:
+                continue
+            before = json.dumps(memories.get(key, {}), sort_keys=True, default=str)
+            memory = _stock_early_update_memory(row, dict(memories.get(key) or {}), observed_at, scan_generation, bucket == "EARLY_ENTRY")
+            memories[key] = memory
+            touched_keys.add(key)
+            row["early_entry_shadow"] = _stock_early_public_shadow(memory)
+            after = json.dumps(memory, sort_keys=True, default=str)
+            changed = changed or before != after
+
+        for key in existing_keys - touched_keys:
+            memory = memories.get(key)
+            if not isinstance(memory, dict) or _stock_early_terminal(str(memory.get("state") or "")):
+                continue
+            last_seen = memory.get("last_seen_at")
+            tf = memory.get("timeframe") or ""
+            bars_missing = _estimated_bars_between(last_seen, observed_at, tf)
+            if bars_missing is not None and bars_missing > STOCK_EARLY_ENTRY_EXPIRE_BARS:
+                dummy = {"ticker": memory.get("ticker"), "timeframe": tf, "price": memory.get("last_price")}
+                _stock_early_transition(memory, "EXPIRED", "setup_absent_from_scan_beyond_age_limit", observed_at, observed_at, dummy)
+                memories[key] = memory
+                changed = True
+
+        if changed:
+            _save_stock_early_entry_memory_locked()
+        diagnostics = _stock_early_memory_diagnostics(memories, touched_keys)
+    return diagnostics
+
+
+def stock_early_entry_shadow_diagnostics() -> dict:
+    with _stock_early_entry_memory_lock:
+        memories = _load_stock_early_entry_memory_locked()
+        return _stock_early_memory_diagnostics(memories)
 
 
 def _coerce_earnings_date(value):
@@ -6926,6 +7438,19 @@ def _enrich_stock_scout_fields(
     })
     option_plan_ms = round((time.perf_counter() - option_plan_start) * 1000, 1)
     best_contract = _unclean_contract("Live contract selection replaced by Option Plan", "option_plan")
+    selected_tf = str(result.get("timeframe") or "").upper()
+    selected_df = h4_df if selected_tf == "4H" else daily_df
+    latest_bar = {}
+    if isinstance(selected_df, pd.DataFrame) and not selected_df.empty:
+        try:
+            last = selected_df.iloc[-1]
+            latest_bar = {
+                "current_bar_high": round(float(last.get("high")), 4) if last.get("high") is not None else None,
+                "current_bar_low": round(float(last.get("low")), 4) if last.get("low") is not None else None,
+                "current_candle_time": _format_utc_timestamp(selected_df.index[-1]),
+            }
+        except Exception:
+            latest_bar = {}
 
     timing = result.setdefault("_scan_timing", {})
     timing.update({
@@ -6965,6 +7490,7 @@ def _enrich_stock_scout_fields(
         "setupGradeReason": setup_grade_reason,
         "confirmationStarted": confirmation_started,
         "confirmationReason": confirmation_reason,
+        **latest_bar,
         "earnings": earnings,
         "option_plan": option_plan,
         "best_contract": best_contract,
