@@ -7169,6 +7169,30 @@ function renderScannerResults() {
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
   const snapshotSetups = [...allRows, ...allNearMiss];
   const visibleSetups = [...rows, ...nearMiss];
+  const warmingMeta = latestScannerMeta || {};
+  const discoveredWarmupWithoutRows = scannerRows.length === 0
+    && scannerNearMiss.length === 0
+    && isDiscoveredWarmingMeta(warmingMeta);
+
+  if (discoveredWarmupWithoutRows) {
+    ['marketCoverage', 'marketSnapshot', 'marketIntelligence', 'topOpportunities'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.innerHTML = '';
+        el.style.display = 'none';
+      }
+    });
+    if (summary) summary.innerHTML = '';
+    if (results) results.innerHTML = renderDiscoveryWarmupCard(warmingMeta);
+    const nmSection = document.getElementById('near-miss-section');
+    if (nmSection) nmSection.style.display = 'none';
+    return;
+  }
+
+  ['marketCoverage', 'marketSnapshot', 'marketIntelligence', 'topOpportunities'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = '';
+  });
   renderMarketCoveragePanel(snapshotSetups, latestScannerMeta || {});
   renderMarketSnapshot(snapshotSetups);
   renderMarketIntelligencePanel(snapshotSetups, latestScannerMeta || {});
@@ -7179,11 +7203,7 @@ function renderScannerResults() {
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
-    const warmingMeta = latestScannerMeta || {};
-    const warming = scannerRows.length === 0 && scannerNearMiss.length === 0 && isDiscoveredWarmingMeta(warmingMeta);
-    results.innerHTML = warming
-      ? renderDiscoveryWarmupCard(warmingMeta)
-      : `<div class="empty">No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.</div>`;
+    results.innerHTML = `<div class="empty">No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.</div>`;
   } else {
     results.innerHTML = rows.map(renderCard).join('');
   }
