@@ -57,6 +57,31 @@ const earlyStages = guidance.readinessStages(earlyEntrySetup, { bucket: 'EARLY_E
 assert.deepStrictEqual(earlyStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Early', 'Execute:Caution']);
 assert.deepStrictEqual(guidance.nextStep(earlyEntrySetup, { bucket: 'EARLY_ENTRY' }, 'available').lines, ["Structure has broken, but full confirmation hasn't happened yet.", 'Consider smaller size given lower confirmation.']);
 
+const earlyTouchPresentation = {
+  ...earlyEntrySetup,
+  execution_lifecycle_presentation_enabled: true,
+  execution_lifecycle_state: 'EARLY_TOUCH',
+};
+assert.strictEqual(guidance.executionState(earlyTouchPresentation, { bucket: 'EARLY_ENTRY' }), 'SETUP_EARLY_TOUCH');
+assert.deepStrictEqual(guidance.cardStatus(earlyTouchPresentation, { bucket: 'EARLY_ENTRY' }), { label: 'EARLY TOUCH', className: 'early-touch' });
+assert.deepStrictEqual(guidance.nextStep(earlyTouchPresentation, { bucket: 'EARLY_ENTRY' }, 'available').lines, ['Price reached the entry before confirmation. Wait - this is not Enter Now.']);
+
+const waitingRetestPresentation = {
+  ...earlyEntrySetup,
+  execution_lifecycle_presentation_enabled: true,
+  execution_lifecycle_state: 'WAITING_FOR_RETEST',
+};
+assert.strictEqual(guidance.executionState(waitingRetestPresentation, { bucket: 'EARLY_ENTRY' }), 'SETUP_WAITING_FOR_RETEST');
+assert.deepStrictEqual(guidance.cardStatus(waitingRetestPresentation, { bucket: 'EARLY_ENTRY' }), { label: 'WAITING FOR RETEST', className: 'waiting-retest' });
+assert.deepStrictEqual(guidance.nextStep(waitingRetestPresentation, { bucket: 'EARLY_ENTRY' }, 'available').lines, ['Confirmation completed after an early touch. Wait for a fresh retest of the entry area.']);
+
+const disabledPresentation = {
+  ...earlyEntrySetup,
+  execution_lifecycle_presentation_enabled: false,
+  execution_lifecycle_state: 'EARLY_TOUCH',
+};
+assert.deepStrictEqual(guidance.cardStatus(disabledPresentation, { bucket: 'EARLY_ENTRY' }), { label: 'EARLY ENTRY', className: 'early-entry' });
+
 // Canonical readiness bucket wins over stale/raw trade_eval readiness fields.
 const staleConfirmedRawFields = setup({
   setupGrade: 'A',

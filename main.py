@@ -17,6 +17,8 @@ from scanner import (
     option_pricing_diagnostics,
     queue_option_pricing_for_contracts,
     stock_early_entry_shadow_diagnostics,
+    stock_event_memory_presentation_enabled,
+    stock_execution_lifecycle_presentation,
     build_bos_displacement_shadow_report,
     _batch_download,
     scan_cached,
@@ -726,6 +728,8 @@ def _summary_row(row: dict, generation: Optional[str]) -> dict:
     pricing_status = str(contract.get("pricing_status") or row.get("pricing_status") or "").lower()
     setup_id = _summary_setup_id(row, generation)
     status_bucket = _summary_status_bucket(row)
+    execution_lifecycle = stock_execution_lifecycle_presentation(row)
+    execution_lifecycle["ranking_status_bucket"] = status_bucket
     earnings = row.get("earnings") if isinstance(row.get("earnings"), dict) else {}
     summary = {
         "ticker": row.get("ticker") or row.get("symbol"),
@@ -747,6 +751,12 @@ def _summary_row(row: dict, generation: Optional[str]) -> dict:
         "display_status": status_bucket,
         "status_bucket": status_bucket,
         "normalized_status_bucket": status_bucket,
+        "ranking_status_bucket": execution_lifecycle.get("ranking_status_bucket") or status_bucket,
+        "execution_lifecycle": execution_lifecycle,
+        "execution_lifecycle_state": execution_lifecycle.get("state"),
+        "execution_lifecycle_display": execution_lifecycle.get("display"),
+        "execution_lifecycle_reason": execution_lifecycle.get("reason"),
+        "execution_lifecycle_presentation_enabled": execution_lifecycle.get("enabled"),
         "entryStatus": row.get("entryStatus"),
         "setupStatus": row.get("setupStatus"),
         "setupStatusReason": row.get("setupStatusReason"),
@@ -833,13 +843,19 @@ def _summary_budget_counts(rows: list[dict]) -> dict:
 
 
 def _summary_today_counts(rows: list[dict]) -> dict:
-    buckets = Counter(str(row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
+    if stock_event_memory_presentation_enabled():
+        buckets = Counter(str((row.get("execution_lifecycle") or {}).get("bucket") or row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
+    else:
+        buckets = Counter(str(row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
     accessibility = Counter(str((row.get("accessibility") or {}).get("key") or "") for row in rows)
     return {
         "enter_now": buckets.get("ENTER_NOW", 0),
+        "waiting_for_retest": buckets.get("WAITING_FOR_RETEST", 0),
         "early_entry": buckets.get("EARLY_ENTRY", 0),
+        "early_touch": buckets.get("EARLY_TOUCH", 0),
         "almost_ready": buckets.get("ALMOST_READY", 0),
         "waiting": buckets.get("WAITING", 0),
+        "missed_resolved": buckets.get("RESOLVED", 0),
         "budget_friendly": accessibility.get("easy", 0),
         "premium_only": accessibility.get("premium", 0),
     }
@@ -859,6 +875,7 @@ def _summarize_scan_response(result: dict) -> dict:
         "scan_generation": generation,
         "qualified_count": len(rows),
         "near_miss_count": len(near_miss),
+        "stock_event_memory_presentation_v1": stock_event_memory_presentation_enabled(),
         "today_market_counts": _summary_today_counts(all_rows),
         "budget_counts": _summary_budget_counts(all_rows),
         "summary_generation_ms": round((time.perf_counter() - started) * 1000, 1),

@@ -639,6 +639,8 @@
   }
   .grade-badge.enter-now { background:rgba(34,197,94,0.15); border-color:rgba(34,197,94,0.38); color:#86efac; }
   .grade-badge.early-entry { background:rgba(202,138,4,0.16); border-color:rgba(234,179,8,0.44); color:#fde68a; }
+  .grade-badge.early-touch { background:rgba(251,146,60,0.14); border-color:rgba(251,146,60,0.36); color:#fed7aa; }
+  .grade-badge.waiting-retest { background:rgba(14,165,233,0.14); border-color:rgba(14,165,233,0.36); color:#bae6fd; }
   .grade-badge.wait { background:rgba(245,158,11,0.14); border-color:rgba(245,158,11,0.36); color:#fcd34d; }
   .grade-badge.almost-ready { background:var(--accent-soft); border-color:rgba(139,92,246,0.44); color:#ddd6fe; }
   .grade-badge.skip { background:rgba(148,163,184,0.1); border-color:rgba(148,163,184,0.2); color:#cbd5e1; }
@@ -987,6 +989,8 @@
   .index-simple-status { font-size:20px; font-weight:950; letter-spacing:0.01em; margin-top:3px; }
   .index-simple-status.enter-now { color:var(--long); }
   .index-simple-status.early-entry { color:#fde68a; }
+  .index-simple-status.early-touch { color:#fed7aa; }
+  .index-simple-status.waiting-retest { color:#bae6fd; }
   .index-simple-status.wait { color:#fbbf24; }
   .index-simple-status.almost-ready { color:#ddd6fe; }
   .index-simple-status.skip { color:#94a3b8; }
@@ -3631,9 +3635,12 @@
           <option value="all">All Statuses</option>
           <option value="ACTIONABLE" selected>Opportunities</option>
           <option value="ENTER_NOW">Enter Now</option>
+          <option value="WAITING_FOR_RETEST">Waiting for Retest</option>
           <option value="EARLY_ENTRY">Early Entry</option>
+          <option value="EARLY_TOUCH">Early Touch</option>
           <option value="DEVELOPING">Developing Setups</option>
           <option value="ALMOST_READY">Almost Ready</option>
+          <option value="RESOLVED">Missed / Resolved</option>
           <option value="WAITING">Waiting</option>
           <option value="SKIP">Skip</option>
         </select>
@@ -6382,8 +6389,15 @@ function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
   if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
   const statusBucket = setupProgressState(s).bucket;
-  if (filters.status === 'ACTIONABLE' && !['ENTER_NOW', 'EARLY_ENTRY', 'ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
-  if (filters.status === 'DEVELOPING' && !['EARLY_ENTRY', 'ALMOST_READY', 'WAITING'].includes(statusBucket)) return false;
+  const eventMemoryActive = stockEventMemoryPresentationEnabled(s);
+  const actionableBuckets = eventMemoryActive
+    ? ['ENTER_NOW', 'WAITING_FOR_RETEST', 'EARLY_ENTRY', 'ALMOST_READY', 'WAITING']
+    : ['ENTER_NOW', 'EARLY_ENTRY', 'ALMOST_READY', 'WAITING'];
+  const developingBuckets = eventMemoryActive
+    ? ['WAITING_FOR_RETEST', 'EARLY_ENTRY', 'EARLY_TOUCH', 'ALMOST_READY', 'WAITING']
+    : ['EARLY_ENTRY', 'ALMOST_READY', 'WAITING'];
+  if (filters.status === 'ACTIONABLE' && !actionableBuckets.includes(statusBucket)) return false;
+  if (filters.status === 'DEVELOPING' && !developingBuckets.includes(statusBucket)) return false;
   if (filters.status !== 'all' && filters.status !== 'ACTIONABLE' && filters.status !== 'DEVELOPING' && statusBucket !== filters.status) return false;
   if (filters.direction !== 'all' && String(s?.direction || '').toUpperCase() !== filters.direction) return false;
   if (filters.quality !== 'all' && setupGradeValue(s) !== filters.quality) return false;
@@ -6554,24 +6568,39 @@ function opportunityBudgetSummary(rows = []) {
   return rows.reduce((acc, row) => {
     const bucket = setupProgressState(row).bucket;
     if (bucket === 'ENTER_NOW') acc.enterNow += 1;
+    if (bucket === 'WAITING_FOR_RETEST') acc.waitingForRetest += 1;
     if (bucket === 'ALMOST_READY') acc.almostReady += 1;
     if (bucket === 'EARLY_ENTRY') acc.earlyEntry += 1;
+    if (bucket === 'EARLY_TOUCH') acc.earlyTouch += 1;
+    if (bucket === 'RESOLVED') acc.resolved += 1;
     const accessibility = accessibilityScore(row).key;
     if (accessibility === 'easy') acc.budgetFriendly += 1;
     if (accessibility === 'premium') acc.premiumOnly += 1;
     return acc;
-  }, { enterNow: 0, almostReady: 0, earlyEntry: 0, budgetFriendly: 0, premiumOnly: 0 });
+  }, { enterNow: 0, waitingForRetest: 0, almostReady: 0, earlyEntry: 0, earlyTouch: 0, resolved: 0, budgetFriendly: 0, premiumOnly: 0 });
 }
 
 function renderBudgetSummaryTiles(rows = []) {
   const summary = opportunityBudgetSummary(rows);
-  const tiles = [
-    ['Enter Now', summary.enterNow],
-    ['Almost Ready', summary.almostReady],
-    ['Early Entry', summary.earlyEntry],
-    ['Budget Friendly', summary.budgetFriendly],
-    ['Premium Only', summary.premiumOnly],
-  ];
+  const eventMemoryActive = rows.some(row => stockEventMemoryPresentationEnabled(row));
+  const tiles = eventMemoryActive
+    ? [
+        ['Enter Now', summary.enterNow],
+        ['Waiting for Retest', summary.waitingForRetest],
+        ['Early Entry', summary.earlyEntry],
+        ['Early Touch', summary.earlyTouch],
+        ['Almost Ready', summary.almostReady],
+        ['Resolved', summary.resolved],
+        ['Budget Friendly', summary.budgetFriendly],
+        ['Premium Only', summary.premiumOnly],
+      ]
+    : [
+        ['Enter Now', summary.enterNow],
+        ['Almost Ready', summary.almostReady],
+        ['Early Entry', summary.earlyEntry],
+        ['Budget Friendly', summary.budgetFriendly],
+        ['Premium Only', summary.premiumOnly],
+      ];
   return `
     <div class="budget-summary-row" aria-label="Today's market opportunity summary">
       ${tiles.map(([label, value]) => `
@@ -6965,7 +6994,8 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
       : null
   );
   const throughput = Number(performance.symbols_per_second ?? meta.symbols_per_second);
-  const progressCounts = countBy(allRows, ['SKIP', 'WAITING', 'ALMOST_READY', 'EARLY_ENTRY', 'ENTER_NOW'], row => setupProgressState(row).bucket);
+  const progressLabels = scannerProgressLabelsForRows(allRows);
+  const progressCounts = countBy(allRows, progressLabels, row => setupProgressState(row).bucket);
   const gradeCounts = countBy(allRows, ['A', 'B', 'C'], setupGradeValue);
   const noTradeReasons = {};
   allRows.forEach(row => {
@@ -7027,11 +7057,10 @@ function renderMarketCoveragePanel(rows = [], meta = {}) {
         <div>
           <div class="snapshot-group-title">Opportunity Funnel</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Enter Now', progressCounts.ENTER_NOW || 0, 'timing-entry', 'status', 'ENTER_NOW')}
-            ${renderSnapshotBadge('Early Entry', progressCounts.EARLY_ENTRY || 0, 'timing-area', 'status', 'EARLY_ENTRY')}
-            ${renderSnapshotBadge('Almost Ready', progressCounts.ALMOST_READY || 0, 'timing-area', 'status', 'ALMOST_READY')}
-            ${renderSnapshotBadge('Waiting', progressCounts.WAITING || 0, 'timing-reaction', 'status', 'WAITING')}
-            ${renderSnapshotBadge('Skip', progressCounts.SKIP || 0, 'timing-not-ready', 'status', 'SKIP')}
+            ${progressLabels.map(bucket => {
+              const [label, className] = scannerProgressBadgeConfig(bucket);
+              return renderSnapshotBadge(label, progressCounts[bucket] || 0, className, 'status', bucket);
+            }).join('')}
           </div>
         </div>
         <div>
@@ -7075,7 +7104,7 @@ function renderMarketSnapshot(rows) {
   const el = document.getElementById('marketSnapshot');
   if (!el) return;
   const gradeCounts = countBy(rows, ['A', 'B', 'C'], setupGradeValue);
-  const progressLabels = ['SKIP', 'WAITING', 'ALMOST_READY', 'EARLY_ENTRY', 'ENTER_NOW'];
+  const progressLabels = scannerProgressLabelsForRows(rows);
   const progressCounts = countBy(rows, progressLabels, row => setupProgressState(row).bucket);
   const directionCounts = countBy(rows, ['LONG', 'SHORT'], row => String(row.direction || '').toUpperCase());
   const contractCounts = countBy(rows, ['CALL', 'PUT'], contractTypeValue);
@@ -7095,11 +7124,10 @@ function renderMarketSnapshot(rows) {
         <div>
           <div class="snapshot-group-title">Status</div>
           <div class="snapshot-badges">
-            ${renderSnapshotBadge('Skip', progressCounts.SKIP || 0, 'timing-not-ready', 'status', 'SKIP')}
-            ${renderSnapshotBadge('Waiting', progressCounts.WAITING || 0, 'timing-reaction', 'status', 'WAITING')}
-            ${renderSnapshotBadge('Almost Ready', progressCounts.ALMOST_READY || 0, 'timing-area', 'status', 'ALMOST_READY')}
-            ${renderSnapshotBadge('Early Entry', progressCounts.EARLY_ENTRY || 0, 'timing-area', 'status', 'EARLY_ENTRY')}
-            ${renderSnapshotBadge('Enter Now', progressCounts.ENTER_NOW || 0, 'timing-entry', 'status', 'ENTER_NOW')}
+            ${progressLabels.map(bucket => {
+              const [label, className] = scannerProgressBadgeConfig(bucket);
+              return renderSnapshotBadge(label, progressCounts[bucket] || 0, className, 'status', bucket);
+            }).join('')}
           </div>
         </div>
         <div>
@@ -7251,6 +7279,8 @@ function renderPriorityWatchlist() {
 }
 
 function simpleStatus(setup) {
+  const lifecycle = stockExecutionLifecyclePresentation(setup);
+  if (lifecycle) return { label: lifecycle.label, className: lifecycle.className };
   const explicitBucket = String(firstPresent(setup.status_bucket, setup.normalized_status_bucket, '') || '').toUpperCase();
   if (explicitBucket === 'ENTER_NOW') return { label: 'ENTER NOW', className: 'enter-now' };
   if (explicitBucket === 'EARLY_ENTRY') return { label: 'EARLY ENTRY', className: 'early-entry' };
@@ -7284,6 +7314,48 @@ function simpleStatus(setup) {
   return { label: 'WAIT', className: 'wait' };
 }
 
+function stockEventMemoryPresentationEnabled(setup = {}) {
+  if (setup.execution_lifecycle_presentation_enabled === true) return true;
+  return Boolean(latestScannerMeta?.stock_event_memory_presentation_v1);
+}
+
+function stockExecutionLifecyclePresentation(setup = {}) {
+  if (!stockEventMemoryPresentationEnabled(setup)) return null;
+  const state = String(firstPresent(setup.execution_lifecycle_state, setup.execution_lifecycle?.state, '') || '').toUpperCase();
+  const map = {
+    EARLY_ENTRY_BUILDING: { label: 'EARLY ENTRY', bucket: 'EARLY_ENTRY', className: 'early-entry', stage: 3.75, percent: 82 },
+    EARLY_TOUCH: { label: 'EARLY TOUCH', bucket: 'EARLY_TOUCH', className: 'early-touch', stage: 3.5, percent: 75 },
+    WAITING_FOR_RETEST: { label: 'WAITING FOR RETEST', bucket: 'WAITING_FOR_RETEST', className: 'waiting-retest', stage: 4.75, percent: 98 },
+    ENTRY_TRIGGERED: { label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', stage: 5, percent: 100 },
+    MISSED_ENTRY: { label: 'MISSED ENTRY', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
+    TP1_BEFORE_CONFIRMATION: { label: 'TP1 BEFORE CONFIRMATION', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
+    INVALIDATED: { label: 'INVALIDATED', bucket: 'RESOLVED', className: 'skip', stage: 0, percent: 0 },
+    EXPIRED: { label: 'EXPIRED', bucket: 'RESOLVED', className: 'skip', stage: 0, percent: 0 },
+    PLAN_REPLACED: { label: 'PLAN REPLACED', bucket: 'RESOLVED', className: 'skip', stage: 0, percent: 0 },
+  };
+  return map[state] || null;
+}
+
+function scannerProgressLabelsForRows(rows = []) {
+  const eventMemoryActive = rows.some(row => stockEventMemoryPresentationEnabled(row));
+  return eventMemoryActive
+    ? ['ENTER_NOW', 'WAITING_FOR_RETEST', 'ALMOST_READY', 'EARLY_ENTRY', 'EARLY_TOUCH', 'WAITING', 'RESOLVED', 'SKIP']
+    : ['SKIP', 'WAITING', 'ALMOST_READY', 'EARLY_ENTRY', 'ENTER_NOW'];
+}
+
+function scannerProgressBadgeConfig(bucket) {
+  return {
+    ENTER_NOW: ['Enter Now', 'timing-entry'],
+    WAITING_FOR_RETEST: ['Waiting for Retest', 'timing-entry'],
+    EARLY_ENTRY: ['Early Entry', 'timing-area'],
+    EARLY_TOUCH: ['Early Touch', 'timing-area'],
+    ALMOST_READY: ['Almost Ready', 'timing-area'],
+    WAITING: ['Waiting', 'timing-reaction'],
+    RESOLVED: ['Missed / Resolved', 'timing-not-ready'],
+    SKIP: ['Skip', 'timing-not-ready'],
+  }[bucket] || [bucket.replace(/_/g, ' '), 'timing-not-ready'];
+}
+
 function hasValidTradePlan(setup) {
   return ['entry', 'sl', 'tp1'].every(key => {
     const value = Number(setup?.[key]);
@@ -7292,6 +7364,16 @@ function hasValidTradePlan(setup) {
 }
 
 function setupProgressState(setup) {
+  const lifecycle = stockExecutionLifecyclePresentation(setup);
+  if (lifecycle) {
+    return {
+      stage: lifecycle.stage,
+      label: lifecycle.label,
+      bucket: lifecycle.bucket,
+      className: lifecycle.className,
+      percent: lifecycle.percent,
+    };
+  }
   const explicitBucket = String(firstPresent(setup.status_bucket, setup.normalized_status_bucket, '') || '').toUpperCase();
   if (explicitBucket === 'ENTER_NOW') return { stage: 5, label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', percent: 100 };
   if (explicitBucket === 'EARLY_ENTRY') return { stage: 4.5, label: 'Early Entry', bucket: 'EARLY_ENTRY', className: 'early-entry', percent: 97 };

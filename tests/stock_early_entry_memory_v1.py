@@ -1,9 +1,11 @@
 import tempfile
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import scanner
+import smart_notifications
 
 
 def setup(**overrides):
@@ -155,6 +157,8 @@ def test_plan_change_creates_new_memory_and_short_touch_rules():
     run([second], "2026-08-05T11:00:00Z")
     diag = scanner.stock_early_entry_shadow_diagnostics()
     assert diag["total_memories"] == 2
+    assert diag["states"]["PLAN_REPLACED"] == 1
+    assert diag["states"]["EARLY_TOUCH"] == 1
 
     reset_memory()
     short = setup(
@@ -198,6 +202,81 @@ def test_scheduled_scans_preserve_memory_without_recreating():
     assert len(second_shadow["transitions"]) == len(first_shadow["transitions"])
 
 
+def test_execution_lifecycle_presentation_is_separate_from_ranking_bucket():
+    reset_memory()
+    previous_flag = scanner.STOCK_EVENT_MEMORY_PRESENTATION_V1
+    try:
+        scanner.STOCK_EVENT_MEMORY_PRESENTATION_V1 = False
+        row = setup(current_bar=1, price=100.2, current_bar_low=99.8, current_bar_high=100.4)
+        run([row], "2026-08-05T10:00:00Z")
+        presentation = scanner.stock_execution_lifecycle_presentation(row)
+        assert presentation["enabled"] is False
+        assert presentation["ranking_status_bucket"] == "EARLY_ENTRY"
+        assert presentation["state"] == "EARLY_TOUCH"
+        assert presentation["display"] == "EARLY TOUCH"
+        assert scanner._ranking_status_bucket(row) == "EARLY_ENTRY"
+
+        scanner.STOCK_EVENT_MEMORY_PRESENTATION_V1 = True
+        enabled = scanner.stock_execution_lifecycle_presentation(row)
+        assert enabled["enabled"] is True
+        assert enabled["bucket"] == "EARLY_TOUCH"
+        assert enabled["actionable"] is False
+    finally:
+        scanner.STOCK_EVENT_MEMORY_PRESENTATION_V1 = previous_flag
+
+
+def test_stale_early_touch_blocks_enter_now_notifications_until_valid_retest():
+    row = setup(
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+        early_entry_shadow={"state": "WAITING_FOR_RETEST"},
+    )
+    assert smart_notifications.setup_bucket(row) == "ENTER_NOW"
+    assert smart_notifications.stale_early_touch_blocks_enter_now(row) is True
+
+    row["early_entry_shadow"] = {"state": "ENTRY_TRIGGERED"}
+    assert smart_notifications.stale_early_touch_blocks_enter_now(row) is False
+
+
+def test_daily_lifecycle_report_counts_today_transitions_only():
+    memories = {
+        "aaa": {
+            "ticker": "AAA",
+            "timeframe": "1H",
+            "direction": "LONG",
+            "candidate_id": "aaa",
+            "transitions": [
+                {"from": None, "to": "EARLY_ENTRY_BUILDING", "timestamp": "2026-08-05T10:00:00Z", "reason": "early_entry_first_printed"},
+                {"from": "EARLY_ENTRY_BUILDING", "to": "EARLY_TOUCH", "timestamp": "2026-08-05T11:00:00Z", "reason": "planned_entry_touched_before_confirmation"},
+                {"from": "EARLY_TOUCH", "to": "WAITING_FOR_RETEST", "timestamp": "2026-08-04T12:00:00Z", "reason": "yesterday"},
+            ],
+        },
+        "bbb": {
+            "ticker": "BBB",
+            "timeframe": "4H",
+            "direction": "SHORT",
+            "candidate_id": "bbb",
+            "transitions": [
+                {"from": None, "to": "EARLY_ENTRY_BUILDING", "timestamp": "2026-08-05T10:30:00Z", "reason": "early_entry_first_printed"},
+                {"from": "WAITING_FOR_RETEST", "to": "ENTRY_TRIGGERED", "timestamp": "2026-08-05T14:00:00Z", "reason": "valid_retest_after_confirmation"},
+                {"from": "ENTRY_TRIGGERED", "to": "MISSED_ENTRY", "timestamp": "not-a-date", "reason": "ignored"},
+            ],
+        },
+    }
+    report = scanner._stock_early_daily_lifecycle_report(memories, now=datetime(2026, 8, 5, tzinfo=timezone.utc))
+    assert report["report_date_utc"] == "2026-08-05"
+    assert report["counts"]["early_entry"] == 2
+    assert report["counts"]["early_touch"] == 1
+    assert report["counts"]["waiting_for_retest"] == 0
+    assert report["counts"]["enter_now"] == 1
+    assert report["counts"]["missed_entry"] == 0
+    assert [item["key"] for item in report["ordered_counts"]][:4] == [
+        "early_entry",
+        "early_touch",
+        "waiting_for_retest",
+        "enter_now",
+    ]
+
+
 if __name__ == "__main__":
     test_confirmation_before_entry_touch_enters_without_changing_bucket()
     test_entry_touch_before_confirmation_waits_for_later_retest()
@@ -206,4 +285,7 @@ if __name__ == "__main__":
     test_plan_change_creates_new_memory_and_short_touch_rules()
     test_expiration_for_non_confirming_setup()
     test_scheduled_scans_preserve_memory_without_recreating()
+    test_execution_lifecycle_presentation_is_separate_from_ranking_bucket()
+    test_stale_early_touch_blocks_enter_now_notifications_until_valid_retest()
+    test_daily_lifecycle_report_counts_today_transitions_only()
     print("stock_early_entry_memory_v1 passed")

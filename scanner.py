@@ -209,6 +209,7 @@ STOCK_EARLY_ENTRY_MEMORY_VERSION = "stock-early-entry-memory-v1"
 STOCK_EARLY_ENTRY_MEMORY_PATH = os.getenv("STOCK_EARLY_ENTRY_MEMORY_PATH") or "/tmp/kairos_stock_early_entry_memory_v1.json"
 STOCK_EARLY_ENTRY_EXPIRE_BARS = int(os.getenv("STOCK_EARLY_ENTRY_EXPIRE_BARS") or "20")
 STOCK_EARLY_ENTRY_RETEST_BARS = int(os.getenv("STOCK_EARLY_ENTRY_RETEST_BARS") or "4")
+STOCK_EVENT_MEMORY_PRESENTATION_V1 = str(os.getenv("STOCK_EVENT_MEMORY_PRESENTATION_V1") or "false").strip().lower() in {"1", "true", "yes", "on"}
 _stock_early_entry_memory_lock = threading.RLock()
 _stock_early_entry_memory_loaded = False
 _stock_early_entry_memory = {}
@@ -1036,6 +1037,7 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "partial_result_reason": scan_meta.get("partial_result_reason"),
         "market_data_failures": scan_meta.get("market_data_failures", {}),
         "early_entry_shadow": scan_meta.get("early_entry_shadow") or stock_early_entry_shadow_diagnostics(),
+        "stock_event_memory_presentation_v1": stock_event_memory_presentation_enabled(),
         "scan_duration_ms": scan_meta.get("scan_duration_ms"),
         "scan_started_at": scan_meta.get("scan_started_at"),
         "scan_completed_at": scan_meta.get("scan_completed_at"),
@@ -2616,6 +2618,121 @@ def stock_early_entry_memory_key(row: dict) -> Optional[str]:
     ])
 
 
+def stock_event_memory_presentation_enabled() -> bool:
+    return STOCK_EVENT_MEMORY_PRESENTATION_V1
+
+
+_STOCK_EARLY_TERMINAL_STATES = {
+    "ENTRY_TRIGGERED",
+    "MISSED_ENTRY",
+    "TP1_BEFORE_CONFIRMATION",
+    "INVALIDATED",
+    "EXPIRED",
+    "PLAN_REPLACED",
+}
+
+
+_STOCK_EXECUTION_LIFECYCLE_PRESENTATION = {
+    "EARLY_ENTRY_BUILDING": {
+        "display": "EARLY ENTRY",
+        "bucket": "EARLY_ENTRY",
+        "class_name": "early-entry",
+        "actionable": True,
+        "reason": "Lower-confirmation setup. Price has not touched the planned entry yet.",
+    },
+    "EARLY_TOUCH": {
+        "display": "EARLY TOUCH",
+        "bucket": "EARLY_TOUCH",
+        "class_name": "early-touch",
+        "actionable": False,
+        "reason": "Price reached the entry before confirmation. Wait - this is not Enter Now.",
+    },
+    "WAITING_FOR_CONFIRMATION": {
+        "display": "WAITING FOR CONFIRMATION",
+        "bucket": "WAITING",
+        "class_name": "wait",
+        "actionable": False,
+        "reason": "Entry is not confirmed yet.",
+    },
+    "WAITING_FOR_RETEST": {
+        "display": "WAITING FOR RETEST",
+        "bucket": "WAITING_FOR_RETEST",
+        "class_name": "waiting-retest",
+        "actionable": True,
+        "reason": "Confirmation completed after an early touch. Wait for a fresh retest of the entry area.",
+    },
+    "ENTRY_TRIGGERED": {
+        "display": "ENTER NOW",
+        "bucket": "ENTER_NOW",
+        "class_name": "enter-now",
+        "actionable": True,
+        "reason": "Confirmation is complete and a valid post-confirmation entry is available.",
+    },
+    "MISSED_ENTRY": {
+        "display": "MISSED ENTRY",
+        "bucket": "RESOLVED",
+        "class_name": "too-late",
+        "actionable": False,
+        "reason": "The confirmed setup moved away without a valid retest. Do not chase.",
+    },
+    "TP1_BEFORE_CONFIRMATION": {
+        "display": "TP1 BEFORE CONFIRMATION",
+        "bucket": "RESOLVED",
+        "class_name": "too-late",
+        "actionable": False,
+        "reason": "The move reached the first target before confirmation completed. This setup is no longer actionable.",
+    },
+    "INVALIDATED": {
+        "display": "INVALIDATED",
+        "bucket": "RESOLVED",
+        "class_name": "skip",
+        "actionable": False,
+        "reason": "The setup invalidated before a valid entry.",
+    },
+    "EXPIRED": {
+        "display": "EXPIRED",
+        "bucket": "RESOLVED",
+        "class_name": "skip",
+        "actionable": False,
+        "reason": "The setup aged out before producing a valid entry.",
+    },
+    "PLAN_REPLACED": {
+        "display": "PLAN REPLACED",
+        "bucket": "RESOLVED",
+        "class_name": "skip",
+        "actionable": False,
+        "reason": "The trade plan changed materially; this memory was closed.",
+    },
+}
+
+
+def stock_execution_lifecycle_presentation(row: Optional[dict]) -> dict:
+    row = row or {}
+    ranking_bucket = _ranking_status_bucket(row)
+    shadow = row.get("early_entry_shadow") if isinstance(row.get("early_entry_shadow"), dict) else {}
+    state = str(shadow.get("state") or "").upper()
+    mapped = dict(_STOCK_EXECUTION_LIFECYCLE_PRESENTATION.get(state) or {})
+    if not mapped:
+        mapped = {
+            "display": ranking_bucket.replace("_", " ").title() if ranking_bucket else None,
+            "bucket": ranking_bucket,
+            "class_name": "",
+            "actionable": ranking_bucket in {"ENTER_NOW", "EARLY_ENTRY", "ALMOST_READY"},
+            "reason": None,
+        }
+    return {
+        "enabled": stock_event_memory_presentation_enabled(),
+        "ranking_status_bucket": ranking_bucket,
+        "state": state or None,
+        "display": mapped.get("display"),
+        "bucket": mapped.get("bucket"),
+        "class_name": mapped.get("class_name"),
+        "actionable": mapped.get("actionable"),
+        "reason": mapped.get("reason"),
+        "source": "stock_early_entry_event_memory_v1" if state else "ranking_status_bucket",
+    }
+
+
 def _stock_early_price_evidence(row: dict) -> dict:
     price = _safe_float(row.get("price") if row.get("price") is not None else row.get("current_price"))
     high = _safe_float(
@@ -2720,7 +2837,28 @@ def _stock_early_record_event(memory: dict, field: str, observed_at: str, bar_ma
 
 
 def _stock_early_terminal(state: str) -> bool:
-    return state in {"ENTRY_TRIGGERED", "MISSED_ENTRY", "TP1_BEFORE_CONFIRMATION", "INVALIDATED", "EXPIRED"}
+    return state in _STOCK_EARLY_TERMINAL_STATES
+
+
+def _stock_early_mark_replaced_memories(memories: dict, row: dict, active_key: str, observed_at: str, bar_marker: str) -> bool:
+    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+    if not ticker:
+        return False
+    changed = False
+    for key, memory in list((memories or {}).items()):
+        if key == active_key or not isinstance(memory, dict):
+            continue
+        if str(memory.get("version") or "") != STOCK_EARLY_ENTRY_MEMORY_VERSION:
+            continue
+        if str(memory.get("ticker") or "").strip().upper() != ticker:
+            continue
+        if _stock_early_terminal(str(memory.get("state") or "")):
+            continue
+        _stock_early_transition(memory, "PLAN_REPLACED", "material_trade_plan_changed", observed_at, bar_marker, row)
+        memory["replaced_by_candidate_id"] = active_key
+        memories[key] = memory
+        changed = True
+    return changed
 
 
 def _stock_early_elapsed_bars(memory: dict, row: dict, observed_at: str, start_field: str = "first_seen_at") -> Optional[int]:
@@ -2752,6 +2890,8 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
             "setup_generation": _stock_early_setup_generation(row),
             "first_seen_at": observed_at,
             "first_seen_bar": bar_marker,
+            "observed_at_initialization": True,
+            "initialization_evidence": "observed_at_initialization",
             "state": None,
             "previous_state": None,
             "transitions": [],
@@ -2845,6 +2985,8 @@ def _stock_early_public_shadow(memory: Optional[dict]) -> Optional[dict]:
         "tp1",
         "setup_generation",
         "first_seen_at",
+        "observed_at_initialization",
+        "initialization_evidence",
         "first_entry_touch_at",
         "confirmation_at",
         "retest_at",
@@ -2864,6 +3006,79 @@ def _stock_early_public_shadow(memory: Optional[dict]) -> Optional[dict]:
     public = {field: memory.get(field) for field in fields if field in memory}
     public["transitions"] = list(memory.get("transitions") or [])[-8:]
     return public
+
+
+def _stock_early_daily_lifecycle_report(memories: dict, *, now: Optional[datetime] = None) -> dict:
+    report_dt = (now or _utc_now()).astimezone(timezone.utc)
+    report_date = report_dt.date()
+    ordered_states = [
+        ("early_entry", "EARLY_ENTRY_BUILDING", "Early Entry"),
+        ("early_touch", "EARLY_TOUCH", "Early Touch"),
+        ("waiting_for_retest", "WAITING_FOR_RETEST", "Waiting for Retest"),
+        ("enter_now", "ENTRY_TRIGGERED", "Enter Now"),
+        ("missed_entry", "MISSED_ENTRY", "Missed Entry"),
+        ("tp1_before_confirmation", "TP1_BEFORE_CONFIRMATION", "TP1 Before Confirmation"),
+        ("invalidated", "INVALIDATED", "Invalidated"),
+        ("expired", "EXPIRED", "Expired"),
+        ("plan_replaced", "PLAN_REPLACED", "Plan Replaced"),
+    ]
+    state_to_key = {state: key for key, state, _label in ordered_states}
+    counts = Counter()
+    examples = {key: [] for key, _state, _label in ordered_states}
+    for memory in (memories or {}).values():
+        if not isinstance(memory, dict):
+            continue
+        for transition in memory.get("transitions") or []:
+            if not isinstance(transition, dict):
+                continue
+            transitioned_at = _coerce_utc_datetime(transition.get("timestamp"))
+            if transitioned_at is None or transitioned_at.date() != report_date:
+                continue
+            state = str(transition.get("to") or "").upper()
+            key = state_to_key.get(state)
+            if not key:
+                continue
+            counts[key] += 1
+            if len(examples[key]) < 10:
+                examples[key].append({
+                    "ticker": memory.get("ticker"),
+                    "timeframe": memory.get("timeframe"),
+                    "direction": memory.get("direction"),
+                    "candidate_id": memory.get("candidate_id"),
+                    "timestamp": _format_utc_timestamp(transitioned_at),
+                    "from": transition.get("from"),
+                    "to": transition.get("to"),
+                    "reason": transition.get("reason"),
+                })
+    ordered_counts = [
+        {
+            "key": key,
+            "state": state,
+            "label": label,
+            "count": counts.get(key, 0),
+        }
+        for key, state, label in ordered_states
+    ]
+    return {
+        "title": "Today's Lifecycle Report",
+        "report_date_utc": report_date.isoformat(),
+        "generated_at": _format_utc_timestamp(report_dt),
+        "transition_total": sum(counts.values()),
+        "counts": {item["key"]: item["count"] for item in ordered_counts},
+        "ordered_counts": ordered_counts,
+        "examples": {key: value for key, value in examples.items() if value},
+        "definitions": {
+            "early_entry": "Memory first observed an Early Entry setup today.",
+            "early_touch": "Planned entry was touched before full confirmation.",
+            "waiting_for_retest": "Confirmation completed after an early touch and now requires a later retest.",
+            "enter_now": "A valid post-confirmation entry or retest occurred.",
+            "missed_entry": "The setup moved away without a valid retest.",
+            "tp1_before_confirmation": "TP1 was reached before full confirmation.",
+            "invalidated": "Stop or structural invalidation occurred before valid entry.",
+            "expired": "The setup aged out or disappeared beyond the configured window.",
+            "plan_replaced": "The trade plan changed materially and the old memory was closed.",
+        },
+    }
 
 
 def _stock_early_memory_diagnostics(memories: dict, touched_keys: Optional[set] = None) -> dict:
@@ -2900,6 +3115,7 @@ def _stock_early_memory_diagnostics(memories: dict, touched_keys: Optional[set] 
     return {
         "version": STOCK_EARLY_ENTRY_MEMORY_VERSION,
         "memory_path": STOCK_EARLY_ENTRY_MEMORY_PATH,
+        "daily_lifecycle_report": _stock_early_daily_lifecycle_report(memories),
         "total_memories": total,
         "current_scan_memories": len(touched_memories),
         "states": dict(sorted(states.items())),
@@ -2914,6 +3130,7 @@ def _stock_early_memory_diagnostics(memories: dict, touched_keys: Optional[set] 
         "tp1_before_confirmation": states.get("TP1_BEFORE_CONFIRMATION", 0),
         "invalidations": states.get("INVALIDATED", 0),
         "expirations": states.get("EXPIRED", 0),
+        "plan_replaced": states.get("PLAN_REPLACED", 0),
         "terminal_outcomes": len(terminal),
         "still_developing": total - len(terminal),
         "entry_triggered_conversion_rate": round(entry_triggered / total, 4) if total else None,
@@ -2958,10 +3175,18 @@ def update_stock_early_entry_shadow(rows: list, near_miss: list, scan_meta: Opti
             if bucket != "EARLY_ENTRY" and not has_existing:
                 continue
             before = json.dumps(memories.get(key, {}), sort_keys=True, default=str)
+            bar_marker = _stock_early_bar_marker(row, observed_at)
+            changed = _stock_early_mark_replaced_memories(memories, row, key, observed_at, bar_marker) or changed
             memory = _stock_early_update_memory(row, dict(memories.get(key) or {}), observed_at, scan_generation, bucket == "EARLY_ENTRY")
             memories[key] = memory
             touched_keys.add(key)
             row["early_entry_shadow"] = _stock_early_public_shadow(memory)
+            row["ranking_status_bucket"] = bucket
+            row["execution_lifecycle"] = stock_execution_lifecycle_presentation(row)
+            row["execution_lifecycle_state"] = row["execution_lifecycle"].get("state")
+            row["execution_lifecycle_display"] = row["execution_lifecycle"].get("display")
+            row["execution_lifecycle_reason"] = row["execution_lifecycle"].get("reason")
+            row["execution_lifecycle_presentation_enabled"] = stock_event_memory_presentation_enabled()
             after = json.dumps(memory, sort_keys=True, default=str)
             changed = changed or before != after
 

@@ -116,6 +116,24 @@ def setup_bucket(setup: dict[str, Any]) -> str:
     ))
 
 
+def stale_early_touch_blocks_enter_now(setup: dict[str, Any]) -> bool:
+    shadow = setup.get("early_entry_shadow") if isinstance(setup.get("early_entry_shadow"), dict) else {}
+    lifecycle = str(first_present(setup.get("execution_lifecycle_state"), shadow.get("state")) or "").strip().upper()
+    if not lifecycle:
+        return False
+    if lifecycle == "ENTRY_TRIGGERED":
+        return False
+    return lifecycle in {
+        "EARLY_TOUCH",
+        "WAITING_FOR_RETEST",
+        "MISSED_ENTRY",
+        "TP1_BEFORE_CONFIRMATION",
+        "INVALIDATED",
+        "EXPIRED",
+        "PLAN_REPLACED",
+    }
+
+
 def setup_identity(setup: dict[str, Any]) -> str:
     explicit = first_present(setup.get("setup_id"), setup.get("setupId"), setup.get("id"))
     if explicit:
@@ -774,10 +792,11 @@ class SQLiteNotificationRepository:
             previous = self.state_for(entity_id)
             previous_state = previous.get("state") if previous else None
             events = []
+            enter_now_blocked_by_memory = state == "ENTER_NOW" and stale_early_touch_blocks_enter_now(setup)
             if previous:
-                if previous_state != "ENTER_NOW" and state == "ENTER_NOW":
+                if previous_state != "ENTER_NOW" and state == "ENTER_NOW" and not enter_now_blocked_by_memory:
                     events.append(build_setup_event("NEW_ENTER_NOW", setup, previous_state, state, meta))
-                if not previous.get("entry_reached") and flags["entry_reached"]:
+                if not previous.get("entry_reached") and flags["entry_reached"] and not enter_now_blocked_by_memory:
                     events.append(build_setup_event("PLANNED_ENTRY_REACHED", setup, previous_state, state, meta))
                 if previous_state not in {"SKIP", "INVALIDATED", "REJECTED"} and invalidated(setup):
                     events.append(build_setup_event("SETUP_INVALIDATED", setup, previous_state, state, meta))

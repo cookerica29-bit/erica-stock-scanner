@@ -172,10 +172,15 @@ def test_full_response_remains_backward_compatible_and_summary_is_additive():
             "normalized_status_bucket", "ranking", "earnings", "option",
             "option_pricing", "pricing_status", "pricing_quality",
             "accessibility", "lazy_hydration", "setup_id", "scan_generation",
+            "ranking_status_bucket", "execution_lifecycle",
+            "execution_lifecycle_presentation_enabled",
         }
         assert required.issubset(summary["rows"][0].keys())
+        assert summary["rows"][0]["ranking_status_bucket"] == "ENTER_NOW"
+        assert summary["rows"][0]["execution_lifecycle"]["ranking_status_bucket"] == "ENTER_NOW"
         assert summary["meta"]["view"] == "summary"
         assert summary["meta"]["summary_version"] == main.SUMMARY_SCAN_VIEW_VERSION
+        assert summary["meta"]["stock_event_memory_presentation_v1"] is False
     finally:
         main.scan_cached = original_scan_cached
         main._attach_notification_metrics = original_attach
