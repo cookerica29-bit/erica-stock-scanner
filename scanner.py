@@ -210,9 +210,13 @@ STOCK_EARLY_ENTRY_MEMORY_PATH = os.getenv("STOCK_EARLY_ENTRY_MEMORY_PATH") or "/
 STOCK_EARLY_ENTRY_EXPIRE_BARS = int(os.getenv("STOCK_EARLY_ENTRY_EXPIRE_BARS") or "20")
 STOCK_EARLY_ENTRY_RETEST_BARS = int(os.getenv("STOCK_EARLY_ENTRY_RETEST_BARS") or "4")
 STOCK_EVENT_MEMORY_PRESENTATION_V1 = str(os.getenv("STOCK_EVENT_MEMORY_PRESENTATION_V1") or "false").strip().lower() in {"1", "true", "yes", "on"}
+STOCK_MISSION_WORKFLOW_VERSION = "stock-mission-workflow-v1"
+STOCK_MISSION_WORKFLOW_V1 = str(os.getenv("STOCK_MISSION_WORKFLOW_V1") or "false").strip().lower() in {"1", "true", "yes", "on"}
 _stock_early_entry_memory_lock = threading.RLock()
 _stock_early_entry_memory_loaded = False
 _stock_early_entry_memory = {}
+_stock_mission_workflow_lock = threading.RLock()
+_stock_mission_workflow_previous = {}
 
 
 def _parse_background_analysis_scan_workers(value: Optional[str], default: int = 4) -> int:
@@ -1038,6 +1042,13 @@ def _analysis_cache_meta(key: tuple, cached: dict, refreshing: bool) -> dict:
         "market_data_failures": scan_meta.get("market_data_failures", {}),
         "early_entry_shadow": scan_meta.get("early_entry_shadow") or stock_early_entry_shadow_diagnostics(),
         "stock_event_memory_presentation_v1": stock_event_memory_presentation_enabled(),
+        "stock_mission_workflow_v1": stock_mission_workflow_enabled(),
+        "mission_workflow": scan_meta.get("mission_workflow") or stock_mission_workflow_snapshot(
+            rows,
+            near_miss,
+            universe=_analysis_cache_label(key),
+            update_movements=False,
+        ),
         "scan_duration_ms": scan_meta.get("scan_duration_ms"),
         "scan_started_at": scan_meta.get("scan_started_at"),
         "scan_completed_at": scan_meta.get("scan_completed_at"),
@@ -1146,6 +1157,13 @@ def _store_analysis_cache(key: tuple, rows: list, near_miss: list, scan_meta: Op
     scan_meta = dict(scan_meta or {})
     early_entry_shadow = update_stock_early_entry_shadow(rows, near_miss, scan_meta, generated_at=generated_at)
     scan_meta["early_entry_shadow"] = early_entry_shadow
+    scan_meta["stock_mission_workflow_v1"] = stock_mission_workflow_enabled()
+    scan_meta["mission_workflow"] = stock_mission_workflow_snapshot(
+        rows,
+        near_miss,
+        universe=_analysis_cache_label(key),
+        update_movements=True,
+    )
     cached = {
         "rows": rows,
         "near_miss": near_miss,
@@ -2622,6 +2640,10 @@ def stock_event_memory_presentation_enabled() -> bool:
     return STOCK_EVENT_MEMORY_PRESENTATION_V1
 
 
+def stock_mission_workflow_enabled() -> bool:
+    return STOCK_MISSION_WORKFLOW_V1
+
+
 _STOCK_EARLY_TERMINAL_STATES = {
     "ENTRY_TRIGGERED",
     "MISSED_ENTRY",
@@ -2721,7 +2743,7 @@ def stock_execution_lifecycle_presentation(row: Optional[dict]) -> dict:
             "reason": None,
         }
     return {
-        "enabled": stock_event_memory_presentation_enabled(),
+        "enabled": stock_event_memory_presentation_enabled() or stock_mission_workflow_enabled(),
         "ranking_status_bucket": ranking_bucket,
         "state": state or None,
         "display": mapped.get("display"),
@@ -2730,6 +2752,224 @@ def stock_execution_lifecycle_presentation(row: Optional[dict]) -> dict:
         "actionable": mapped.get("actionable"),
         "reason": mapped.get("reason"),
         "source": "stock_early_entry_event_memory_v1" if state else "ranking_status_bucket",
+    }
+
+
+_STOCK_MISSION_RESOLVED_STATES = {
+    "MISSED_ENTRY",
+    "TP1_BEFORE_CONFIRMATION",
+    "INVALIDATED",
+    "EXPIRED",
+    "PLAN_REPLACED",
+}
+
+_STOCK_MISSION_WATCH_STATES = {
+    "EARLY_ENTRY_BUILDING",
+    "EARLY_TOUCH",
+    "WAITING_FOR_RETEST",
+}
+
+
+def stock_mission_workflow_identity(row: Optional[dict]) -> Optional[str]:
+    row = row or {}
+    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+    timeframe = str(row.get("timeframe") or row.get("scanner_timeframe") or "").strip().upper()
+    direction = str(row.get("direction") or "").strip().upper()
+    entry = _safe_float(row.get("entry") if row.get("entry") is not None else row.get("planned_entry"))
+    stop = _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop"))
+    tp1 = _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target"))
+    generation = _stock_early_setup_generation(row) or str(row.get("scan_generation") or row.get("setup_generation") or "")
+    if not ticker or not timeframe or direction not in {"LONG", "SHORT"} or entry is None or stop is None or tp1 is None or not generation:
+        return None
+    return "|".join([
+        ticker,
+        timeframe,
+        direction,
+        f"{entry:.4f}",
+        f"{stop:.4f}",
+        f"{tp1:.4f}",
+        generation,
+    ])
+
+
+def _stock_mission_execution_state(row: dict) -> str:
+    lifecycle = row.get("execution_lifecycle") if isinstance(row.get("execution_lifecycle"), dict) else {}
+    shadow = row.get("early_entry_shadow") if isinstance(row.get("early_entry_shadow"), dict) else {}
+    return str(
+        row.get("execution_lifecycle_state")
+        or lifecycle.get("state")
+        or shadow.get("state")
+        or ""
+    ).upper()
+
+
+def _stock_mission_ranking_bucket(row: dict) -> str:
+    ranking = row.get("ranking") if isinstance(row.get("ranking"), dict) else {}
+    return str(
+        row.get("ranking_status_bucket")
+        or ranking.get("status_bucket")
+        or row.get("normalized_status_bucket")
+        or row.get("status_bucket")
+        or _ranking_status_bucket(row)
+        or ""
+    ).upper()
+
+
+def _stock_mission_watch_priority(row: dict) -> int:
+    execution_state = _stock_mission_execution_state(row)
+    bucket = _stock_mission_ranking_bucket(row)
+    if execution_state == "WAITING_FOR_RETEST":
+        return 1
+    if bucket == "ALMOST_READY":
+        return 2
+    if bucket == "EARLY_ENTRY" or execution_state == "EARLY_ENTRY_BUILDING":
+        return 3
+    if execution_state == "EARLY_TOUCH":
+        return 4
+    if bucket == "WAITING":
+        return 5
+    return 99
+
+
+def stock_mission_workflow_bucket(row: Optional[dict]) -> Optional[str]:
+    row = row or {}
+    grade = _ranking_grade(row)
+    ranking = row.get("ranking") if isinstance(row.get("ranking"), dict) else {}
+    tier = str(ranking.get("tier") or "").upper()
+    bucket = _stock_mission_ranking_bucket(row)
+    execution_state = _stock_mission_execution_state(row)
+
+    if execution_state in _STOCK_MISSION_RESOLVED_STATES:
+        return "RESOLVED"
+    if execution_state == "ENTRY_TRIGGERED" and grade in {"A", "B"}:
+        return "TRADE_NOW"
+    if execution_state == "WAITING_FOR_RETEST" and grade in {"A", "B"}:
+        return "WATCH_CLOSELY"
+    if bucket == "ENTER_NOW" and execution_state not in (_STOCK_MISSION_WATCH_STATES | _STOCK_MISSION_RESOLVED_STATES):
+        return "TRADE_NOW"
+    if grade in {"A", "B"} and bucket in {"ALMOST_READY", "EARLY_ENTRY"}:
+        return "WATCH_CLOSELY"
+    if grade in {"A", "B"} and execution_state in _STOCK_MISSION_WATCH_STATES:
+        return "WATCH_CLOSELY"
+    if grade in {"A", "B"} and bucket == "WAITING" and tier in {"TOP_OPPORTUNITY", "HIGH_PRIORITY", "REVIEW"}:
+        return "WATCH_CLOSELY"
+    return None
+
+
+def _stock_mission_row_snapshot(row: dict) -> dict:
+    ranking = row.get("ranking") if isinstance(row.get("ranking"), dict) else {}
+    identity = stock_mission_workflow_identity(row)
+    bucket = stock_mission_workflow_bucket(row)
+    execution_state = _stock_mission_execution_state(row) or None
+    ranking_bucket = _stock_mission_ranking_bucket(row)
+    return {
+        "identity": identity,
+        "ticker": row.get("ticker") or row.get("symbol"),
+        "timeframe": row.get("timeframe"),
+        "direction": row.get("direction"),
+        "grade": _ranking_grade(row),
+        "rank": ranking.get("rank"),
+        "score": ranking.get("score"),
+        "ranking_status_bucket": ranking_bucket,
+        "execution_lifecycle_state": execution_state,
+        "mission_bucket": bucket,
+        "setup_generation": _stock_early_setup_generation(row) or row.get("setup_generation") or row.get("scan_generation"),
+        "watch_priority": _stock_mission_watch_priority(row),
+    }
+
+
+def stock_mission_workflow_snapshot(
+    rows: Optional[list] = None,
+    near_miss: Optional[list] = None,
+    *,
+    universe: str = "default",
+    update_movements: bool = False,
+) -> dict:
+    all_rows = [row for row in [*(rows or []), *(near_miss or [])] if isinstance(row, dict)]
+    row_snapshots = [
+        snap for snap in (_stock_mission_row_snapshot(row) for row in all_rows)
+        if snap.get("identity")
+    ]
+    current = {snap["identity"]: snap for snap in row_snapshots}
+    counts_by_bucket = Counter(snap.get("mission_bucket") or "UNASSIGNED" for snap in row_snapshots)
+    counts_by_state = Counter(snap.get("execution_lifecycle_state") or snap.get("ranking_status_bucket") or "UNKNOWN" for snap in row_snapshots)
+    movement_counts = Counter()
+    movement_samples = []
+
+    with _stock_mission_workflow_lock:
+        previous = _stock_mission_workflow_previous.get(universe, {})
+        if update_movements:
+            previous_ids = set(previous)
+            current_ids = set(current)
+            for identity in sorted(current_ids):
+                before = previous.get(identity)
+                after = current[identity]
+                before_bucket = before.get("mission_bucket") if isinstance(before, dict) else None
+                after_bucket = after.get("mission_bucket")
+                if after_bucket == "WATCH_CLOSELY" and before_bucket != "WATCH_CLOSELY":
+                    movement = "entered_watch_closely"
+                elif before_bucket == "WATCH_CLOSELY" and after_bucket == "TRADE_NOW":
+                    movement = "watch_closely_to_trade_now"
+                elif before_bucket == "WATCH_CLOSELY" and after_bucket in {None, "UNASSIGNED"}:
+                    movement = "watch_closely_to_waiting"
+                elif before_bucket == "WATCH_CLOSELY" and after_bucket == "RESOLVED":
+                    movement = "watch_closely_to_resolved"
+                else:
+                    movement = None
+                if movement:
+                    movement_counts[movement] += 1
+                    if len(movement_samples) < 20:
+                        movement_samples.append({
+                            "movement": movement,
+                            "identity": identity,
+                            "ticker": after.get("ticker"),
+                            "from": before_bucket,
+                            "to": after_bucket,
+                            "state": after.get("execution_lifecycle_state"),
+                        })
+            for identity in sorted(previous_ids - current_ids):
+                before = previous.get(identity) or {}
+                if before.get("mission_bucket") in {"TRADE_NOW", "WATCH_CLOSELY"}:
+                    movement_counts["plan_replacements_or_removed"] += 1
+                    if len(movement_samples) < 20:
+                        movement_samples.append({
+                            "movement": "plan_replacements_or_removed",
+                            "identity": identity,
+                            "ticker": before.get("ticker"),
+                            "from": before.get("mission_bucket"),
+                            "to": "REMOVED",
+                            "state": before.get("execution_lifecycle_state"),
+                        })
+            _stock_mission_workflow_previous[universe] = current
+
+    trade_now = sorted(
+        [snap for snap in row_snapshots if snap.get("mission_bucket") == "TRADE_NOW"],
+        key=lambda item: (item.get("rank") if isinstance(item.get("rank"), (int, float)) else 10**9, str(item.get("ticker") or "")),
+    )
+    watch = sorted(
+        [snap for snap in row_snapshots if snap.get("mission_bucket") == "WATCH_CLOSELY"],
+        key=lambda item: (item.get("watch_priority") or 99, item.get("rank") if isinstance(item.get("rank"), (int, float)) else 10**9, str(item.get("ticker") or "")),
+    )
+    return {
+        "version": STOCK_MISSION_WORKFLOW_VERSION,
+        "enabled": stock_mission_workflow_enabled(),
+        "universe": universe,
+        "evaluated_setups": len(row_snapshots),
+        "trade_now_count": counts_by_bucket.get("TRADE_NOW", 0),
+        "watch_closely_count": counts_by_bucket.get("WATCH_CLOSELY", 0),
+        "resolved_count": counts_by_bucket.get("RESOLVED", 0),
+        "counts_by_bucket": dict(sorted(counts_by_bucket.items())),
+        "counts_by_state": dict(sorted(counts_by_state.items())),
+        "movements": {
+            "entered_watch_closely": movement_counts.get("entered_watch_closely", 0),
+            "watch_closely_to_trade_now": movement_counts.get("watch_closely_to_trade_now", 0),
+            "watch_closely_to_waiting": movement_counts.get("watch_closely_to_waiting", 0),
+            "watch_closely_to_resolved": movement_counts.get("watch_closely_to_resolved", 0),
+            "plan_replacements_or_removed": movement_counts.get("plan_replacements_or_removed", 0),
+            "samples": movement_samples,
+        },
+        "trade_now": trade_now[:25],
+        "watch_closely": watch[:25],
     }
 
 

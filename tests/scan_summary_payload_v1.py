@@ -173,7 +173,8 @@ def test_full_response_remains_backward_compatible_and_summary_is_additive():
             "option_pricing", "pricing_status", "pricing_quality",
             "accessibility", "lazy_hydration", "setup_id", "scan_generation",
             "ranking_status_bucket", "execution_lifecycle",
-            "execution_lifecycle_presentation_enabled",
+            "execution_lifecycle_presentation_enabled", "mission_identity",
+            "mission_workflow_bucket", "mission_workflow_enabled",
         }
         assert required.issubset(summary["rows"][0].keys())
         assert summary["rows"][0]["ranking_status_bucket"] == "ENTER_NOW"
@@ -181,6 +182,8 @@ def test_full_response_remains_backward_compatible_and_summary_is_additive():
         assert summary["meta"]["view"] == "summary"
         assert summary["meta"]["summary_version"] == main.SUMMARY_SCAN_VIEW_VERSION
         assert summary["meta"]["stock_event_memory_presentation_v1"] is False
+        assert summary["meta"]["stock_mission_workflow_v1"] is False
+        assert summary["meta"]["mission_workflow"]["enabled"] is False
     finally:
         main.scan_cached = original_scan_cached
         main._attach_notification_metrics = original_attach

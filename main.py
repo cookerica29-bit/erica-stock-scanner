@@ -19,6 +19,10 @@ from scanner import (
     stock_early_entry_shadow_diagnostics,
     stock_event_memory_presentation_enabled,
     stock_execution_lifecycle_presentation,
+    stock_mission_workflow_bucket,
+    stock_mission_workflow_enabled,
+    stock_mission_workflow_identity,
+    stock_mission_workflow_snapshot,
     build_bos_displacement_shadow_report,
     _batch_download,
     scan_cached,
@@ -730,10 +734,15 @@ def _summary_row(row: dict, generation: Optional[str]) -> dict:
     status_bucket = _summary_status_bucket(row)
     execution_lifecycle = stock_execution_lifecycle_presentation(row)
     execution_lifecycle["ranking_status_bucket"] = status_bucket
+    mission_identity = stock_mission_workflow_identity(row)
+    mission_bucket = stock_mission_workflow_bucket(row)
     earnings = row.get("earnings") if isinstance(row.get("earnings"), dict) else {}
     summary = {
         "ticker": row.get("ticker") or row.get("symbol"),
         "setup_id": setup_id,
+        "mission_identity": mission_identity,
+        "mission_workflow_bucket": mission_bucket,
+        "mission_workflow_enabled": stock_mission_workflow_enabled(),
         "scan_generation": generation,
         "timeframe": row.get("timeframe"),
         "direction": row.get("direction"),
@@ -843,7 +852,7 @@ def _summary_budget_counts(rows: list[dict]) -> dict:
 
 
 def _summary_today_counts(rows: list[dict]) -> dict:
-    if stock_event_memory_presentation_enabled():
+    if stock_event_memory_presentation_enabled() or stock_mission_workflow_enabled():
         buckets = Counter(str((row.get("execution_lifecycle") or {}).get("bucket") or row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
     else:
         buckets = Counter(str(row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
@@ -876,8 +885,15 @@ def _summarize_scan_response(result: dict) -> dict:
         "qualified_count": len(rows),
         "near_miss_count": len(near_miss),
         "stock_event_memory_presentation_v1": stock_event_memory_presentation_enabled(),
+        "stock_mission_workflow_v1": stock_mission_workflow_enabled(),
         "today_market_counts": _summary_today_counts(all_rows),
         "budget_counts": _summary_budget_counts(all_rows),
+        "mission_workflow": meta.get("mission_workflow") or stock_mission_workflow_snapshot(
+            rows,
+            near_miss,
+            universe=str(meta.get("universe") or meta.get("cache_key") or "default"),
+            update_movements=False,
+        ),
         "summary_generation_ms": round((time.perf_counter() - started) * 1000, 1),
     }
     return {

@@ -837,6 +837,95 @@
     box-shadow: var(--card-shadow);
     padding: 14px 16px;
   }
+  .mission-workflow {
+    margin-top: 14px;
+  }
+  .mission-workflow-card {
+    background: rgba(53,66,88,0.86);
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
+    box-shadow: var(--card-shadow);
+    display: grid;
+    gap: 14px;
+    padding: 14px 16px;
+  }
+  .mission-section {
+    display: grid;
+    gap: 9px;
+  }
+  .mission-section-head {
+    align-items: baseline;
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+  }
+  .mission-title {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 950;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .mission-count {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 850;
+  }
+  .mission-copy {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .mission-list {
+    display: grid;
+    gap: 8px;
+  }
+  .mission-card {
+    appearance: none;
+    background: rgba(65,80,106,0.44);
+    border: 1px solid rgba(148,163,184,0.14);
+    border-radius: 8px;
+    color: inherit;
+    cursor: pointer;
+    display: grid;
+    gap: 6px;
+    padding: 10px;
+    text-align: left;
+    width: 100%;
+  }
+  .mission-card:hover,
+  .mission-card:focus-visible {
+    border-color: rgba(124,92,255,0.5);
+    outline: none;
+  }
+  .mission-card-main {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+  .mission-card-ticker {
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 950;
+  }
+  .mission-card-meta,
+  .mission-card-next {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .mission-card-next {
+    color: var(--text);
+  }
+  .mission-empty {
+    background: rgba(15,23,42,0.16);
+    border: 1px dashed rgba(148,163,184,0.2);
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 10px;
+  }
   .budget-opportunity-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2403,8 +2492,11 @@
     #marketIntelligence {
       order: 5;
     }
-    #topOpportunities {
+    #missionWorkflow {
       order: 6;
+    }
+    #topOpportunities {
+      order: 7;
     }
     #dataStatus {
       justify-content: flex-start;
@@ -2488,6 +2580,20 @@
       margin-top: 10px;
       padding: 0 12px;
       max-width: 100%;
+    }
+    .mission-workflow {
+      margin-top: 10px;
+      padding: 0 12px;
+      max-width: 100%;
+    }
+    .mission-workflow-card {
+      border-radius: 9px;
+      padding: 10px;
+    }
+    .mission-section-head {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 2px;
     }
     .top-opportunity-card {
       border-radius: 9px;
@@ -3696,6 +3802,7 @@
   <div id="marketCoverage" class="market-snapshot"></div>
   <div id="marketSnapshot" class="market-snapshot"></div>
   <div id="marketIntelligence" class="market-intelligence"></div>
+  <div id="missionWorkflow" class="mission-workflow"></div>
   <div id="topOpportunities" class="top-opportunities"></div>
   <main>
     <div id="summary"></div>
@@ -4004,6 +4111,10 @@
   <details class="analytics-collapse">
     <summary>Opportunity Price Mix</summary>
     <div class="analytics-collapse-body" id="opportunityPriceMixDiagnostics"></div>
+  </details>
+  <details class="analytics-collapse">
+    <summary>Mission Workflow Diagnostics</summary>
+    <div class="analytics-collapse-body" id="missionWorkflowDiagnostics"></div>
   </details>
   <details class="analytics-collapse">
     <summary>Contract Candidate Audit</summary>
@@ -6526,6 +6637,186 @@ function topBudgetSetup(rows = [], budget = tradingBudgetValue()) {
   })[0] || null;
 }
 
+function stockMissionWorkflowEnabled(setup = {}) {
+  if (setup.mission_workflow_enabled === true) return true;
+  return Boolean(latestScannerMeta?.stock_mission_workflow_v1);
+}
+
+function missionSetupIdentity(setup = {}) {
+  if (setup.mission_identity) return String(setup.mission_identity);
+  const ticker = String(setup.ticker || setup.symbol || '').trim().toUpperCase();
+  const timeframe = String(setup.timeframe || setup.scanner_timeframe || '').trim().toUpperCase();
+  const direction = String(setup.direction || '').trim().toUpperCase();
+  const entry = Number(setup.entry ?? setup.planned_entry);
+  const stop = Number(setup.sl ?? setup.stop);
+  const tp1 = Number(setup.tp1 ?? setup.target);
+  const generation = String(setup.setup_generation || setup.scan_generation || setup.signal_timestamp || setup.scannedAt || '').trim();
+  if (!ticker || !timeframe || !direction || !Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(tp1) || !generation) return '';
+  return [ticker, timeframe, direction, entry.toFixed(4), stop.toFixed(4), tp1.toFixed(4), generation].join('|');
+}
+
+function missionExecutionState(setup = {}) {
+  return String(firstPresent(setup.execution_lifecycle_state, setup.execution_lifecycle?.state, setup.early_entry_shadow?.state, '') || '').toUpperCase();
+}
+
+function frozenRankingBucket(setup = {}) {
+  return String(firstPresent(
+    setup.ranking_status_bucket,
+    setup.ranking?.status_bucket,
+    setup.normalized_status_bucket,
+    setup.status_bucket,
+    ''
+  ) || '').toUpperCase();
+}
+
+function missionWorkflowBucket(setup = {}) {
+  const fromPayload = String(setup.mission_workflow_bucket || '').toUpperCase();
+  if (fromPayload) return fromPayload;
+  const state = missionExecutionState(setup);
+  const rankingBucket = frozenRankingBucket(setup) || setupProgressState(setup).bucket;
+  const grade = setupGradeValue(setup);
+  const tier = String(setup.ranking?.tier || '').toUpperCase();
+  const resolvedStates = ['MISSED_ENTRY', 'TP1_BEFORE_CONFIRMATION', 'INVALIDATED', 'EXPIRED', 'PLAN_REPLACED'];
+  const watchStates = ['EARLY_ENTRY_BUILDING', 'EARLY_TOUCH', 'WAITING_FOR_RETEST'];
+  if (resolvedStates.includes(state)) return 'RESOLVED';
+  if (state === 'ENTRY_TRIGGERED' && ['A', 'B'].includes(grade)) return 'TRADE_NOW';
+  if (state === 'WAITING_FOR_RETEST' && ['A', 'B'].includes(grade)) return 'WATCH_CLOSELY';
+  if (rankingBucket === 'ENTER_NOW' && !watchStates.includes(state) && !resolvedStates.includes(state)) return 'TRADE_NOW';
+  if (['A', 'B'].includes(grade) && ['ALMOST_READY', 'EARLY_ENTRY'].includes(rankingBucket)) return 'WATCH_CLOSELY';
+  if (['A', 'B'].includes(grade) && watchStates.includes(state)) return 'WATCH_CLOSELY';
+  if (['A', 'B'].includes(grade) && rankingBucket === 'WAITING' && ['TOP_OPPORTUNITY', 'HIGH_PRIORITY', 'REVIEW'].includes(tier)) return 'WATCH_CLOSELY';
+  return '';
+}
+
+function missionWatchPriority(setup = {}) {
+  const state = missionExecutionState(setup);
+  const bucket = frozenRankingBucket(setup) || setupProgressState(setup).bucket;
+  if (state === 'WAITING_FOR_RETEST') return 1;
+  if (bucket === 'ALMOST_READY') return 2;
+  if (bucket === 'EARLY_ENTRY' || state === 'EARLY_ENTRY_BUILDING') return 3;
+  if (state === 'EARLY_TOUCH') return 4;
+  if (bucket === 'WAITING') return 5;
+  return 99;
+}
+
+function missionSortTradeNow(rows = []) {
+  return rows.slice().sort((a, b) => {
+    const rankDiff = opportunityRankValue(a) - opportunityRankValue(b);
+    if (rankDiff) return rankDiff;
+    const scoreDiff = Number(b.ranking?.score || 0) - Number(a.ranking?.score || 0);
+    if (scoreDiff) return scoreDiff;
+    const rrDiff = rrValue(b) - rrValue(a);
+    if (rrDiff) return rrDiff;
+    const oppDiff = opportunityRemainingValue(b) - opportunityRemainingValue(a);
+    if (oppDiff) return oppDiff;
+    return String(a.ticker || '').localeCompare(String(b.ticker || ''));
+  });
+}
+
+function missionSortWatchClosely(rows = []) {
+  return rows.slice().sort((a, b) => {
+    const priorityDiff = missionWatchPriority(a) - missionWatchPriority(b);
+    if (priorityDiff) return priorityDiff;
+    const rankDiff = opportunityRankValue(a) - opportunityRankValue(b);
+    if (rankDiff) return rankDiff;
+    return String(a.ticker || '').localeCompare(String(b.ticker || ''));
+  });
+}
+
+function missionRows(rows = []) {
+  const seen = new Set();
+  const buckets = { tradeNow: [], watchClosely: [], resolved: [] };
+  rows.forEach(setup => {
+    const identity = missionSetupIdentity(setup);
+    if (!identity || seen.has(identity)) return;
+    seen.add(identity);
+    const bucket = missionWorkflowBucket(setup);
+    if (bucket === 'TRADE_NOW') buckets.tradeNow.push(setup);
+    if (bucket === 'WATCH_CLOSELY') buckets.watchClosely.push(setup);
+    if (bucket === 'RESOLVED') buckets.resolved.push(setup);
+  });
+  buckets.tradeNow = missionSortTradeNow(buckets.tradeNow);
+  buckets.watchClosely = missionSortWatchClosely(buckets.watchClosely);
+  return buckets;
+}
+
+function missionNextActionText(setup = {}) {
+  const state = setupProgressState(setup);
+  const reason = setup.execution_lifecycle_reason || setup.execution_lifecycle?.reason;
+  if (reason) return reason;
+  if (state.bucket === 'ENTER_NOW') return 'Confirmed and executable under the current rules.';
+  if (state.bucket === 'WAITING_FOR_RETEST') return 'Wait for a fresh retest of the entry area.';
+  if (state.bucket === 'EARLY_TOUCH') return 'Entry touched before confirmation. Wait; this is not Enter Now.';
+  if (state.bucket === 'EARLY_ENTRY') return 'Price has not reached the planned entry. Full confirmation is still developing.';
+  if (state.bucket === 'ALMOST_READY') return 'High-quality setup developing. Wait for confirmation.';
+  if (state.bucket === 'WAITING') return 'Monitor only while the setup continues building.';
+  return 'No current action.';
+}
+
+function renderMissionMiniCard(setup = {}, section = '') {
+  const status = setupProgressState(setup);
+  const grade = setupGradeValue(setup);
+  const direction = simpleDirection(setup.direction);
+  const identity = missionSetupIdentity(setup);
+  return `
+    <button type="button" class="mission-card mission-card-${escapeHtml(section)}" data-mission-id="${escapeHtml(identity)}" onclick="focusSetupCard('${escapeHtml(String(setup.ticker || ''))}')">
+      <div class="mission-card-main">
+        <span class="mission-card-ticker">${escapeHtml(setup.ticker || '—')}</span>
+        ${setup.timeframe ? `<span class="timeframe-badge">${escapeHtml(setup.timeframe)}</span>` : ''}
+        <span class="direction-value ${directionClass(setup.direction)}">${escapeHtml(direction)}</span>
+        ${renderSetupGradePill(grade)}
+        <span class="grade-badge ${escapeHtml(status.className)}">${escapeHtml(status.label)}</span>
+      </div>
+      <div class="mission-card-meta">Entry ${escapeHtml(fmtMoney(setup.entry))} · Stop ${escapeHtml(fmtMoney(setup.sl ?? setup.stop))} · TP1 ${escapeHtml(fmtMoney(setup.tp1))} · Rank #${escapeHtml(String(setup.ranking?.rank || '—'))}</div>
+      <div class="mission-card-next">${escapeHtml(missionNextActionText(setup))}</div>
+    </button>`;
+}
+
+function renderMissionSection(title, countLabel, copy, rows, emptyText, section) {
+  return `
+    <section class="mission-section mission-section-${escapeHtml(section)}">
+      <div class="mission-section-head">
+        <div class="mission-title">${escapeHtml(title)}</div>
+        <div class="mission-count">${escapeHtml(countLabel)}</div>
+      </div>
+      <div class="mission-copy">${escapeHtml(copy)}</div>
+      <div class="mission-list">
+        ${rows.length ? rows.slice(0, 6).map(row => renderMissionMiniCard(row, section)).join('') : `<div class="mission-empty">${escapeHtml(emptyText)}</div>`}
+      </div>
+    </section>`;
+}
+
+function renderMissionWorkflow(rows = []) {
+  const el = document.getElementById('missionWorkflow');
+  if (!el) return;
+  if (!stockMissionWorkflowEnabled()) {
+    el.innerHTML = '';
+    el.style.display = 'none';
+    return;
+  }
+  const buckets = missionRows(rows);
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="mission-workflow-card">
+      ${renderMissionSection(
+        'Trade Now',
+        `${buckets.tradeNow.length} executable setup${buckets.tradeNow.length === 1 ? '' : 's'}`,
+        'Fully confirmed and executable under the current rules.',
+        buckets.tradeNow,
+        'No fully confirmed trades right now.',
+        'trade-now'
+      )}
+      ${renderMissionSection(
+        'Watch Closely',
+        `${buckets.watchClosely.length} developing setup${buckets.watchClosely.length === 1 ? '' : 's'}`,
+        'High-quality setups developing. Wait for the next required event.',
+        buckets.watchClosely,
+        'No high-priority developing setups in this view.',
+        'watch-closely'
+      )}
+    </div>`;
+}
+
 function renderBudgetOpportunityPanel(title, row, budget = tradingBudgetValue()) {
   if (!row) {
     const isBudgetPanel = title.toLowerCase().includes('budget');
@@ -7169,13 +7460,18 @@ function renderScannerResults() {
   const totalBeforeLocFilter = allRows.length + allNearMiss.length;
   const snapshotSetups = [...allRows, ...allNearMiss];
   const visibleSetups = [...rows, ...nearMiss];
+  const missionFilters = { ...filters, status: 'all' };
+  const missionSetups = [
+    ...sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, missionFilters)), 'RANK'),
+    ...sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, missionFilters)), 'RANK'),
+  ];
   const warmingMeta = latestScannerMeta || {};
   const discoveredWarmupWithoutRows = scannerRows.length === 0
     && scannerNearMiss.length === 0
     && isDiscoveredWarmingMeta(warmingMeta);
 
   if (discoveredWarmupWithoutRows) {
-    ['marketCoverage', 'marketSnapshot', 'marketIntelligence', 'topOpportunities'].forEach(id => {
+    ['marketCoverage', 'marketSnapshot', 'marketIntelligence', 'missionWorkflow', 'topOpportunities'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.innerHTML = '';
@@ -7189,13 +7485,14 @@ function renderScannerResults() {
     return;
   }
 
-  ['marketCoverage', 'marketSnapshot', 'marketIntelligence', 'topOpportunities'].forEach(id => {
+  ['marketCoverage', 'marketSnapshot', 'marketIntelligence', 'missionWorkflow', 'topOpportunities'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = '';
   });
   renderMarketCoveragePanel(snapshotSetups, latestScannerMeta || {});
   renderMarketSnapshot(snapshotSetups);
   renderMarketIntelligencePanel(snapshotSetups, latestScannerMeta || {});
+  renderMissionWorkflow(missionSetups);
   renderTopOpportunities(visibleSetups);
   if (Number.isFinite(tradingBudgetValue())) {
     queueOptionPricingForSetups(visibleSetups, 'budget_view');
@@ -7336,7 +7633,8 @@ function simpleStatus(setup) {
 
 function stockEventMemoryPresentationEnabled(setup = {}) {
   if (setup.execution_lifecycle_presentation_enabled === true) return true;
-  return Boolean(latestScannerMeta?.stock_event_memory_presentation_v1);
+  if (setup.mission_workflow_enabled === true) return true;
+  return Boolean(latestScannerMeta?.stock_event_memory_presentation_v1 || latestScannerMeta?.stock_mission_workflow_v1);
 }
 
 function stockExecutionLifecyclePresentation(setup = {}) {
@@ -11134,7 +11432,7 @@ function renderCard(s) {
     : 'No entry distance available yet';
 
   return `
-  <div class="card" data-ticker="${escapeHtml(String(s.ticker || ''))}" data-opportunity-rank="${escapeHtml(String(s.ranking?.rank || ''))}" data-normalized-status="${escapeHtml(String(cardStatus.label || state.bucket).toUpperCase().replace(/\s+/g, '_'))}" data-execution-state="${escapeHtml(executionState)}" data-execute-visual-state="${escapeHtml(executeVisualState)}">
+  <div class="card" data-ticker="${escapeHtml(String(s.ticker || ''))}" data-mission-id="${escapeHtml(missionSetupIdentity(s))}" data-opportunity-rank="${escapeHtml(String(s.ranking?.rank || ''))}" data-normalized-status="${escapeHtml(String(cardStatus.label || state.bucket).toUpperCase().replace(/\s+/g, '_'))}" data-execution-state="${escapeHtml(executionState)}" data-execute-visual-state="${escapeHtml(executeVisualState)}">
     <div class="card-header">
       <div class="ticker-wrap">
         <span class="ticker ticker-with-direction">${escapeHtml(s.ticker)} ${renderDirectionMarker(directionLabel)}</span>
@@ -17399,6 +17697,67 @@ function renderOpportunityPriceMixDiagnostics() {
   `;
 }
 
+function renderMissionWorkflowDiagnostics() {
+  const el = document.getElementById('missionWorkflowDiagnostics');
+  if (!el) return;
+  const diag = latestScannerMeta?.mission_workflow || {};
+  if (!diag.version) {
+    el.innerHTML = '<div class="analytics-empty">Mission workflow diagnostics will appear after the next scanner response.</div>';
+    return;
+  }
+  const movements = diag.movements || {};
+  const bucketRows = Object.entries(diag.counts_by_bucket || {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([bucket, count]) => `<tr><td>${escapeHtml(bucket)}</td><td>${escapeHtml(String(count))}</td></tr>`)
+    .join('');
+  const stateRows = Object.entries(diag.counts_by_state || {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([state, count]) => `<tr><td>${escapeHtml(state)}</td><td>${escapeHtml(String(count))}</td></tr>`)
+    .join('');
+  const sampleRows = (movements.samples || []).map(sample => `
+    <tr>
+      <td><strong>${escapeHtml(sample.ticker || '—')}</strong></td>
+      <td>${escapeHtml(sample.movement || '—')}</td>
+      <td>${escapeHtml(sample.from || '—')}</td>
+      <td>${escapeHtml(sample.to || '—')}</td>
+      <td>${escapeHtml(sample.state || '—')}</td>
+    </tr>`).join('');
+  el.innerHTML = `
+    <div class="analytics-empty" style="margin-bottom:10px;text-align:left;">
+      Developer-only diagnostic. Mission workflow is presentation-only and does not change frozen ranking, strategy qualification, alerts, or journal routing.
+      <br>Version: ${escapeHtml(diag.version || '—')} · Flag enabled: ${escapeHtml(String(Boolean(diag.enabled)))} · Universe: ${escapeHtml(diag.universe || '—')}
+    </div>
+    <div class="journal-stats" style="margin-bottom:12px;">
+      <div class="stat-card"><div class="stat-label">Trade Now</div><div class="stat-value">${escapeHtml(String(diag.trade_now_count || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Watch Closely</div><div class="stat-value">${escapeHtml(String(diag.watch_closely_count || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Resolved</div><div class="stat-value">${escapeHtml(String(diag.resolved_count || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Entered Watch</div><div class="stat-value">${escapeHtml(String(movements.entered_watch_closely || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Watch → Trade</div><div class="stat-value">${escapeHtml(String(movements.watch_closely_to_trade_now || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Watch → Waiting</div><div class="stat-value">${escapeHtml(String(movements.watch_closely_to_waiting || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Watch → Resolved</div><div class="stat-value">${escapeHtml(String(movements.watch_closely_to_resolved || 0))}</div></div>
+      <div class="stat-card"><div class="stat-label">Plan Replaced</div><div class="stat-value">${escapeHtml(String(movements.plan_replacements_or_removed || 0))}</div></div>
+    </div>
+    <div class="analysis-two-col">
+      <div>
+        <div class="snapshot-title">Current Buckets</div>
+        <table class="analytics-table"><tbody>${bucketRows || '<tr><td>No bucket counts yet.</td><td>—</td></tr>'}</tbody></table>
+      </div>
+      <div>
+        <div class="snapshot-title">Current States</div>
+        <table class="analytics-table"><tbody>${stateRows || '<tr><td>No state counts yet.</td><td>—</td></tr>'}</tbody></table>
+      </div>
+    </div>
+    <details class="analytics-subdetails">
+      <summary>Recent movement samples</summary>
+      <div class="analytics-subdetails-body">
+        <table class="analytics-table">
+          <thead><tr><th>Ticker</th><th>Movement</th><th>From</th><th>To</th><th>State</th></tr></thead>
+          <tbody>${sampleRows || '<tr><td colspan="5">No movement samples recorded yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
 function auditContractSummaryText(contract) {
   if (!contract) return 'Unavailable';
   const cost = contract.estimated_contract_cost == null ? '—' : fmtMoney(contract.estimated_contract_cost);
@@ -17588,6 +17947,7 @@ function renderAnalytics() {
   if (opportunityEl) opportunityEl.innerHTML = renderOpportunityDiagnostics(all);
   renderEnterNowFunnelDiagnostics();
   renderOpportunityPriceMixDiagnostics();
+  renderMissionWorkflowDiagnostics();
   renderContractCandidateAuditDiagnostics();
   renderSmartNotificationDiagnostics();
   renderVerifiedHistoryFromCache();
