@@ -7095,6 +7095,37 @@ def _has_ranking_trade_plan(row: dict) -> bool:
     return all(_safe_float(row.get(key)) is not None for key in ("entry", "sl", "tp1"))
 
 
+def _ranking_execution_lifecycle_state(row: dict) -> str:
+    lifecycle = row.get("execution_lifecycle") if isinstance(row.get("execution_lifecycle"), dict) else {}
+    shadow = row.get("early_entry_shadow") if isinstance(row.get("early_entry_shadow"), dict) else {}
+    return str(
+        row.get("execution_lifecycle_state")
+        or lifecycle.get("state")
+        or shadow.get("state")
+        or ""
+    ).upper()
+
+
+def _ranking_entry_executable(row: dict) -> bool:
+    entry_status = str(row.get("entryStatus") or "").strip()
+    if entry_status != "Tradeable":
+        return False
+
+    direction = str(row.get("direction") or row.get("trend") or "").upper()
+    entry = _safe_float(row.get("entry"))
+    price = _safe_float(row.get("price") if row.get("price") is not None else row.get("current_price"))
+    if direction not in {"LONG", "SHORT"} or entry is None or price is None:
+        return False
+
+    atr_distance = _safe_float(row.get("distanceFromEntryAtr"))
+    if atr_distance is not None and atr_distance > 0.25:
+        return False
+
+    if direction == "LONG":
+        return price >= entry
+    return price <= entry
+
+
 def _ranking_status_bucket(row: dict) -> str:
     grade = _ranking_grade(row)
     ev = row.get("trade_eval") or {}
@@ -7106,6 +7137,7 @@ def _ranking_status_bucket(row: dict) -> str:
     has_plan = _has_ranking_trade_plan(row)
     trigger_confirmed = bool(ev.get("trigger_confirmed") or ev.get("a_plus_ready"))
     b_plus_tradeable = bool(ev.get("b_plus_tradeable"))
+    execution_state = _ranking_execution_lifecycle_state(row)
 
     if (
         not has_direction
@@ -7117,13 +7149,19 @@ def _ranking_status_bucket(row: dict) -> str:
         or "CHOPPY" in stock_status
     ):
         return "SKIP"
+    if execution_state in {"WAITING_FOR_RETEST", "MISSED_ENTRY", "TP1_BEFORE_CONFIRMATION", "INVALIDATED", "EXPIRED", "PLAN_REPLACED"}:
+        return execution_state
     if entry_status == "Too Far":
+        if has_plan and trigger_confirmed:
+            return "MISSED_ENTRY"
         return "SKIP"
-    if has_plan and trigger_confirmed:
+    if has_plan and trigger_confirmed and _ranking_entry_executable(row):
         return "ENTER_NOW"
     if has_plan and b_plus_tradeable and entry_status == "Tradeable":
         return "EARLY_ENTRY"
     if has_plan and entry_status in {"Tradeable", "Near Entry"}:
+        return "ALMOST_READY"
+    if has_plan and trigger_confirmed:
         return "ALMOST_READY"
     return "WAITING"
 

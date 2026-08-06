@@ -17,6 +17,8 @@ def row(ticker, *, grade="B", stage="BUILDING / WATCHLIST", entry_status="Waitin
         "direction": "LONG",
         "setupGrade": grade,
         "entryStatus": entry_status,
+        "price": 100.0,
+        "distanceFromEntryAtr": 0.0 if entry_status == "Tradeable" else 0.4 if entry_status == "Near Entry" else 0.8,
         "entry": 100.0,
         "sl": 95.0,
         "tp1": 112.0,
@@ -96,6 +98,76 @@ def test_priority_buckets_dominate_scores():
     assert ordered.index("NOWB") < ordered.index("ALMB")
     assert ordered.index("ALMB") < ordered.index("WAITA")
     assert rows[0]["ranking"]["status_bucket"] == "ENTER_NOW"
+
+
+def test_enter_now_requires_executable_entry_state():
+    beyond_short = row(
+        "WFC",
+        grade="A",
+        stage="A+ READY",
+        entry_status="Waiting",
+        direction="SHORT",
+        entry=89.22,
+        sl=90.21,
+        tp1=87.24,
+        price=88.00,
+        distanceFromEntryAtr=0.8,
+    )
+    before_short = row(
+        "WYNN",
+        grade="B",
+        stage="A+ READY",
+        entry_status="Tradeable",
+        direction="SHORT",
+        entry=99.92,
+        sl=102.99,
+        tp1=93.78,
+        price=100.10,
+        distanceFromEntryAtr=0.05,
+    )
+    executable_short = row(
+        "EXEC",
+        grade="A",
+        stage="A+ READY",
+        entry_status="Tradeable",
+        direction="SHORT",
+        entry=99.92,
+        sl=102.99,
+        tp1=93.78,
+        price=99.90,
+        distanceFromEntryAtr=0.02,
+    )
+    early_touch = row(
+        "RETEST",
+        grade="A",
+        stage="A+ READY",
+        entry_status="Tradeable",
+        direction="SHORT",
+        entry=99.92,
+        sl=102.99,
+        tp1=93.78,
+        price=99.90,
+        distanceFromEntryAtr=0.02,
+        early_entry_shadow={"state": "WAITING_FOR_RETEST"},
+    )
+    missed_short = row(
+        "MISS",
+        grade="A",
+        stage="A+ READY",
+        entry_status="Too Far",
+        direction="SHORT",
+        entry=99.92,
+        sl=102.99,
+        tp1=93.78,
+        price=98.00,
+        distanceFromEntryAtr=1.1,
+    )
+
+    assert scanner._ranking_status_bucket(beyond_short) == "ALMOST_READY"
+    assert scanner._ranking_status_bucket(before_short) == "ALMOST_READY"
+    assert scanner._ranking_status_bucket(executable_short) == "ENTER_NOW"
+    assert scanner._ranking_status_bucket(early_touch) == "WAITING_FOR_RETEST"
+    assert scanner._ranking_status_bucket(missed_short) == "MISSED_ENTRY"
 
 
 def test_grade_a_beats_grade_b_inside_equivalent_status():
