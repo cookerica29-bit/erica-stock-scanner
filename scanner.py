@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import json
+from zoneinfo import ZoneInfo
 
 from market_data import (
     ALPACA_PROVIDER_NAME,
@@ -209,14 +210,17 @@ STOCK_EARLY_ENTRY_MEMORY_VERSION = "stock-early-entry-memory-v1"
 STOCK_EARLY_ENTRY_MEMORY_PATH = os.getenv("STOCK_EARLY_ENTRY_MEMORY_PATH") or "/tmp/kairos_stock_early_entry_memory_v1.json"
 STOCK_EARLY_ENTRY_EXPIRE_BARS = int(os.getenv("STOCK_EARLY_ENTRY_EXPIRE_BARS") or "20")
 STOCK_EARLY_ENTRY_RETEST_BARS = int(os.getenv("STOCK_EARLY_ENTRY_RETEST_BARS") or "4")
+STOCK_ENTRY_EXECUTION_MAX_ATR = 0.25
 STOCK_EVENT_MEMORY_PRESENTATION_V1 = str(os.getenv("STOCK_EVENT_MEMORY_PRESENTATION_V1") or "false").strip().lower() in {"1", "true", "yes", "on"}
 STOCK_MISSION_WORKFLOW_VERSION = "stock-mission-workflow-v1"
 STOCK_MISSION_WORKFLOW_V1 = str(os.getenv("STOCK_MISSION_WORKFLOW_V1") or "false").strip().lower() in {"1", "true", "yes", "on"}
 _stock_early_entry_memory_lock = threading.RLock()
 _stock_early_entry_memory_loaded = False
 _stock_early_entry_memory = {}
+_stock_ohlc_schema_log_seen = set()
 _stock_mission_workflow_lock = threading.RLock()
 _stock_mission_workflow_previous = {}
+_EASTERN_TZ = ZoneInfo("America/New_York")
 
 
 def _parse_background_analysis_scan_workers(value: Optional[str], default: int = 4) -> int:
@@ -2180,6 +2184,133 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _stock_ohlc_column_map(df: Optional[pd.DataFrame]) -> dict:
+    if df is None or getattr(df, "empty", True):
+        return {}
+    mapping = {}
+    for column in df.columns:
+        key = str(column).strip().lower()
+        if key in {"open", "o"}:
+            mapping["open"] = column
+        elif key in {"high", "h"}:
+            mapping["high"] = column
+        elif key in {"low", "l"}:
+            mapping["low"] = column
+        elif key in {"close", "c", "adj close"}:
+            mapping.setdefault("close", column)
+        elif key in {"volume", "v"}:
+            mapping["volume"] = column
+    return mapping
+
+
+def _log_stock_ohlc_schema(provider: str, timeframe: str, df: Optional[pd.DataFrame], source: str) -> None:
+    columns = [str(column) for column in getattr(df, "columns", [])]
+    signature = (str(provider or "unknown"), str(timeframe or "unknown"), source, tuple(columns))
+    if signature in _stock_ohlc_schema_log_seen:
+        return
+    _stock_ohlc_schema_log_seen.add(signature)
+    logger.info(
+        "[stock-lifecycle-evidence] ohlc_schema provider=%s timeframe=%s source=%s columns=%s normalized=%s",
+        provider or "unknown",
+        timeframe or "unknown",
+        source,
+        columns,
+        sorted(_stock_ohlc_column_map(df).keys()),
+    )
+
+
+def _stock_normalized_bar_from_row(row, timestamp, column_map: dict) -> Optional[dict]:
+    try:
+        open_value = _safe_float(row.get(column_map.get("open"))) if column_map.get("open") is not None else None
+        high_value = _safe_float(row.get(column_map.get("high"))) if column_map.get("high") is not None else None
+        low_value = _safe_float(row.get(column_map.get("low"))) if column_map.get("low") is not None else None
+        close_value = _safe_float(row.get(column_map.get("close"))) if column_map.get("close") is not None else None
+    except Exception:
+        return None
+    if high_value is None or low_value is None or close_value is None:
+        return None
+    return {
+        "time": _format_utc_timestamp(timestamp),
+        "open": open_value,
+        "high": high_value,
+        "low": low_value,
+        "close": close_value,
+    }
+
+
+def _stock_candle_completed_at(candle_time, timeframe: str):
+    candle_dt = _coerce_utc_datetime(candle_time)
+    tf = str(timeframe or "").upper()
+    if candle_dt is None:
+        return None
+    if tf == "1D":
+        eastern = candle_dt.astimezone(_EASTERN_TZ)
+        market_close = datetime(eastern.year, eastern.month, eastern.day, 16, 0, tzinfo=_EASTERN_TZ)
+        return market_close.astimezone(timezone.utc)
+    if tf == "1W":
+        eastern = candle_dt.astimezone(_EASTERN_TZ)
+        days_to_friday = max(0, 4 - eastern.weekday())
+        friday = eastern + timedelta(days=days_to_friday)
+        return datetime(friday.year, friday.month, friday.day, 16, 0, tzinfo=_EASTERN_TZ).astimezone(timezone.utc)
+    minutes = _timeframe_minutes(tf)
+    if not minutes:
+        return candle_dt
+    return candle_dt + timedelta(minutes=minutes)
+
+
+def _stock_is_completed_candle(candle_time, timeframe: str, observed_at) -> bool:
+    completed_at = _stock_candle_completed_at(candle_time, timeframe)
+    observed_dt = _coerce_utc_datetime(observed_at)
+    if completed_at is None or observed_dt is None:
+        return False
+    return completed_at <= observed_dt
+
+
+def _stock_completed_bar_records(
+    df: Optional[pd.DataFrame],
+    timeframe: str,
+    observed_at,
+    *,
+    limit: Optional[int] = None,
+) -> list[dict]:
+    if df is None or getattr(df, "empty", True):
+        return []
+    frame = _flatten_columns(df.copy())
+    column_map = _stock_ohlc_column_map(frame)
+    if not {"high", "low", "close"}.issubset(column_map):
+        return []
+    bars = []
+    for timestamp, row in frame.iterrows():
+        if not _stock_is_completed_candle(timestamp, timeframe, observed_at):
+            continue
+        bar = _stock_normalized_bar_from_row(row, timestamp, column_map)
+        if bar:
+            bars.append(bar)
+    if limit is not None and limit > 0:
+        return bars[-limit:]
+    return bars
+
+
+def _stock_bar_after(left, right) -> bool:
+    left_dt = _coerce_utc_datetime(left)
+    right_dt = _coerce_utc_datetime(right)
+    if left_dt is None or right_dt is None:
+        return str(left or "") > str(right or "")
+    return left_dt > right_dt
+
+
+def _stock_time_before(left, right) -> bool:
+    left_dt = _coerce_utc_datetime(left)
+    right_dt = _coerce_utc_datetime(right)
+    if left_dt is not None and right_dt is not None:
+        return left_dt < right_dt
+    return str(left or "") < str(right or "")
+
+
+def _stock_event_time_for_bar(bar_marker: str, observed_at: str) -> str:
+    return bar_marker if _coerce_utc_datetime(bar_marker) is not None else observed_at
+
+
 def _compute_rsi(series: pd.Series, period: int = 14) -> float:
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -2975,6 +3106,8 @@ def stock_mission_workflow_snapshot(
 
 def _stock_early_price_evidence(row: dict) -> dict:
     price = _safe_float(row.get("price") if row.get("price") is not None else row.get("current_price"))
+    open_value = _safe_float(row.get("current_bar_open") if row.get("current_bar_open") is not None else row.get("open") if row.get("open") is not None else row.get("latest_open"))
+    close_value = _safe_float(row.get("current_bar_close") if row.get("current_bar_close") is not None else row.get("close") if row.get("close") is not None else row.get("latest_close"))
     high = _safe_float(
         row.get("current_bar_high")
         if row.get("current_bar_high") is not None
@@ -2988,9 +3121,12 @@ def _stock_early_price_evidence(row: dict) -> dict:
         else row.get("latest_low")
     )
     return {
-        "price": price,
-        "high": high if high is not None else price,
-        "low": low if low is not None else price,
+        "price": price if price is not None else close_value,
+        "open": open_value,
+        "high": high if high is not None else (price if price is not None else close_value),
+        "low": low if low is not None else (price if price is not None else close_value),
+        "close": close_value if close_value is not None else price,
+        "time": row.get("current_candle_time") or row.get("latest_candle_time") or row.get("current_bar"),
         "used_price_fallback": high is None or low is None,
     }
 
@@ -3012,6 +3148,52 @@ def _stock_early_entry_touched(row: dict) -> bool:
     if direction == "SHORT" and entry is not None:
         return (high is not None and high >= entry) or (price is not None and price <= entry)
     return False
+
+
+def _stock_early_bar_row(row: dict, bar: dict) -> dict:
+    bar_row = dict(row)
+    close_value = _safe_float(bar.get("close"))
+    entry = _safe_float(row.get("entry"))
+    atr_value = _safe_float(row.get("atr"))
+    if close_value is not None:
+        bar_row["price"] = close_value
+        bar_row["current_price"] = close_value
+    bar_row["current_bar_open"] = _safe_float(bar.get("open"))
+    bar_row["current_bar_high"] = _safe_float(bar.get("high"))
+    bar_row["current_bar_low"] = _safe_float(bar.get("low"))
+    bar_row["current_bar_close"] = close_value
+    bar_row["current_candle_time"] = bar.get("time")
+    bar_row["current_candle_complete"] = True
+    if atr_value and entry is not None and close_value is not None:
+        bar_row["distanceFromEntryAtr"] = abs(close_value - entry) / atr_value
+    return bar_row
+
+
+def _stock_early_valid_retest(row: dict) -> bool:
+    direction = str(row.get("direction") or "").upper()
+    entry = _safe_float(row.get("entry"))
+    evidence = _stock_early_price_evidence(row)
+    high = evidence.get("high")
+    low = evidence.get("low")
+    close_value = evidence.get("close")
+    if direction not in {"LONG", "SHORT"} or entry is None or close_value is None:
+        return False
+    touched = False
+    if direction == "LONG":
+        touched = low is not None and low <= entry and close_value >= entry
+    elif direction == "SHORT":
+        touched = high is not None and high >= entry and close_value <= entry
+    if not touched:
+        return False
+    if _ranking_entry_executable(row):
+        return True
+    atr_distance = _safe_float(row.get("distanceFromEntryAtr"))
+    if atr_distance is None:
+        atr_value = _safe_float(row.get("atr"))
+        if not atr_value:
+            return False
+        atr_distance = abs(close_value - entry) / atr_value
+    return atr_distance <= STOCK_ENTRY_EXECUTION_MAX_ATR
 
 
 def _stock_early_tp1_reached(row: dict) -> bool:
@@ -3081,8 +3263,8 @@ def _stock_early_terminal(state: str) -> bool:
 
 
 def _stock_early_mark_replaced_memories(memories: dict, row: dict, active_key: str, observed_at: str, bar_marker: str) -> bool:
-    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
-    if not ticker:
+    active_family = _stock_early_memory_family_identity(row)
+    if not active_family[0]:
         return False
     changed = False
     for key, memory in list((memories or {}).items()):
@@ -3090,7 +3272,7 @@ def _stock_early_mark_replaced_memories(memories: dict, row: dict, active_key: s
             continue
         if str(memory.get("version") or "") != STOCK_EARLY_ENTRY_MEMORY_VERSION:
             continue
-        if str(memory.get("ticker") or "").strip().upper() != ticker:
+        if _stock_early_memory_family_identity(memory) != active_family:
             continue
         if _stock_early_terminal(str(memory.get("state") or "")):
             continue
@@ -3108,35 +3290,84 @@ def _stock_early_elapsed_bars(memory: dict, row: dict, observed_at: str, start_f
     return _estimated_bars_between(memory.get(start_field), observed_at, row.get("timeframe") or "")
 
 
-def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_generation: str, is_early_entry: bool) -> dict:
-    key = stock_early_entry_memory_key(row)
+def _stock_early_completed_evidence_rows(row: dict, observed_at: str) -> list[dict]:
+    raw_bars = row.get("_lifecycle_completed_bars")
+    bars = raw_bars if isinstance(raw_bars, list) else []
+    evidence_rows = []
+    for bar in bars:
+        if not isinstance(bar, dict) or not bar.get("time"):
+            continue
+        evidence_rows.append(_stock_early_bar_row(row, bar))
+    if evidence_rows:
+        return evidence_rows
+    evidence = _stock_early_price_evidence(row)
+    if evidence.get("high") is None or evidence.get("low") is None:
+        return []
+    marker = _stock_early_bar_marker(row, observed_at)
+    if not marker:
+        return []
+    if row.get("current_candle_time") and row.get("current_candle_complete") is False:
+        return []
+    return [row]
+
+
+def _stock_early_memory_family_identity(row_or_memory: dict) -> tuple:
+    return (
+        str(row_or_memory.get("ticker") or row_or_memory.get("symbol") or "").strip().upper(),
+        str(row_or_memory.get("timeframe") or row_or_memory.get("scanner_timeframe") or "").strip().upper(),
+        str(row_or_memory.get("direction") or "").strip().upper(),
+        STOCK_EARLY_ENTRY_MEMORY_VERSION,
+    )
+
+
+def _stock_early_migrate_boundary(memory: dict, row: dict, evidence_rows: list[dict], observed_at: str, *, new_memory: bool = False) -> bool:
+    if memory.get("last_evaluated_bar_time"):
+        return False
+    policy = "bounded_current_scan_continuation"
+    if new_memory:
+        policy = "bounded_initial_setup_generation_replay"
+        boundary = _stock_early_setup_generation(row) or memory.get("first_seen_bar")
+    else:
+        boundary = (
+            memory.get("last_seen_bar")
+            or memory.get("first_entry_touch_at_bar")
+            or memory.get("first_seen_bar")
+            or _stock_early_setup_generation(row)
+        )
+    if not boundary and evidence_rows:
+        boundary = _stock_early_bar_marker(evidence_rows[-1], observed_at)
+        policy = "current_completed_bar_no_prior_boundary"
+    memory["evidence_migration_policy"] = policy
+    memory["evidence_migration_at"] = observed_at
+    memory["evidence_migration_boundary"] = boundary
+    eligible = [
+        _stock_early_bar_marker(item, observed_at)
+        for item in evidence_rows
+        if boundary and _stock_bar_after(_stock_early_bar_marker(item, observed_at), boundary)
+    ]
+    memory["evidence_migration_unseen_bars"] = len(eligible)
+    memory["evidence_migration_oldest_replay_bar"] = eligible[0] if eligible else None
+    memory["evidence_migration_newest_replay_bar"] = eligible[-1] if eligible else None
+    if boundary:
+        memory["last_evaluated_bar_time"] = boundary
+    return True
+
+
+def _stock_early_process_evidence_row(
+    row: dict,
+    memory: dict,
+    observed_at: str,
+    scan_generation: str,
+    is_early_entry: bool,
+    *,
+    confirmation_allowed: bool,
+) -> dict:
     bar_marker = _stock_early_bar_marker(row, observed_at)
-    confirmation_complete = _stock_early_confirmation_complete(row)
+    confirmation_complete = _stock_early_confirmation_complete(row) and confirmation_allowed
     touched = _stock_early_entry_touched(row)
     tp1_reached = _stock_early_tp1_reached(row)
     stop_reached = _stock_early_stop_reached(row)
     evidence = _stock_early_price_evidence(row)
-
-    if not memory:
-        memory = {
-            "version": STOCK_EARLY_ENTRY_MEMORY_VERSION,
-            "candidate_id": key,
-            "ticker": str(row.get("ticker") or "").upper(),
-            "timeframe": str(row.get("timeframe") or "").upper(),
-            "direction": str(row.get("direction") or "").upper(),
-            "entry": _safe_float(row.get("entry")),
-            "stop": _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop")),
-            "tp1": _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target")),
-            "setup_generation": _stock_early_setup_generation(row),
-            "first_seen_at": observed_at,
-            "first_seen_bar": bar_marker,
-            "observed_at_initialization": True,
-            "initialization_evidence": "observed_at_initialization",
-            "state": None,
-            "previous_state": None,
-            "transitions": [],
-        }
-        _stock_early_transition(memory, "EARLY_ENTRY_BUILDING", "early_entry_first_printed", observed_at, bar_marker, row)
 
     memory["last_seen_at"] = observed_at
     memory["last_seen_scan_generation"] = scan_generation
@@ -3145,7 +3376,7 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
     memory["used_price_fallback"] = bool(evidence.get("used_price_fallback"))
     memory["production_bucket"] = _ranking_status_bucket(row)
     memory["production_entry_status"] = row.get("entryStatus")
-    memory["trigger_confirmed"] = confirmation_complete
+    memory["trigger_confirmed"] = _stock_early_confirmation_complete(row)
     memory["b_plus_tradeable"] = bool((row.get("trade_eval") or {}).get("b_plus_tradeable"))
 
     state = str(memory.get("state") or "EARLY_ENTRY_BUILDING")
@@ -3170,7 +3401,7 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
     if confirmation_complete:
         confirmation_was_new = not memory.get("confirmation_at")
         _stock_early_record_event(memory, "confirmation_at", observed_at, bar_marker, row)
-        if memory.get("first_entry_touch_at") and memory.get("first_entry_touch_at") < memory.get("confirmation_at"):
+        if memory.get("first_entry_touch_at") and _stock_time_before(memory.get("first_entry_touch_at"), memory.get("confirmation_at")):
             if confirmation_was_new:
                 _stock_early_transition(memory, "WAITING_FOR_RETEST", "confirmation_after_early_touch_requires_later_retest", observed_at, bar_marker, row)
             confirmation_bar = memory.get("confirmation_at_bar")
@@ -3182,7 +3413,7 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
             if too_far:
                 _stock_early_transition(memory, "MISSED_ENTRY", "price_moved_too_far_without_retest", observed_at, bar_marker, row)
                 return memory
-            retest_is_later_bar = touched and str(bar_marker) != str(confirmation_bar)
+            retest_is_later_bar = _stock_early_valid_retest(row) and str(bar_marker) != str(confirmation_bar)
             if retest_is_later_bar:
                 _stock_early_record_event(memory, "valid_entry_at", observed_at, bar_marker, row)
                 memory["retest_at"] = observed_at
@@ -3190,7 +3421,7 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
                 _stock_early_transition(memory, "ENTRY_TRIGGERED", "valid_retest_after_confirmation", observed_at, bar_marker, row)
                 return memory
             return memory
-        if touched:
+        if _stock_early_valid_retest(row):
             _stock_early_record_event(memory, "valid_entry_at", observed_at, bar_marker, row)
             _stock_early_transition(memory, "ENTRY_TRIGGERED", "confirmation_complete_entry_available", observed_at, bar_marker, row)
             return memory
@@ -3206,6 +3437,91 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
     elapsed_bars = _stock_early_elapsed_bars(memory, row, observed_at)
     if elapsed_bars is not None and elapsed_bars > STOCK_EARLY_ENTRY_EXPIRE_BARS:
         _stock_early_transition(memory, "EXPIRED", "confirmation_never_completed_within_age_limit", observed_at, bar_marker, row)
+    return memory
+
+
+def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_generation: str, is_early_entry: bool) -> dict:
+    key = stock_early_entry_memory_key(row)
+    bar_marker = _stock_early_bar_marker(row, observed_at)
+    evidence_rows = _stock_early_completed_evidence_rows(row, observed_at)
+    new_memory = not memory
+
+    if new_memory:
+        memory = {
+            "version": STOCK_EARLY_ENTRY_MEMORY_VERSION,
+            "candidate_id": key,
+            "ticker": str(row.get("ticker") or "").upper(),
+            "timeframe": str(row.get("timeframe") or "").upper(),
+            "direction": str(row.get("direction") or "").upper(),
+            "entry": _safe_float(row.get("entry")),
+            "stop": _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop")),
+            "tp1": _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target")),
+            "setup_generation": _stock_early_setup_generation(row),
+            "first_seen_at": observed_at,
+            "first_seen_bar": bar_marker,
+            "observed_at_initialization": True,
+            "initialization_evidence": "observed_at_initialization",
+            "state": None,
+            "previous_state": None,
+            "transitions": [],
+        }
+        _stock_early_transition(memory, "EARLY_ENTRY_BUILDING", "early_entry_first_printed", observed_at, bar_marker, row)
+
+    _stock_early_migrate_boundary(memory, row, evidence_rows, observed_at, new_memory=new_memory)
+    boundary = memory.get("last_evaluated_bar_time")
+    replay_rows = [
+        item for item in evidence_rows
+        if not boundary or _stock_bar_after(_stock_early_bar_marker(item, observed_at), boundary)
+    ]
+    latest_replay_bar = _stock_early_bar_marker(replay_rows[-1], observed_at) if replay_rows else None
+    for item in replay_rows:
+        item_marker = _stock_early_bar_marker(item, observed_at)
+        item_event_at = _stock_event_time_for_bar(item_marker, observed_at)
+        confirmation_allowed = bool(memory.get("confirmation_at")) or item_marker == latest_replay_bar
+        memory = _stock_early_process_evidence_row(
+            item,
+            memory,
+            item_event_at,
+            scan_generation,
+            is_early_entry,
+            confirmation_allowed=confirmation_allowed,
+        )
+        memory["last_evaluated_bar_time"] = item_marker
+        if _stock_early_terminal(str(memory.get("state") or "")):
+            break
+
+    if not replay_rows:
+        if not (row.get("current_candle_time") and row.get("current_candle_complete") is False):
+            memory = _stock_early_process_evidence_row(
+                row,
+                memory,
+                observed_at,
+                scan_generation,
+                is_early_entry,
+                confirmation_allowed=True,
+            )
+        else:
+            evidence = _stock_early_price_evidence(row)
+            memory["last_seen_at"] = observed_at
+            memory["last_seen_scan_generation"] = scan_generation
+            memory["last_seen_bar"] = bar_marker
+            memory["last_price"] = evidence.get("price")
+            memory["used_price_fallback"] = bool(evidence.get("used_price_fallback"))
+            memory["production_bucket"] = _ranking_status_bucket(row)
+            memory["production_entry_status"] = row.get("entryStatus")
+            memory["trigger_confirmed"] = _stock_early_confirmation_complete(row)
+            memory["b_plus_tradeable"] = bool((row.get("trade_eval") or {}).get("b_plus_tradeable"))
+    else:
+        evidence = _stock_early_price_evidence(row)
+        memory["last_seen_at"] = observed_at
+        memory["last_seen_scan_generation"] = scan_generation
+        memory["last_seen_bar"] = bar_marker
+        memory["last_price"] = evidence.get("price")
+        memory["used_price_fallback"] = bool(evidence.get("used_price_fallback"))
+        memory["production_bucket"] = _ranking_status_bucket(row)
+        memory["production_entry_status"] = row.get("entryStatus")
+        memory["trigger_confirmed"] = _stock_early_confirmation_complete(row)
+        memory["b_plus_tradeable"] = bool((row.get("trade_eval") or {}).get("b_plus_tradeable"))
     return memory
 
 
@@ -3236,12 +3552,19 @@ def _stock_early_public_shadow(memory: Optional[dict]) -> Optional[dict]:
         "last_seen_at",
         "last_transition_at",
         "last_transition_bar",
+        "last_evaluated_bar_time",
         "last_price",
         "production_bucket",
         "production_entry_status",
         "trigger_confirmed",
         "b_plus_tradeable",
         "used_price_fallback",
+        "evidence_migration_policy",
+        "evidence_migration_at",
+        "evidence_migration_boundary",
+        "evidence_migration_unseen_bars",
+        "evidence_migration_oldest_replay_bar",
+        "evidence_migration_newest_replay_bar",
     ]
     public = {field: memory.get(field) for field in fields if field in memory}
     public["transitions"] = list(memory.get("transitions") or [])[-8:]
@@ -3352,6 +3675,9 @@ def _stock_early_memory_diagnostics(memories: dict, touched_keys: Optional[set] 
 
     total = len(all_memories)
     entry_triggered = states.get("ENTRY_TRIGGERED", 0)
+    using_price_fallback = sum(1 for m in all_memories if m.get("used_price_fallback"))
+    with_evaluated_boundary = sum(1 for m in all_memories if m.get("last_evaluated_bar_time"))
+    migration_policies = Counter(str(m.get("evidence_migration_policy") or "none") for m in all_memories)
     return {
         "version": STOCK_EARLY_ENTRY_MEMORY_VERSION,
         "memory_path": STOCK_EARLY_ENTRY_MEMORY_PATH,
@@ -3373,6 +3699,9 @@ def _stock_early_memory_diagnostics(memories: dict, touched_keys: Optional[set] 
         "plan_replaced": states.get("PLAN_REPLACED", 0),
         "terminal_outcomes": len(terminal),
         "still_developing": total - len(terminal),
+        "memories_using_current_price_fallback": using_price_fallback,
+        "memories_with_last_evaluated_bar_time": with_evaluated_boundary,
+        "evidence_migration_policies": dict(sorted(migration_policies.items())),
         "entry_triggered_conversion_rate": round(entry_triggered / total, 4) if total else None,
         "touched_before_confirmation_rate": round(
             sum(1 for m in all_memories if m.get("first_entry_touch_at") and (not m.get("confirmation_at") or m.get("first_entry_touch_at") < m.get("confirmation_at"))) / total,
@@ -3429,6 +3758,9 @@ def update_stock_early_entry_shadow(rows: list, near_miss: list, scan_meta: Opti
             row["execution_lifecycle_presentation_enabled"] = stock_event_memory_presentation_enabled()
             after = json.dumps(memory, sort_keys=True, default=str)
             changed = changed or before != after
+
+        for row in all_rows:
+            row.pop("_lifecycle_completed_bars", None)
 
         for key in existing_keys - touched_keys:
             memory = memories.get(key)
@@ -7118,7 +7450,7 @@ def _ranking_entry_executable(row: dict) -> bool:
         return False
 
     atr_distance = _safe_float(row.get("distanceFromEntryAtr"))
-    if atr_distance is not None and atr_distance > 0.25:
+    if atr_distance is not None and atr_distance > STOCK_ENTRY_EXECUTION_MAX_ATR:
         return False
 
     if direction == "LONG":
@@ -7908,6 +8240,7 @@ def _enrich_stock_scout_fields(
     h4_result: Optional[dict],
     daily_df: Optional[pd.DataFrame],
     h4_df: Optional[pd.DataFrame],
+    observed_at: Optional[datetime] = None,
 ) -> Optional[dict]:
     if not result:
         return None
@@ -7943,17 +8276,32 @@ def _enrich_stock_scout_fields(
     best_contract = _unclean_contract("Live contract selection replaced by Option Plan", "option_plan")
     selected_tf = str(result.get("timeframe") or "").upper()
     selected_df = h4_df if selected_tf == "4H" else daily_df
+    selected_provider = provider_name_for_timeframe(selected_tf or "1D")
+    _log_stock_ohlc_schema(selected_provider, selected_tf, selected_df, "enrich_selected_timeframe")
     latest_bar = {}
-    if isinstance(selected_df, pd.DataFrame) and not selected_df.empty:
-        try:
-            last = selected_df.iloc[-1]
-            latest_bar = {
-                "current_bar_high": round(float(last.get("high")), 4) if last.get("high") is not None else None,
-                "current_bar_low": round(float(last.get("low")), 4) if last.get("low") is not None else None,
-                "current_candle_time": _format_utc_timestamp(selected_df.index[-1]),
-            }
-        except Exception:
-            latest_bar = {}
+    completed_bars = _stock_completed_bar_records(
+        selected_df,
+        selected_tf,
+        observed_at or _utc_now(),
+        limit=max(STOCK_EARLY_ENTRY_EXPIRE_BARS + STOCK_EARLY_ENTRY_RETEST_BARS + 4, 12),
+    )
+    if completed_bars:
+        bar = completed_bars[-1]
+        latest_bar = {
+            "current_bar_open": round(float(bar.get("open")), 4) if bar.get("open") is not None else None,
+            "current_bar_high": round(float(bar.get("high")), 4) if bar.get("high") is not None else None,
+            "current_bar_low": round(float(bar.get("low")), 4) if bar.get("low") is not None else None,
+            "current_bar_close": round(float(bar.get("close")), 4) if bar.get("close") is not None else None,
+            "current_candle_time": bar.get("time"),
+            "current_candle_complete": True,
+            "_lifecycle_completed_bars": completed_bars,
+        }
+    elif isinstance(selected_df, pd.DataFrame) and not selected_df.empty:
+        latest_bar = {
+            "current_candle_time": _format_utc_timestamp(selected_df.index[-1]),
+            "current_candle_complete": False,
+            "_lifecycle_completed_bars": [],
+        }
 
     timing = result.setdefault("_scan_timing", {})
     timing.update({
@@ -8088,6 +8436,7 @@ def scan_all(
                 _daily_df=daily_data.get(ticker),
                 _weekly_df=weekly_data.get(ticker),
                 _h4_df=h4_data.get(ticker, pd.DataFrame()),
+                observed_at=scan_started_at,
             )
 
         with _scan_symbol_stdout_context():
@@ -8424,6 +8773,7 @@ def scan_ticker(
     _daily_df: Optional[pd.DataFrame] = None,
     _weekly_df: Optional[pd.DataFrame] = None,
     _h4_df: Optional[pd.DataFrame] = None,
+    observed_at: Optional[datetime] = None,
 ) -> Optional[dict]:
     ticker_start = time.perf_counter()
     ticker = ticker.upper()
@@ -8449,7 +8799,7 @@ def scan_ticker(
     price_trend_ms = round((time.perf_counter() - price_trend_start) * 1000, 1)
 
     best = _best_timeframe_result(daily_result, h4_result)
-    enriched = _enrich_stock_scout_fields(best, daily_result, h4_result, _daily_df, h4_source)
+    enriched = _enrich_stock_scout_fields(best, daily_result, h4_result, _daily_df, h4_source, observed_at=observed_at)
     if enriched is not None:
         timing = enriched.setdefault("_scan_timing", {})
         timing["price_trend_ms"] = price_trend_ms
