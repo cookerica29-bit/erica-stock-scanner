@@ -8,6 +8,7 @@ import math
 import os
 import random
 import resource
+import shutil
 import threading
 import time
 from collections import Counter
@@ -2693,6 +2694,24 @@ def _stock_early_entry_memory_path() -> Path:
     return Path(STOCK_EARLY_ENTRY_MEMORY_PATH)
 
 
+def _stock_early_entry_memory_backup_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.bak")
+
+
+def _stock_early_parse_memory_payload(raw: str, source: Path) -> dict:
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"memory payload is not an object: {source}")
+    memories = parsed.get("memories") if isinstance(parsed.get("memories"), dict) else parsed
+    if not isinstance(memories, dict):
+        raise ValueError(f"memory payload memories is not an object: {source}")
+    return memories
+
+
+def _stock_early_load_memory_file(path: Path) -> dict:
+    return _stock_early_parse_memory_payload(path.read_text(), path)
+
+
 def _load_stock_early_entry_memory_locked() -> dict:
     global _stock_early_entry_memory_loaded, _stock_early_entry_memory
     if _stock_early_entry_memory_loaded:
@@ -2701,12 +2720,17 @@ def _load_stock_early_entry_memory_locked() -> dict:
     loaded = {}
     try:
         if path.exists():
-            parsed = json.loads(path.read_text())
-            if isinstance(parsed, dict):
-                loaded = parsed.get("memories") if isinstance(parsed.get("memories"), dict) else parsed
+            loaded = _stock_early_load_memory_file(path)
     except Exception as exc:
         logger.warning("[early-entry-shadow] failed to load memory path=%s error=%s", path, exc)
-        loaded = {}
+        backup_path = _stock_early_entry_memory_backup_path(path)
+        try:
+            if backup_path.exists():
+                loaded = _stock_early_load_memory_file(backup_path)
+                logger.warning("[early-entry-shadow] recovered memory from backup path=%s", backup_path)
+        except Exception as backup_exc:
+            logger.warning("[early-entry-shadow] failed to recover memory backup path=%s error=%s", backup_path, backup_exc)
+            loaded = {}
     _stock_early_entry_memory = loaded
     _stock_early_entry_memory_loaded = True
     return _stock_early_entry_memory
@@ -2721,7 +2745,31 @@ def _save_stock_early_entry_memory_locked() -> None:
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        _stock_early_parse_memory_payload(serialized, path)
+
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            with tmp_path.open("w") as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _stock_early_load_memory_file(tmp_path)
+
+            backup_path = _stock_early_entry_memory_backup_path(path)
+            if path.exists():
+                try:
+                    _stock_early_load_memory_file(path)
+                    shutil.copy2(path, backup_path)
+                except Exception as backup_exc:
+                    logger.warning("[early-entry-shadow] skipped malformed memory backup path=%s error=%s", path, backup_exc)
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
     except Exception as exc:
         logger.warning("[early-entry-shadow] failed to persist memory path=%s error=%s", path, exc)
 
