@@ -681,6 +681,48 @@ def _summary_selected_contract(row: dict) -> dict:
     return selected
 
 
+def _summary_option_plan(row: dict) -> Optional[dict]:
+    plan = row.get("option_plan") if isinstance(row.get("option_plan"), dict) else None
+    if not plan:
+        return None
+    suggested_expiration = plan.get("suggested_expiration") if isinstance(plan.get("suggested_expiration"), dict) else {}
+    expected_hold = plan.get("expected_hold") if isinstance(plan.get("expected_hold"), dict) else {}
+    expected_move = plan.get("expected_move") if isinstance(plan.get("expected_move"), dict) else {}
+    confidence = plan.get("confidence") if isinstance(plan.get("confidence"), dict) else {}
+    return {
+        "available": plan.get("available"),
+        "type": plan.get("type"),
+        "preferred_strike": plan.get("preferred_strike"),
+        "raw_preferred_strike": plan.get("raw_preferred_strike"),
+        "planned_entry": plan.get("planned_entry"),
+        "tp1": plan.get("tp1"),
+        "suggested_expiration": {
+            "min_dte": suggested_expiration.get("min_dte"),
+            "max_dte": suggested_expiration.get("max_dte"),
+            "label": suggested_expiration.get("label"),
+        },
+        "expected_hold": {
+            "min_trading_days": expected_hold.get("min_trading_days"),
+            "max_trading_days": expected_hold.get("max_trading_days"),
+            "label": expected_hold.get("label"),
+            "fallback_used": expected_hold.get("fallback_used"),
+            "fallback_speed": expected_hold.get("fallback_speed"),
+        },
+        "expected_move": {
+            "dollars": expected_move.get("dollars"),
+            "percent": expected_move.get("percent"),
+            "label": expected_move.get("label"),
+        },
+        "confidence": {
+            "stars": confidence.get("stars"),
+            "label": confidence.get("label"),
+            "note": confidence.get("note"),
+        },
+        "source": plan.get("source"),
+        "reason": _first_present(plan.get("reason"), plan.get("unavailable_reason")),
+    }
+
+
 def _summary_accessibility(contract: dict, pricing_status: str = "") -> dict:
     status = str(pricing_status or "").lower()
     if status == "pending":
@@ -729,6 +771,7 @@ def _summary_status_bucket(row: dict) -> Optional[str]:
 def _summary_row(row: dict, generation: Optional[str]) -> dict:
     ranking = row.get("ranking") if isinstance(row.get("ranking"), dict) else {}
     contract = _summary_selected_contract(row)
+    option_plan = _summary_option_plan(row)
     pricing_status = str(contract.get("pricing_status") or row.get("pricing_status") or "").lower()
     setup_id = _summary_setup_id(row, generation)
     status_bucket = _summary_status_bucket(row)
@@ -804,6 +847,7 @@ def _summary_row(row: dict, generation: Optional[str]) -> dict:
             "loading": earnings.get("loading"),
         },
         "option": contract,
+        "option_plan": option_plan,
         "option_pricing": {
             "status": contract.get("pricing_status"),
             "quality": contract.get("pricing_quality"),

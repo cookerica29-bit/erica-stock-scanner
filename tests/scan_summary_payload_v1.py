@@ -170,13 +170,19 @@ def test_full_response_remains_backward_compatible_and_summary_is_additive():
             "ticker", "timeframe", "direction", "current_price", "planned_entry",
             "stop", "tp1", "tp2", "tp3", "setupGrade", "display_status",
             "normalized_status_bucket", "ranking", "earnings", "option",
-            "option_pricing", "pricing_status", "pricing_quality",
+            "option_plan", "option_pricing", "pricing_status", "pricing_quality",
             "accessibility", "lazy_hydration", "setup_id", "scan_generation",
             "ranking_status_bucket", "execution_lifecycle",
             "execution_lifecycle_presentation_enabled", "mission_identity",
             "mission_workflow_bucket", "mission_workflow_enabled",
         }
         assert required.issubset(summary["rows"][0].keys())
+        assert summary["rows"][0]["option_plan"]["available"] is True
+        assert summary["rows"][0]["option_plan"]["type"] == "CALL"
+        assert summary["rows"][0]["option_plan"]["preferred_strike"] == 25.0
+        assert summary["rows"][0]["option"]["strike"] == 25.0
+        assert summary["rows"][0]["option_plan"]["suggested_expiration"]["label"] == "21-35 DTE"
+        assert summary["rows"][0]["option_plan"]["source"] == "kairos_trade_plan"
         assert summary["rows"][0]["ranking_status_bucket"] == "ENTER_NOW"
         assert summary["rows"][0]["execution_lifecycle"]["ranking_status_bucket"] == "ENTER_NOW"
         assert summary["meta"]["view"] == "summary"
@@ -203,6 +209,7 @@ def test_summary_preserves_budget_and_market_outcomes():
     assert summary["meta"]["near_miss_count"] == 0
     assert summary["rows"][0]["lazy_hydration"]["ticker"] == "AAA"
     assert summary["rows"][0]["lazy_hydration"]["expiration"] == "2026-09-18"
+    assert summary["rows"][0]["option_plan"]["preferred_strike"] == full_payload()["rows"][0]["option_plan"]["preferred_strike"]
 
 
 def test_detail_lookup_returns_matching_full_row_and_rejects_stale_generation():
