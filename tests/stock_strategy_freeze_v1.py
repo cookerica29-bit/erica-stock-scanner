@@ -13,6 +13,8 @@ import inspect
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -25,7 +27,7 @@ EXPECTED_BASELINE = "7441aac88d5cdf2bb479b85f0e73e4cec629ed57"
 
 CORE_FUNCTION_HASHES = {
     # Updated 2026-07-19: corrected RR disqualifier wording to match the existing 1.5R threshold.
-    "_build_trade_stage_eval": "3e3fa41e9f15b258511ebb161dfd939f67ec12ce67edf1125203cad0a61646a7",
+    "_build_trade_stage_eval": "6d4e58dde9e3c2b4e6cf43e16593753f17592d3ef3326b02bf46dd345867c8ef",
     # Updated 2026-07-18: added daily-only HTF swing tolerance for provider precision stability (non-strategy).
     "analyze_ticker": "6b526f843e5dfc1a78101d2eb5424b6f3d1d2bf9a638d71d038104f696dd7284",
     "_build_chart_coach": "7642863ce83136bacf46e441b8a5965e7552d067435b1dec2800ee79e39561f0",
@@ -312,6 +314,156 @@ CASES = [
 ]
 
 
+FREEZE_BOS_SWINGS = [
+    {"type": "high", "index": 1, "price": 96.0},
+    {"type": "low", "index": 2, "price": 94.0},
+    {"type": "high", "index": 3, "price": 100.0},
+    {"type": "low", "index": 5, "price": 98.0},
+    {"type": "high", "index": 7, "price": 104.0},
+]
+
+
+def displacement_df(candles: list[tuple[float, float, float, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"Open": open_, "High": high, "Low": low, "Close": close, "Volume": 1000000}
+            for open_, high, low, close in candles
+        ],
+        index=pd.date_range("2026-01-01", periods=len(candles), freq="D", tz="UTC"),
+    )
+
+
+def displacement_snapshot(candles: list[tuple[float, float, float, float]], *, atr: float = 2.0) -> dict:
+    df = displacement_df(candles)
+    bos_index = scanner._first_bos_close_index(df, FREEZE_BOS_SWINGS, "LONG", 100.0)
+    components = scanner._displacement_measurement_components(df, atr, "LONG", bos_index=bos_index)
+    classification, score = scanner.detect_displacement(df, atr, "LONG", True, bos_index=bos_index)
+    selected_index = components["displacement_index"]
+    return {
+        "selected_bar_timestamp": scanner._format_utc_timestamp(df.index[selected_index]),
+        "avg_body_atr": round(components["avg_body_atr"], 4) if components["avg_body_atr"] is not None else None,
+        "last_range_atr": round(components["last_range_atr"], 4) if components["last_range_atr"] is not None else None,
+        "directional_count": len(components["directional"]),
+        "classification": classification,
+        "score": score,
+    }
+
+
+def test_displacement_anchors_to_bos_close_bar() -> None:
+    snapshot = displacement_snapshot([
+        (95.0, 96.0, 94.0, 95.2),
+        (95.0, 96.2, 94.8, 95.5),
+        (97.0, 98.4, 96.8, 98.0),
+        (98.4, 99.8, 98.2, 99.2),
+        (100.2, 101.8, 98.8, 100.8),
+        (101.0, 101.4, 100.4, 100.7),
+        (100.7, 101.0, 100.0, 100.4),
+        (100.4, 100.8, 99.7, 100.1),
+    ])
+    assert_equal("anchored selected bar", snapshot["selected_bar_timestamp"], "2026-01-05T00:00:00Z")
+    assert_equal("anchored avg body", snapshot["avg_body_atr"], 0.4)
+    assert_equal("anchored last range", snapshot["last_range_atr"], 1.5)
+    assert_equal("anchored directional count", snapshot["directional_count"], 3)
+    assert_equal("anchored classification", snapshot["classification"], "STRONG")
+
+
+def test_displacement_last_range_non_zero_on_bos_bar() -> None:
+    snapshot = displacement_snapshot([
+        (95.0, 96.0, 94.0, 95.2),
+        (95.0, 96.2, 94.8, 95.5),
+        (97.0, 98.4, 96.8, 98.0),
+        (98.4, 99.8, 98.2, 99.2),
+        (100.2, 101.8, 98.8, 100.8),
+        (101.0, 101.4, 100.4, 100.7),
+        (100.7, 101.0, 100.0, 100.4),
+        (100.4, 100.8, 99.7, 100.1),
+    ])
+    if not snapshot["last_range_atr"] or snapshot["last_range_atr"] <= 0:
+        raise AssertionError(f"last_range_atr should be non-zero on BOS candle, got {snapshot['last_range_atr']!r}")
+
+
+def test_displacement_body_only_strong() -> None:
+    snapshot = displacement_snapshot([
+        (95.0, 96.0, 94.0, 95.2),
+        (95.0, 96.2, 94.8, 95.5),
+        (97.0, 99.0, 96.8, 98.7),
+        (98.8, 100.4, 98.6, 100.3),
+        (100.2, 101.5, 99.5, 101.2),
+        (101.0, 101.4, 100.4, 100.7),
+        (100.7, 101.0, 100.0, 100.4),
+        (100.4, 100.8, 99.7, 100.1),
+    ])
+    assert_equal("body-only selected bar", snapshot["selected_bar_timestamp"], "2026-01-05T00:00:00Z")
+    assert_equal("body-only avg body", snapshot["avg_body_atr"], 0.7)
+    assert_equal("body-only last range", snapshot["last_range_atr"], 1.0)
+    assert_equal("body-only directional count", snapshot["directional_count"], 3)
+    assert_equal("body-only classification", snapshot["classification"], "STRONG")
+
+
+def test_displacement_range_only_strong() -> None:
+    snapshot = displacement_snapshot([
+        (95.0, 96.0, 94.0, 95.2),
+        (95.0, 96.2, 94.8, 95.5),
+        (97.0, 97.8, 96.8, 97.5),
+        (98.0, 98.9, 97.8, 98.6),
+        (100.2, 101.8, 98.8, 100.8),
+        (101.0, 101.4, 100.4, 100.7),
+        (100.7, 101.0, 100.0, 100.4),
+        (100.4, 100.8, 99.7, 100.1),
+    ])
+    assert_equal("range-only selected bar", snapshot["selected_bar_timestamp"], "2026-01-05T00:00:00Z")
+    assert_equal("range-only avg body", snapshot["avg_body_atr"], 0.2833)
+    assert_equal("range-only last range", snapshot["last_range_atr"], 1.5)
+    assert_equal("range-only directional count", snapshot["directional_count"], 3)
+    assert_equal("range-only classification", snapshot["classification"], "STRONG")
+
+
+def test_displacement_failing_strong_size_arms_is_weak() -> None:
+    snapshot = displacement_snapshot([
+        (95.0, 96.0, 94.0, 95.2),
+        (95.0, 96.2, 94.8, 95.5),
+        (97.0, 98.1, 96.8, 97.9),
+        (98.0, 98.9, 97.8, 98.8),
+        (100.2, 101.4, 99.8, 101.0),
+        (101.0, 101.4, 100.4, 100.7),
+        (100.7, 101.0, 100.0, 100.4),
+        (100.4, 100.8, 99.7, 100.1),
+    ])
+    assert_equal("weak selected bar", snapshot["selected_bar_timestamp"], "2026-01-05T00:00:00Z")
+    assert_equal("weak avg body", snapshot["avg_body_atr"], 0.4167)
+    assert_equal("weak last range", snapshot["last_range_atr"], 0.8)
+    assert_equal("weak directional count", snapshot["directional_count"], 3)
+    assert_equal("weak classification", snapshot["classification"], "WEAK")
+
+
+def test_displacement_directional_majority_blocks_strong() -> None:
+    snapshot = displacement_snapshot([
+        (95.0, 96.0, 94.0, 95.2),
+        (95.0, 96.2, 94.8, 95.5),
+        (98.0, 98.4, 96.8, 97.0),
+        (99.2, 99.8, 98.2, 98.4),
+        (100.2, 101.8, 98.8, 100.8),
+        (101.0, 101.4, 100.4, 100.7),
+        (100.7, 101.0, 100.0, 100.4),
+        (100.4, 100.8, 99.7, 100.1),
+    ])
+    assert_equal("majority selected bar", snapshot["selected_bar_timestamp"], "2026-01-05T00:00:00Z")
+    assert_equal("majority avg body", snapshot["avg_body_atr"], 0.3)
+    assert_equal("majority last range", snapshot["last_range_atr"], 1.5)
+    assert_equal("majority directional count", snapshot["directional_count"], 1)
+    assert_equal("majority classification", snapshot["classification"], "WEAK")
+
+
+DISPLACEMENT_CASES = [
+    test_displacement_anchors_to_bos_close_bar,
+    test_displacement_last_range_non_zero_on_bos_bar,
+    test_displacement_body_only_strong,
+    test_displacement_range_only_strong,
+    test_displacement_failing_strong_size_arms_is_weak,
+    test_displacement_directional_majority_blocks_strong,
+]
+
+
 def main() -> int:
     assert_equal("strategy version", scanner.STOCK_SCANNER_STRATEGY_VERSION, EXPECTED_VERSION)
     assert_equal("strategy baseline", scanner.STOCK_SCANNER_STRATEGY_BASELINE_COMMIT, EXPECTED_BASELINE)
@@ -334,7 +486,13 @@ def main() -> int:
             raise AssertionError(f"{name}: fill expected hash with {actual_hash}")
         assert_equal(f"{name} source hash", actual_hash, expected_hash)
 
-    print(f"Stock Scanner Strategy {EXPECTED_VERSION} regression passed ({len(CASES)} cases).")
+    for displacement_case in DISPLACEMENT_CASES:
+        displacement_case()
+
+    print(
+        f"Stock Scanner Strategy {EXPECTED_VERSION} regression passed "
+        f"({len(CASES)} snapshot cases + {len(DISPLACEMENT_CASES)} displacement cases)."
+    )
     return 0
 
 
