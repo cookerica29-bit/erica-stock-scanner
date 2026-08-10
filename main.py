@@ -96,6 +96,8 @@ app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
 
 DISCOVERY_UNIVERSE_TTL_SECONDS = 24 * 60 * 60
+DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS = 2 * 60 * 60
+DISCOVERY_REFRESH_WATCHDOG_SECONDS = 60 * 60
 _discovery_universe_cache = {
     "symbols": [],
     "generated_at": None,
@@ -412,7 +414,8 @@ def _submit_discovery_universe_job(force: bool = False) -> tuple[bool, str]:
             return False, "already running"
         if not force and _discovery_universe_cache.get("symbols"):
             expires_at = _coerce_utc_datetime(_discovery_universe_cache.get("expires_at"))
-            if isinstance(expires_at, datetime) and expires_at > _utc_now():
+            refresh_due_at = _utc_now() + timedelta(seconds=DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS)
+            if isinstance(expires_at, datetime) and expires_at > refresh_due_at:
                 return False, "cache fresh"
         job_id = f"discovery:{int(time.time())}"
         _discovery_universe_cache.update({
@@ -452,7 +455,14 @@ def _require_journal_admin_token(header_value) -> None:
 
 def _discovery_cache_needs_refresh() -> bool:
     status = _discovery_status_snapshot()
-    return not status.get("has_cache") or bool(status.get("stale"))
+    if not status.get("has_cache") or bool(status.get("stale")):
+        return True
+    with _discovery_universe_lock:
+        expires_at = _coerce_utc_datetime(_discovery_universe_cache.get("expires_at"))
+    if not isinstance(expires_at, datetime):
+        return True
+    refresh_due_at = _utc_now() + timedelta(seconds=DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS)
+    return expires_at <= refresh_due_at
 
 
 def _submit_discovery_universe_job_if_needed() -> tuple[bool, str]:
@@ -464,7 +474,7 @@ def _submit_discovery_universe_job_if_needed() -> tuple[bool, str]:
 def _register_discovery_background_refresh() -> None:
     register_background_periodic_task(
         "discovery_universe",
-        DISCOVERY_UNIVERSE_TTL_SECONDS,
+        DISCOVERY_REFRESH_WATCHDOG_SECONDS,
         _submit_discovery_universe_job_if_needed,
     )
     register_background_periodic_task(

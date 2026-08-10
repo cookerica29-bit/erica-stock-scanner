@@ -159,7 +159,8 @@ def test_discovery_run_populates_cache_with_valid_token():
     os.environ["DISCOVERY_ADMIN_TOKEN"] = "secret"
     main._discovery_universe_executor = InlineExecutor()
     main.build_ranked_discovery_universe = fake_discovery_result
-    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
+    handoff_calls = []
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": handoff_calls.append(reason) or (False, "stubbed")
     reset_discovery_cache()
     try:
         client = TestClient(main.app)
@@ -187,6 +188,7 @@ def test_discovery_run_populates_cache_with_valid_token():
         assert status["stale"] is False
         assert status["generated_at"]
         assert status["expires_at"]
+        assert handoff_calls == ["discovery_completed_no_scanner_cache"]
     finally:
         main._discovery_universe_executor = previous_executor
         main.build_ranked_discovery_universe = previous_builder
@@ -366,11 +368,15 @@ def test_discovery_cache_refresh_needed_for_missing_and_stale_cache():
         main._discovery_universe_cache.update({
             "symbols": ["AAPL"],
             "generated_at": now,
-            "expires_at": now + __import__("datetime").timedelta(hours=1),
+            "expires_at": now + __import__("datetime").timedelta(hours=3),
             "running": False,
             "last_error": None,
         })
     assert main._discovery_cache_needs_refresh() is False
+
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache["expires_at"] = now + __import__("datetime").timedelta(minutes=30)
+    assert main._discovery_cache_needs_refresh() is True
 
     with main._discovery_universe_lock:
         main._discovery_universe_cache["expires_at"] = now - __import__("datetime").timedelta(seconds=1)
@@ -395,6 +401,14 @@ def test_discovery_auto_submit_skips_fresh_cache_and_running_job():
         accepted, reason = main._submit_discovery_universe_job_if_needed()
         assert accepted is False
         assert reason == "cache fresh"
+
+        with main._discovery_universe_lock:
+            near_expiry = __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(minutes=30)
+            main._discovery_universe_cache["expires_at"] = near_expiry
+        accepted, job_id = main._submit_discovery_universe_job_if_needed()
+        assert accepted is True
+        assert job_id.startswith("discovery:")
+        assert main._discovery_status_snapshot()["status"] == "ready"
 
         with main._discovery_universe_lock:
             main._discovery_universe_cache.update({
@@ -425,7 +439,7 @@ def test_startup_registers_and_submits_discovery_refresh():
     main._maybe_enqueue_discovered_scan_handoff = lambda reason="": calls.append(("handoff", reason)) or (False, "stubbed")
     try:
         main.startup_market_cache_refresh()
-        assert calls[0][0:3] == ("register", "discovery_universe", main.DISCOVERY_UNIVERSE_TTL_SECONDS)
+        assert calls[0][0:3] == ("register", "discovery_universe", main.DISCOVERY_REFRESH_WATCHDOG_SECONDS)
         assert callable(calls[0][3])
         assert calls[1][0:3] == ("register", "discovered_scan_handoff", 30)
         assert callable(calls[1][3])
