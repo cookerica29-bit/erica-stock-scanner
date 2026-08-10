@@ -103,6 +103,22 @@ def test_bullish_bos_candle_strong():
     assert events[0]["atr_source"] == "bos_candle_close"
 
 
+def test_live_displacement_range_is_measured_on_bos_candle():
+    df = bullish_bos_df(older_than_three=True)
+    swings = bullish_swings()
+    atr = 2.0
+    bos_index = scanner._first_bos_close_index(df, swings, "LONG", 105.0)
+
+    components = scanner._displacement_measurement_components(df, atr, "LONG", bos_index=bos_index)
+    displacement, score = scanner.detect_displacement(df, atr, "LONG", True, bos_index=bos_index)
+
+    assert bos_index == 15
+    assert components["last_range_atr"] == 3.0
+    assert components["last_range_atr"] > 0
+    assert displacement == "WEAK"
+    assert score == 3.0
+
+
 def test_bearish_bos_candle_strong():
     df = bearish_bos_df()
     original = with_swings(bearish_swings())
@@ -321,6 +337,7 @@ def test_shadow_report_counts_recoveries():
 
 def main() -> int:
     test_bullish_bos_candle_strong()
+    test_live_displacement_range_is_measured_on_bos_candle()
     test_bearish_bos_candle_strong()
     test_unknown_when_atr_history_is_insufficient()
     test_strong_bos_older_than_three_candles_remains_valid_shadow_only()

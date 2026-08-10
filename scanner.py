@@ -5330,24 +5330,79 @@ def _directional_candles(df: pd.DataFrame, direction: str, lookback: int = 3) ->
     return recent.iloc[0:0]
 
 
-def detect_displacement(df: pd.DataFrame, atr: float, direction: str, bos_confirmed: bool) -> tuple:
-    if not bos_confirmed or direction not in ("LONG", "SHORT") or len(df) < 3 or atr <= 0:
-        return "NONE", 0.0
+def _first_bos_close_index(df: pd.DataFrame, swings: list, direction: str, bos_level: Optional[float], lookback: int = 40) -> Optional[int]:
+    if direction not in ("LONG", "SHORT") or bos_level is None or df is None or len(df) <= 0:
+        return None
+    highs_sw = [s for s in swings if s["type"] == "high"]
+    lows_sw = [s for s in swings if s["type"] == "low"]
+    n = len(df)
+    min_idx = max(0, n - 1 - lookback)
+    start_idx = min_idx
+    if direction == "LONG" and len(highs_sw) >= 2:
+        start_idx = max(int(highs_sw[-2]["index"]) + 1, min_idx)
+    elif direction == "SHORT" and len(lows_sw) >= 2:
+        start_idx = max(int(lows_sw[-2]["index"]) + 1, min_idx)
+    opens = df["Open"].astype(float).values
+    closes = df["Close"].astype(float).values
+    level = float(bos_level)
+    for i in range(start_idx, n):
+        if direction == "LONG" and closes[i] > level and closes[i] > opens[i]:
+            return i
+        if direction == "SHORT" and closes[i] < level and closes[i] < opens[i]:
+            return i
+    return None
 
-    recent = df.tail(3)
-    directional = _directional_candles(df, direction, lookback=3)
+
+def _displacement_measurement_components(df: pd.DataFrame, atr: float, direction: str, bos_index: Optional[int] = None) -> dict:
+    end_idx = len(df) - 1 if bos_index is None else int(bos_index)
+    start_idx = max(0, end_idx - 2)
+    recent = df.iloc[start_idx:end_idx + 1]
+    if direction == "LONG":
+        directional = recent[recent["Close"] > recent["Open"]]
+    elif direction == "SHORT":
+        directional = recent[recent["Close"] < recent["Open"]]
+    else:
+        directional = recent.iloc[0:0]
+
     if directional.empty:
-        return "NONE", 0.0
+        return {
+            "window": recent,
+            "directional": directional,
+            "avg_body_atr": None,
+            "last_range_atr": None,
+            "directional_majority": False,
+            "displacement_index": end_idx,
+        }
 
     bodies = (directional["Close"] - directional["Open"]).abs()
     avg_body_atr = float(bodies.mean() / atr)
-    last = recent.iloc[-1]
+    last = df.iloc[end_idx]
     last_is_directional = (
         (direction == "LONG" and float(last["Close"]) > float(last["Open"]))
         or (direction == "SHORT" and float(last["Close"]) < float(last["Open"]))
     )
     last_range_atr = float((last["High"] - last["Low"]) / atr) if last_is_directional else 0.0
-    directional_majority = len(directional) >= 2
+    return {
+        "window": recent,
+        "directional": directional,
+        "avg_body_atr": avg_body_atr,
+        "last_range_atr": last_range_atr,
+        "directional_majority": len(directional) >= 2,
+        "displacement_index": end_idx,
+    }
+
+
+def detect_displacement(df: pd.DataFrame, atr: float, direction: str, bos_confirmed: bool, bos_index: Optional[int] = None) -> tuple:
+    if not bos_confirmed or direction not in ("LONG", "SHORT") or len(df) < 3 or atr <= 0:
+        return "NONE", 0.0
+
+    components = _displacement_measurement_components(df, atr, direction, bos_index=bos_index)
+    if components["directional"].empty:
+        return "NONE", 0.0
+
+    avg_body_atr = components["avg_body_atr"]
+    last_range_atr = components["last_range_atr"]
+    directional_majority = components["directional_majority"]
 
     if directional_majority and (avg_body_atr >= 0.7 or last_range_atr >= 1.2):
         return "STRONG", round(max(avg_body_atr, last_range_atr), 2)
@@ -6043,7 +6098,8 @@ def _build_trade_stage_eval(
     location, location_pct = _strict_location(price, swings)
     bos_confirmed, bos_level = detect_structure_break(df, swings, trend)
     structure_quality = _structure_quality(trend, bos_confirmed, cleanliness)
-    displacement, displacement_score = detect_displacement(df, atr, trend, bos_confirmed)
+    bos_index = _first_bos_close_index(df, swings, trend, bos_level) if bos_confirmed else None
+    displacement, displacement_score = detect_displacement(df, atr, trend, bos_confirmed, bos_index=bos_index)
     sweep_taken, sweep_level = detect_liquidity_sweep(df, swings, trend)
     rejection_confirmed = detect_rejection(df, trend, sweep_level)
     room = _room_to_target(price, trend, swings, entry, stop, fallback_target, atr=atr)
