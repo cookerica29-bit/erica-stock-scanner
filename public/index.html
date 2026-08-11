@@ -2614,28 +2614,30 @@
     .discovery-pool-panel {
       margin-top: 10px;
       max-width: 100%;
-      padding: 0 12px;
+      padding: 0 8px;
     }
     .discovery-pool-card {
       border-radius: 9px;
       gap: 9px;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: 1fr;
       padding: 10px;
     }
     .discovery-pool-head {
       align-items: flex-start;
       display: grid;
       grid-column: 1 / -1;
-      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+    .discovery-pool-status {
+      grid-column: 2;
+      justify-self: start;
+      margin-top: 4px;
     }
     .discovery-pool-title {
       font-size: 11px;
     }
     .discovery-pool-value {
       font-size: 12px;
-    }
-    .discovery-pool-stat:last-child {
-      grid-column: 1 / -1;
     }
     #marketCoverage {
       margin-top: 0;
