@@ -52,20 +52,29 @@ DISCOVERY_OPTIONS_MAX_ATTEMPTS = 4
 DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS = 1.5
 DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS = 550
 DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV = "DISCOVERY_UNIVERSE_MAX_SYMBOLS"
+DISCOVERY_KAIROS_INTAKE_CAP_ENV = "KAIROS_INTAKE_CAP"
+DISCOVERY_SOURCE = "alpaca"
+DISCOVERY_RANKING_VERSION = "alpaca-liquidity-ranking-v1"
 DISCOVERY_RANK_DOLLAR_VOLUME_WEIGHT = 0.50
 DISCOVERY_RANK_CALL_OI_WEIGHT = 0.25
 DISCOVERY_RANK_PUT_OI_WEIGHT = 0.25
 
 
 def discovery_universe_max_symbols(value: Optional[str] = None) -> int:
-    raw = os.getenv(DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV) if value is None else value
-    if raw is None or str(raw).strip() == "":
-        return DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
-    try:
-        parsed = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
-    return parsed if parsed > 0 else DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
+    candidates = [value] if value is not None else [
+        os.getenv(DISCOVERY_KAIROS_INTAKE_CAP_ENV),
+        os.getenv(DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV),
+    ]
+    for raw in candidates:
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            parsed = int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
 
 WARRANT_NAME_RE = re.compile(r"\bwarrants?\b|\bwt\b", re.IGNORECASE)
 UNIT_NAME_RE = re.compile(r"\bunits?\b", re.IGNORECASE)
@@ -844,6 +853,8 @@ def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None
     }
     return {
         "symbols": selected_symbols,
+        "source": DISCOVERY_SOURCE,
+        "ranking_version": DISCOVERY_RANKING_VERSION,
         "pipeline_counts": {
             "raw_assets": len(assets),
             "tradable_optionable": len(stage1),
@@ -862,8 +873,10 @@ def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None
             "near_atm_strike_band_pct": DISCOVERY_OPTIONS_STRIKE_BAND_PCT,
             "minimum_call_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
             "minimum_put_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+            "kairos_intake_cap": effective_cap,
             "target_universe_size": effective_cap,
             "default_target_universe_size": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
+            "kairos_intake_cap_env": DISCOVERY_KAIROS_INTAKE_CAP_ENV,
             "target_universe_size_env": DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV,
         },
         "formula": {
@@ -983,8 +996,10 @@ def main() -> int:
                 ranked = rank_discovery_candidates(metrics, options_metrics, target_size=effective_cap)
                 selected = [candidate for candidate in ranked if candidate.selected]
                 report["stage5"] = {
+                    "kairos_intake_cap": effective_cap,
                     "target_universe_size": effective_cap,
                     "default_target_universe_size": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
+                    "kairos_intake_cap_env": DISCOVERY_KAIROS_INTAKE_CAP_ENV,
                     "target_universe_size_env": DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV,
                     "formula": {
                         "combined_liquidity_score": (

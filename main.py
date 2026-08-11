@@ -1,8 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Optional
@@ -95,10 +97,17 @@ from verified_history_store import SQLiteVerifiedHistoryRepository
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
 
-DISCOVERY_UNIVERSE_TTL_SECONDS = 24 * 60 * 60
+DISCOVERY_POOL_VERSION = "kairos-weekly-discovery-pool-v1"
+DISCOVERY_POOL_SOURCE = "alpaca"
+DISCOVERY_POOL_RANKING_VERSION = "alpaca-liquidity-ranking-v1"
+DISCOVERY_POOL_PATH_ENV = "KAIROS_DISCOVERY_POOL_PATH"
+DISCOVERY_UNIVERSE_TTL_SECONDS = 7 * 24 * 60 * 60
 DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS = 2 * 60 * 60
 DISCOVERY_REFRESH_WATCHDOG_SECONDS = 60 * 60
 _discovery_universe_cache = {
+    "version": DISCOVERY_POOL_VERSION,
+    "source": DISCOVERY_POOL_SOURCE,
+    "ranking_version": DISCOVERY_POOL_RANKING_VERSION,
     "symbols": [],
     "generated_at": None,
     "expires_at": None,
@@ -117,6 +126,8 @@ _discovery_universe_cache = {
     "started_at": None,
     "completed_at": None,
     "metrics": {},
+    "loaded_from_disk": False,
+    "persisted_at": None,
 }
 _discovery_universe_lock = threading.RLock()
 _discovery_universe_executor = ThreadPoolExecutor(max_workers=1)
@@ -170,10 +181,176 @@ def _utc_now() -> datetime:
 
 def _coerce_utc_datetime(value):
     if not isinstance(value, datetime):
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = f"{text[:-1]}+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError:
+                return None
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _discovery_pool_path() -> Path:
+    return Path(os.getenv(DISCOVERY_POOL_PATH_ENV) or "/data/kairos_weekly_discovery_pool_v1.json")
+
+
+def _discovery_cache_defaults() -> dict:
+    return {
+        "version": DISCOVERY_POOL_VERSION,
+        "source": DISCOVERY_POOL_SOURCE,
+        "ranking_version": DISCOVERY_POOL_RANKING_VERSION,
+        "symbols": [],
+        "generated_at": None,
+        "expires_at": None,
+        "pipeline_counts": {},
+        "thresholds": {},
+        "formula": {},
+        "stage3": {},
+        "stage4": {},
+        "top_20": [],
+        "bottom_20_selected": [],
+        "watchlist_overlap": {},
+        "last_error": None,
+        "last_duration": None,
+        "job_id": None,
+        "running": False,
+        "started_at": None,
+        "completed_at": None,
+        "metrics": {},
+        "loaded_from_disk": False,
+        "persisted_at": None,
+    }
+
+
+def _json_safe_discovery_value(value):
+    if isinstance(value, datetime):
+        return _format_timestamp(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe_discovery_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_discovery_value(item) for item in value]
+    return value
+
+
+def _discovery_pool_payload_from_cache(cached: dict, persisted_at: Optional[datetime] = None) -> dict:
+    persisted_at = persisted_at or _utc_now()
+    pipeline_counts = cached.get("pipeline_counts") or {}
+    thresholds = cached.get("thresholds") or {}
+    metrics = cached.get("metrics") or {}
+    return {
+        "version": DISCOVERY_POOL_VERSION,
+        "source": cached.get("source") or DISCOVERY_POOL_SOURCE,
+        "symbols": list(cached.get("symbols") or []),
+        "generated_at": _format_timestamp(_coerce_utc_datetime(cached.get("generated_at"))),
+        "expires_at": _format_timestamp(_coerce_utc_datetime(cached.get("expires_at"))),
+        "next_scheduled_refresh": _format_timestamp(_coerce_utc_datetime(cached.get("expires_at"))),
+        "persisted_at": _format_timestamp(persisted_at),
+        "raw_source_count": pipeline_counts.get("raw_assets"),
+        "optionable_tradable_count": pipeline_counts.get("tradable_optionable"),
+        "hygiene_pass_count": pipeline_counts.get("hygiene_passed"),
+        "dollar_volume_pass_count": pipeline_counts.get("dollar_volume_passed"),
+        "options_liquidity_pass_count": pipeline_counts.get("options_liquidity_passed"),
+        "selected_count": len(cached.get("symbols") or []),
+        "ranking_version": cached.get("ranking_version") or metrics.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
+        "ranking_methodology": (cached.get("formula") or {}).get("combined_liquidity_score"),
+        "kairos_intake_cap": thresholds.get("kairos_intake_cap") or thresholds.get("target_universe_size"),
+        "pipeline_counts": pipeline_counts,
+        "thresholds": thresholds,
+        "formula": cached.get("formula") or {},
+        "stage3": cached.get("stage3") or {},
+        "stage4": cached.get("stage4") or {},
+        "top_20": cached.get("top_20") or [],
+        "bottom_20_selected": cached.get("bottom_20_selected") or [],
+        "watchlist_overlap": cached.get("watchlist_overlap") or {},
+        "last_duration": cached.get("last_duration"),
+        "metrics": metrics,
+    }
+
+
+def _write_discovery_pool_locked() -> None:
+    cached = dict(_discovery_universe_cache)
+    if not cached.get("symbols") or not cached.get("generated_at") or not cached.get("expires_at"):
+        return
+    path = _discovery_pool_path()
+    payload = _json_safe_discovery_value(_discovery_pool_payload_from_cache(cached))
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp_path.open("w") as handle:
+            handle.write(serialized)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+        _discovery_universe_cache["persisted_at"] = _coerce_utc_datetime(payload.get("persisted_at"))
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _load_discovery_pool_from_disk() -> bool:
+    path = _discovery_pool_path()
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:
+        with _discovery_universe_lock:
+            _discovery_universe_cache.update(_discovery_cache_defaults())
+            _discovery_universe_cache["last_error"] = f"persisted discovery pool invalid: {exc.__class__.__name__}"
+        return False
+
+    symbols = [str(symbol or "").strip().upper() for symbol in (payload.get("symbols") or []) if str(symbol or "").strip()]
+    generated_at = _coerce_utc_datetime(payload.get("generated_at"))
+    expires_at = _coerce_utc_datetime(payload.get("expires_at"))
+    if payload.get("version") != DISCOVERY_POOL_VERSION or not symbols or not generated_at or not expires_at:
+        with _discovery_universe_lock:
+            _discovery_universe_cache.update(_discovery_cache_defaults())
+            _discovery_universe_cache["last_error"] = "persisted discovery pool invalid: missing required fields"
+        return False
+
+    pipeline_counts = payload.get("pipeline_counts") if isinstance(payload.get("pipeline_counts"), dict) else {}
+    thresholds = payload.get("thresholds") if isinstance(payload.get("thresholds"), dict) else {}
+    formula = payload.get("formula") if isinstance(payload.get("formula"), dict) else {}
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    with _discovery_universe_lock:
+        _discovery_universe_cache.update({
+            **_discovery_cache_defaults(),
+            "version": payload.get("version") or DISCOVERY_POOL_VERSION,
+            "source": payload.get("source") or DISCOVERY_POOL_SOURCE,
+            "ranking_version": payload.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
+            "symbols": symbols,
+            "generated_at": generated_at,
+            "expires_at": expires_at,
+            "pipeline_counts": pipeline_counts,
+            "thresholds": thresholds,
+            "formula": formula,
+            "stage3": payload.get("stage3") if isinstance(payload.get("stage3"), dict) else {},
+            "stage4": payload.get("stage4") if isinstance(payload.get("stage4"), dict) else {},
+            "top_20": payload.get("top_20") if isinstance(payload.get("top_20"), list) else [],
+            "bottom_20_selected": payload.get("bottom_20_selected") if isinstance(payload.get("bottom_20_selected"), list) else [],
+            "watchlist_overlap": payload.get("watchlist_overlap") if isinstance(payload.get("watchlist_overlap"), dict) else {},
+            "last_error": None,
+            "last_duration": payload.get("last_duration") or metrics.get("discovery_duration_ms"),
+            "job_id": None,
+            "running": False,
+            "started_at": None,
+            "completed_at": generated_at,
+            "metrics": metrics,
+            "loaded_from_disk": True,
+            "persisted_at": _coerce_utc_datetime(payload.get("persisted_at")),
+        })
+    return True
 
 
 def _discovery_admin_token() -> str:
@@ -204,6 +381,9 @@ def _discovery_status_snapshot() -> dict:
         status = "error"
     return {
         "status": status,
+        "version": cached.get("version") or DISCOVERY_POOL_VERSION,
+        "source": cached.get("source") or DISCOVERY_POOL_SOURCE,
+        "pool_path": str(_discovery_pool_path()),
         "enabled": bool(_discovery_admin_token()),
         "running": bool(cached.get("running")),
         "job_id": cached.get("job_id"),
@@ -211,11 +391,22 @@ def _discovery_status_snapshot() -> dict:
         "completed_at": _format_timestamp(completed_at),
         "generated_at": _format_timestamp(generated_at),
         "expires_at": _format_timestamp(expires_at),
+        "next_scheduled_refresh": _format_timestamp(expires_at),
         "age_seconds": age_seconds,
         "expires_in_seconds": expires_in_seconds,
         "stale": bool(stale),
         "has_cache": bool(cached.get("symbols")),
         "selected_count": len(cached.get("symbols") or []),
+        "raw_source_count": (cached.get("pipeline_counts") or {}).get("raw_assets"),
+        "optionable_tradable_count": (cached.get("pipeline_counts") or {}).get("tradable_optionable"),
+        "hygiene_pass_count": (cached.get("pipeline_counts") or {}).get("hygiene_passed"),
+        "dollar_volume_pass_count": (cached.get("pipeline_counts") or {}).get("dollar_volume_passed"),
+        "options_liquidity_pass_count": (cached.get("pipeline_counts") or {}).get("options_liquidity_passed"),
+        "kairos_intake_cap": (cached.get("thresholds") or {}).get("kairos_intake_cap") or (cached.get("thresholds") or {}).get("target_universe_size"),
+        "ranking_version": cached.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
+        "ranking_methodology": (cached.get("formula") or {}).get("combined_liquidity_score"),
+        "loaded_from_disk": bool(cached.get("loaded_from_disk")),
+        "persisted_at": _format_timestamp(_coerce_utc_datetime(cached.get("persisted_at"))),
         "pipeline_counts": cached.get("pipeline_counts") or {},
         "thresholds": cached.get("thresholds") or {},
         "formula": cached.get("formula") or {},
@@ -251,6 +442,7 @@ def _discovery_metrics_from_result(result: dict, started_at: datetime, completed
         "discovery_completed_at": _format_timestamp(completed_at),
         "discovery_duration_ms": duration_ms,
         "raw_alpaca_asset_count": counts.get("raw_assets"),
+        "source": result.get("source") or DISCOVERY_POOL_SOURCE,
         "tradable_optionable_count": counts.get("tradable_optionable"),
         "hygiene_passed_count": counts.get("hygiene_passed"),
         "dollar_volume_passed_count": counts.get("dollar_volume_passed"),
@@ -259,6 +451,9 @@ def _discovery_metrics_from_result(result: dict, started_at: datetime, completed
         "final_admitted_symbol_count": counts.get("selected"),
         "configured_cap": cap,
         "effective_cap": cap,
+        "kairos_intake_cap": cap,
+        "ranking_version": result.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
+        "ranking_methodology": (result.get("formula") or {}).get("combined_liquidity_score"),
         "failure_count_by_stage": {
             "stage3_dollar_volume": sum(int(value or 0) for value in stage3_failures.values()) + int(stage3.get("fetch_failures") or 0),
             "stage4_options_liquidity": sum(int(value or 0) for value in stage4_failures.values()),
@@ -363,6 +558,9 @@ def _run_discovery_universe_job(job_id: str) -> None:
         metrics = _discovery_metrics_from_result(result, started_at, now, duration_ms)
         with _discovery_universe_lock:
             _discovery_universe_cache.update({
+                "version": result.get("version") or DISCOVERY_POOL_VERSION,
+                "source": result.get("source") or DISCOVERY_POOL_SOURCE,
+                "ranking_version": result.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
                 "symbols": result.get("symbols") or [],
                 "generated_at": now,
                 "expires_at": now + timedelta(seconds=DISCOVERY_UNIVERSE_TTL_SECONDS),
@@ -381,7 +579,13 @@ def _run_discovery_universe_job(job_id: str) -> None:
                 "started_at": None,
                 "completed_at": now,
                 "metrics": metrics,
+                "loaded_from_disk": False,
             })
+            try:
+                _write_discovery_pool_locked()
+            except Exception as persist_exc:
+                logger.exception("discovery_pool.persist_failed path=%s", _discovery_pool_path())
+                _discovery_universe_cache["last_error"] = f"discovery pool persistence failed: {persist_exc.__class__.__name__}"
         counts = result.get("pipeline_counts") or {}
         logger.info(
             "coverage.discovery.complete duration_ms=%s raw_assets=%s tradable_optionable=%s hygiene_passed=%s dollar_volume_passed=%s options_liquidity_passed=%s ranked_before_cap=%s final_symbols=%s effective_cap=%s",
@@ -505,6 +709,7 @@ async def add_no_store_headers(request: Request, call_next):
 def startup_market_cache_refresh():
     _register_discovery_background_refresh()
     start_market_cache_refresh()
+    _load_discovery_pool_from_disk()
     _submit_discovery_universe_job_if_needed()
     _maybe_enqueue_discovered_scan_handoff("startup_discovery_ready_no_scanner_cache")
 

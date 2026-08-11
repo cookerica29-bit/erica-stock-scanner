@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -14,30 +16,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import main  # noqa: E402
+from discovery import DollarVolumeMetrics, OptionsLiquidityMetrics, discovery_universe_max_symbols, rank_discovery_candidates  # noqa: E402
 
 
 def reset_discovery_cache():
     with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": [],
-            "generated_at": None,
-            "expires_at": None,
-            "pipeline_counts": {},
-            "thresholds": {},
-            "formula": {},
-            "stage3": {},
-            "stage4": {},
-            "top_20": [],
-            "bottom_20_selected": [],
-            "watchlist_overlap": {},
-            "last_error": None,
-            "last_duration": None,
-            "job_id": None,
-            "running": False,
-            "started_at": None,
-            "completed_at": None,
-            "metrics": {},
-        })
+        main._discovery_universe_cache.update(main._discovery_cache_defaults())
 
 
 def reset_handoff_state():
@@ -70,6 +54,8 @@ class InlineExecutor:
 def fake_discovery_result(static_watchlist=None):
     return {
         "symbols": ["AAPL", "MSFT", "F"],
+        "source": "alpaca",
+        "ranking_version": "alpaca-liquidity-ranking-v1",
         "pipeline_counts": {
             "raw_assets": 10,
             "tradable_optionable": 8,
@@ -79,7 +65,7 @@ def fake_discovery_result(static_watchlist=None):
             "ranked": 5,
             "selected": 3,
         },
-        "thresholds": {"target_universe_size": 550},
+        "thresholds": {"target_universe_size": 550, "kairos_intake_cap": 550},
         "formula": {"combined_liquidity_score": "test"},
         "stage3": {"elapsed_seconds": 1.2},
         "stage4": {"elapsed_seconds": 2.3},
@@ -153,6 +139,7 @@ def test_discovery_run_rejects_wrong_token():
 
 def test_discovery_run_populates_cache_with_valid_token():
     previous_token = os.environ.get("DISCOVERY_ADMIN_TOKEN")
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
     previous_executor = main._discovery_universe_executor
     previous_builder = main.build_ranked_discovery_universe
     previous_handoff = main._maybe_enqueue_discovered_scan_handoff
@@ -161,43 +148,283 @@ def test_discovery_run_populates_cache_with_valid_token():
     main.build_ranked_discovery_universe = fake_discovery_result
     handoff_calls = []
     main._maybe_enqueue_discovered_scan_handoff = lambda reason="": handoff_calls.append(reason) or (False, "stubbed")
-    reset_discovery_cache()
-    try:
-        client = TestClient(main.app)
-        response = client.post("/api/discovery/run?refresh=true", headers={"X-Kairos-Admin-Token": "secret"})
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["accepted"] is True
-        assert payload["status"]["status"] == "ready"
-        assert payload["status"]["selected_count"] == 3
-        assert payload["status"]["pipeline_counts"]["selected"] == 3
-        assert payload["status"]["metrics"]["final_admitted_symbol_count"] == 3
-        assert payload["status"]["metrics"]["effective_cap"] == 550
-        assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_started_at"])
-        assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_completed_at"])
-        assert payload["status"]["last_error"] is None
-
-        symbols = client.get("/api/discovery/symbols").json()
-        assert symbols["symbols"] == ["AAPL", "MSFT", "F"]
-        assert symbols["count"] == 3
-        assert symbols["status"]["has_cache"] is True
-
-        status = client.get("/api/discovery/status").json()
-        assert status["enabled"] is True
-        assert status["status"] == "ready"
-        assert status["stale"] is False
-        assert status["generated_at"]
-        assert status["expires_at"]
-        assert handoff_calls == ["discovery_completed_no_scanner_cache"]
-    finally:
-        main._discovery_universe_executor = previous_executor
-        main.build_ranked_discovery_universe = previous_builder
-        main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(Path(temp_dir) / "pool.json")
         reset_discovery_cache()
-        if previous_token is None:
-            os.environ.pop("DISCOVERY_ADMIN_TOKEN", None)
+        try:
+            client = TestClient(main.app)
+            response = client.post("/api/discovery/run?refresh=true", headers={"X-Kairos-Admin-Token": "secret"})
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["accepted"] is True
+            assert payload["status"]["status"] == "ready"
+            assert payload["status"]["selected_count"] == 3
+            assert payload["status"]["pipeline_counts"]["selected"] == 3
+            assert payload["status"]["metrics"]["final_admitted_symbol_count"] == 3
+            assert payload["status"]["metrics"]["effective_cap"] == 550
+            assert payload["status"]["kairos_intake_cap"] == 550
+            assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_started_at"])
+            assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_completed_at"])
+            assert payload["status"]["last_error"] is None
+
+            symbols = client.get("/api/discovery/symbols").json()
+            assert symbols["symbols"] == ["AAPL", "MSFT", "F"]
+            assert symbols["count"] == 3
+            assert symbols["status"]["has_cache"] is True
+
+            status = client.get("/api/discovery/status").json()
+            assert status["enabled"] is True
+            assert status["status"] == "ready"
+            assert status["stale"] is False
+            assert status["generated_at"]
+            assert status["expires_at"]
+            assert handoff_calls == ["discovery_completed_no_scanner_cache"]
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_token is None:
+                os.environ.pop("DISCOVERY_ADMIN_TOKEN", None)
+            else:
+                os.environ["DISCOVERY_ADMIN_TOKEN"] = previous_token
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_discovery_pool_persists_and_hydrates_after_restart():
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    previous_executor = main._discovery_universe_executor
+    previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
+    main._discovery_universe_executor = InlineExecutor()
+    main.build_ranked_discovery_universe = fake_discovery_result
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(Path(temp_dir) / "pool.json")
+        reset_discovery_cache()
+        try:
+            accepted, job_id = main._submit_discovery_universe_job(force=True)
+            assert accepted is True
+            assert job_id.startswith("discovery:")
+            assert Path(os.environ[main.DISCOVERY_POOL_PATH_ENV]).exists()
+
+            reset_discovery_cache()
+            loaded = main._load_discovery_pool_from_disk()
+            assert loaded is True
+            status = main._discovery_status_snapshot()
+            assert status["status"] == "ready"
+            assert status["loaded_from_disk"] is True
+            assert status["selected_count"] == 3
+            assert status["source"] == "alpaca"
+            assert status["kairos_intake_cap"] == 550
+            assert status["next_scheduled_refresh"] == status["expires_at"]
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_valid_persisted_pool_prevents_startup_rediscovery():
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    previous_executor = main._discovery_universe_executor
+    previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
+    calls = []
+    main._discovery_universe_executor = InlineExecutor()
+    main.build_ranked_discovery_universe = lambda *args, **kwargs: calls.append("builder") or fake_discovery_result()
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(Path(temp_dir) / "pool.json")
+        reset_discovery_cache()
+        try:
+            assert main._submit_discovery_universe_job(force=True)[0] is True
+            assert calls == ["builder"]
+            reset_discovery_cache()
+            assert main._load_discovery_pool_from_disk() is True
+            accepted, reason = main._submit_discovery_universe_job_if_needed()
+            assert accepted is False
+            assert reason == "cache fresh"
+            assert calls == ["builder"]
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_weekly_expired_persisted_pool_triggers_discovery():
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    previous_executor = main._discovery_universe_executor
+    previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
+    calls = []
+    main._discovery_universe_executor = InlineExecutor()
+    main.build_ranked_discovery_universe = lambda *args, **kwargs: calls.append("builder") or fake_discovery_result()
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "pool.json"
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(path)
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+        payload = main._discovery_pool_payload_from_cache({
+            **main._discovery_cache_defaults(),
+            "symbols": ["OLD"],
+            "generated_at": now - __import__("datetime").timedelta(days=8),
+            "expires_at": now - __import__("datetime").timedelta(hours=1),
+            "pipeline_counts": {"selected": 1},
+            "thresholds": {"kairos_intake_cap": 1000, "target_universe_size": 1000},
+            "formula": {"combined_liquidity_score": "test"},
+        })
+        path.write_text(json.dumps(payload))
+        reset_discovery_cache()
+        try:
+            assert main._load_discovery_pool_from_disk() is True
+            assert main._discovery_cache_needs_refresh() is True
+            accepted, job_id = main._submit_discovery_universe_job_if_needed()
+            assert accepted is True
+            assert job_id.startswith("discovery:")
+            assert calls == ["builder"]
+            assert main._discovery_status_snapshot()["selected_count"] == 3
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_corrupt_or_missing_persisted_pool_safely_rebuilds():
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    previous_executor = main._discovery_universe_executor
+    previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
+    calls = []
+    main._discovery_universe_executor = InlineExecutor()
+    main.build_ranked_discovery_universe = lambda *args, **kwargs: calls.append("builder") or fake_discovery_result()
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "pool.json"
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(path)
+        try:
+            reset_discovery_cache()
+            assert main._load_discovery_pool_from_disk() is False
+            accepted, _ = main._submit_discovery_universe_job_if_needed()
+            assert accepted is True
+            assert calls == ["builder"]
+
+            path.write_text("{not-json")
+            reset_discovery_cache()
+            assert main._load_discovery_pool_from_disk() is False
+            accepted, _ = main._submit_discovery_universe_job_if_needed()
+            assert accepted is True
+            assert calls == ["builder", "builder"]
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_scanner_analyzes_persisted_pool_normally():
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    previous_scan_cached = main.scan_cached
+    calls = []
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "pool.json"
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(path)
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+        payload = main._discovery_pool_payload_from_cache({
+            **main._discovery_cache_defaults(),
+            "symbols": ["AAPL", "MSFT", "F"],
+            "generated_at": now,
+            "expires_at": now + __import__("datetime").timedelta(days=7),
+            "pipeline_counts": {"selected": 3},
+            "thresholds": {"kairos_intake_cap": 1000, "target_universe_size": 1000},
+            "formula": {"combined_liquidity_score": "test"},
+        })
+        path.write_text(json.dumps(payload))
+        reset_discovery_cache()
+
+        def fake_scan_cached(watchlist=None, **kwargs):
+            calls.append((watchlist, kwargs))
+            return {"rows": [], "near_miss": [], "meta": {"configured_universe_count": len(watchlist or []), "cache_key": "discovered"}}
+
+        main.scan_cached = fake_scan_cached
+        try:
+            assert main._load_discovery_pool_from_disk() is True
+            client = TestClient(main.app)
+            response = client.get("/api/scan?universe=discovered")
+            assert response.status_code == 200
+            assert calls[0][0] == ["AAPL", "MSFT", "F"]
+            assert calls[0][1]["universe"] == "discovered"
+            assert calls[0][1]["max_symbols"] is None
+            assert calls[0][1]["trusted_options_symbols"] == {"AAPL", "MSFT", "F"}
+        finally:
+            main.scan_cached = previous_scan_cached
+            reset_discovery_cache()
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_intake_cap_only_truncates_when_eligible_candidates_exceed_cap():
+    dollars = [
+        DollarVolumeMetrics("AAA", 10, 1_000_000, 100_000_000, 30, True),
+        DollarVolumeMetrics("BBB", 20, 1_000_000, 200_000_000, 30, True),
+        DollarVolumeMetrics("CCC", 30, 1_000_000, 300_000_000, 30, True),
+    ]
+    options = [
+        OptionsLiquidityMetrics("AAA", 10, 100, 100, "AAAC", "AAAP", 2, 1, True),
+        OptionsLiquidityMetrics("BBB", 20, 200, 200, "BBBC", "BBBP", 2, 1, True),
+        OptionsLiquidityMetrics("CCC", 30, 300, 300, "CCCC", "CCCP", 2, 1, True),
+    ]
+    under_cap = rank_discovery_candidates(dollars, options, target_size=5)
+    at_cap = rank_discovery_candidates(dollars, options, target_size=3)
+    over_cap = rank_discovery_candidates(dollars, options, target_size=2)
+    assert sum(1 for candidate in under_cap if candidate.selected) == 3
+    assert sum(1 for candidate in at_cap if candidate.selected) == 3
+    assert sum(1 for candidate in over_cap if candidate.selected) == 2
+
+
+def test_kairos_intake_cap_preserves_legacy_env_compatibility():
+    previous_new = os.environ.get("KAIROS_INTAKE_CAP")
+    previous_old = os.environ.get("DISCOVERY_UNIVERSE_MAX_SYMBOLS")
+    try:
+        os.environ.pop("KAIROS_INTAKE_CAP", None)
+        os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = "1000"
+        assert discovery_universe_max_symbols() == 1000
+        os.environ["KAIROS_INTAKE_CAP"] = "750"
+        assert discovery_universe_max_symbols() == 750
+        os.environ["KAIROS_INTAKE_CAP"] = "invalid"
+        assert discovery_universe_max_symbols() == 1000
+    finally:
+        if previous_new is None:
+            os.environ.pop("KAIROS_INTAKE_CAP", None)
         else:
-            os.environ["DISCOVERY_ADMIN_TOKEN"] = previous_token
+            os.environ["KAIROS_INTAKE_CAP"] = previous_new
+        if previous_old is None:
+            os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
+        else:
+            os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = previous_old
 
 
 def test_scan_discovered_universe_returns_warming_when_cache_missing():
@@ -385,55 +612,64 @@ def test_discovery_cache_refresh_needed_for_missing_and_stale_cache():
 
 
 def test_discovery_auto_submit_skips_fresh_cache_and_running_job():
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
     previous_executor = main._discovery_universe_executor
     previous_builder = main.build_ranked_discovery_universe
     previous_handoff = main._maybe_enqueue_discovered_scan_handoff
     main._discovery_universe_executor = InlineExecutor()
     main.build_ranked_discovery_universe = fake_discovery_result
     main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
-    reset_discovery_cache()
-    try:
-        accepted, job_id = main._submit_discovery_universe_job_if_needed()
-        assert accepted is True
-        assert job_id.startswith("discovery:")
-        assert main._discovery_status_snapshot()["status"] == "ready"
-
-        accepted, reason = main._submit_discovery_universe_job_if_needed()
-        assert accepted is False
-        assert reason == "cache fresh"
-
-        with main._discovery_universe_lock:
-            near_expiry = __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(minutes=30)
-            main._discovery_universe_cache["expires_at"] = near_expiry
-        accepted, job_id = main._submit_discovery_universe_job_if_needed()
-        assert accepted is True
-        assert job_id.startswith("discovery:")
-        assert main._discovery_status_snapshot()["status"] == "ready"
-
-        with main._discovery_universe_lock:
-            main._discovery_universe_cache.update({
-                "running": True,
-                "symbols": [],
-                "generated_at": None,
-                "expires_at": None,
-            })
-        accepted, reason = main._submit_discovery_universe_job_if_needed()
-        assert accepted is False
-        assert reason == "already running"
-    finally:
-        main._discovery_universe_executor = previous_executor
-        main.build_ranked_discovery_universe = previous_builder
-        main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(Path(temp_dir) / "pool.json")
         reset_discovery_cache()
+        try:
+            accepted, job_id = main._submit_discovery_universe_job_if_needed()
+            assert accepted is True
+            assert job_id.startswith("discovery:")
+            assert main._discovery_status_snapshot()["status"] == "ready"
+
+            accepted, reason = main._submit_discovery_universe_job_if_needed()
+            assert accepted is False
+            assert reason == "cache fresh"
+
+            with main._discovery_universe_lock:
+                near_expiry = __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(minutes=30)
+                main._discovery_universe_cache["expires_at"] = near_expiry
+            accepted, job_id = main._submit_discovery_universe_job_if_needed()
+            assert accepted is True
+            assert job_id.startswith("discovery:")
+            assert main._discovery_status_snapshot()["status"] == "ready"
+
+            with main._discovery_universe_lock:
+                main._discovery_universe_cache.update({
+                    "running": True,
+                    "symbols": [],
+                    "generated_at": None,
+                    "expires_at": None,
+                })
+            accepted, reason = main._submit_discovery_universe_job_if_needed()
+            assert accepted is False
+            assert reason == "already running"
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
 
 
 def test_startup_registers_and_submits_discovery_refresh():
     previous_register = main.register_background_periodic_task
     previous_submit = main._submit_discovery_universe_job_if_needed
+    previous_load = main._load_discovery_pool_from_disk
     previous_start_market_cache = main.start_market_cache_refresh
     previous_handoff = main._maybe_enqueue_discovered_scan_handoff
     calls = []
     main.register_background_periodic_task = lambda key, ttl, callback: calls.append(("register", key, ttl, callback))
+    main._load_discovery_pool_from_disk = lambda: calls.append(("load_pool",)) or False
     main._submit_discovery_universe_job_if_needed = lambda: calls.append(("submit",)) or (True, "job")
     main.start_market_cache_refresh = lambda: calls.append(("market_cache",))
     main._maybe_enqueue_discovered_scan_handoff = lambda reason="": calls.append(("handoff", reason)) or (False, "stubbed")
@@ -444,11 +680,13 @@ def test_startup_registers_and_submits_discovery_refresh():
         assert calls[1][0:3] == ("register", "discovered_scan_handoff", 30)
         assert callable(calls[1][3])
         assert calls[2] == ("market_cache",)
-        assert calls[3] == ("submit",)
-        assert calls[4] == ("handoff", "startup_discovery_ready_no_scanner_cache")
+        assert calls[3] == ("load_pool",)
+        assert calls[4] == ("submit",)
+        assert calls[5] == ("handoff", "startup_discovery_ready_no_scanner_cache")
     finally:
         main.register_background_periodic_task = previous_register
         main._submit_discovery_universe_job_if_needed = previous_submit
+        main._load_discovery_pool_from_disk = previous_load
         main.start_market_cache_refresh = previous_start_market_cache
         main._maybe_enqueue_discovered_scan_handoff = previous_handoff
 
@@ -667,6 +905,12 @@ def main_test() -> int:
     test_discovery_run_disabled_when_token_unset()
     test_discovery_run_rejects_wrong_token()
     test_discovery_run_populates_cache_with_valid_token()
+    test_discovery_pool_persists_and_hydrates_after_restart()
+    test_valid_persisted_pool_prevents_startup_rediscovery()
+    test_weekly_expired_persisted_pool_triggers_discovery()
+    test_corrupt_or_missing_persisted_pool_safely_rebuilds()
+    test_scanner_analyzes_persisted_pool_normally()
+    test_intake_cap_only_truncates_when_eligible_candidates_exceed_cap()
     test_scan_discovered_universe_returns_warming_when_cache_missing()
     test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz()
     test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncation()
