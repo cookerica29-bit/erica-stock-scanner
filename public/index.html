@@ -379,6 +379,92 @@
     gap: 8px;
     margin-top: 14px;
   }
+  .discovery-pool-panel {
+    max-width: 1400px;
+    margin: 12px auto 0;
+    padding: 0 24px;
+  }
+  .discovery-pool-card {
+    align-items: center;
+    background: rgba(53,66,88,0.76);
+    border: 1px solid var(--border-soft);
+    border-radius: 12px;
+    box-shadow: 0 10px 24px rgba(15,23,42,0.12);
+    display: grid;
+    gap: 10px;
+    grid-template-columns: minmax(180px, 1.2fr) repeat(5, minmax(108px, 1fr));
+    min-width: 0;
+    padding: 11px 13px;
+  }
+  .discovery-pool-card.error {
+    border-color: rgba(255,45,85,0.36);
+  }
+  .discovery-pool-head {
+    align-items: center;
+    display: flex;
+    gap: 9px;
+    min-width: 0;
+  }
+  .discovery-pool-head > div {
+    min-width: 0;
+  }
+  .discovery-pool-title {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 950;
+    letter-spacing: 0.06em;
+    line-height: 1.15;
+    text-transform: uppercase;
+  }
+  .discovery-pool-source {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 750;
+    line-height: 1.25;
+    margin-top: 2px;
+  }
+  .discovery-pool-status {
+    border: 1px solid rgba(148,163,184,0.24);
+    border-radius: 999px;
+    color: var(--muted);
+    flex: 0 0 auto;
+    font-size: 9px;
+    font-weight: 950;
+    letter-spacing: 0.08em;
+    padding: 5px 7px;
+    text-transform: uppercase;
+  }
+  .discovery-pool-status.active { border-color: rgba(34,197,94,0.38); color: #86efac; }
+  .discovery-pool-status.refreshing { border-color: rgba(245,158,11,0.42); color: #facc15; }
+  .discovery-pool-status.error { border-color: rgba(255,45,85,0.42); color: #fca5a5; }
+  .discovery-pool-stat {
+    min-width: 0;
+  }
+  .discovery-pool-label {
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 850;
+    letter-spacing: 0.06em;
+    line-height: 1.1;
+    overflow-wrap: anywhere;
+    text-transform: uppercase;
+  }
+  .discovery-pool-value {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 900;
+    line-height: 1.25;
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+  }
+  .discovery-pool-sub {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.25;
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+  }
 
   /* ── Scanner panel ─────────────────────────────────────────────────────── */
   main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; width: 100%; }
@@ -2525,6 +2611,32 @@
       padding: 0 12px;
       max-width: 100%;
     }
+    .discovery-pool-panel {
+      margin-top: 10px;
+      max-width: 100%;
+      padding: 0 12px;
+    }
+    .discovery-pool-card {
+      border-radius: 9px;
+      gap: 9px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      padding: 10px;
+    }
+    .discovery-pool-head {
+      align-items: flex-start;
+      display: grid;
+      grid-column: 1 / -1;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+    .discovery-pool-title {
+      font-size: 11px;
+    }
+    .discovery-pool-value {
+      font-size: 12px;
+    }
+    .discovery-pool-stat:last-child {
+      grid-column: 1 / -1;
+    }
     #marketCoverage {
       margin-top: 0;
       padding-bottom: calc(86px + env(safe-area-inset-bottom));
@@ -3799,6 +3911,7 @@
     <span id="status"></span>
     <span id="autoScanCountdown" style="font-size:11px;color:var(--muted);margin-left:4px;"></span>
   </div>
+  <div id="discoveryPoolStatus" class="discovery-pool-panel" aria-live="polite"></div>
   <div id="marketCoverage" class="market-snapshot"></div>
   <div id="marketSnapshot" class="market-snapshot"></div>
   <div id="marketIntelligence" class="market-intelligence"></div>
@@ -4647,6 +4760,8 @@ let scannerRenderLimit = SCANNER_INITIAL_RENDER_LIMIT;
 let scannerDerivedViewCache = new Map();
 let scannerSearchDebounceTimer = null;
 let scannerLastSummarySignature = '';
+let latestDiscoveryPoolStatus = null;
+let discoveryPoolStatusTimer = null;
 const scannerSetupLookup = new Map();
 let contractTierSelections = (() => {
   try {
@@ -6148,8 +6263,152 @@ function cacheStatusFromMeta(meta = {}) {
   return 'warming';
 }
 
+function formatDiscoveryPoolCount(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '—';
+  return numeric.toLocaleString();
+}
+
+function formatDiscoveryPoolDate(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '—';
+  return date.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function discoveryPoolStatusLabel(status = {}) {
+  const raw = String(status.status || '').toLowerCase();
+  if (status.running || raw === 'refreshing') return { label: 'Refreshing', className: 'refreshing' };
+  if (status.last_error || raw === 'error') return { label: 'Error', className: 'error' };
+  if (status.has_cache && !status.stale) return { label: 'Active', className: 'active' };
+  return { label: 'Refreshing', className: 'refreshing' };
+}
+
+function renderDiscoveryPoolStatus(status = latestDiscoveryPoolStatus || {}) {
+  const el = document.getElementById('discoveryPoolStatus');
+  if (!el) return;
+  if (!status || !Object.keys(status).length) {
+    el.innerHTML = `
+      <div class="discovery-pool-card">
+        <div class="discovery-pool-head">
+          <span class="scanner-health-indicator waiting"></span>
+          <div>
+            <div class="discovery-pool-title">Weekly Discovery Pool</div>
+            <div class="discovery-pool-source">Checking discovery status</div>
+          </div>
+          <span class="discovery-pool-status refreshing">Loading</span>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const counts = status.pipeline_counts || {};
+  const thresholds = status.thresholds || {};
+  const source = String(firstPresent(status.source, 'alpaca')).trim();
+  const sourceLabel = source ? source.charAt(0).toUpperCase() + source.slice(1).toLowerCase() : 'Alpaca';
+  const selected = firstPresent(status.selected_count, counts.selected);
+  const cap = firstPresent(status.kairos_intake_cap, thresholds.kairos_intake_cap, thresholds.target_universe_size);
+  const statusLabel = discoveryPoolStatusLabel(status);
+  const loadedText = status.loaded_from_disk === true
+    ? 'Loaded from persisted storage'
+    : status.loaded_from_disk === false
+      ? 'Created this runtime'
+      : 'Storage status unavailable';
+  const cardClass = statusLabel.className === 'error' ? ' error' : '';
+  const statusDot = statusLabel.className === 'active'
+    ? 'complete'
+    : statusLabel.className === 'error'
+      ? 'failed'
+      : 'partial';
+  const lastRefresh = firstPresent(status.generated_at, status.completed_at);
+  const nextRefresh = firstPresent(status.next_scheduled_refresh, status.expires_at);
+
+  el.innerHTML = `
+    <div class="discovery-pool-card${cardClass}">
+      <div class="discovery-pool-head">
+        <span class="scanner-health-indicator ${escapeHtml(statusDot)}"></span>
+        <div>
+          <div class="discovery-pool-title">Weekly Discovery Pool</div>
+          <div class="discovery-pool-source">Source: ${escapeHtml(sourceLabel)} · ${escapeHtml(loadedText)}</div>
+        </div>
+        <span class="discovery-pool-status ${escapeHtml(statusLabel.className)}">${escapeHtml(statusLabel.label)}</span>
+      </div>
+      <div class="discovery-pool-stat">
+        <div class="discovery-pool-label">Market Universe</div>
+        <div class="discovery-pool-value">${escapeHtml(formatDiscoveryPoolCount(firstPresent(status.raw_source_count, counts.raw_assets)))}</div>
+      </div>
+      <div class="discovery-pool-stat">
+        <div class="discovery-pool-label">Tradable / Optionable</div>
+        <div class="discovery-pool-value">${escapeHtml(formatDiscoveryPoolCount(firstPresent(status.optionable_tradable_count, counts.tradable_optionable)))}</div>
+      </div>
+      <div class="discovery-pool-stat">
+        <div class="discovery-pool-label">Dollar-Volume Eligible</div>
+        <div class="discovery-pool-value">${escapeHtml(formatDiscoveryPoolCount(firstPresent(status.dollar_volume_pass_count, counts.dollar_volume_passed)))}</div>
+      </div>
+      <div class="discovery-pool-stat">
+        <div class="discovery-pool-label">Options-Liquidity Eligible</div>
+        <div class="discovery-pool-value">${escapeHtml(formatDiscoveryPoolCount(firstPresent(status.options_liquidity_pass_count, counts.options_liquidity_passed)))}</div>
+      </div>
+      <div class="discovery-pool-stat">
+        <div class="discovery-pool-label">Kairos Intake</div>
+        <div class="discovery-pool-value">${escapeHtml(formatDiscoveryPoolCount(selected))} / ${escapeHtml(formatDiscoveryPoolCount(cap))}</div>
+        <div class="discovery-pool-sub">Last: ${escapeHtml(formatDiscoveryPoolDate(lastRefresh))}</div>
+        <div class="discovery-pool-sub">Next: ${escapeHtml(formatDiscoveryPoolDate(nextRefresh))}</div>
+      </div>
+    </div>`;
+}
+
+function scheduleDiscoveryPoolStatusPoll(status = latestDiscoveryPoolStatus || {}) {
+  if (discoveryPoolStatusTimer) {
+    clearTimeout(discoveryPoolStatusTimer);
+    discoveryPoolStatusTimer = null;
+  }
+  if (!status?.running && String(status?.status || '').toLowerCase() !== 'refreshing') return;
+  discoveryPoolStatusTimer = setTimeout(() => {
+    loadDiscoveryPoolStatus(false).catch(error => console.warn('[Discovery Pool] status poll failed:', error));
+  }, 15000);
+}
+
+async function loadDiscoveryPoolStatus(showLoading = false) {
+  if (showLoading && !latestDiscoveryPoolStatus) renderDiscoveryPoolStatus({});
+  try {
+    const res = await fetchWithTimeout(`${API}/api/discovery/status`, {}, 6000);
+    if (!res.ok) throw new Error(`Discovery status failed with HTTP ${res.status}`);
+    latestDiscoveryPoolStatus = await res.json();
+    renderDiscoveryPoolStatus(latestDiscoveryPoolStatus);
+    scheduleDiscoveryPoolStatusPoll(latestDiscoveryPoolStatus);
+    return latestDiscoveryPoolStatus;
+  } catch (error) {
+    latestDiscoveryPoolStatus = {
+      ...(latestDiscoveryPoolStatus || {}),
+      status: 'error',
+      last_error: error.message || String(error),
+    };
+    renderDiscoveryPoolStatus(latestDiscoveryPoolStatus);
+    scheduleDiscoveryPoolStatusPoll(latestDiscoveryPoolStatus);
+    return latestDiscoveryPoolStatus;
+  }
+}
+
+function updateDiscoveryPoolStatusFromMeta(meta = {}) {
+  const discovery = meta.discovery_status || meta.discoveryStatus;
+  if (!discovery || !Object.keys(discovery).length) return;
+  latestDiscoveryPoolStatus = {
+    ...(latestDiscoveryPoolStatus || {}),
+    ...discovery,
+  };
+  renderDiscoveryPoolStatus(latestDiscoveryPoolStatus);
+  scheduleDiscoveryPoolStatusPoll(latestDiscoveryPoolStatus);
+}
+
 function updateDataStatus(meta = {}) {
   const el = document.getElementById('dataStatus');
+  updateDiscoveryPoolStatusFromMeta(meta);
   if (!el) return;
   if (!cacheStatusMatchesActiveUniverse(meta)) {
     el.innerHTML = `
@@ -18513,6 +18772,7 @@ initializeJournalServerSync();
 updateDeveloperReplayAccess();
 renderNotificationCenter();
 loadNotifications(false);
+loadDiscoveryPoolStatus(true);
 bindTickerSearch();
 initializeMobileScannerFilters();
 bindMobileNavigationDismissal();
