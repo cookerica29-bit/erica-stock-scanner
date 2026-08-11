@@ -3722,7 +3722,7 @@
   <div class="controls">
     <div class="control-group">
       <label class="control-label" for="tickerInput">Ticker Search · UI v5</label>
-      <input type="search" id="tickerInput" placeholder="Search AAPL or Apple..." autocomplete="off" oninput="renderScannerResults()" onsearch="renderScannerResults()" />
+      <input type="search" id="tickerInput" placeholder="Search AAPL or Apple..." autocomplete="off" />
       <div class="control-hint">Scan refreshes all cards. Type AAPL or Apple here to filter the loaded cards.</div>
     </div>
     <details id="mobileScannerFilters" class="mobile-filter-shell">
@@ -3737,7 +3737,7 @@
           <option value="discovered" selected>Discovered</option>
           <option value="default">My Watchlist</option>
         </select>
-        <select id="statusFilter" onchange="renderScannerResults()">
+        <select id="statusFilter" onchange="handleScannerFilterChange()">
           <option value="all">All Statuses</option>
           <option value="ACTIONABLE" selected>Opportunities</option>
           <option value="ENTER_NOW">Enter Now</option>
@@ -3750,18 +3750,18 @@
           <option value="WAITING">Waiting</option>
           <option value="SKIP">Skip</option>
         </select>
-        <select id="directionFilter" onchange="renderScannerResults()">
+        <select id="directionFilter" onchange="handleScannerFilterChange()">
           <option value="all">All Directions</option>
           <option value="LONG">Long</option>
           <option value="SHORT">Short</option>
         </select>
-        <select id="qualityFilter" onchange="renderScannerResults()">
+        <select id="qualityFilter" onchange="handleScannerFilterChange()">
           <option value="all">All Setup Quality</option>
           <option value="A">Top Setup</option>
           <option value="B">Strong Setup</option>
           <option value="C">Skip / Low Quality</option>
         </select>
-        <select id="contractTypeFilter" onchange="renderScannerResults()">
+        <select id="contractTypeFilter" onchange="handleScannerFilterChange()">
           <option value="all">All Contracts</option>
           <option value="CALL">Calls</option>
           <option value="PUT">Puts</option>
@@ -3773,7 +3773,7 @@
           <option value="500">Under $500</option>
           <option value="1000">Under $1,000</option>
         </select>
-        <select id="sortFilter" onchange="renderScannerResults()">
+        <select id="sortFilter" onchange="handleScannerFilterChange()">
           <option value="RANK" selected>Opportunity Rank</option>
           <option value="BUDGET">Best Within Budget</option>
           <option value="STATUS">Status</option>
@@ -4639,6 +4639,15 @@ let scannerNearMiss = [];
 let indexWatchRows = [];
 let latestScannerMeta = null;
 const optionPricingLazyRequestedKeys = new Set();
+const SCANNER_INITIAL_RENDER_LIMIT = 60;
+const SCANNER_RENDER_INCREMENT = 60;
+const SCANNER_SEARCH_DEBOUNCE_MS = 150;
+let scannerRowsVersion = 0;
+let scannerRenderLimit = SCANNER_INITIAL_RENDER_LIMIT;
+let scannerDerivedViewCache = new Map();
+let scannerSearchDebounceTimer = null;
+let scannerLastSummarySignature = '';
+const scannerSetupLookup = new Map();
 let contractTierSelections = (() => {
   try {
     const saved = localStorage.getItem(CONTRACT_TIER_SELECTION_KEY);
@@ -5289,6 +5298,31 @@ function scannerDetailKey(setup = {}) {
   return `${setupId}|${generation}`;
 }
 
+function scannerStableSetupKey(setup = {}) {
+  return scannerDetailKey(setup) || setupIdFromSetup(setup);
+}
+
+function invalidateScannerDerivedViews({ resetWindow = false } = {}) {
+  scannerRowsVersion += 1;
+  scannerDerivedViewCache.clear();
+  scannerLastSummarySignature = '';
+  if (resetWindow) scannerRenderLimit = SCANNER_INITIAL_RENDER_LIMIT;
+}
+
+function rebuildScannerSetupLookup() {
+  scannerSetupLookup.clear();
+  [...scannerRows, ...scannerNearMiss].forEach(setup => {
+    const key = scannerStableSetupKey(setup);
+    if (key) scannerSetupLookup.set(key, setup);
+  });
+}
+
+function scannerSetupFromKey(key = '') {
+  if (!key) return null;
+  if (!scannerSetupLookup.size) rebuildScannerSetupLookup();
+  return scannerSetupLookup.get(String(key)) || null;
+}
+
 function scannerDetailUrl(setup = {}) {
   const ticker = String(setup.ticker || '').trim().toUpperCase();
   const setupId = firstPresent(setup.setup_id, setup.setupId, setup.lazy_hydration?.setup_id);
@@ -5318,6 +5352,8 @@ function replaceScannerRowWithDetail(summary = {}, detail = {}) {
   const replaceIn = rows => rows.map(row => scannerDetailKey(row) === key ? merged : row);
   scannerRows = replaceIn(scannerRows);
   scannerNearMiss = replaceIn(scannerNearMiss);
+  invalidateScannerDerivedViews();
+  rebuildScannerSetupLookup();
 }
 
 async function fetchScannerDetail(setup = {}) {
@@ -5382,6 +5418,8 @@ function handleUniverseChange() {
   scannerDetailRequests.clear();
   contractRefreshAttempts = 0;
   contractPendingTimedOutKeys = new Set();
+  invalidateScannerDerivedViews({ resetWindow: true });
+  rebuildScannerSetupLookup();
   renderScannerResults();
   runScan();
 }
@@ -5650,6 +5688,8 @@ function clearResults() {
   contractPendingTimedOutKeys = new Set();
   scannerRows = [];
   scannerNearMiss = [];
+  invalidateScannerDerivedViews({ resetWindow: true });
+  rebuildScannerSetupLookup();
   previousTradeStages = new Map();
   aPlusReadyAlerts = new Set();
   try { localStorage.removeItem(STAGE_CACHE_KEY); } catch {}
@@ -6038,13 +6078,16 @@ function markPendingContractsTimedOut(rows = [], targetSet = contractPendingTime
 }
 
 function currentScannerFilters() {
+  const tickerSearch = tickerQueryParts(document.getElementById('tickerInput')?.value || '');
   return {
     status: document.getElementById('statusFilter')?.value || 'all',
     direction: document.getElementById('directionFilter')?.value || 'all',
     quality: document.getElementById('qualityFilter')?.value || 'all',
     contractType: document.getElementById('contractTypeFilter')?.value || 'all',
     tradingBudget: document.getElementById('tradingBudgetFilter')?.value || 'NO_LIMIT',
-    tickerSearch: tickerQueryParts(document.getElementById('tickerInput')?.value || ''),
+    sort: document.getElementById('sortFilter')?.value || 'RANK',
+    tickerSearch,
+    tickerSearchMode: scannerTickerSearchMode(tickerSearch),
   };
 }
 
@@ -6064,9 +6107,8 @@ function scheduleContractRefreshPoll() {
   clearContractRefreshPoll();
   if (contractRefreshAttempts >= CONTRACT_PENDING_MAX_ATTEMPTS) {
     markPendingContractsTimedOut(visibleScannerRowsForContractPoll(), contractPendingTimedOutKeys);
-    renderScannerResults();
-    renderExecutionTab();
-    renderFurtherAnalysisTab();
+    invalidateScannerDerivedViews();
+    renderScannerResults({ cardsOnly: true });
     return;
   }
   contractRefreshAttempts += 1;
@@ -6081,23 +6123,18 @@ function scheduleContractRefreshPoll() {
       latestScannerMeta = data.meta || latestScannerMeta;
       scannerRows = nextRows;
       scannerNearMiss = nextNearMiss;
-      refreshExpectedMoveTrackingFromRows([...nextRows, ...nextNearMiss]);
-      evaluatePositionAlertNotifications();
-      loadNotifications(false);
+      invalidateScannerDerivedViews();
+      rebuildScannerSetupLookup();
       updateDataStatus(data.meta || {});
-      renderScannerResults();
-      renderExecutionTab();
-      renderFurtherAnalysisTab();
-      renderPositionsTab();
+      renderScannerResults({ cardsOnly: true });
       if (rowsHavePendingContracts(visibleScannerRowsForContractPoll())) {
         scheduleContractRefreshPoll();
       }
     } catch (e) {
       console.warn('[Contracts] background contract refresh poll failed:', e);
       markPendingContractsTimedOut(visibleScannerRowsForContractPoll(), contractPendingTimedOutKeys);
-      renderScannerResults();
-      renderExecutionTab();
-      renderFurtherAnalysisTab();
+      invalidateScannerDerivedViews();
+      renderScannerResults({ cardsOnly: true });
     }
   }, 7000);
 }
@@ -6257,6 +6294,8 @@ function applyScanPayload(data = {}) {
 
     scannerRows = nextRows;
     scannerNearMiss = nextNearMiss;
+    invalidateScannerDerivedViews({ resetWindow: true });
+    rebuildScannerSetupLookup();
     recordEnterNowFunnelSnapshot(nextRows, nextNearMiss, scanMeta || {});
     if (nextRows.length || nextNearMiss.length || shouldRenderCompletedScan(scanMeta)) {
       collapseMobileScannerFiltersAfterScan();
@@ -6287,6 +6326,8 @@ function renderScannerWarming(data = {}) {
   updateDataStatus(latestScannerMeta || {});
   scannerRows = [];
   scannerNearMiss = [];
+  invalidateScannerDerivedViews({ resetWindow: true });
+  rebuildScannerSetupLookup();
   renderScannerResults();
 }
 
@@ -6477,6 +6518,26 @@ function setupGradeValue(s) {
   return normalizeSetupGrade(s.setupGrade);
 }
 
+function scannerAllSetups() {
+  return [...scannerRows, ...scannerNearMiss];
+}
+
+function scannerTickerSet(rows = scannerAllSetups()) {
+  return new Set((rows || []).map(row => String(row?.ticker || '').toUpperCase()).filter(Boolean));
+}
+
+function scannerTickerSearchMode(tokens = [], rows = scannerAllSetups()) {
+  const tickerSet = scannerTickerSet(rows);
+  return (tokens || []).some(token => tickerSet.has(String(token || '').toUpperCase())) ? 'exact' : 'contains';
+}
+
+function tickerMatchesSearch(ticker = '', tokens = [], mode = 'contains') {
+  if (!tokens?.length) return true;
+  const symbol = String(ticker || '').toUpperCase();
+  if (mode === 'exact') return tokens.some(token => symbol === String(token || '').toUpperCase());
+  return tokens.some(token => symbol.includes(String(token || '').toUpperCase()));
+}
+
 function entryTimingValue(s) {
   return s.entryTimingState || 'Not Ready';
 }
@@ -6498,7 +6559,7 @@ function actionPriorityForSetup(s) {
 
 function passesFrameworkFilters(s, filters) {
   const ticker = String(s?.ticker || '').toUpperCase();
-  if (filters.tickerSearch?.length && !filters.tickerSearch.some(q => ticker.includes(q))) return false;
+  if (!tickerMatchesSearch(ticker, filters.tickerSearch, filters.tickerSearchMode)) return false;
   const statusBucket = setupProgressState(s).bucket;
   const eventMemoryActive = stockEventMemoryPresentationEnabled(s);
   const actionableBuckets = eventMemoryActive
@@ -7189,7 +7250,7 @@ function applySnapshotFilter(filterType, filterValue) {
   if (!control) return;
   control.value = control.value === filterValue ? 'all' : filterValue;
   if (filterType === 'status') control.dataset.userTouched = 'true';
-  renderScannerResults();
+  handleScannerFilterChange();
 }
 
 function snapshotFilterActive(filterType, filterValue) {
@@ -7439,25 +7500,40 @@ function renderMarketSnapshot(rows) {
     </div>`;
 }
 
-function renderScannerResults() {
-  const results = document.getElementById('results');
-  const summary = document.getElementById('summary');
-  updateMobileFilterSummary();
-  const filters = {
-    status: document.getElementById('statusFilter')?.value || 'all',
-    direction: document.getElementById('directionFilter')?.value || 'all',
-    quality: document.getElementById('qualityFilter')?.value || 'all',
-    contractType: document.getElementById('contractTypeFilter')?.value || 'all',
-    sort: document.getElementById('sortFilter')?.value || 'RANK',
-    tickerSearch: tickerQueryParts(document.getElementById('tickerInput')?.value || ''),
-  };
+function scannerRenderSignature(filters = currentScannerFilters()) {
+  return JSON.stringify({
+    version: scannerRowsVersion,
+    status: filters.status,
+    direction: filters.direction,
+    quality: filters.quality,
+    contractType: filters.contractType,
+    tradingBudget: filters.tradingBudget,
+    sort: filters.sort,
+    tickerSearch: filters.tickerSearch,
+    tickerSearchMode: filters.tickerSearchMode,
+  });
+}
+
+function scannerSummarySignature(filters = currentScannerFilters()) {
+  return JSON.stringify({
+    version: scannerRowsVersion,
+    status: filters.status,
+    direction: filters.direction,
+    quality: filters.quality,
+    contractType: filters.contractType,
+    tradingBudget: filters.tradingBudget,
+    sort: filters.sort,
+  });
+}
+
+function scannerDerivedView(filters = currentScannerFilters()) {
+  const signature = scannerRenderSignature(filters);
+  if (scannerDerivedViewCache.has(signature)) return scannerDerivedViewCache.get(signature);
 
   const allRows = scannerRows.slice();
   const allNearMiss = scannerNearMiss.slice();
   const rows = sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, filters)), filters.sort);
   const nearMiss = sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, filters)), filters.sort);
-  const totalVisible = rows.length + nearMiss.length;
-  const totalBeforeLocFilter = allRows.length + allNearMiss.length;
   const snapshotSetups = [...allRows, ...allNearMiss];
   const visibleSetups = [...rows, ...nearMiss];
   const missionFilters = { ...filters, status: 'all' };
@@ -7465,6 +7541,99 @@ function renderScannerResults() {
     ...sortScannerCardsForDisplay(allRows.filter(s => passesFrameworkFilters(s, missionFilters)), 'RANK'),
     ...sortScannerCardsForDisplay(allNearMiss.filter(s => passesFrameworkFilters(s, missionFilters)), 'RANK'),
   ];
+  const view = {
+    allRows,
+    allNearMiss,
+    rows,
+    nearMiss,
+    totalVisible: rows.length + nearMiss.length,
+    totalBeforeLocFilter: allRows.length + allNearMiss.length,
+    snapshotSetups,
+    visibleSetups,
+    missionSetups,
+  };
+  scannerDerivedViewCache.set(signature, view);
+  return view;
+}
+
+function renderScannerSummaryPanels(view, filters = currentScannerFilters(), { force = false } = {}) {
+  const signature = scannerSummarySignature(filters);
+  if (!force && scannerLastSummarySignature === signature) return;
+  scannerLastSummarySignature = signature;
+  const summaryFilters = { ...filters, tickerSearch: [], tickerSearchMode: 'contains' };
+  const summaryView = scannerDerivedView(summaryFilters);
+  renderMarketCoveragePanel(summaryView.snapshotSetups, latestScannerMeta || {});
+  renderMarketSnapshot(summaryView.snapshotSetups);
+  renderMarketIntelligencePanel(summaryView.snapshotSetups, latestScannerMeta || {});
+  renderMissionWorkflow(summaryView.missionSetups);
+  renderTopOpportunities(summaryView.visibleSetups);
+}
+
+function hiddenTickerFilterMessage(filters = currentScannerFilters()) {
+  if (!filters.tickerSearch?.length || filters.tickerSearchMode !== 'exact') return '';
+  const all = scannerAllSetups();
+  const exact = all.filter(setup => tickerMatchesSearch(setup?.ticker, filters.tickerSearch, 'exact'));
+  if (!exact.length) return '';
+  const visible = exact.filter(setup => passesFrameworkFilters(setup, filters));
+  if (visible.length) return '';
+  const tickers = [...new Set(exact.map(setup => String(setup?.ticker || '').toUpperCase()).filter(Boolean))].join(', ');
+  const states = [...new Set(exact.map(setup => setupProgressState(setup).label).filter(Boolean))].join(' · ');
+  return `
+    <div class="empty scanner-filter-empty">
+      ${escapeHtml(tickers)} is loaded, but hidden by the active filters${states ? ` (${escapeHtml(states)})` : ''}.
+      <button type="button" class="btn-sm" onclick="showTickerAcrossStatuses()">View ticker across statuses</button>
+    </div>`;
+}
+
+function showTickerAcrossStatuses() {
+  const status = document.getElementById('statusFilter');
+  if (status) {
+    status.value = 'all';
+    status.dataset.userTouched = 'true';
+  }
+  scannerRenderLimit = SCANNER_INITIAL_RENDER_LIMIT;
+  renderScannerResults({ forceSummary: true });
+}
+
+function handleScannerFilterChange() {
+  scannerRenderLimit = SCANNER_INITIAL_RENDER_LIMIT;
+  renderScannerResults({ forceSummary: true });
+}
+
+function scheduleScannerSearchRender() {
+  clearTimeout(scannerSearchDebounceTimer);
+  scannerSearchDebounceTimer = setTimeout(() => {
+    scannerRenderLimit = SCANNER_INITIAL_RENDER_LIMIT;
+    renderScannerResults({ cardsOnly: true });
+  }, SCANNER_SEARCH_DEBOUNCE_MS);
+}
+
+function renderScannerShowMoreButton(remaining = 0) {
+  if (remaining <= 0) return '';
+  return `
+    <div class="scanner-show-more">
+      <button type="button" class="btn-sm" onclick="showMoreScannerCards()">Show More (${escapeHtml(String(remaining))})</button>
+    </div>`;
+}
+
+function showMoreScannerCards() {
+  scannerRenderLimit += SCANNER_RENDER_INCREMENT;
+  renderScannerResults({ cardsOnly: true });
+}
+
+function renderScannerResults(options = {}) {
+  const results = document.getElementById('results');
+  const summary = document.getElementById('summary');
+  if (!results || !summary) return;
+  updateMobileFilterSummary();
+  const filters = currentScannerFilters();
+  const view = scannerDerivedView(filters);
+  const { rows, nearMiss, totalVisible, totalBeforeLocFilter, visibleSetups } = view;
+  const visibleRows = rows.slice(0, scannerRenderLimit);
+  const remainingWindow = Math.max(0, scannerRenderLimit - visibleRows.length);
+  const visibleNearMiss = nearMiss.slice(0, remainingWindow);
+  const renderedSetups = [...visibleRows, ...visibleNearMiss];
+  const remainingCards = Math.max(0, totalVisible - renderedSetups.length);
   const warmingMeta = latestScannerMeta || {};
   const discoveredWarmupWithoutRows = scannerRows.length === 0
     && scannerNearMiss.length === 0
@@ -7489,20 +7658,19 @@ function renderScannerResults() {
     const el = document.getElementById(id);
     if (el) el.style.display = '';
   });
-  renderMarketCoveragePanel(snapshotSetups, latestScannerMeta || {});
-  renderMarketSnapshot(snapshotSetups);
-  renderMarketIntelligencePanel(snapshotSetups, latestScannerMeta || {});
-  renderMissionWorkflow(missionSetups);
-  renderTopOpportunities(visibleSetups);
+  if (!options.cardsOnly) {
+    renderScannerSummaryPanels(view, filters, { force: options.forceSummary });
+  }
   if (Number.isFinite(tradingBudgetValue())) {
-    queueOptionPricingForSetups(visibleSetups, 'budget_view');
+    queueOptionPricingForSetups(renderedSetups, 'budget_view');
   }
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
-    results.innerHTML = `<div class="empty">No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.</div>`;
+    results.innerHTML = hiddenTickerFilterMessage(filters)
+      || `<div class="empty">No qualified setups match this filter${tickerNote}. Clear the ticker search or loosen filters to see more cards.</div>`;
   } else {
-    results.innerHTML = rows.map(renderCard).join('');
+    results.innerHTML = visibleRows.map(renderCard).join('') + renderScannerShowMoreButton(remainingCards);
   }
 
   const longs   = rows.filter(s => s.direction === 'LONG').length;
@@ -7519,14 +7687,19 @@ function renderScannerResults() {
   const showingLabel = totalBeforeLocFilter !== totalVisible
     ? ` · Showing ${totalVisible} of ${totalBeforeLocFilter} setups`
     : ` · ${totalVisible} total including developing`;
-  summary.innerHTML = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — <span class="direction-value direction-long">${longs} Long</span>, <span class="direction-value direction-short">${shorts} Short</span> · ${escapeHtml(filterLabel)}${escapeHtml(showingLabel)} · ${escapeHtml(simpleStatusSummary(visibleSetups))}`;
+  const windowLabel = remainingCards > 0
+    ? ` · Rendering ${renderedSetups.length} of ${totalVisible}`
+    : '';
+  summary.innerHTML = `${rows.length} qualified setup${rows.length !== 1 ? 's' : ''} — <span class="direction-value direction-long">${longs} Long</span>, <span class="direction-value direction-short">${shorts} Short</span> · ${escapeHtml(filterLabel)}${escapeHtml(showingLabel)}${escapeHtml(windowLabel)} · ${escapeHtml(simpleStatusSummary(visibleSetups))}`;
 
   const nmSection = document.getElementById('near-miss-section');
   const nmResults = document.getElementById('near-miss-results');
   const nmHeader = document.getElementById('near-miss-header');
   if (nearMiss.length > 0) {
     nmHeader.textContent = `Scout Cards — Other Setups (${nearMiss.length})`;
-    nmResults.innerHTML = nearMiss.map(renderNearMissCard).join('');
+    nmResults.innerHTML = visibleNearMiss.length
+      ? visibleNearMiss.map(renderNearMissCard).join('')
+      : '<div class="empty">Scout cards are available after showing more qualified setups.</div>';
     nmSection.style.display = 'block';
   } else {
     nmSection.style.display = 'none';
@@ -7536,9 +7709,8 @@ function renderScannerResults() {
 function bindTickerSearch() {
   const input = document.getElementById('tickerInput');
   if (!input) return;
-  input.addEventListener('input', renderScannerResults);
-  input.addEventListener('search', renderScannerResults);
-  input.addEventListener('keyup', renderScannerResults);
+  input.addEventListener('input', scheduleScannerSearchRender);
+  input.addEventListener('search', scheduleScannerSearchRender);
 }
 
 function initializeScannerDefaults() {
@@ -9312,10 +9484,7 @@ function tradingBudgetLabel(value = tradingBudgetValue()) {
 function handleTradingBudgetChange() {
   const control = document.getElementById('tradingBudgetFilter');
   if (control) localStorage.setItem(TRADING_BUDGET_KEY, control.value || 'NO_LIMIT');
-  renderScannerResults();
-  if (Number.isFinite(tradingBudgetValue())) {
-    queueOptionPricingForSetups(visibleScannerRowsForContractPoll(), 'budget_view');
-  }
+  handleScannerFilterChange();
 }
 
 function initializeTradingBudgetControl() {
@@ -11426,13 +11595,13 @@ function renderCard(s) {
     ? window.KairosExecutionGuidance.executeVisualState(executionState)
     : 'not-ready';
   const why = simpleWhyItems(s, state.label, trend, setupTf, phase, setupStatus, entryStatus, location);
-  const encoded = encodeURIComponent(JSON.stringify(s));
+  const setupKey = scannerStableSetupKey(s);
   const distanceText = s.distanceFromEntryAtr != null
     ? `${fmtNumber(s.distanceFromEntryAtr)} ATR / ${fmtNumber(s.distanceFromEntryPercent)}% from entry`
     : 'No entry distance available yet';
 
   return `
-  <div class="card" data-ticker="${escapeHtml(String(s.ticker || ''))}" data-mission-id="${escapeHtml(missionSetupIdentity(s))}" data-opportunity-rank="${escapeHtml(String(s.ranking?.rank || ''))}" data-normalized-status="${escapeHtml(String(cardStatus.label || state.bucket).toUpperCase().replace(/\s+/g, '_'))}" data-execution-state="${escapeHtml(executionState)}" data-execute-visual-state="${escapeHtml(executeVisualState)}">
+  <div class="card" data-setup-key="${escapeHtml(setupKey)}" data-ticker="${escapeHtml(String(s.ticker || ''))}" data-mission-id="${escapeHtml(missionSetupIdentity(s))}" data-opportunity-rank="${escapeHtml(String(s.ranking?.rank || ''))}" data-normalized-status="${escapeHtml(String(cardStatus.label || state.bucket).toUpperCase().replace(/\s+/g, '_'))}" data-execution-state="${escapeHtml(executionState)}" data-execute-visual-state="${escapeHtml(executeVisualState)}">
     <div class="card-header">
       <div class="ticker-wrap">
         <span class="ticker ticker-with-direction">${escapeHtml(s.ticker)} ${renderDirectionMarker(directionLabel)}</span>
@@ -11476,9 +11645,18 @@ function renderCard(s) {
       })}
     </div>
     <div class="card-footer">
-      <button class="btn-log btn-sm" onclick="openLogModalForSetup(decodeURIComponent('${encoded}'), this)">Log Review</button>
+      <button class="btn-log btn-sm" onclick="openLogModalForSetupKey(this.closest('.card')?.dataset?.setupKey, this)">Log Review</button>
     </div>
   </div>`;
+}
+
+function openLogModalForSetupKey(setupKey, button = null) {
+  const setup = scannerSetupFromKey(setupKey);
+  if (!setup) {
+    showToast('Setup details are no longer available. Refresh the scan and try again.', 'error');
+    return;
+  }
+  openLogModalForSetup(JSON.stringify(setup), button);
 }
 
 async function openLogModalForSetup(encodedSetup, button = null) {
