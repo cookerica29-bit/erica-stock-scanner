@@ -6317,7 +6317,7 @@ function renderDiscoveryPoolStatus(status = latestDiscoveryPoolStatus || {}) {
   const cap = firstPresent(status.kairos_intake_cap, thresholds.kairos_intake_cap, thresholds.target_universe_size);
   const statusLabel = discoveryPoolStatusLabel(status);
   const loadedText = status.loaded_from_disk === true
-    ? 'Loaded from persisted storage'
+    ? 'Persisted storage'
     : status.loaded_from_disk === false
       ? 'Created this runtime'
       : 'Storage status unavailable';
