@@ -10312,7 +10312,26 @@ function currentScannerViewLabel(model = {}) {
   const live = model.live || {};
   return [live.currentScannerStatus, live.currentGrade ? `Grade ${live.currentGrade}` : null, live.currentEntryStatus]
     .filter(Boolean)
-    .join(' · ') || 'No current scanner match';
+    .join(' · ') || 'No current new-entry signal';
+}
+
+function currentNewEntrySignalExplanation(model = {}) {
+  if (!model.latestSetup) return 'Active position remains managed from original trade plan.';
+  if (model.scannerContextMatch === 'setup_identity') {
+    return 'Same setup identity. This is still new-entry context; management uses the original trade plan.';
+  }
+  return 'Same ticker context only. The active position remains managed from original trade plan.';
+}
+
+function positionThesisStatus(model = {}) {
+  const entry = model.entry || {};
+  const intel = model.position_intelligence || {};
+  if ((entry.result || 'Open') !== 'Open' || entry.tracking_status === 'completed' || entry.completion_reason) return 'CLOSED';
+  if (model.live?.stopTouchedAt || intel.state === 'EXIT' || intel.reason_code === 'STOP_INVALIDATED') return 'STOP / THESIS INVALIDATED';
+  if (model.live?.tp1TouchedAt || intel.tp1_reached) return 'TP1 REACHED';
+  if (intel.state === 'WATCH' || intel.state === 'PROTECT') return 'CAUTION / MANAGEMENT';
+  if (intel.state === 'DATA_NEEDED') return 'CAUTION / MANAGEMENT';
+  return 'THESIS INTACT';
 }
 
 function positionRRange(entry = {}, live = {}) {
@@ -10493,6 +10512,7 @@ function activeDashboardViewModel(model = {}) {
     ticker: plan.ticker,
     direction: plan.direction,
     position_lifecycle: positionLifecycleStatus(model),
+    position_thesis_status: positionThesisStatus(model),
     position_health: intel.state_label || positionStateLabel(intel.state),
     dashboard_status: status,
     attention_reasons: attention,
@@ -10698,7 +10718,9 @@ function renderActiveDashboardCard(vm = {}) {
           ${renderActiveKv('Health', vm.position_health || 'Unavailable')}
           ${renderActiveKv('Recommendation', vm.recommendation || 'Review Position')}
           ${renderActiveKv('Original Setup', [vm.original_grade ? `Grade ${vm.original_grade}` : null, vm.direction, lifecycleStatus].filter(Boolean).join(' · ') || 'Unavailable')}
-          ${renderActiveKv('Current Scanner View', currentScannerViewLabel(model))}
+          ${renderActiveKv('Position Thesis', vm.position_thesis_status || 'THESIS INTACT')}
+          ${renderActiveKv('Current New-Entry Signal', currentScannerViewLabel(model))}
+          ${renderActiveKv('Scanner Relationship', currentNewEntrySignalExplanation(model))}
         </div>
       </div>
       <div class="active-card-section" style="margin-top:10px;">
@@ -10743,7 +10765,9 @@ function renderActiveDashboardCard(vm = {}) {
               ['TP1 State', positionTargetState(model, 'tp1')],
               ['Stop State', positionStopState(model)],
               ['Elapsed', `${model.live.tradingDaysElapsed ?? '—'} trading days · ${model.live.barsElapsed ?? '—'} bars`],
-              ['Current Scanner View', currentScannerViewLabel(model)],
+              ['Position Thesis', positionThesisStatus(model)],
+              ['Current New-Entry Signal', currentScannerViewLabel(model)],
+              ['Scanner Relationship', currentNewEntrySignalExplanation(model)],
               ['Current Scanner Grade', model.live.currentGrade ? `Grade ${model.live.currentGrade}` : '—'],
             ])}
           </div>
@@ -11906,7 +11930,8 @@ function renderCard(s) {
       })}
     </div>
     <div class="card-footer">
-      <button class="btn-log btn-sm" onclick="openLogModalForSetupKey(this.closest('.card')?.dataset?.setupKey, this)">Log Review</button>
+      <button class="btn-log btn-sm" onclick="openPositionTakenForSetupKey(this.closest('.card')?.dataset?.setupKey, this)">Position Taken</button>
+      <button class="btn-secondary btn-sm" onclick="openLogModalForSetupKey(this.closest('.card')?.dataset?.setupKey, this)">Log Review</button>
     </div>
   </div>`;
 }
@@ -11920,16 +11945,25 @@ function openLogModalForSetupKey(setupKey, button = null) {
   openLogModalForSetup(JSON.stringify(setup), button);
 }
 
-async function openLogModalForSetup(encodedSetup, button = null) {
+function openPositionTakenForSetupKey(setupKey, button = null) {
+  const setup = scannerSetupFromKey(setupKey);
+  if (!setup) {
+    showToast('Setup details are no longer available. Refresh the scan and try again.', 'error');
+    return;
+  }
+  openLogModalForSetup(JSON.stringify(setup), button, { positionTaken: true });
+}
+
+async function openLogModalForSetup(encodedSetup, button = null, options = {}) {
   let setup = null;
   try {
     setup = JSON.parse(encodedSetup);
   } catch {
-    openLogModal(encodedSetup);
+    openLogModal(encodedSetup, options);
     return;
   }
   if (!rowNeedsFullDetail(setup)) {
-    openLogModal(encodedSetup);
+    openLogModal(encodedSetup, options);
     return;
   }
   const originalText = button?.textContent;
@@ -11939,7 +11973,7 @@ async function openLogModalForSetup(encodedSetup, button = null) {
   }
   try {
     const full = await fetchScannerDetail(setup);
-    openLogModal(JSON.stringify(full));
+    openLogModal(JSON.stringify(full), options);
   } catch (error) {
     showToast(scannerDetailErrorMessage(error), 'error');
   } finally {
@@ -12314,6 +12348,80 @@ function scannerSnapshotFromSetup(setup = {}, ev = {}) {
     actual_expiration: firstPresent(setup.actual_expiration, ''),
     actual_premium: coerceNumber(setup.actual_premium),
     actual_quantity: coerceNumber(setup.actual_quantity),
+  };
+}
+
+function scannerStateAtHandoff(setup = {}, ev = {}) {
+  const snapshotSetup = { ...setup, trade_eval: { ...(setup.trade_eval || {}), ...ev } };
+  const progress = typeof setupProgressState === 'function' ? setupProgressState(snapshotSetup) : {};
+  const cardStatus = window.KairosExecutionGuidance?.cardStatus
+    ? window.KairosExecutionGuidance.cardStatus(snapshotSetup, progress)
+    : { label: progress.label || progress.bucket || null };
+  return {
+    display: cardStatus?.label || progress.label || null,
+    bucket: progress.bucket || null,
+    execution_state: firstPresent(setup.execution_lifecycle_state, setup.execution_lifecycle?.state, setup.early_entry_shadow?.state, null),
+    ranking_status_bucket: firstPresent(setup.ranking_status_bucket, setup.ranking?.status_bucket, setup.status_bucket, setup.scanner_status, null),
+    entry_status: firstPresent(setup.entryStatus, setup.entry_status, null),
+  };
+}
+
+function optionContractSnapshotForHandoff(setup = {}) {
+  const selected = selectedContractFromSetup(setup);
+  const optionPlan = optionPlanFromSetup(setup);
+  return {
+    option_symbol: selected.option_symbol || firstPresent(setup.option_symbol, setup.contract?.symbol, null),
+    option_type: selected.option_type || firstPresent(setup.option_type, optionPlan.type, null),
+    strike: firstPresent(selected.strike_price, optionPlan.preferred_strike, setup.preferred_strike, null),
+    expiration: firstPresent(selected.expiration_date, setup.option_expiration, setup.expiration_date, null),
+    entry_premium: firstPresent(selected.option_entry_premium, selected.option_ask_at_entry, setup.actual_premium, null),
+    quantity: firstPresent(selected.contracts, setup.actual_quantity, null),
+    contract_tier: firstPresent(selected.contract_tier, selected.contract_tier_label, setup.contract_tier, null),
+    source: firstPresent(selected.contract_guidance_source, selected.contract_selection_source, setup.contract_guidance_source, null),
+  };
+}
+
+function positionHandoffSnapshot(setup = {}, ev = {}, takenAt = new Date().toISOString()) {
+  const sourceSetupId = setupIdFromSetup(setup);
+  const scannerState = scannerStateAtHandoff(setup, ev);
+  const entry = coerceNumber(firstPresent(setup.entry, setup.entry_price));
+  const stop = coerceNumber(firstPresent(setup.sl, setup.stop, setup.stop_price));
+  const tp1 = coerceNumber(firstPresent(setup.tp1, setup.target, setup.target_price));
+  const tp2 = coerceNumber(firstPresent(setup.tp2, setup.plannedTp2));
+  const tp3 = coerceNumber(firstPresent(setup.tp3, setup.plannedTp3));
+  return {
+    handoff_version: 'position-handoff-v1',
+    source: 'scanner',
+    source_setup_id: sourceSetupId,
+    ticker: String(setup.ticker || '').toUpperCase(),
+    direction: String(setup.direction || '').toUpperCase(),
+    timeframe: firstPresent(setup.timeframe, setup.scanner_timeframe, setup.setupTf, null),
+    scan_generation: firstPresent(setup.scan_generation, setup.cache_generated_at, setup.scannedAt, null),
+    setup_generation: firstPresent(setup.setup_generation, setup.early_entry_shadow?.setup_generation, null),
+    scanner_signal_timestamp: firstPresent(setup.signal_timestamp, setup.signalTimestamp, setup.candle_timestamp, setup.candleTime, setup.scannedAt, null),
+    scanner_state_at_handoff: scannerState,
+    original_planned_entry: entry,
+    actual_entry: coerceNumber(firstPresent(setup.actual_underlying_entry, setup.actual_entry, null)),
+    original_stop: stop,
+    original_tp1: tp1,
+    original_tp2: tp2,
+    original_tp3: tp3,
+    setup_grade: firstPresent(setup.setupGrade, setup.setup_grade, setup.quality?.grade, null),
+    confirmation: {
+      trigger_confirmed: Boolean(ev.trigger_confirmed || ev.a_plus_ready),
+      a_plus_ready: Boolean(ev.a_plus_ready),
+      b_plus_tradeable: Boolean(ev.b_plus_tradeable),
+      confirmation_started: Boolean(setup.confirmationStarted),
+      confirmation_reason: firstPresent(setup.confirmationReason, setup.confirmation_reason, ev.confirmation_reason, null),
+      bos: Boolean(ev.bos || ev.bos_confirmed || ev.structure_confirmed),
+      liquidity_sweep: Boolean(ev.liquidity_sweep || ev.sweep_confirmed),
+      rejection: Boolean(ev.rejection || ev.rejection_confirmed),
+      displacement: firstPresent(ev.displacement_classification, ev.displacement, null),
+    },
+    option_contract: optionContractSnapshotForHandoff(setup),
+    position_taken_at: takenAt,
+    resulting_journal_id: null,
+    resulting_position_id: null,
   };
 }
 
@@ -12785,7 +12893,7 @@ function isActiveTrackedSetup(entry = {}) {
 
 function entryRisk(entry = {}) {
   const entryPrice = coerceNumber(firstPresent(entry.entry_price, entry.entry));
-  const stopPrice = coerceNumber(firstPresent(entry.stop_price, entry.plannedStop));
+  const stopPrice = positionStopPrice(entry);
   if (entryPrice == null || stopPrice == null) return null;
   const risk = Math.abs(entryPrice - stopPrice);
   return risk > 0 ? risk : null;
@@ -12796,6 +12904,8 @@ function latestScannerRowsByTicker() {
   const map = new Map();
   rows.forEach(row => {
     const ticker = String(row.ticker || '').toUpperCase();
+    const setupId = setupIdFromSetup(row);
+    if (setupId && !map.has(setupId)) map.set(setupId, row);
     if (!ticker || map.has(ticker)) return;
     map.set(ticker, row);
   });
@@ -12879,11 +12989,11 @@ function positionEntryPrice(entry = {}) {
 }
 
 function positionStopPrice(entry = {}) {
-  return coerceNumber(firstPresent(entry.stop_price, entry.plannedStop));
+  return coerceNumber(firstPresent(entry.original_stop, entry.stop_price, entry.plannedStop));
 }
 
 function positionTp1Price(entry = {}) {
-  return coerceNumber(firstPresent(entry.target_price, entry.plannedTp1, entry.tp1));
+  return coerceNumber(firstPresent(entry.original_tp1, entry.target_price, entry.plannedTp1, entry.tp1));
 }
 
 function positionProgressToTp1(direction, entryPrice, tp1, currentPrice) {
@@ -13255,8 +13365,8 @@ function positionPlanSide(entry = {}) {
     actualUnderlyingEntry: coerceNumber(entry.actual_underlying_entry),
     stopPrice: positionStopPrice(entry),
     tp1: positionTp1Price(entry),
-    tp2: coerceNumber(firstPresent(entry.tp2, entry.plannedTp2)),
-    tp3: coerceNumber(firstPresent(entry.tp3, entry.plannedTp3)),
+    tp2: coerceNumber(firstPresent(entry.original_tp2, entry.tp2, entry.plannedTp2)),
+    tp3: coerceNumber(firstPresent(entry.original_tp3, entry.tp3, entry.plannedTp3)),
     setupGrade: firstPresent(entry.setup_grade, entry.setupGrade, null),
     setupGradeReason: firstPresent(entry.setupGradeReason, ''),
     scannerStatus: firstPresent(entry.scanner_status, entry.scannerStatus, entry.scanner_status_normalized, null),
@@ -13381,7 +13491,10 @@ function buildPositionModels(entries = loadJournal(), latestByTicker = latestSca
     .filter(isActiveTrackedSetup)
     .map(entry => {
       const ticker = String(entry.ticker || '').toUpperCase();
-      const latestSetup = latestByTicker.get(ticker) || null;
+      const originalSetupId = firstPresent(entry.source_setup_id, entry.setup_id, entry.position_handoff?.source_setup_id, null);
+      const identityMatch = originalSetupId ? latestByTicker.get(originalSetupId) || null : null;
+      const tickerMatch = latestByTicker.get(ticker) || null;
+      const latestSetup = identityMatch || tickerMatch || null;
       const currentPrice = livePriceForPosition(entry, latestSetup);
       const marketSnapshot = {
         current_price: currentPrice,
@@ -13394,6 +13507,7 @@ function buildPositionModels(entries = loadJournal(), latestByTicker = latestSca
         id: entry.id,
         entry,
         latestSetup,
+        scannerContextMatch: identityMatch ? 'setup_identity' : tickerMatch ? 'ticker_context_only' : 'none',
         plan: positionPlanSide(entry),
         live: positionLiveSide(entry, latestSetup),
         position_intelligence: positionIntelligence,
@@ -13508,8 +13622,8 @@ function updateTrackedSetupWithObservation(entry = {}, obs = {}) {
   markRMilestone(updated, 2, 'reached_2r', 'time_to_2r', obsTime);
 
   const direction = String(updated.direction || '').toUpperCase();
-  const target = coerceNumber(firstPresent(updated.target_price, updated.plannedTp1));
-  const stop = coerceNumber(firstPresent(updated.stop_price, updated.plannedStop));
+  const target = positionTp1Price(updated);
+  const stop = positionStopPrice(updated);
   if (updated.first_entry_touch_at && target != null) {
     const targetTouched = direction === 'SHORT' ? obs.low <= target : obs.high >= target;
     if (targetTouched && !updated.first_target_touch_at) {
@@ -13654,16 +13768,16 @@ function openTrendReviewModal(trendJson) {
   });
 }
 
-function openLogModal(setupJson) {
+function openLogModal(setupJson, options = {}) {
   const s = typeof setupJson === 'string' ? JSON.parse(setupJson) : setupJson;
   const ev = s.trade_eval || {};
   const trendReview = s.trendReview || {};
   const selectedContract = selectedContractFromSetup(s);
   _editId = null;
-  _pendingSetup = s;
+  _pendingSetup = { ...s, _positionTakenHandoff: Boolean(options.positionTaken) };
   setSetupReviewBox(s);
-  document.getElementById('modal-title').textContent   = 'Log Review';
-  document.getElementById('modalSaveBtn').textContent  = 'Save Trade';
+  document.getElementById('modal-title').textContent   = options.positionTaken ? 'Position Taken' : 'Log Review';
+  document.getElementById('modalSaveBtn').textContent  = options.positionTaken ? 'Save Position' : 'Save Trade';
   setValue('f_ticker', s.ticker || '');
   setValue('f_direction', s.direction || 'LONG');
   setValue('f_timeframe', s.timeframe || 'N/A');
@@ -14396,7 +14510,22 @@ function saveJournalEntry() {
     const snapshot = scannerSnapshotFromSetup(_pendingSetup, ev);
     const selectedContract = selectedContractFromSetup(_pendingSetup);
     const opportunitySnapshot = opportunitySnapshotFields(_pendingSetup);
+    const handoffTakenAt = new Date().toISOString();
+    const handoff = _pendingSetup._positionTakenHandoff ? positionHandoffSnapshot(_pendingSetup, ev, handoffTakenAt) : null;
     Object.assign(updated, defaultTrackingFields(snapshot.signal_timestamp || new Date().toISOString()), snapshot, selectedContract, formContractFields, opportunitySnapshot);
+    if (handoff) {
+      handoff.actual_entry = coerceNumber(firstPresent(updated.actual_underlying_entry, updated.entry_price, updated.entry, handoff.actual_entry));
+      updated.position_handoff_version = 'position-handoff-v1';
+      updated.position_handoff_status = 'POSITION_TAKEN';
+      updated.position_taken_at = handoff.position_taken_at;
+      updated.source_setup_id = handoff.source_setup_id;
+      updated.position_handoff = handoff;
+      updated.original_planned_entry = updated.original_planned_entry ?? handoff.original_planned_entry;
+      updated.original_stop = updated.original_stop ?? handoff.original_stop;
+      updated.original_tp1 = updated.original_tp1 ?? handoff.original_tp1;
+      updated.original_tp2 = updated.original_tp2 ?? handoff.original_tp2;
+      updated.original_tp3 = updated.original_tp3 ?? handoff.original_tp3;
+    }
     updated.original_opportunity_remaining_pct = updated.original_opportunity_remaining_pct ?? opportunitySnapshot.current_opportunity_remaining_pct ?? null;
     const scannerSelectedContract = Boolean(selectedContract.contract_tier || selectedContract.contract_selection_source || selectedContract.contract_guidance_source === 'estimated');
     if (!scannerSelectedContract && (formContractFields.strike_price != null || formContractFields.expiration_date || formContractFields.option_symbol)) {
@@ -14437,6 +14566,10 @@ function saveJournalEntry() {
     updated.plannedTp1 = _pendingSetup.tp1 ?? updated.plannedTp1;
     updated.plannedTp2 = updated.plannedTp2 ?? _pendingSetup.tp2 ?? null;
     updated.plannedTp3 = updated.plannedTp3 ?? _pendingSetup.tp3 ?? null;
+    updated.original_stop = updated.original_stop ?? updated.plannedStop ?? null;
+    updated.original_tp1 = updated.original_tp1 ?? updated.plannedTp1 ?? null;
+    updated.original_tp2 = updated.original_tp2 ?? updated.plannedTp2 ?? null;
+    updated.original_tp3 = updated.original_tp3 ?? updated.plannedTp3 ?? null;
     if (updated.expiration_date) {
       updated.days_to_expiration_at_entry = daysUntilDate(updated.signal_timestamp || updated.createdAt || new Date().toISOString(), updated.expiration_date);
     }
@@ -14453,6 +14586,14 @@ function saveJournalEntry() {
   } else {
     const createdAt = new Date().toISOString();
     const newEntry = { id: Date.now(), date: createdAt.slice(0, 10), createdAt, updatedAt: createdAt, ...updated };
+    if (newEntry.position_handoff) {
+      const handoff = {
+        ...newEntry.position_handoff,
+        resulting_journal_id: firstPresent(newEntry.journal_id, newEntry.id, null),
+        resulting_position_id: firstPresent(newEntry.position_id, newEntry.journal_id, newEntry.id, null),
+      };
+      newEntry.position_handoff = handoff;
+    }
     const duplicateIdx = entries.findIndex(e => e.setup_id && newEntry.setup_id && e.setup_id === newEntry.setup_id);
     if (duplicateIdx !== -1) {
       entries[duplicateIdx] = mirrorJournalCompatibilityFields(fillMissingOnly(entries[duplicateIdx], newEntry));
@@ -15075,6 +15216,13 @@ function ensureJournalStableIds(entry = {}) {
   const generated = existing || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `journal-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   next.journal_id = String(generated);
   next.position_id = String(firstPresent(next.position_id, next.journal_id));
+  if (next.position_handoff && typeof next.position_handoff === 'object') {
+    next.position_handoff = {
+      ...next.position_handoff,
+      resulting_journal_id: next.journal_id,
+      resulting_position_id: next.position_id,
+    };
+  }
   return next;
 }
 

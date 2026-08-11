@@ -193,6 +193,48 @@ def test_notes_endpoint_preserves_plan_and_does_not_queue_replay():
         cleanup()
 
 
+def test_position_handoff_metadata_is_read_only_active_trade_context():
+    client, journal, _history, cleanup = make_context()
+    try:
+        handoff = {
+            "handoff_version": "position-handoff-v1",
+            "source": "scanner",
+            "source_setup_id": "stock:DOW:source",
+            "ticker": "DOW",
+            "direction": "SHORT",
+            "timeframe": "4H",
+            "original_planned_entry": 31.20,
+            "original_stop": 32.15,
+            "original_tp1": 29.50,
+            "scanner_state_at_handoff": {"display": "ENTER NOW", "bucket": "ENTER_NOW"},
+            "position_taken_at": "2026-07-23T14:05:00Z",
+            "resulting_journal_id": "j-1",
+            "resulting_position_id": "p-1",
+        }
+        journal.create_entry(open_entry(
+            actual_underlying_entry=31.15,
+            position_handoff_version="position-handoff-v1",
+            position_handoff_status="POSITION_TAKEN",
+            position_handoff=handoff,
+        ))
+        payload = client.get("/api/active-trades", headers=headers()).json()
+        record = payload["records"][0]
+        assert record["tracking_state"] == "ENTERED"
+        assert record["position_handoff"]["source_setup_id"] == "stock:DOW:source"
+        assert record["plan"]["planned_entry"] == 31.20
+        assert record["plan"]["stop"] == 32.15
+
+        stopped = journal.update_entry("j-1", {
+            "record_version": journal.get_entry("j-1")["record_version"],
+            "first_stop_touch_at": "2026-07-24T14:00:00Z",
+        })
+        assert stopped["position_handoff"]["source_setup_id"] == "stock:DOW:source"
+        stop_payload = client.get("/api/active-trades", headers=headers()).json()
+        assert stop_payload["records"][0]["tracking_state"] == "STOP_REACHED"
+    finally:
+        cleanup()
+
+
 def test_protected_diagnostics():
     client, journal, _history, cleanup = make_context()
     try:
@@ -214,5 +256,6 @@ if __name__ == "__main__":
     test_completion_requires_entry_evidence_and_required_fields()
     test_valid_completion_queues_verified_history_job_without_claiming_verification()
     test_notes_endpoint_preserves_plan_and_does_not_queue_replay()
+    test_position_handoff_metadata_is_read_only_active_trade_context()
     test_protected_diagnostics()
     print("Active Trade Workspace v1 tests passed")

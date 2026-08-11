@@ -2441,6 +2441,7 @@ def _active_trade_record(entry: dict, history_record: Optional[dict], notificati
         "timeframe": plan.get("timeframe"),
         "plan": plan,
         "contract": contract,
+        "position_handoff": entry.get("position_handoff") if isinstance(entry.get("position_handoff"), dict) else None,
         "verified_history": history_record,
         "notifications": notification_rows,
         "attention_items": sorted(set(attention)),
