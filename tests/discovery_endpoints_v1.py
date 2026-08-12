@@ -16,7 +16,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import main  # noqa: E402
-from discovery import DollarVolumeMetrics, OptionsLiquidityMetrics, discovery_universe_max_symbols, rank_discovery_candidates  # noqa: E402
+import discovery  # noqa: E402
+from discovery import DollarVolumeMetrics, OptionsLiquidityMetrics, discovery_universe_max_symbols, discovery_universe_max_symbols_resolution, rank_discovery_candidates  # noqa: E402
 
 
 def reset_discovery_cache():
@@ -52,6 +53,14 @@ class InlineExecutor:
 
 
 def fake_discovery_result(static_watchlist=None):
+    cap_resolution = {
+        "resolved_value": 1000,
+        "source": "KAIROS_INTAKE_CAP",
+        "env_var_used": "KAIROS_INTAKE_CAP",
+        "used_default": False,
+        "default_value": 1000,
+        "warning": None,
+    }
     return {
         "symbols": ["AAPL", "MSFT", "F"],
         "source": "alpaca",
@@ -65,10 +74,47 @@ def fake_discovery_result(static_watchlist=None):
             "ranked": 5,
             "selected": 3,
         },
-        "thresholds": {"target_universe_size": 550, "kairos_intake_cap": 550},
+        "thresholds": {
+            "target_universe_size": 1000,
+            "kairos_intake_cap": 1000,
+            "kairos_intake_cap_resolution": cap_resolution,
+        },
         "formula": {"combined_liquidity_score": "test"},
         "stage3": {"elapsed_seconds": 1.2},
         "stage4": {"elapsed_seconds": 2.3},
+        "rejection_evidence": {
+            "stage3_dollar_volume": [
+                {
+                    "ticker": "LOWDV",
+                    "symbol": "LOWDV",
+                    "stage": "dollar_volume",
+                    "rejection_reason": "low dollar volume",
+                    "measured_values": {
+                        "latest_close": 10,
+                        "average_daily_volume": 1000,
+                        "average_daily_dollar_volume": 10000,
+                        "valid_daily_bars": 30,
+                    },
+                    "thresholds_used": {"average_daily_dollar_volume_floor": 100_000_000},
+                }
+            ],
+            "stage4_options_liquidity": [
+                {
+                    "ticker": "THINOI",
+                    "symbol": "THINOI",
+                    "stage": "options_liquidity",
+                    "rejection_reason": "thin call open interest",
+                    "measured_values": {
+                        "latest_close": 25,
+                        "near_atm_call_open_interest": 12,
+                        "near_atm_put_open_interest": 180,
+                        "near_atm_contracts_checked": 8,
+                        "pages_fetched": 1,
+                    },
+                    "thresholds_used": {"minimum_call_open_interest": 100, "minimum_put_open_interest": 100},
+                }
+            ],
+        },
         "top_20": [{"symbol": "AAPL", "rank": 1}],
         "bottom_20_selected": [{"symbol": "F", "rank": 3}],
         "watchlist_overlap": {
@@ -161,8 +207,10 @@ def test_discovery_run_populates_cache_with_valid_token():
             assert payload["status"]["selected_count"] == 3
             assert payload["status"]["pipeline_counts"]["selected"] == 3
             assert payload["status"]["metrics"]["final_admitted_symbol_count"] == 3
-            assert payload["status"]["metrics"]["effective_cap"] == 550
-            assert payload["status"]["kairos_intake_cap"] == 550
+            assert payload["status"]["metrics"]["effective_cap"] == 1000
+            assert payload["status"]["kairos_intake_cap"] == 1000
+            assert payload["status"]["kairos_intake_cap_resolution"]["source"] == "KAIROS_INTAKE_CAP"
+            assert payload["status"]["kairos_intake_cap_warning"] is None
             assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_started_at"])
             assert_utc_z_timestamp(payload["status"]["metrics"]["discovery_completed_at"])
             assert payload["status"]["last_error"] is None
@@ -219,7 +267,8 @@ def test_discovery_pool_persists_and_hydrates_after_restart():
             assert status["loaded_from_disk"] is True
             assert status["selected_count"] == 3
             assert status["source"] == "alpaca"
-            assert status["kairos_intake_cap"] == 550
+            assert status["kairos_intake_cap"] == 1000
+            assert status["kairos_intake_cap_resolution"]["resolved_value"] == 1000
             assert status["next_scheduled_refresh"] == status["expires_at"]
         finally:
             main._discovery_universe_executor = previous_executor
@@ -230,6 +279,89 @@ def test_discovery_pool_persists_and_hydrates_after_restart():
                 os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
             else:
                 os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_successful_discovery_persists_rejection_evidence():
+    previous_pool_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    previous_evidence_path = os.environ.get(main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV)
+    previous_executor = main._discovery_universe_executor
+    previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
+    main._discovery_universe_executor = InlineExecutor()
+    main.build_ranked_discovery_universe = fake_discovery_result
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        evidence_path = Path(temp_dir) / "evidence.json"
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(Path(temp_dir) / "pool.json")
+        os.environ[main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV] = str(evidence_path)
+        reset_discovery_cache()
+        try:
+            accepted, _job_id = main._submit_discovery_universe_job(force=True)
+            assert accepted is True
+            assert evidence_path.exists()
+            payload = json.loads(evidence_path.read_text())
+            assert payload["counts"]["stage3_dollar_volume"] == 1
+            assert payload["counts"]["stage4_options_liquidity"] == 1
+            assert payload["counts"]["total"] == 2
+            assert payload["stage3_dollar_volume"][0]["ticker"] == "LOWDV"
+            assert payload["stage3_dollar_volume"][0]["discovery_generated_at"]
+            assert payload["stage4_options_liquidity"][0]["measured_values"]["near_atm_call_open_interest"] == 12
+            status = main._discovery_status_snapshot()
+            assert status["rejection_evidence_path"] == str(evidence_path)
+            assert status["rejection_evidence_counts"]["total"] == 2
+            assert status["rejection_evidence_persisted_at"]
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_pool_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_pool_path
+            if previous_evidence_path is None:
+                os.environ.pop(main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV] = previous_evidence_path
+
+
+def test_failed_discovery_does_not_overwrite_last_good_rejection_evidence():
+    previous_pool_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    previous_evidence_path = os.environ.get(main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV)
+    previous_executor = main._discovery_universe_executor
+    previous_builder = main.build_ranked_discovery_universe
+    previous_handoff = main._maybe_enqueue_discovered_scan_handoff
+    main._discovery_universe_executor = InlineExecutor()
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": (False, "stubbed")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        evidence_path = Path(temp_dir) / "evidence.json"
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(Path(temp_dir) / "pool.json")
+        os.environ[main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV] = str(evidence_path)
+        reset_discovery_cache()
+        try:
+            main.build_ranked_discovery_universe = fake_discovery_result
+            assert main._submit_discovery_universe_job(force=True)[0] is True
+            before = evidence_path.read_text()
+
+            def failing_discovery(*_args, **_kwargs):
+                raise RuntimeError("provider failure")
+
+            main.build_ranked_discovery_universe = failing_discovery
+            assert main._submit_discovery_universe_job(force=True)[0] is True
+            assert evidence_path.read_text() == before
+        finally:
+            main._discovery_universe_executor = previous_executor
+            main.build_ranked_discovery_universe = previous_builder
+            main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+            reset_discovery_cache()
+            if previous_pool_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_pool_path
+            if previous_evidence_path is None:
+                os.environ.pop(main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV] = previous_evidence_path
 
 
 def test_valid_persisted_pool_prevents_startup_rediscovery():
@@ -405,17 +537,99 @@ def test_intake_cap_only_truncates_when_eligible_candidates_exceed_cap():
     assert sum(1 for candidate in over_cap if candidate.selected) == 2
 
 
+def test_discovery_selected_symbols_unchanged_for_identical_inputs():
+    previous_client = discovery.AlpacaAssetDiscoveryClient
+    previous_stage3 = discovery.stage3_dollar_volume_filter
+    previous_stage4 = discovery.stage4_options_liquidity_filter
+    previous_new = os.environ.get("KAIROS_INTAKE_CAP")
+    previous_old = os.environ.get("DISCOVERY_UNIVERSE_MAX_SYMBOLS")
+
+    class FakeClient:
+        def fetch_assets(self):
+            return [
+                {"symbol": "AAA", "status": "active", "class": "us_equity", "tradable": True, "exchange": "NYSE", "attributes": ["options_enabled"]},
+                {"symbol": "BBB", "status": "active", "class": "us_equity", "tradable": True, "exchange": "NYSE", "attributes": ["options_enabled"]},
+                {"symbol": "CCC", "status": "active", "class": "us_equity", "tradable": True, "exchange": "NYSE", "attributes": ["options_enabled"]},
+                {"symbol": "LOW", "status": "active", "class": "us_equity", "tradable": True, "exchange": "NYSE", "attributes": ["options_enabled"]},
+            ]
+
+    dollars = [
+        DollarVolumeMetrics("AAA", 10, 1_000_000, 100_000_000, 30, True),
+        DollarVolumeMetrics("BBB", 20, 1_000_000, 200_000_000, 30, True),
+        DollarVolumeMetrics("CCC", 30, 1_000_000, 300_000_000, 30, True),
+        DollarVolumeMetrics("LOW", 5, 10_000, 50_000, 30, False, "low dollar volume"),
+    ]
+    options = [
+        OptionsLiquidityMetrics("AAA", 10, 100, 100, "AAAC", "AAAP", 2, 1, True),
+        OptionsLiquidityMetrics("BBB", 20, 200, 200, "BBBC", "BBBP", 2, 1, True),
+        OptionsLiquidityMetrics("CCC", 30, 300, 300, "CCCC", "CCCP", 2, 1, True),
+    ]
+    try:
+        os.environ["KAIROS_INTAKE_CAP"] = "2"
+        os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
+        discovery.AlpacaAssetDiscoveryClient = FakeClient
+        discovery.stage3_dollar_volume_filter = lambda _assets: (dollars, {})
+        discovery.stage4_options_liquidity_filter = lambda _metrics: options
+        first = discovery.build_ranked_discovery_universe()
+        second = discovery.build_ranked_discovery_universe()
+        assert first["symbols"] == ["CCC", "BBB"]
+        assert second["symbols"] == first["symbols"]
+        assert [(row["symbol"], row["rank"], row["selected"]) for row in first["top_20"]] == [
+            ("CCC", 1, True),
+            ("BBB", 2, True),
+            ("AAA", 3, False),
+        ]
+        assert first["rejection_evidence"]["stage3_dollar_volume"][0]["ticker"] == "LOW"
+    finally:
+        discovery.AlpacaAssetDiscoveryClient = previous_client
+        discovery.stage3_dollar_volume_filter = previous_stage3
+        discovery.stage4_options_liquidity_filter = previous_stage4
+        if previous_new is None:
+            os.environ.pop("KAIROS_INTAKE_CAP", None)
+        else:
+            os.environ["KAIROS_INTAKE_CAP"] = previous_new
+        if previous_old is None:
+            os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
+        else:
+            os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = previous_old
+
+
 def test_kairos_intake_cap_preserves_legacy_env_compatibility():
     previous_new = os.environ.get("KAIROS_INTAKE_CAP")
     previous_old = os.environ.get("DISCOVERY_UNIVERSE_MAX_SYMBOLS")
     try:
+        os.environ["KAIROS_INTAKE_CAP"] = "1000"
+        os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = "750"
+        resolution = discovery_universe_max_symbols_resolution()
+        assert discovery_universe_max_symbols() == 1000
+        assert resolution["resolved_value"] == 1000
+        assert resolution["source"] == "KAIROS_INTAKE_CAP"
+        assert resolution["env_var_used"] == "KAIROS_INTAKE_CAP"
+        assert resolution["used_default"] is False
+        assert resolution["warning"] is None
+
         os.environ.pop("KAIROS_INTAKE_CAP", None)
         os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = "1000"
+        legacy_resolution = discovery_universe_max_symbols_resolution()
         assert discovery_universe_max_symbols() == 1000
+        assert legacy_resolution["source"] == "DISCOVERY_UNIVERSE_MAX_SYMBOLS"
+        assert legacy_resolution["env_var_used"] == "DISCOVERY_UNIVERSE_MAX_SYMBOLS"
+
         os.environ["KAIROS_INTAKE_CAP"] = "750"
         assert discovery_universe_max_symbols() == 750
+
         os.environ["KAIROS_INTAKE_CAP"] = "invalid"
         assert discovery_universe_max_symbols() == 1000
+
+        os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = "invalid"
+        default_resolution = discovery_universe_max_symbols_resolution()
+        assert discovery_universe_max_symbols() == 1000
+        assert default_resolution["resolved_value"] == 1000
+        assert default_resolution["source"] == "code_default"
+        assert default_resolution["env_var_used"] is None
+        assert default_resolution["used_default"] is True
+        assert default_resolution["default_value"] == 1000
+        assert "KAIROS_INTAKE_CAP" in default_resolution["warning"]
     finally:
         if previous_new is None:
             os.environ.pop("KAIROS_INTAKE_CAP", None)
@@ -906,11 +1120,15 @@ def main_test() -> int:
     test_discovery_run_rejects_wrong_token()
     test_discovery_run_populates_cache_with_valid_token()
     test_discovery_pool_persists_and_hydrates_after_restart()
+    test_successful_discovery_persists_rejection_evidence()
+    test_failed_discovery_does_not_overwrite_last_good_rejection_evidence()
     test_valid_persisted_pool_prevents_startup_rediscovery()
     test_weekly_expired_persisted_pool_triggers_discovery()
     test_corrupt_or_missing_persisted_pool_safely_rebuilds()
     test_scanner_analyzes_persisted_pool_normally()
     test_intake_cap_only_truncates_when_eligible_candidates_exceed_cap()
+    test_discovery_selected_symbols_unchanged_for_identical_inputs()
+    test_kairos_intake_cap_preserves_legacy_env_compatibility()
     test_scan_discovered_universe_returns_warming_when_cache_missing()
     test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz()
     test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncation()

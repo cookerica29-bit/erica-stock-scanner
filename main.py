@@ -101,6 +101,7 @@ DISCOVERY_POOL_VERSION = "kairos-weekly-discovery-pool-v1"
 DISCOVERY_POOL_SOURCE = "alpaca"
 DISCOVERY_POOL_RANKING_VERSION = "alpaca-liquidity-ranking-v1"
 DISCOVERY_POOL_PATH_ENV = "KAIROS_DISCOVERY_POOL_PATH"
+DISCOVERY_REJECTION_EVIDENCE_PATH_ENV = "KAIROS_DISCOVERY_REJECTION_EVIDENCE_PATH"
 DISCOVERY_UNIVERSE_TTL_SECONDS = 7 * 24 * 60 * 60
 DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS = 2 * 60 * 60
 DISCOVERY_REFRESH_WATCHDOG_SECONDS = 60 * 60
@@ -202,6 +203,16 @@ def _discovery_pool_path() -> Path:
     return Path(os.getenv(DISCOVERY_POOL_PATH_ENV) or "/data/kairos_weekly_discovery_pool_v1.json")
 
 
+def _discovery_rejection_evidence_path() -> Path:
+    configured = os.getenv(DISCOVERY_REJECTION_EVIDENCE_PATH_ENV)
+    if configured:
+        return Path(configured)
+    configured_pool = os.getenv(DISCOVERY_POOL_PATH_ENV)
+    if configured_pool:
+        return Path(configured_pool).with_name("kairos_weekly_discovery_rejection_evidence_v1.json")
+    return Path("/data/kairos_weekly_discovery_rejection_evidence_v1.json")
+
+
 def _discovery_cache_defaults() -> dict:
     return {
         "version": DISCOVERY_POOL_VERSION,
@@ -218,6 +229,10 @@ def _discovery_cache_defaults() -> dict:
         "top_20": [],
         "bottom_20_selected": [],
         "watchlist_overlap": {},
+        "rejection_evidence": {},
+        "rejection_evidence_path": None,
+        "rejection_evidence_counts": {},
+        "rejection_evidence_persisted_at": None,
         "last_error": None,
         "last_duration": None,
         "job_id": None,
@@ -262,6 +277,8 @@ def _discovery_pool_payload_from_cache(cached: dict, persisted_at: Optional[date
         "ranking_version": cached.get("ranking_version") or metrics.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
         "ranking_methodology": (cached.get("formula") or {}).get("combined_liquidity_score"),
         "kairos_intake_cap": thresholds.get("kairos_intake_cap") or thresholds.get("target_universe_size"),
+        "kairos_intake_cap_resolution": thresholds.get("kairos_intake_cap_resolution") or {},
+        "kairos_intake_cap_warning": (thresholds.get("kairos_intake_cap_resolution") or {}).get("warning"),
         "pipeline_counts": pipeline_counts,
         "thresholds": thresholds,
         "formula": cached.get("formula") or {},
@@ -270,6 +287,9 @@ def _discovery_pool_payload_from_cache(cached: dict, persisted_at: Optional[date
         "top_20": cached.get("top_20") or [],
         "bottom_20_selected": cached.get("bottom_20_selected") or [],
         "watchlist_overlap": cached.get("watchlist_overlap") or {},
+        "rejection_evidence_path": cached.get("rejection_evidence_path"),
+        "rejection_evidence_counts": cached.get("rejection_evidence_counts") or {},
+        "rejection_evidence_persisted_at": _format_timestamp(_coerce_utc_datetime(cached.get("rejection_evidence_persisted_at"))),
         "last_duration": cached.get("last_duration"),
         "metrics": metrics,
     }
@@ -298,6 +318,65 @@ def _write_discovery_pool_locked() -> None:
             pass
 
 
+def _rejection_evidence_payload(result: dict, generated_at: datetime, persisted_at: Optional[datetime] = None) -> dict:
+    persisted_at = persisted_at or _utc_now()
+    evidence = result.get("rejection_evidence") or {}
+    generated_text = _format_timestamp(generated_at)
+
+    def stamp_rows(rows: list[dict]) -> list[dict]:
+        stamped = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            stamped.append({
+                **row,
+                "discovery_generated_at": generated_text,
+                "discovery_timestamp": generated_text,
+            })
+        return stamped
+
+    stage3 = stamp_rows(evidence.get("stage3_dollar_volume") or [])
+    stage4 = stamp_rows(evidence.get("stage4_options_liquidity") or [])
+    return {
+        "version": DISCOVERY_POOL_VERSION,
+        "source": result.get("source") or DISCOVERY_POOL_SOURCE,
+        "ranking_version": result.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
+        "generated_at": generated_text,
+        "persisted_at": _format_timestamp(persisted_at),
+        "counts": {
+            "stage3_dollar_volume": len(stage3),
+            "stage4_options_liquidity": len(stage4),
+            "total": len(stage3) + len(stage4),
+        },
+        "stage3_dollar_volume": stage3,
+        "stage4_options_liquidity": stage4,
+    }
+
+
+def _write_discovery_rejection_evidence(result: dict, generated_at: datetime) -> dict:
+    path = _discovery_rejection_evidence_path()
+    payload = _json_safe_discovery_value(_rejection_evidence_payload(result, generated_at))
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp_path.open("w") as handle:
+            handle.write(serialized)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+    return {
+        "path": str(path),
+        "counts": payload.get("counts") or {},
+        "persisted_at": _coerce_utc_datetime(payload.get("persisted_at")),
+    }
+
+
 def _load_discovery_pool_from_disk() -> bool:
     path = _discovery_pool_path()
     if not path.exists():
@@ -321,6 +400,8 @@ def _load_discovery_pool_from_disk() -> bool:
 
     pipeline_counts = payload.get("pipeline_counts") if isinstance(payload.get("pipeline_counts"), dict) else {}
     thresholds = payload.get("thresholds") if isinstance(payload.get("thresholds"), dict) else {}
+    if "kairos_intake_cap_resolution" not in thresholds and isinstance(payload.get("kairos_intake_cap_resolution"), dict):
+        thresholds = {**thresholds, "kairos_intake_cap_resolution": payload.get("kairos_intake_cap_resolution")}
     formula = payload.get("formula") if isinstance(payload.get("formula"), dict) else {}
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
     with _discovery_universe_lock:
@@ -340,6 +421,9 @@ def _load_discovery_pool_from_disk() -> bool:
             "top_20": payload.get("top_20") if isinstance(payload.get("top_20"), list) else [],
             "bottom_20_selected": payload.get("bottom_20_selected") if isinstance(payload.get("bottom_20_selected"), list) else [],
             "watchlist_overlap": payload.get("watchlist_overlap") if isinstance(payload.get("watchlist_overlap"), dict) else {},
+            "rejection_evidence_path": payload.get("rejection_evidence_path"),
+            "rejection_evidence_counts": payload.get("rejection_evidence_counts") if isinstance(payload.get("rejection_evidence_counts"), dict) else {},
+            "rejection_evidence_persisted_at": _coerce_utc_datetime(payload.get("rejection_evidence_persisted_at")),
             "last_error": None,
             "last_duration": payload.get("last_duration") or metrics.get("discovery_duration_ms"),
             "job_id": None,
@@ -403,10 +487,15 @@ def _discovery_status_snapshot() -> dict:
         "dollar_volume_pass_count": (cached.get("pipeline_counts") or {}).get("dollar_volume_passed"),
         "options_liquidity_pass_count": (cached.get("pipeline_counts") or {}).get("options_liquidity_passed"),
         "kairos_intake_cap": (cached.get("thresholds") or {}).get("kairos_intake_cap") or (cached.get("thresholds") or {}).get("target_universe_size"),
+        "kairos_intake_cap_resolution": (cached.get("thresholds") or {}).get("kairos_intake_cap_resolution") or {},
+        "kairos_intake_cap_warning": ((cached.get("thresholds") or {}).get("kairos_intake_cap_resolution") or {}).get("warning"),
         "ranking_version": cached.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
         "ranking_methodology": (cached.get("formula") or {}).get("combined_liquidity_score"),
         "loaded_from_disk": bool(cached.get("loaded_from_disk")),
         "persisted_at": _format_timestamp(_coerce_utc_datetime(cached.get("persisted_at"))),
+        "rejection_evidence_path": cached.get("rejection_evidence_path"),
+        "rejection_evidence_counts": cached.get("rejection_evidence_counts") or {},
+        "rejection_evidence_persisted_at": _format_timestamp(_coerce_utc_datetime(cached.get("rejection_evidence_persisted_at"))),
         "pipeline_counts": cached.get("pipeline_counts") or {},
         "thresholds": cached.get("thresholds") or {},
         "formula": cached.get("formula") or {},
@@ -437,6 +526,7 @@ def _discovery_metrics_from_result(result: dict, started_at: datetime, completed
     stage3_failures = stage3.get("failure_reasons") or {}
     stage4_failures = stage4.get("failure_reasons") or {}
     cap = thresholds.get("target_universe_size")
+    cap_resolution = thresholds.get("kairos_intake_cap_resolution") or {}
     return {
         "discovery_started_at": _format_timestamp(started_at),
         "discovery_completed_at": _format_timestamp(completed_at),
@@ -452,6 +542,8 @@ def _discovery_metrics_from_result(result: dict, started_at: datetime, completed
         "configured_cap": cap,
         "effective_cap": cap,
         "kairos_intake_cap": cap,
+        "kairos_intake_cap_resolution": cap_resolution,
+        "kairos_intake_cap_warning": cap_resolution.get("warning"),
         "ranking_version": result.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
         "ranking_methodology": (result.get("formula") or {}).get("combined_liquidity_score"),
         "failure_count_by_stage": {
@@ -572,6 +664,9 @@ def _run_discovery_universe_job(job_id: str) -> None:
                 "top_20": result.get("top_20") or [],
                 "bottom_20_selected": result.get("bottom_20_selected") or [],
                 "watchlist_overlap": result.get("watchlist_overlap") or {},
+                "rejection_evidence_path": None,
+                "rejection_evidence_counts": {},
+                "rejection_evidence_persisted_at": None,
                 "last_error": None,
                 "last_duration": round(duration_ms / 1000, 1),
                 "job_id": job_id,
@@ -583,9 +678,20 @@ def _run_discovery_universe_job(job_id: str) -> None:
             })
             try:
                 _write_discovery_pool_locked()
+                evidence_metadata = _write_discovery_rejection_evidence(result, now)
+                _discovery_universe_cache.update({
+                    "rejection_evidence_path": evidence_metadata.get("path"),
+                    "rejection_evidence_counts": evidence_metadata.get("counts") or {},
+                    "rejection_evidence_persisted_at": evidence_metadata.get("persisted_at"),
+                })
+                _write_discovery_pool_locked()
             except Exception as persist_exc:
-                logger.exception("discovery_pool.persist_failed path=%s", _discovery_pool_path())
-                _discovery_universe_cache["last_error"] = f"discovery pool persistence failed: {persist_exc.__class__.__name__}"
+                logger.exception(
+                    "discovery_persistence.persist_failed pool_path=%s evidence_path=%s",
+                    _discovery_pool_path(),
+                    _discovery_rejection_evidence_path(),
+                )
+                _discovery_universe_cache["last_error"] = f"discovery persistence failed: {persist_exc.__class__.__name__}"
         counts = result.get("pipeline_counts") or {}
         logger.info(
             "coverage.discovery.complete duration_ms=%s raw_assets=%s tradable_optionable=%s hygiene_passed=%s dollar_volume_passed=%s options_liquidity_passed=%s ranked_before_cap=%s final_symbols=%s effective_cap=%s",

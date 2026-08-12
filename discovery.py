@@ -50,7 +50,7 @@ DISCOVERY_OPTIONS_MAX_PAGES = 10
 DISCOVERY_OPTIONS_MAX_WORKERS = 2
 DISCOVERY_OPTIONS_MAX_ATTEMPTS = 4
 DISCOVERY_OPTIONS_RETRY_BACKOFF_SECONDS = 1.5
-DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS = 550
+DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS = 1000
 DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV = "DISCOVERY_UNIVERSE_MAX_SYMBOLS"
 DISCOVERY_KAIROS_INTAKE_CAP_ENV = "KAIROS_INTAKE_CAP"
 DISCOVERY_SOURCE = "alpaca"
@@ -60,12 +60,16 @@ DISCOVERY_RANK_CALL_OI_WEIGHT = 0.25
 DISCOVERY_RANK_PUT_OI_WEIGHT = 0.25
 
 
-def discovery_universe_max_symbols(value: Optional[str] = None) -> int:
-    candidates = [value] if value is not None else [
-        os.getenv(DISCOVERY_KAIROS_INTAKE_CAP_ENV),
-        os.getenv(DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV),
-    ]
-    for raw in candidates:
+def discovery_universe_max_symbols_resolution(value: Optional[str] = None) -> dict[str, Any]:
+    candidates = (
+        [("explicit", None, value)]
+        if value is not None
+        else [
+            ("env", DISCOVERY_KAIROS_INTAKE_CAP_ENV, os.getenv(DISCOVERY_KAIROS_INTAKE_CAP_ENV)),
+            ("env", DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV, os.getenv(DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV)),
+        ]
+    )
+    for source, env_var, raw in candidates:
         if raw is None or str(raw).strip() == "":
             continue
         try:
@@ -73,8 +77,29 @@ def discovery_universe_max_symbols(value: Optional[str] = None) -> int:
         except (TypeError, ValueError):
             continue
         if parsed > 0:
-            return parsed
-    return DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS
+            return {
+                "resolved_value": parsed,
+                "source": "explicit_value" if source == "explicit" else env_var,
+                "env_var_used": env_var,
+                "used_default": False,
+                "default_value": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
+                "warning": None,
+            }
+    return {
+        "resolved_value": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
+        "source": "code_default",
+        "env_var_used": None,
+        "used_default": True,
+        "default_value": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
+        "warning": (
+            f"Using code default Kairos intake cap {DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS}; "
+            f"{DISCOVERY_KAIROS_INTAKE_CAP_ENV} and {DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV} are unset or invalid."
+        ),
+    }
+
+
+def discovery_universe_max_symbols(value: Optional[str] = None) -> int:
+    return int(discovery_universe_max_symbols_resolution(value).get("resolved_value") or DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS)
 
 WARRANT_NAME_RE = re.compile(r"\bwarrants?\b|\bwt\b", re.IGNORECASE)
 UNIT_NAME_RE = re.compile(r"\bunits?\b", re.IGNORECASE)
@@ -791,6 +816,52 @@ def _sample_options_metric(metric: OptionsLiquidityMetrics) -> dict[str, Any]:
     }
 
 
+def _dollar_volume_rejection_evidence(metric: DollarVolumeMetrics) -> dict[str, Any]:
+    return {
+        "ticker": metric.symbol,
+        "symbol": metric.symbol,
+        "stage": "dollar_volume",
+        "rejection_reason": metric.rejection_reason,
+        "measured_values": {
+            "latest_close": metric.latest_close,
+            "average_daily_volume": metric.average_daily_volume,
+            "average_daily_dollar_volume": metric.average_daily_dollar_volume,
+            "valid_daily_bars": metric.valid_daily_bars,
+        },
+        "thresholds_used": {
+            "average_daily_dollar_volume_floor": DISCOVERY_MIN_AVG_DOLLAR_VOLUME,
+            "minimum_valid_daily_bars": DISCOVERY_MIN_VALID_DAILY_BARS,
+            "lookback_bars": DISCOVERY_DOLLAR_VOLUME_LOOKBACK_BARS,
+            "daily_bars_period": DISCOVERY_DAILY_BARS_PERIOD,
+        },
+    }
+
+
+def _options_liquidity_rejection_evidence(metric: OptionsLiquidityMetrics) -> dict[str, Any]:
+    return {
+        "ticker": metric.symbol,
+        "symbol": metric.symbol,
+        "stage": "options_liquidity",
+        "rejection_reason": metric.rejection_reason,
+        "measured_values": {
+            "latest_close": metric.latest_close,
+            "near_atm_call_open_interest": metric.near_atm_call_open_interest,
+            "near_atm_put_open_interest": metric.near_atm_put_open_interest,
+            "near_atm_call_contract": metric.near_atm_call_contract,
+            "near_atm_put_contract": metric.near_atm_put_contract,
+            "near_atm_contracts_checked": metric.near_atm_contracts_checked,
+            "pages_fetched": metric.pages_fetched,
+        },
+        "thresholds_used": {
+            "minimum_dte": DISCOVERY_OPTIONS_MIN_DTE,
+            "maximum_dte": DISCOVERY_OPTIONS_MAX_DTE,
+            "near_atm_strike_band_pct": DISCOVERY_OPTIONS_STRIKE_BAND_PCT,
+            "minimum_call_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+            "minimum_put_open_interest": DISCOVERY_OPTIONS_MIN_OPEN_INTEREST,
+        },
+    }
+
+
 def _sample_ranked_candidate(candidate: RankedDiscoveryCandidate) -> dict[str, Any]:
     return {
         "rank": candidate.rank,
@@ -831,7 +902,8 @@ def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None
     stage4_passed = [metric for metric in options_metrics if metric.passed]
     stage4_failed = [metric for metric in options_metrics if not metric.passed]
 
-    effective_cap = discovery_universe_max_symbols()
+    effective_cap_resolution = discovery_universe_max_symbols_resolution()
+    effective_cap = int(effective_cap_resolution.get("resolved_value") or DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS)
     ranked = rank_discovery_candidates(dollar_metrics, options_metrics, target_size=effective_cap)
     selected = [candidate for candidate in ranked if candidate.selected]
     selected_symbols = [candidate.symbol for candidate in selected]
@@ -878,6 +950,7 @@ def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None
             "default_target_universe_size": DISCOVERY_DEFAULT_UNIVERSE_MAX_SYMBOLS,
             "kairos_intake_cap_env": DISCOVERY_KAIROS_INTAKE_CAP_ENV,
             "target_universe_size_env": DISCOVERY_UNIVERSE_MAX_SYMBOLS_ENV,
+            "kairos_intake_cap_resolution": effective_cap_resolution,
         },
         "formula": {
             "combined_liquidity_score": (
@@ -895,6 +968,16 @@ def build_ranked_discovery_universe(static_watchlist: Optional[list[str]] = None
             "elapsed_seconds": stage4_elapsed,
             "failure_reasons": dict(sorted(stage4_failure_reasons.items())),
             "total_pages_fetched": sum(metric.pages_fetched for metric in options_metrics),
+        },
+        "rejection_evidence": {
+            "stage3_dollar_volume": [
+                _dollar_volume_rejection_evidence(metric)
+                for metric in sorted(stage3_failed, key=lambda item: item.symbol)
+            ],
+            "stage4_options_liquidity": [
+                _options_liquidity_rejection_evidence(metric)
+                for metric in sorted(stage4_failed, key=lambda item: item.symbol)
+            ],
         },
         "top_20": [_sample_ranked_candidate(candidate) for candidate in ranked[:20]],
         "bottom_20_selected": [_sample_ranked_candidate(candidate) for candidate in selected[-20:]],

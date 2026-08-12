@@ -437,6 +437,13 @@
   .discovery-pool-status.active { border-color: rgba(34,197,94,0.38); color: #86efac; }
   .discovery-pool-status.refreshing { border-color: rgba(245,158,11,0.42); color: #facc15; }
   .discovery-pool-status.error { border-color: rgba(255,45,85,0.42); color: #fca5a5; }
+  .discovery-pool-warning {
+    color: #facc15;
+    font-size: 10px;
+    font-weight: 850;
+    grid-column: 1 / -1;
+    line-height: 1.25;
+  }
   .discovery-pool-stat {
     min-width: 0;
   }
@@ -6315,6 +6322,14 @@ function renderDiscoveryPoolStatus(status = latestDiscoveryPoolStatus || {}) {
   const sourceLabel = source ? source.charAt(0).toUpperCase() + source.slice(1).toLowerCase() : 'Alpaca';
   const selected = firstPresent(status.selected_count, counts.selected);
   const cap = firstPresent(status.kairos_intake_cap, thresholds.kairos_intake_cap, thresholds.target_universe_size);
+  const capResolution = status.kairos_intake_cap_resolution || thresholds.kairos_intake_cap_resolution || {};
+  const capSourceRaw = String(firstPresent(capResolution.source, '')).trim();
+  const capSourceLabel = capSourceRaw === 'code_default'
+    ? 'Code default'
+    : capSourceRaw === 'explicit_value'
+      ? 'Explicit value'
+      : capSourceRaw || 'Unavailable';
+  const capWarning = firstPresent(status.kairos_intake_cap_warning, capResolution.warning, '');
   const statusLabel = discoveryPoolStatusLabel(status);
   const loadedText = status.loaded_from_disk === true
     ? 'Persisted storage'
@@ -6359,9 +6374,11 @@ function renderDiscoveryPoolStatus(status = latestDiscoveryPoolStatus || {}) {
       <div class="discovery-pool-stat">
         <div class="discovery-pool-label">Kairos Intake</div>
         <div class="discovery-pool-value">${escapeHtml(formatDiscoveryPoolCount(selected))} / ${escapeHtml(formatDiscoveryPoolCount(cap))}</div>
+        <div class="discovery-pool-sub">Cap: ${escapeHtml(capSourceLabel)}</div>
         <div class="discovery-pool-sub">Last: ${escapeHtml(formatDiscoveryPoolDate(lastRefresh))}</div>
         <div class="discovery-pool-sub">Next: ${escapeHtml(formatDiscoveryPoolDate(nextRefresh))}</div>
       </div>
+      ${capWarning ? `<div class="discovery-pool-warning">${escapeHtml(capWarning)}</div>` : ''}
     </div>`;
 }
 
