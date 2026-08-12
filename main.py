@@ -36,7 +36,7 @@ from scanner import (
     register_background_periodic_task,
     start_market_cache_refresh,
 )
-from discovery import build_ranked_discovery_universe
+from discovery import build_ranked_discovery_universe, discovery_universe_max_symbols_resolution
 from market_data import (
     ALPACA_PROVIDER_NAME,
     YAHOO_PROVIDER_NAME,
@@ -463,6 +463,8 @@ def _discovery_status_snapshot() -> dict:
     status = "refreshing" if cached.get("running") else "ready" if cached.get("symbols") else "warming"
     if cached.get("last_error") and not cached.get("symbols") and not cached.get("running"):
         status = "error"
+    thresholds = cached.get("thresholds") or {}
+    cap_resolution = thresholds.get("kairos_intake_cap_resolution") or discovery_universe_max_symbols_resolution()
     return {
         "status": status,
         "version": cached.get("version") or DISCOVERY_POOL_VERSION,
@@ -486,9 +488,9 @@ def _discovery_status_snapshot() -> dict:
         "hygiene_pass_count": (cached.get("pipeline_counts") or {}).get("hygiene_passed"),
         "dollar_volume_pass_count": (cached.get("pipeline_counts") or {}).get("dollar_volume_passed"),
         "options_liquidity_pass_count": (cached.get("pipeline_counts") or {}).get("options_liquidity_passed"),
-        "kairos_intake_cap": (cached.get("thresholds") or {}).get("kairos_intake_cap") or (cached.get("thresholds") or {}).get("target_universe_size"),
-        "kairos_intake_cap_resolution": (cached.get("thresholds") or {}).get("kairos_intake_cap_resolution") or {},
-        "kairos_intake_cap_warning": ((cached.get("thresholds") or {}).get("kairos_intake_cap_resolution") or {}).get("warning"),
+        "kairos_intake_cap": thresholds.get("kairos_intake_cap") or thresholds.get("target_universe_size") or cap_resolution.get("resolved_value"),
+        "kairos_intake_cap_resolution": cap_resolution,
+        "kairos_intake_cap_warning": cap_resolution.get("warning"),
         "ranking_version": cached.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
         "ranking_methodology": (cached.get("formula") or {}).get("combined_liquidity_score"),
         "loaded_from_disk": bool(cached.get("loaded_from_disk")),

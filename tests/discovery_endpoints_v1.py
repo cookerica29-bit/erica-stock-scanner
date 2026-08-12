@@ -281,6 +281,40 @@ def test_discovery_pool_persists_and_hydrates_after_restart():
                 os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
 
 
+def test_legacy_persisted_pool_exposes_live_cap_resolution_metadata():
+    previous_new = os.environ.get("KAIROS_INTAKE_CAP")
+    previous_old = os.environ.get("DISCOVERY_UNIVERSE_MAX_SYMBOLS")
+    try:
+        os.environ["KAIROS_INTAKE_CAP"] = "1000"
+        os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
+        reset_discovery_cache()
+        with main._discovery_universe_lock:
+            main._discovery_universe_cache.update({
+                **main._discovery_cache_defaults(),
+                "symbols": ["AAPL"],
+                "generated_at": main._utc_now(),
+                "expires_at": main._utc_now() + __import__("datetime").timedelta(days=7),
+                "thresholds": {"kairos_intake_cap": 1000, "target_universe_size": 1000},
+                "loaded_from_disk": True,
+            })
+        status = main._discovery_status_snapshot()
+        assert status["kairos_intake_cap"] == 1000
+        assert status["kairos_intake_cap_resolution"]["resolved_value"] == 1000
+        assert status["kairos_intake_cap_resolution"]["source"] == "KAIROS_INTAKE_CAP"
+        assert status["kairos_intake_cap_resolution"]["used_default"] is False
+        assert status["kairos_intake_cap_warning"] is None
+    finally:
+        reset_discovery_cache()
+        if previous_new is None:
+            os.environ.pop("KAIROS_INTAKE_CAP", None)
+        else:
+            os.environ["KAIROS_INTAKE_CAP"] = previous_new
+        if previous_old is None:
+            os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
+        else:
+            os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = previous_old
+
+
 def test_successful_discovery_persists_rejection_evidence():
     previous_pool_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
     previous_evidence_path = os.environ.get(main.DISCOVERY_REJECTION_EVIDENCE_PATH_ENV)
@@ -1120,6 +1154,7 @@ def main_test() -> int:
     test_discovery_run_rejects_wrong_token()
     test_discovery_run_populates_cache_with_valid_token()
     test_discovery_pool_persists_and_hydrates_after_restart()
+    test_legacy_persisted_pool_exposes_live_cap_resolution_metadata()
     test_successful_discovery_persists_rejection_evidence()
     test_failed_discovery_does_not_overwrite_last_good_rejection_evidence()
     test_valid_persisted_pool_prevents_startup_rediscovery()
