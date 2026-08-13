@@ -65,6 +65,35 @@ def test_strike_rounding_bands():
     assert scanner.build_option_plan(setup(direction="SHORT", entry=172, tp1=160))["preferred_strike"] == 165.0
 
 
+def test_call_strike_rounding_clamps_below_tp1():
+    plan = scanner.build_option_plan(setup(direction="LONG", entry=17.86, tp1=18.36))
+    assert plan["available"] is True
+    assert plan["type"] == "CALL"
+    assert plan["preferred_strike"] == 18.0
+    assert plan["preferred_strike"] < plan["tp1"]
+
+
+def test_put_strike_rounding_clamps_above_tp1():
+    plan = scanner.build_option_plan(setup(direction="SHORT", entry=146.53, tp1=142.53))
+    assert plan["available"] is True
+    assert plan["type"] == "PUT"
+    assert plan["preferred_strike"] == 145.0
+    assert plan["preferred_strike"] > plan["tp1"]
+
+
+def test_strike_rounding_already_itm_at_tp1_is_unchanged():
+    plan = scanner.build_option_plan(setup(direction="LONG", entry=18.04, tp1=19.36))
+    assert plan["available"] is True
+    assert plan["preferred_strike"] == 19.0
+    assert plan["preferred_strike"] < plan["tp1"]
+
+
+def test_option_plan_suppressed_when_no_strike_exists_between_entry_and_tp1():
+    plan = scanner.build_option_plan(setup(direction="SHORT", entry=17.78, tp1=17.40))
+    assert plan["available"] is False
+    assert plan["reason"] == "no strike between entry and TP1"
+
+
 def test_expected_hold_and_expiration_mapping():
     fast = scanner.build_option_plan(setup(trade_eval={"trigger_confirmed": True}))
     assert fast["expected_hold"]["label"] == "3–7 Trading Days"
@@ -126,6 +155,10 @@ def main() -> int:
     test_call_plan_generation_and_formatting()
     test_put_plan_generation_and_formatting()
     test_strike_rounding_bands()
+    test_call_strike_rounding_clamps_below_tp1()
+    test_put_strike_rounding_clamps_above_tp1()
+    test_strike_rounding_already_itm_at_tp1_is_unchanged()
+    test_option_plan_suppressed_when_no_strike_exists_between_entry_and_tp1()
     test_expected_hold_and_expiration_mapping()
     test_confidence_star_mapping()
     test_planned_entry_fallback_and_missing_tp1_failure()

@@ -4690,10 +4690,16 @@ def build_option_plan(setup: dict) -> dict:
     increment = _option_strike_increment(planned_entry)
     if increment is None:
         return _option_plan_unavailable("strike rounding unavailable")
+    if abs(move_dollars) < increment:
+        return _option_plan_unavailable("no strike between entry and TP1")
     raw_strike = planned_entry + (move_dollars * 0.5)
     preferred_strike = _round_option_plan_strike(raw_strike, increment, option_type)
     if preferred_strike is None:
         return _option_plan_unavailable("preferred strike unavailable")
+    if option_type == "CALL" and preferred_strike > tp1:
+        preferred_strike = round(preferred_strike - increment, 2 if increment < 1 else 1 if increment % 1 else 0)
+    elif option_type == "PUT" and preferred_strike < tp1:
+        preferred_strike = round(preferred_strike + increment, 2 if increment < 1 else 1 if increment % 1 else 0)
 
     expected_hold = _option_plan_expected_hold(setup)
     expiration = _option_plan_expiration_window(expected_hold)
