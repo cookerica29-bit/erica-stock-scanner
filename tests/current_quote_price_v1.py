@@ -48,8 +48,11 @@ def test_latest_quotes_uses_midpoint_then_ask_then_bid():
     assert len(calls) == 1
     assert calls[0]["symbols"] == "AAPL,MSFT,NVDA,TSLA"
     assert quotes["AAPL"]["price"] == 100.5
+    assert quotes["AAPL"]["price_branch"] == "midpoint"
     assert quotes["MSFT"]["price"] == 402.25
+    assert quotes["MSFT"]["price_branch"] == "ask_only"
     assert quotes["NVDA"]["price"] == 203.5
+    assert quotes["NVDA"]["price_branch"] == "bid_only"
     assert "TSLA" not in quotes
     assert quotes["AAPL"]["source"] == "alpaca_latest_quote"
     assert quotes["AAPL"]["timestamp"] == "2026-07-20T15:00:00Z"
@@ -100,6 +103,7 @@ def test_latest_quotes_failure_returns_available_quotes_only():
             "price": 100.5,
             "bid": 100.0,
             "ask": 101.0,
+            "price_branch": "midpoint",
             "timestamp": None,
             "source": "alpaca_latest_quote",
         }
@@ -116,7 +120,14 @@ def test_attach_current_quotes_is_display_only():
         def latest_quotes(self, symbols):
             assert symbols == ["AAPL", "MSFT"]
             return {
-                "AAPL": {"price": 100.52, "timestamp": "2026-07-20T15:00:00Z", "source": "alpaca_latest_quote"},
+                "AAPL": {
+                    "price": 100.52,
+                    "bid": 100.5,
+                    "ask": 100.54,
+                    "price_branch": "midpoint",
+                    "timestamp": "2026-07-20T15:00:00Z",
+                    "source": "alpaca_latest_quote",
+                },
                 "MSFT": {"price": None},
             }
 
@@ -129,6 +140,9 @@ def test_attach_current_quotes_is_display_only():
 
     assert rows[0]["price"] == 100.0
     assert rows[0]["current_quote_price"] == 100.52
+    assert rows[0]["current_quote_bid"] == 100.5
+    assert rows[0]["current_quote_ask"] == 100.54
+    assert rows[0]["current_quote_price_branch"] == "midpoint"
     assert rows[0]["current_quote_source"] == "alpaca_latest_quote"
     assert rows[0]["current_quote_timestamp"] == "2026-07-20T15:00:00Z"
     assert rows[1]["price"] == 400.0

@@ -402,7 +402,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         return _multi_symbol_frame(frames)
 
     @staticmethod
-    def _quote_price(quote: dict[str, Any]) -> Optional[float]:
+    def _quote_price(quote: dict[str, Any]) -> tuple[Optional[float], Optional[str]]:
         def positive_number(value) -> Optional[float]:
             try:
                 number = float(value)
@@ -413,12 +413,12 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         bid = positive_number(quote.get("bp"))
         ask = positive_number(quote.get("ap"))
         if bid is not None and ask is not None:
-            return (bid + ask) / 2
+            return (bid + ask) / 2, "midpoint"
         if ask is not None:
-            return ask
+            return ask, "ask_only"
         if bid is not None:
-            return bid
-        return None
+            return bid, "bid_only"
+        return None, None
 
     def latest_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         requested_symbols = list(dict.fromkeys(_as_symbol_list(symbols)))
@@ -445,13 +445,14 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                 original_symbol = reverse_symbol_map.get(str(provider_symbol or "").strip().upper())
                 if not original_symbol or not isinstance(quote, dict):
                     continue
-                price = self._quote_price(quote)
+                price, price_branch = self._quote_price(quote)
                 if price is None:
                     continue
                 results[original_symbol] = {
                     "price": price,
                     "bid": quote.get("bp"),
                     "ask": quote.get("ap"),
+                    "price_branch": price_branch,
                     "timestamp": quote.get("t"),
                     "source": "alpaca_latest_quote",
                 }

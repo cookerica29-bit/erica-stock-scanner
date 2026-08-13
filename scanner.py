@@ -212,6 +212,7 @@ STOCK_EARLY_ENTRY_MEMORY_PATH = os.getenv("STOCK_EARLY_ENTRY_MEMORY_PATH") or "/
 STOCK_EARLY_ENTRY_EXPIRE_BARS = int(os.getenv("STOCK_EARLY_ENTRY_EXPIRE_BARS") or "20")
 STOCK_EARLY_ENTRY_RETEST_BARS = int(os.getenv("STOCK_EARLY_ENTRY_RETEST_BARS") or "4")
 STOCK_ENTRY_EXECUTION_MAX_ATR = 0.25
+STOCK_ENTRY_QUOTE_MAX_DIVERGENCE = 0.10
 STOCK_EVENT_MEMORY_PRESENTATION_V1 = str(os.getenv("STOCK_EVENT_MEMORY_PRESENTATION_V1") or "false").strip().lower() in {"1", "true", "yes", "on"}
 STOCK_MISSION_WORKFLOW_VERSION = "stock-mission-workflow-v1"
 STOCK_MISSION_WORKFLOW_V1 = str(os.getenv("STOCK_MISSION_WORKFLOW_V1") or "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -6746,6 +6747,9 @@ def _attach_current_quotes(rows: list[dict]) -> None:
         except (TypeError, ValueError):
             continue
         row["current_quote_price"] = current_quote_price
+        row["current_quote_bid"] = quote.get("bid")
+        row["current_quote_ask"] = quote.get("ask")
+        row["current_quote_price_branch"] = quote.get("price_branch")
         row["current_quote_source"] = quote.get("source") or "alpaca_latest_quote"
         row["current_quote_timestamp"] = quote.get("timestamp")
         attached += 1
@@ -7637,6 +7641,8 @@ def _ranking_execution_lifecycle_state(row: dict) -> str:
 
 
 def _ranking_entry_executable(row: dict) -> bool:
+    row.pop("execution_quote_blocker", None)
+    row.pop("execution_quote_divergence", None)
     entry_status = str(row.get("entryStatus") or "").strip()
     if entry_status != "Tradeable":
         return False
@@ -7646,6 +7652,16 @@ def _ranking_entry_executable(row: dict) -> bool:
     price = _safe_float(row.get("price") if row.get("price") is not None else row.get("current_price"))
     quote_price = _safe_float(row.get("current_quote_price"))
     if direction not in {"LONG", "SHORT"} or entry is None or price is None or quote_price is None:
+        return False
+
+    if price <= 0:
+        row["execution_quote_blocker"] = "quote_implausible_vs_candle_close"
+        row["execution_quote_divergence"] = None
+        return False
+    quote_divergence = abs(quote_price - price) / price
+    row["execution_quote_divergence"] = round(quote_divergence, 6)
+    if quote_divergence > STOCK_ENTRY_QUOTE_MAX_DIVERGENCE:
+        row["execution_quote_blocker"] = "quote_implausible_vs_candle_close"
         return False
 
     atr_distance = _safe_float(row.get("distanceFromEntryAtr"))

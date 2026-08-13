@@ -516,6 +516,46 @@ def test_executable_short_both_prices_below_entry_passes() -> None:
     assert_equal("short correct-side live quote", scanner._ranking_entry_executable(row), True)
 
 
+def test_executable_quote_within_plausibility_limit_passes() -> None:
+    row = executable_fixture(
+        direction="LONG",
+        entry=100.0,
+        price=100.0,
+        current_quote_price=109.99,
+        atr=2.0,
+        distanceFromEntryAtr=0.0,
+    )
+    assert_equal("plausible quote correct-side", scanner._ranking_entry_executable(row), True)
+    assert_equal("plausible quote blocker absent", row.get("execution_quote_blocker"), None)
+
+
+def test_executable_implausible_quote_blocks_with_reason() -> None:
+    row = executable_fixture(
+        direction="LONG",
+        entry=100.0,
+        price=100.0,
+        current_quote_price=111.0,
+        atr=2.0,
+        distanceFromEntryAtr=0.0,
+    )
+    assert_equal("implausible quote blocks", scanner._ranking_entry_executable(row), False)
+    assert_equal("implausible quote reason", row.get("execution_quote_blocker"), "quote_implausible_vs_candle_close")
+    assert_equal("implausible quote divergence", row.get("execution_quote_divergence"), 0.11)
+
+
+def test_executable_implausible_correct_side_quote_still_blocks() -> None:
+    row = executable_fixture(
+        direction="SHORT",
+        entry=100.0,
+        price=100.0,
+        current_quote_price=80.0,
+        atr=2.0,
+        distanceFromEntryAtr=0.0,
+    )
+    assert_equal("implausible correct-side quote blocks", scanner._ranking_entry_executable(row), False)
+    assert_equal("implausible correct-side reason", row.get("execution_quote_blocker"), "quote_implausible_vs_candle_close")
+
+
 def test_executable_missing_live_quote_blocks() -> None:
     row = executable_fixture(
         direction="LONG",
@@ -528,11 +568,27 @@ def test_executable_missing_live_quote_blocks() -> None:
     assert_equal("missing live quote fails closed", scanner._ranking_entry_executable(row), False)
 
 
+def test_executable_quote_divergence_boundary_passes() -> None:
+    row = executable_fixture(
+        direction="LONG",
+        entry=100.0,
+        price=100.0,
+        current_quote_price=110.0,
+        atr=2.0,
+        distanceFromEntryAtr=0.0,
+    )
+    assert_equal("ten percent quote boundary passes", scanner._ranking_entry_executable(row), True)
+
+
 EXECUTABLE_GATE_CASES = [
     test_executable_short_live_quote_above_entry_blocks,
     test_executable_long_live_quote_below_entry_blocks,
     test_executable_short_both_prices_below_entry_passes,
+    test_executable_quote_within_plausibility_limit_passes,
+    test_executable_implausible_quote_blocks_with_reason,
+    test_executable_implausible_correct_side_quote_still_blocks,
     test_executable_missing_live_quote_blocks,
+    test_executable_quote_divergence_boundary_passes,
 ]
 
 
