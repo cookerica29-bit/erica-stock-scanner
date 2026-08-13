@@ -13,6 +13,12 @@ if str(ROOT) not in sys.path:
 import scanner  # noqa: E402
 
 
+class SyntheticChain:
+    def __init__(self, *, calls=None, puts=None):
+        self.calls = scanner.pd.DataFrame(calls or [])
+        self.puts = scanner.pd.DataFrame(puts or [])
+
+
 def setup(**overrides):
     base = {
         "ticker": "AAPL",
@@ -246,6 +252,119 @@ def test_option_pricing_descriptor_falls_back_to_row_option_without_plan():
     assert descriptor["key"] == ("CHWY", "2026-09-25", 23.0, "CALL")
 
 
+def contract(strike, bid=1.0, ask=1.2, last=1.1):
+    return {
+        "contractSymbol": f"SYN{strike}",
+        "strike": strike,
+        "bid": bid,
+        "ask": ask,
+        "lastPrice": last,
+        "volume": 10,
+        "openInterest": 100,
+    }
+
+
+def test_pricing_snaps_unlisted_call_to_nearest_listed_itm_at_tp1():
+    descriptor = {
+        "ticker": "SYN",
+        "expiry": "2026-09-18",
+        "type": "CALL",
+        "strike": 44.0,
+        "tp1": 45.0,
+        "option_plan_available": True,
+        "key": ("SYN", "2026-09-18", 44.0, "CALL"),
+    }
+    chain = SyntheticChain(calls=[contract(42.0), contract(44.5), contract(46.0)])
+    data = scanner._option_pricing_from_chain(descriptor, chain, scanner._utc_now())
+    assert data["status"] == "ready"
+    assert data["strike"] == 44.5
+    assert data["snapped_strike"] == 44.5
+    assert data["strike"] <= descriptor["tp1"]
+    assert data["requested_key"] == ("SYN", "2026-09-18", 44.0, "CALL")
+    assert data["key"] == ("SYN", "2026-09-18", 44.5, "CALL")
+
+
+def test_pricing_selects_further_itm_strike_over_nearest_otm_call():
+    descriptor = {
+        "ticker": "SYN",
+        "expiry": "2026-09-18",
+        "type": "CALL",
+        "strike": 44.0,
+        "tp1": 43.0,
+        "option_plan_available": True,
+        "key": ("SYN", "2026-09-18", 44.0, "CALL"),
+    }
+    chain = SyntheticChain(calls=[contract(43.0), contract(44.5)])
+    data = scanner._option_pricing_from_chain(descriptor, chain, scanner._utc_now())
+    assert data["status"] == "ready"
+    assert data["strike"] == 43.0
+    assert data["strike"] <= descriptor["tp1"]
+
+
+def test_pricing_marks_plan_unavailable_when_no_listed_call_is_itm_at_tp1():
+    descriptor = {
+        "ticker": "SYN",
+        "expiry": "2026-09-18",
+        "type": "CALL",
+        "strike": 44.0,
+        "tp1": 43.0,
+        "option_plan_available": True,
+        "key": ("SYN", "2026-09-18", 44.0, "CALL"),
+    }
+    chain = SyntheticChain(calls=[contract(44.5), contract(46.0)])
+    data = scanner._option_pricing_from_chain(descriptor, chain, scanner._utc_now())
+    assert data["status"] == "unavailable"
+    assert data["reason"] == "no_listed_itm_strike_at_tp1"
+    row = scanner._apply_option_pricing_to_row({
+        "ticker": "SYN",
+        "direction": "LONG",
+        "option_plan": {
+            "available": True,
+            "type": "CALL",
+            "preferred_strike": 44.0,
+            "tp1": 43.0,
+            "expiration": "2026-09-18",
+        },
+    }, data)
+    assert row["option_plan"]["available"] is False
+    assert row["option_plan"]["unavailable_reason"] == "no_listed_itm_strike_at_tp1"
+
+
+def test_pricing_leaves_listed_itm_put_unchanged():
+    descriptor = {
+        "ticker": "SYN",
+        "expiry": "2026-09-18",
+        "type": "PUT",
+        "strike": 100.0,
+        "tp1": 97.0,
+        "option_plan_available": True,
+        "key": ("SYN", "2026-09-18", 100.0, "PUT"),
+    }
+    chain = SyntheticChain(puts=[contract(95.0), contract(100.0), contract(105.0)])
+    data = scanner._option_pricing_from_chain(descriptor, chain, scanner._utc_now())
+    assert data["status"] == "ready"
+    assert data["strike"] == 100.0
+    assert "snapped_strike" not in data
+    assert data["strike"] >= descriptor["tp1"]
+
+
+def test_pricing_snaps_unlisted_put_to_nearest_listed_itm_at_tp1():
+    descriptor = {
+        "ticker": "SYN",
+        "expiry": "2026-09-18",
+        "type": "PUT",
+        "strike": 217.5,
+        "tp1": 210.75,
+        "option_plan_available": True,
+        "key": ("SYN", "2026-09-18", 217.5, "PUT"),
+    }
+    chain = SyntheticChain(puts=[contract(210.0), contract(220.0), contract(230.0)])
+    data = scanner._option_pricing_from_chain(descriptor, chain, scanner._utc_now())
+    assert data["status"] == "ready"
+    assert data["strike"] == 220.0
+    assert data["strike"] >= descriptor["tp1"]
+
+
 def main() -> int:
     test_call_plan_generation_and_formatting()
     test_put_plan_generation_and_formatting()
@@ -263,6 +382,11 @@ def main() -> int:
     test_option_pricing_descriptor_prefers_plan_type_and_expiration()
     test_option_pricing_descriptor_uses_option_plan_without_row_option()
     test_option_pricing_descriptor_falls_back_to_row_option_without_plan()
+    test_pricing_snaps_unlisted_call_to_nearest_listed_itm_at_tp1()
+    test_pricing_selects_further_itm_strike_over_nearest_otm_call()
+    test_pricing_marks_plan_unavailable_when_no_listed_call_is_itm_at_tp1()
+    test_pricing_leaves_listed_itm_put_unchanged()
+    test_pricing_snaps_unlisted_put_to_nearest_listed_itm_at_tp1()
     print("Option Plan v1 tests passed")
     return 0
 

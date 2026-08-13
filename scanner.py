@@ -1321,6 +1321,8 @@ def _option_pricing_descriptor(row: dict) -> tuple[Optional[dict], Optional[str]
         "expiration_min_dte": min_dte,
         "expiration_max_dte": max_dte,
         "strike": strike,
+        "tp1": _safe_float(plan.get("tp1") or row.get("tp1") or row.get("target") or row.get("target_price")),
+        "option_plan_available": plan_available,
         "key": _option_pricing_key(ticker, expiry, strike, option_type),
     }, None
 
@@ -1429,7 +1431,25 @@ def _option_pricing_from_chain_row(ticker: str, expiry: str, strike: float, opti
     }
 
 
-def _find_option_contract_row(chain, option_type: str, strike: float) -> tuple[Optional[pd.Series], Optional[str], dict]:
+def _listed_itm_option_strikes(frame: pd.DataFrame, option_type: str, tp1: Optional[float]) -> list[float]:
+    if tp1 is None:
+        return []
+    strikes = sorted([float(x) for x in frame["strike_numeric"].dropna().unique()])
+    if option_type == "CALL":
+        return [value for value in strikes if value <= tp1 + 0.0001]
+    if option_type == "PUT":
+        return [value for value in strikes if value >= tp1 - 0.0001]
+    return []
+
+
+def _find_option_contract_row(
+    chain,
+    option_type: str,
+    strike: float,
+    *,
+    tp1: Optional[float] = None,
+    snap_to_itm: bool = False,
+) -> tuple[Optional[pd.Series], Optional[str], dict]:
     if chain is None:
         return None, "provider_timeout", {}
     contracts = chain.calls if option_type == "CALL" else chain.puts
@@ -1439,15 +1459,37 @@ def _find_option_contract_row(chain, option_type: str, strike: float) -> tuple[O
         return None, "missing_strike", {}
     frame = contracts.copy()
     frame["strike_numeric"] = pd.to_numeric(frame["strike"], errors="coerce")
-    exact = frame[(frame["strike_numeric"] - float(strike)).abs() < 0.0001]
+    requested_strike = float(strike)
+    selected_strike = requested_strike
+    snap_details = {}
+    if snap_to_itm:
+        itm_strikes = _listed_itm_option_strikes(frame, option_type, tp1)
+        available = sorted([float(x) for x in frame["strike_numeric"].dropna().unique()])
+        if not itm_strikes:
+            nearest = sorted(available, key=lambda value: abs(value - requested_strike))[:5]
+            return None, "no_listed_itm_strike_at_tp1", {
+                "available_strikes_sample": available[:10],
+                "nearest_available_strikes": nearest,
+                "tp1": tp1,
+                "requested_strike": requested_strike,
+            }
+        selected_strike = min(itm_strikes, key=lambda value: (abs(value - requested_strike), value))
+        if abs(selected_strike - requested_strike) >= 0.0001:
+            snap_details = {
+                "requested_strike": requested_strike,
+                "snapped_strike": selected_strike,
+                "strike_snap_reason": "nearest_listed_itm_at_tp1",
+                "tp1": tp1,
+            }
+    exact = frame[(frame["strike_numeric"] - selected_strike).abs() < 0.0001]
     if exact.empty:
         available = sorted([float(x) for x in frame["strike_numeric"].dropna().unique()])
-        nearest = sorted(available, key=lambda value: abs(value - float(strike)))[:5]
+        nearest = sorted(available, key=lambda value: abs(value - requested_strike))[:5]
         return None, "contract_not_found", {
             "available_strikes_sample": available[:10],
             "nearest_available_strikes": nearest,
         }
-    return exact.iloc[0], None, {}
+    return exact.iloc[0], None, snap_details
 
 
 def _option_pricing_from_chain(
@@ -1470,13 +1512,24 @@ def _option_pricing_from_chain(
         if failure.get("error"):
             data["provider_error"] = failure.get("error")
     else:
-        row, reason, details = _find_option_contract_row(chain, option_type, strike)
+        row, reason, details = _find_option_contract_row(
+            chain,
+            option_type,
+            strike,
+            tp1=_safe_float(descriptor.get("tp1")),
+            snap_to_itm=descriptor.get("option_plan_available") is True,
+        )
         if row is None:
             data = _empty_option_pricing("unavailable", reason or "contract_not_found", descriptor)
             if details:
                 data.update(details)
         else:
-            data = _option_pricing_from_chain_row(ticker, expiry, strike, option_type, row, fetched_at, cache_state)
+            priced_strike = _safe_float(details.get("snapped_strike")) if details else None
+            if priced_strike is None:
+                priced_strike = _safe_float(row.get("strike")) or strike
+            data = _option_pricing_from_chain_row(ticker, expiry, priced_strike, option_type, row, fetched_at, cache_state)
+            if details:
+                data.update(details)
     if provider_latency_ms is not None:
         data["provider_latency_ms"] = provider_latency_ms
     data["requested_expiration"] = descriptor.get("requested_expiration") or descriptor.get("expiry")
@@ -1489,7 +1542,7 @@ def _option_pricing_from_chain(
     data["allowed_max_dte"] = descriptor.get("allowed_max_dte")
     data["option_plan_min_dte"] = descriptor.get("expiration_min_dte")
     data["option_plan_max_dte"] = descriptor.get("expiration_max_dte")
-    data["key"] = descriptor.get("key")
+    data["key"] = _option_pricing_key(ticker, expiry, data.get("strike"), option_type) if data.get("strike") is not None else descriptor.get("key")
     data["requested_key"] = descriptor.get("requested_key") or descriptor.get("key")
     if descriptor.get("available_expirations") and not data.get("available_expirations"):
         data["available_expirations"] = descriptor.get("available_expirations")
@@ -1530,7 +1583,9 @@ def _fetch_option_pricing(descriptor: dict, *, force_refresh: bool = False) -> d
     data = _option_pricing_from_chain(descriptor, chain, now, provider_latency_ms=provider_ms)
     if _should_cache_option_pricing_result(data):
         with _cache_lock:
-            _option_quote_cache[key] = {"fetched_at": now, "data": dict(data)}
+            _option_quote_cache[data.get("key") or key] = {"fetched_at": now, "data": dict(data)}
+            if data.get("requested_key"):
+                _option_quote_cache[data["requested_key"]] = {"fetched_at": now, "data": dict(data)}
     return data
 
 
@@ -1726,7 +1781,9 @@ def _option_pricing_batch_for_descriptors(descriptors: list) -> tuple[dict, dict
                 results[descriptor["requested_key"]] = data
             if _should_cache_option_pricing_result(data):
                 with _cache_lock:
-                    _option_quote_cache[descriptor["key"]] = {"fetched_at": fetched_at, "data": dict(data)}
+                    _option_quote_cache[data.get("key") or descriptor["key"]] = {"fetched_at": fetched_at, "data": dict(data)}
+                    if data.get("requested_key"):
+                        _option_quote_cache[data["requested_key"]] = {"fetched_at": fetched_at, "data": dict(data)}
 
     latencies = diagnostics["latencies_ms"]
     diagnostics["latency_p50_ms"] = _latency_percentile(latencies, 0.50)
@@ -1752,9 +1809,29 @@ def _apply_option_pricing_to_row(row: dict, pricing: Optional[dict] = None, reas
     item["pricing_status"] = pricing.get("status")
     item["pricing_quality"] = pricing.get("quality")
     item["option_pricing"] = dict(pricing)
+    option_plan = item.get("option_plan") if isinstance(item.get("option_plan"), dict) else {}
+    if pricing.get("reason") == "no_listed_itm_strike_at_tp1" and option_plan.get("available") is True:
+        item["option_plan"] = {
+            **option_plan,
+            "available": False,
+            "reason": "no listed ITM strike at TP1",
+            "unavailable_reason": "no_listed_itm_strike_at_tp1",
+            "provisional_preferred_strike": pricing.get("requested_strike") or option_plan.get("preferred_strike"),
+            "tp1": pricing.get("tp1") or option_plan.get("tp1"),
+        }
     if pricing.get("status") == "ready":
+        if option_plan.get("available") is True and pricing.get("strike") is not None:
+            item["option_plan"] = {
+                **option_plan,
+                "preferred_strike": pricing.get("strike"),
+                "priced_strike": pricing.get("strike"),
+                "provisional_preferred_strike": pricing.get("requested_strike") or option_plan.get("preferred_strike"),
+                "strike_snap_reason": pricing.get("strike_snap_reason"),
+            }
         option = dict(item.get("option") or {})
         option.update({
+            "type": pricing.get("type"),
+            "strike": pricing.get("strike"),
             "bid": pricing.get("bid"),
             "ask": pricing.get("ask"),
             "mid": pricing.get("mid"),
