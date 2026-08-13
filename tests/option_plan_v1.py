@@ -151,6 +151,101 @@ def test_option_plan_does_not_call_yahoo_contract_selection():
     assert called["value"] is False
 
 
+def test_option_pricing_descriptor_prefers_option_plan_contract():
+    descriptor, reason = scanner._option_pricing_descriptor({
+        "ticker": "NXT",
+        "direction": "SHORT",
+        "option_plan": {
+            "available": True,
+            "type": "PUT",
+            "preferred_strike": 100.0,
+            "expiration": "2026-09-18",
+            "expiration_source": "option_plan",
+        },
+        "option": {
+            "type": "PUT",
+            "strike": 105.0,
+            "expiry": "2026-09-25",
+            "expiration_source": "fallback",
+        },
+    })
+    assert reason is None
+    assert descriptor["type"] == "PUT"
+    assert descriptor["strike"] == 100.0
+    assert descriptor["expiry"] == "2026-09-18"
+    assert descriptor["expiration_source"] == "option_plan"
+    assert descriptor["key"] == ("NXT", "2026-09-18", 100.0, "PUT")
+
+
+def test_option_pricing_descriptor_prefers_plan_type_and_expiration():
+    descriptor, reason = scanner._option_pricing_descriptor({
+        "ticker": "KTOS",
+        "direction": "SHORT",
+        "option_plan": {
+            "available": True,
+            "type": "PUT",
+            "preferred_strike": 59.0,
+            "expiration": "2026-09-18",
+            "expiration_source": "option_plan",
+        },
+        "option": {
+            "type": "CALL",
+            "strike": 63.0,
+            "expiry": "2026-09-25",
+            "expiration_source": "fallback",
+        },
+    })
+    assert reason is None
+    assert descriptor["type"] == "PUT"
+    assert descriptor["strike"] == 59.0
+    assert descriptor["expiry"] == "2026-09-18"
+    assert descriptor["expiration_source"] == "option_plan"
+    assert descriptor["key"] == ("KTOS", "2026-09-18", 59.0, "PUT")
+
+
+def test_option_pricing_descriptor_uses_option_plan_without_row_option():
+    descriptor, reason = scanner._option_pricing_descriptor({
+        "ticker": "ILMN",
+        "direction": "LONG",
+        "option_plan": {
+            "available": True,
+            "type": "CALL",
+            "preferred_strike": 200.0,
+            "suggested_expiration": {
+                "expiration": "2026-09-18",
+                "min_dte": 21,
+                "max_dte": 30,
+            },
+        },
+    })
+    assert reason is None
+    assert descriptor["type"] == "CALL"
+    assert descriptor["strike"] == 200.0
+    assert descriptor["expiry"] == "2026-09-18"
+    assert descriptor["expiration_min_dte"] == 21
+    assert descriptor["expiration_max_dte"] == 30
+    assert descriptor["key"] == ("ILMN", "2026-09-18", 200.0, "CALL")
+
+
+def test_option_pricing_descriptor_falls_back_to_row_option_without_plan():
+    descriptor, reason = scanner._option_pricing_descriptor({
+        "ticker": "CHWY",
+        "direction": "LONG",
+        "option": {
+            "type": "CALL",
+            "strike": 23.0,
+            "expiry": "2026-09-25",
+            "expiration_source": "fallback",
+        },
+    })
+    assert reason is None
+    assert descriptor["type"] == "CALL"
+    assert descriptor["strike"] == 23.0
+    assert descriptor["expiry"] == "2026-09-25"
+    assert descriptor["expiration_source"] == "fallback"
+    assert descriptor["key"] == ("CHWY", "2026-09-25", 23.0, "CALL")
+
+
 def main() -> int:
     test_call_plan_generation_and_formatting()
     test_put_plan_generation_and_formatting()
@@ -164,6 +259,10 @@ def main() -> int:
     test_planned_entry_fallback_and_missing_tp1_failure()
     test_invalid_projected_move_fails_safely()
     test_option_plan_does_not_call_yahoo_contract_selection()
+    test_option_pricing_descriptor_prefers_option_plan_contract()
+    test_option_pricing_descriptor_prefers_plan_type_and_expiration()
+    test_option_pricing_descriptor_uses_option_plan_without_row_option()
+    test_option_pricing_descriptor_falls_back_to_row_option_without_plan()
     print("Option Plan v1 tests passed")
     return 0
 

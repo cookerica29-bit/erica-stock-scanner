@@ -1276,14 +1276,24 @@ def _option_pricing_descriptor(row: dict) -> tuple[Optional[dict], Optional[str]
         return None, "missing_symbol"
     option = row.get("option") if isinstance(row.get("option"), dict) else {}
     plan = row.get("option_plan") if isinstance(row.get("option_plan"), dict) else {}
-    expiry = str(option.get("expiry") or option.get("expiration") or "").strip()
-    strike = _safe_float(option.get("strike"))
-    if strike is None:
+    plan_expiration = plan.get("expiry") or plan.get("expiration")
+    suggested_expiration = plan.get("suggested_expiration") if isinstance(plan.get("suggested_expiration"), dict) else {}
+    if not plan_expiration:
+        plan_expiration = suggested_expiration.get("expiry") or suggested_expiration.get("expiration")
+    plan_available = plan.get("available") is True
+    if plan_available:
+        expiry = str(plan_expiration or option.get("expiry") or option.get("expiration") or "").strip()
         strike = _safe_float(plan.get("preferred_strike"))
+        option_type = str(plan.get("type") or option.get("type") or "").strip().upper()
+    else:
+        expiry = str(option.get("expiry") or option.get("expiration") or "").strip()
+        strike = _safe_float(option.get("strike"))
+        if strike is None:
+            strike = _safe_float(plan.get("preferred_strike"))
+        option_type = str(option.get("type") or plan.get("type") or "").strip().upper()
     if not expiry and strike is None and plan.get("available") is False:
         reason = str(plan.get("reason") or plan.get("unavailable_reason") or "option_plan_unavailable").strip().lower().replace(" ", "_")
         return None, f"option_plan_unavailable:{reason or 'unknown'}"
-    option_type = str(option.get("type") or plan.get("type") or "").strip().upper()
     if option_type not in {"CALL", "PUT"} and expiry and strike is not None:
         option_type = _option_type_from_available_direction(row) or ""
     if option_type not in {"CALL", "PUT"}:
@@ -1302,9 +1312,10 @@ def _option_pricing_descriptor(row: dict) -> tuple[Optional[dict], Optional[str]
         "requested_expiration": expiry,
         "requested_dte": requested_dte,
         "expiration_source": (
-            option.get("expiration_source")
+            plan.get("expiration_source")
+            or plan.get("expiry_source")
+            or option.get("expiration_source")
             or option.get("expiry_source")
-            or plan.get("expiration_source")
             or "option_contract"
         ),
         "expiration_min_dte": min_dte,
