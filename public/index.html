@@ -6128,9 +6128,18 @@ function optionPricingRequestPayload(setup = {}) {
   const plan = setup.option_plan || {};
   const pricing = setup.option_pricing || {};
   const lazy = setup.lazy_hydration || {};
-  const type = firstPresent(lazy.type, option.type, pricing.type, plan.type);
-  const strike = firstPresent(lazy.strike, option.strike, pricing.strike, plan.preferred_strike);
-  const expiry = firstPresent(lazy.expiration, lazy.resolved_expiration, option.resolved_expiration, pricing.resolved_expiration, option.expiry, option.expiration, pricing.expiry, pricing.expiration);
+  const suggestedExpiration = plan.suggested_expiration || {};
+  const planAvailable = plan.available === true;
+  const planExpiration = firstPresent(plan.expiry, plan.expiration, suggestedExpiration.expiry, suggestedExpiration.expiration);
+  const type = planAvailable
+    ? firstPresent(plan.type, option.type)
+    : firstPresent(lazy.type, option.type, pricing.type, plan.type);
+  const strike = planAvailable
+    ? plan.preferred_strike
+    : firstPresent(lazy.strike, option.strike, pricing.strike, plan.preferred_strike);
+  const expiry = planAvailable
+    ? firstPresent(planExpiration, option.expiry, option.expiration)
+    : firstPresent(lazy.expiration, lazy.resolved_expiration, option.resolved_expiration, pricing.resolved_expiration, option.expiry, option.expiration, pricing.expiry, pricing.expiration);
   if (!setup.ticker || !type || strike === undefined || strike === null || !expiry) return null;
   return {
     ticker: setup.ticker,
@@ -7939,9 +7948,6 @@ function renderScannerResults(options = {}) {
   if (!options.cardsOnly) {
     renderScannerSummaryPanels(view, filters, { force: options.forceSummary });
   }
-  if (Number.isFinite(tradingBudgetValue())) {
-    queueOptionPricingForSetups(renderedSetups, 'budget_view');
-  }
 
   if (rows.length === 0) {
     const tickerNote = filters.tickerSearch.length ? ` for ${filters.tickerSearch.join(', ')}` : '';
@@ -7982,6 +7988,7 @@ function renderScannerResults(options = {}) {
   } else {
     nmSection.style.display = 'none';
   }
+  queueOptionPricingForSetups(renderedSetups, 'card_render');
 }
 
 function bindTickerSearch() {
