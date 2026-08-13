@@ -7257,8 +7257,12 @@ function renderTopOpportunities(rows = []) {
     el.innerHTML = '';
     return;
   }
+  const terminalLifecycleStates = new Set(['MISSED_ENTRY', 'TP1_BEFORE_CONFIRMATION', 'INVALIDATED', 'EXPIRED', 'PLAN_REPLACED']);
   const rankedPool = rows
-    .filter(row => row?.ranking && row.ranking.tier !== 'LOW_PRIORITY')
+    .filter(row => {
+      const lifecycleState = String(firstPresent(row?.execution_lifecycle_state, row?.execution_lifecycle?.state, '') || '').toUpperCase();
+      return row?.ranking && row.ranking.tier !== 'LOW_PRIORITY' && !terminalLifecycleStates.has(lifecycleState);
+    })
     .slice()
     .sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b));
   const displayPool = rankedPool.length ? rankedPool : rows.slice().sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b));
