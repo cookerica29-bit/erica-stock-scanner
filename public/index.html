@@ -7017,19 +7017,45 @@ function frozenRankingBucket(setup = {}) {
   ) || '').toUpperCase();
 }
 
+function authoritativeNewEntryPresentation(setup = {}) {
+  const signal = setup.new_entry_signal || {};
+  const bucket = String(firstPresent(setup.new_entry_signal_bucket, signal.bucket, '') || '').toUpperCase();
+  if (!bucket) return null;
+  const label = String(firstPresent(setup.new_entry_signal_label, signal.label, '') || '').trim();
+  const map = {
+    ENTER_NOW: { label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', stage: 5, percent: 100 },
+    WAITING_FOR_CONFIRMATION: { label: 'WAITING FOR CONFIRMATION', bucket: 'WAITING_FOR_CONFIRMATION', className: 'wait', stage: 4.25, percent: 90 },
+    WAITING_FOR_RETEST: { label: 'WAITING FOR RETEST', bucket: 'WAITING_FOR_RETEST', className: 'waiting-retest', stage: 4.75, percent: 98 },
+    EARLY_TOUCH: { label: 'EARLY TOUCH', bucket: 'EARLY_TOUCH', className: 'early-touch', stage: 3.5, percent: 75 },
+    EARLY_ENTRY: { label: 'Early Entry', bucket: 'EARLY_ENTRY', className: 'early-entry', stage: 3.75, percent: 82 },
+    ALMOST_READY: { label: 'Almost Ready', bucket: 'ALMOST_READY', className: 'almost-ready', stage: 4, percent: 95 },
+    NO_CURRENT_ENTRY: { label: 'Entry Triggered Previously', bucket: 'NO_CURRENT_ENTRY', className: 'wait', stage: 3, percent: 60 },
+    MISSED_ENTRY: { label: 'MISSED ENTRY', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
+    TP1_BEFORE_CONFIRMATION: { label: 'TP1 BEFORE CONFIRMATION', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
+    INVALIDATED: { label: 'INVALIDATED', bucket: 'RESOLVED', className: 'skip', stage: 0, percent: 0 },
+    EXPIRED: { label: 'EXPIRED', bucket: 'RESOLVED', className: 'skip', stage: 0, percent: 0 },
+    PLAN_REPLACED: { label: 'PLAN REPLACED', bucket: 'RESOLVED', className: 'skip', stage: 0, percent: 0 },
+    WAITING: { label: 'Setup Building', bucket: 'WAITING', className: 'wait', stage: 3, percent: 60 },
+    SKIP: { label: 'SKIP', bucket: 'SKIP', className: 'skip', stage: 0, percent: 0 },
+  };
+  const resolved = map[bucket];
+  if (resolved) return { ...resolved, label: label || resolved.label };
+  return { label: label || bucket.replace(/_/g, ' '), bucket, className: 'wait', stage: 3, percent: 60 };
+}
+
 function missionWorkflowBucket(setup = {}) {
   const fromPayload = String(setup.mission_workflow_bucket || '').toUpperCase();
   if (fromPayload) return fromPayload;
   const state = missionExecutionState(setup);
   const rankingBucket = frozenRankingBucket(setup) || setupProgressState(setup).bucket;
+  const newEntryBucket = String(setup.new_entry_signal?.bucket || setup.new_entry_signal_bucket || '').toUpperCase();
   const grade = setupGradeValue(setup);
   const tier = String(setup.ranking?.tier || '').toUpperCase();
   const resolvedStates = ['MISSED_ENTRY', 'TP1_BEFORE_CONFIRMATION', 'INVALIDATED', 'EXPIRED', 'PLAN_REPLACED'];
   const watchStates = ['EARLY_ENTRY_BUILDING', 'EARLY_TOUCH', 'WAITING_FOR_RETEST'];
   if (resolvedStates.includes(state)) return 'RESOLVED';
-  if (state === 'ENTRY_TRIGGERED' && ['A', 'B'].includes(grade)) return 'TRADE_NOW';
+  if (newEntryBucket === 'ENTER_NOW' && ['A', 'B'].includes(grade)) return 'TRADE_NOW';
   if (state === 'WAITING_FOR_RETEST' && ['A', 'B'].includes(grade)) return 'WATCH_CLOSELY';
-  if (rankingBucket === 'ENTER_NOW' && !watchStates.includes(state) && !resolvedStates.includes(state)) return 'TRADE_NOW';
   if (['A', 'B'].includes(grade) && ['ALMOST_READY', 'EARLY_ENTRY'].includes(rankingBucket)) return 'WATCH_CLOSELY';
   if (['A', 'B'].includes(grade) && watchStates.includes(state)) return 'WATCH_CLOSELY';
   if (['A', 'B'].includes(grade) && rankingBucket === 'WAITING' && ['TOP_OPPORTUNITY', 'HIGH_PRIORITY', 'REVIEW'].includes(tier)) return 'WATCH_CLOSELY';
@@ -7339,7 +7365,7 @@ function marketIntelligenceFallback(rows = [], meta = {}) {
     return acc;
   }, {});
   const directionDistribution = counterToDistribution(count(row => String(row.direction || 'UNKNOWN').toUpperCase()));
-  const statusDistribution = counterToDistribution(count(row => row?.ranking?.status_bucket || setupProgressState(row).bucket || 'LOW_PRIORITY'));
+  const statusDistribution = counterToDistribution(count(row => setupProgressState(row).bucket || row?.ranking?.status_bucket || 'LOW_PRIORITY'));
   const gradeDistribution = counterToDistribution(count(setupGradeValue));
   const sectorDistribution = counterToDistribution(count(row => row.sector || 'Unknown'));
   const ranked = allRows.slice().sort((a, b) => opportunityRankValue(a) - opportunityRankValue(b));
@@ -7366,7 +7392,7 @@ function marketIntelligenceFallback(rows = [], meta = {}) {
       ticker: top.ticker,
       direction: top.direction,
       grade: top.setupGrade,
-      status: top.ranking?.status_bucket || setupProgressState(top).bucket,
+      status: setupProgressState(top).bucket || top.ranking?.status_bucket,
       rank: top.ranking?.rank,
       score: top.ranking?.score,
     } : null,
@@ -8057,6 +8083,8 @@ function renderPriorityWatchlist() {
 }
 
 function simpleStatus(setup) {
+  const authoritative = authoritativeNewEntryPresentation(setup);
+  if (authoritative) return { label: authoritative.label.toUpperCase(), className: authoritative.className };
   const lifecycle = stockExecutionLifecyclePresentation(setup);
   if (lifecycle) return { label: lifecycle.label, className: lifecycle.className };
   const explicitBucket = String(firstPresent(setup.status_bucket, setup.normalized_status_bucket, '') || '').toUpperCase();
@@ -8106,6 +8134,7 @@ function stockExecutionLifecyclePresentation(setup = {}) {
     EARLY_TOUCH: { label: 'EARLY TOUCH', bucket: 'EARLY_TOUCH', className: 'early-touch', stage: 3.5, percent: 75 },
     WAITING_FOR_RETEST: { label: 'WAITING FOR RETEST', bucket: 'WAITING_FOR_RETEST', className: 'waiting-retest', stage: 4.75, percent: 98 },
     ENTRY_TRIGGERED: { label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', stage: 5, percent: 100 },
+    WAITING_FOR_CONFIRMATION: { label: 'WAITING FOR CONFIRMATION', bucket: 'WAITING_FOR_CONFIRMATION', className: 'wait', stage: 4.25, percent: 90 },
     MISSED_ENTRY: { label: 'MISSED ENTRY', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
     TP1_BEFORE_CONFIRMATION: { label: 'TP1 BEFORE CONFIRMATION', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
     INVALIDATED: { label: 'INVALIDATED', bucket: 'RESOLVED', className: 'skip', stage: 0, percent: 0 },
@@ -8118,7 +8147,7 @@ function stockExecutionLifecyclePresentation(setup = {}) {
 function scannerProgressLabelsForRows(rows = []) {
   const eventMemoryActive = rows.some(row => stockEventMemoryPresentationEnabled(row));
   return eventMemoryActive
-    ? ['ENTER_NOW', 'WAITING_FOR_RETEST', 'ALMOST_READY', 'EARLY_ENTRY', 'EARLY_TOUCH', 'WAITING', 'RESOLVED', 'SKIP']
+    ? ['ENTER_NOW', 'WAITING_FOR_RETEST', 'WAITING_FOR_CONFIRMATION', 'ALMOST_READY', 'EARLY_ENTRY', 'EARLY_TOUCH', 'WAITING', 'NO_CURRENT_ENTRY', 'RESOLVED', 'SKIP']
     : ['SKIP', 'WAITING', 'ALMOST_READY', 'EARLY_ENTRY', 'ENTER_NOW'];
 }
 
@@ -8126,10 +8155,12 @@ function scannerProgressBadgeConfig(bucket) {
   return {
     ENTER_NOW: ['Enter Now', 'timing-entry'],
     WAITING_FOR_RETEST: ['Waiting for Retest', 'timing-entry'],
+    WAITING_FOR_CONFIRMATION: ['Waiting for Confirmation', 'timing-reaction'],
     EARLY_ENTRY: ['Early Entry', 'timing-area'],
     EARLY_TOUCH: ['Early Touch', 'timing-area'],
     ALMOST_READY: ['Almost Ready', 'timing-area'],
     WAITING: ['Waiting', 'timing-reaction'],
+    NO_CURRENT_ENTRY: ['No Current Entry', 'timing-not-ready'],
     RESOLVED: ['Missed / Resolved', 'timing-not-ready'],
     SKIP: ['Skip', 'timing-not-ready'],
   }[bucket] || [bucket.replace(/_/g, ' '), 'timing-not-ready'];
@@ -8143,6 +8174,16 @@ function hasValidTradePlan(setup) {
 }
 
 function setupProgressState(setup) {
+  const authoritative = authoritativeNewEntryPresentation(setup);
+  if (authoritative) {
+    return {
+      stage: authoritative.stage,
+      label: authoritative.label,
+      bucket: authoritative.bucket,
+      className: authoritative.className,
+      percent: authoritative.percent,
+    };
+  }
   const lifecycle = stockExecutionLifecyclePresentation(setup);
   if (lifecycle) {
     return {

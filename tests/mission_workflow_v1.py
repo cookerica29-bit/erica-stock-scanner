@@ -48,6 +48,13 @@ def setup(
     if lifecycle_state:
         row["early_entry_shadow"] = {"state": lifecycle_state}
         row["execution_lifecycle_state"] = lifecycle_state
+    if ranking_bucket == "ENTER_NOW" and lifecycle_state == "ENTRY_TRIGGERED":
+        row["new_entry_signal"] = {
+            "bucket": "ENTER_NOW",
+            "current_strategy_status": "ENTER_NOW",
+            "lifecycle_state": "ENTRY_TRIGGERED",
+            "actionable": True,
+        }
     return row
 
 

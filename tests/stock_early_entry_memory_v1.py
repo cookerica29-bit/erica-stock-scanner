@@ -17,6 +17,7 @@ def setup(**overrides):
         "sl": 95.0,
         "tp1": 110.0,
         "price": 99.8,
+        "current_quote_price": 100.1,
         "current_bar_high": 99.9,
         "current_bar_low": 99.7,
         "entryStatus": "Tradeable",
@@ -156,9 +157,10 @@ def test_plan_change_creates_new_memory_and_short_touch_rules():
     run([first], "2026-08-05T10:00:00Z")
     run([second], "2026-08-05T11:00:00Z")
     diag = scanner.stock_early_entry_shadow_diagnostics()
-    assert diag["total_memories"] == 2
-    assert diag["states"]["PLAN_REPLACED"] == 1
+    assert diag["total_memories"] == 1
     assert diag["states"]["EARLY_TOUCH"] == 1
+    assert second["early_entry_shadow"]["original_plan"]["entry"] == 100.0
+    assert second["early_entry_shadow"]["current_plan"]["entry"] == 101.0
 
     reset_memory()
     short = setup(
@@ -173,6 +175,118 @@ def test_plan_change_creates_new_memory_and_short_touch_rules():
     )
     run([short], "2026-08-05T10:00:00Z")
     assert_state(short, "EARLY_TOUCH")
+
+
+def test_new_generation_creates_new_memory_and_replaces_old_generation():
+    reset_memory()
+    first = setup(current_bar=1, entry=100.0, sl=95.0, tp1=110.0, signal_timestamp="2026-08-05T10:00:00Z")
+    second = setup(current_bar=2, entry=101.0, sl=96.0, tp1=111.0, signal_timestamp="2026-08-05T11:00:00Z")
+    run([first], "2026-08-05T10:00:00Z")
+    run([second], "2026-08-05T11:00:00Z")
+    diag = scanner.stock_early_entry_shadow_diagnostics()
+    assert diag["total_memories"] == 2
+    assert diag["states"]["PLAN_REPLACED"] == 1
+    assert diag["states"]["EARLY_TOUCH"] == 1
+
+
+def test_raw_enter_now_first_print_receives_lifecycle_tracking():
+    reset_memory()
+    raw_enter = setup(
+        current_bar=2,
+        price=100.05,
+        current_quote_price=100.05,
+        current_bar_low=99.9,
+        current_bar_high=100.2,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    assert scanner._ranking_status_bucket(raw_enter) == "ENTER_NOW"
+    run([raw_enter], "2026-08-05T11:00:00Z")
+    assert_state(raw_enter, "ENTRY_TRIGGERED")
+
+
+def test_almost_ready_direct_jump_to_raw_enter_now_keeps_lifecycle_coverage():
+    reset_memory()
+    almost = setup(
+        current_bar=1,
+        price=99.4,
+        current_quote_price=99.4,
+        current_bar_low=100.2,
+        current_bar_high=100.4,
+        trade_eval={"b_plus_tradeable": False, "trigger_confirmed": False, "a_plus_ready": False},
+    )
+    assert scanner._ranking_status_bucket(almost) == "ALMOST_READY"
+    run([almost], "2026-08-05T10:00:00Z")
+    assert_state(almost, "EARLY_ENTRY_BUILDING")
+
+    raw_enter = setup(
+        current_bar=2,
+        price=100.05,
+        current_quote_price=100.05,
+        current_bar_low=99.9,
+        current_bar_high=100.2,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    assert scanner._ranking_status_bucket(raw_enter) == "ENTER_NOW"
+    run([raw_enter], "2026-08-05T11:00:00Z")
+    assert_state(raw_enter, "ENTRY_TRIGGERED")
+
+
+def test_opposite_direction_does_not_inherit_lifecycle_state():
+    reset_memory()
+    long_row = setup(
+        current_bar=1,
+        price=100.05,
+        current_quote_price=100.05,
+        current_bar_low=99.9,
+        current_bar_high=100.2,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    run([long_row], "2026-08-05T10:00:00Z")
+    assert_state(long_row, "ENTRY_TRIGGERED")
+
+    short_row = setup(
+        direction="SHORT",
+        entry=100.0,
+        sl=105.0,
+        tp1=90.0,
+        price=99.95,
+        current_quote_price=99.95,
+        current_bar_low=99.8,
+        current_bar_high=100.1,
+        current_bar=2,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    run([short_row], "2026-08-05T11:00:00Z")
+    assert_state(short_row, "ENTRY_TRIGGERED")
+    assert short_row["early_entry_shadow"]["candidate_id"] != long_row["early_entry_shadow"]["candidate_id"]
+
+
+def test_new_generation_does_not_inherit_entry_triggered_state():
+    reset_memory()
+    triggered = setup(
+        current_bar=1,
+        price=100.05,
+        current_quote_price=100.05,
+        current_bar_low=99.9,
+        current_bar_high=100.2,
+        signal_timestamp="2026-08-05T10:00:00Z",
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    run([triggered], "2026-08-05T10:00:00Z")
+    assert_state(triggered, "ENTRY_TRIGGERED")
+
+    later_generation = setup(
+        current_bar=2,
+        price=99.4,
+        current_quote_price=99.4,
+        current_bar_low=100.2,
+        current_bar_high=100.4,
+        signal_timestamp="2026-08-05T11:00:00Z",
+        trade_eval={"b_plus_tradeable": False, "trigger_confirmed": False, "a_plus_ready": False},
+    )
+    run([later_generation], "2026-08-05T11:00:00Z")
+    assert_state(later_generation, "EARLY_ENTRY_BUILDING")
+    assert later_generation["early_entry_shadow"]["candidate_id"] != triggered["early_entry_shadow"]["candidate_id"]
 
 
 def test_expiration_for_non_confirming_setup():
@@ -237,6 +351,78 @@ def test_stale_early_touch_blocks_enter_now_notifications_until_valid_retest():
     assert smart_notifications.stale_early_touch_blocks_enter_now(row) is False
 
 
+def with_shadow(row, state, *, generation=None):
+    shadow_row = dict(row)
+    if generation is not None:
+        shadow_row["signal_timestamp"] = generation
+    key = scanner.stock_early_entry_memory_key(shadow_row)
+    row["early_entry_shadow"] = {"candidate_id": key, "state": state}
+    return row
+
+
+def test_new_entry_signal_requires_ranking_and_lifecycle_agreement():
+    ranking_executable = setup(
+        current_bar=2,
+        price=100.1,
+        current_quote_price=100.1,
+        current_bar_low=99.9,
+        current_bar_high=100.3,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    with_shadow(ranking_executable, "WAITING_FOR_CONFIRMATION")
+    assert scanner._ranking_status_bucket(ranking_executable) == "ENTER_NOW"
+    signal = scanner.stock_new_entry_signal(ranking_executable)
+    assert signal["bucket"] == "WAITING_FOR_CONFIRMATION"
+    assert signal["actionable"] is False
+    assert signal["current_strategy_executable"] is True
+    assert signal["lifecycle_entry_triggered"] is False
+
+    lifecycle_only = setup(
+        setupGrade="C",
+        setup_status="SKIPPED",
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    with_shadow(lifecycle_only, "ENTRY_TRIGGERED")
+    signal = scanner.stock_new_entry_signal(lifecycle_only)
+    assert signal["bucket"] == "NO_CURRENT_ENTRY"
+    assert signal["actionable"] is False
+    assert lifecycle_only["early_entry_shadow"]["state"] == "ENTRY_TRIGGERED"
+
+    both_agree = setup(
+        price=100.05,
+        current_quote_price=100.05,
+        current_bar_low=99.9,
+        current_bar_high=100.2,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    with_shadow(both_agree, "ENTRY_TRIGGERED")
+    signal = scanner.stock_new_entry_signal(both_agree)
+    assert signal["bucket"] == "ENTER_NOW"
+    assert signal["actionable"] is True
+
+    invalidated = setup(
+        price=100.05,
+        current_quote_price=100.05,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    with_shadow(invalidated, "INVALIDATED")
+    signal = scanner.stock_new_entry_signal(invalidated)
+    assert signal["bucket"] == "INVALIDATED"
+    assert signal["actionable"] is False
+
+    new_generation = setup(
+        price=100.05,
+        current_quote_price=100.05,
+        signal_timestamp="2026-08-05T12:00:00Z",
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    with_shadow(new_generation, "ENTRY_TRIGGERED", generation="2026-08-05T10:00:00Z")
+    signal = scanner.stock_new_entry_signal(new_generation)
+    assert signal["bucket"] == "ALMOST_READY"
+    assert signal["same_setup_identity"] is False
+    assert signal["actionable"] is False
+
+
 def test_daily_lifecycle_report_counts_today_transitions_only():
     memories = {
         "aaa": {
@@ -283,9 +469,15 @@ if __name__ == "__main__":
     test_no_retest_becomes_missed_entry()
     test_tp1_before_confirmation_and_stop_before_entry_are_terminal()
     test_plan_change_creates_new_memory_and_short_touch_rules()
+    test_new_generation_creates_new_memory_and_replaces_old_generation()
+    test_raw_enter_now_first_print_receives_lifecycle_tracking()
+    test_almost_ready_direct_jump_to_raw_enter_now_keeps_lifecycle_coverage()
+    test_opposite_direction_does_not_inherit_lifecycle_state()
+    test_new_generation_does_not_inherit_entry_triggered_state()
     test_expiration_for_non_confirming_setup()
     test_scheduled_scans_preserve_memory_without_recreating()
     test_execution_lifecycle_presentation_is_separate_from_ranking_bucket()
     test_stale_early_touch_blocks_enter_now_notifications_until_valid_retest()
+    test_new_entry_signal_requires_ranking_and_lifecycle_agreement()
     test_daily_lifecycle_report_counts_today_transitions_only()
     print("stock_early_entry_memory_v1 passed")

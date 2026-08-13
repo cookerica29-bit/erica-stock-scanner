@@ -125,7 +125,14 @@ const almostReady = setup({ ticker: 'AR', ranking: { rank: 2, tier: 'HIGH_PRIORI
 const earlyEntry = setup({ ticker: 'EE', ranking_status_bucket: 'EARLY_ENTRY', normalized_status_bucket: 'EARLY_ENTRY', ranking: { rank: 3, tier: 'HIGH_PRIORITY', score: 88, status_bucket: 'EARLY_ENTRY' }, execution_lifecycle_state: 'EARLY_ENTRY_BUILDING' });
 const earlyTouch = setup({ ticker: 'ET', ranking_status_bucket: 'EARLY_ENTRY', normalized_status_bucket: 'EARLY_ENTRY', ranking: { rank: 4, tier: 'HIGH_PRIORITY', score: 86, status_bucket: 'EARLY_ENTRY' }, execution_lifecycle_state: 'EARLY_TOUCH' });
 const waitingRetest = setup({ ticker: 'RT', execution_lifecycle_state: 'WAITING_FOR_RETEST', ranking: { rank: 5, tier: 'HIGH_PRIORITY', score: 84, status_bucket: 'ALMOST_READY' } });
-const tradeNow = setup({ ticker: 'NOW', ranking_status_bucket: 'ENTER_NOW', normalized_status_bucket: 'ENTER_NOW', ranking: { rank: 1, tier: 'TOP_OPPORTUNITY', score: 97, status_bucket: 'ENTER_NOW' }, execution_lifecycle_state: 'ENTRY_TRIGGERED' });
+const tradeNow = setup({
+  ticker: 'NOW',
+  ranking_status_bucket: 'ENTER_NOW',
+  normalized_status_bucket: 'ENTER_NOW',
+  ranking: { rank: 1, tier: 'TOP_OPPORTUNITY', score: 97, status_bucket: 'ENTER_NOW' },
+  execution_lifecycle_state: 'ENTRY_TRIGGERED',
+  new_entry_signal: { bucket: 'ENTER_NOW', current_strategy_status: 'ENTER_NOW', lifecycle_state: 'ENTRY_TRIGGERED', actionable: true },
+});
 const resolved = setup({ ticker: 'MISS', ranking_status_bucket: 'EARLY_ENTRY', normalized_status_bucket: 'EARLY_ENTRY', ranking: { rank: 6, tier: 'HIGH_PRIORITY', score: 82, status_bucket: 'EARLY_ENTRY' }, execution_lifecycle_state: 'MISSED_ENTRY' });
 
 assert.strictEqual(context.stockMissionWorkflowEnabled(), true);

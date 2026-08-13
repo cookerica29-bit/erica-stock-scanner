@@ -603,6 +603,54 @@ const aPlusSetup = {
 const aPlusStatus = context.simpleStatus(aPlusSetup);
 assert.strictEqual(aPlusStatus.label, 'ENTER NOW', 'true trigger-confirmed setups must still show ENTER NOW');
 
+const rankingExecutableLifecycleWaiting = {
+  ...aPlusSetup,
+  new_entry_signal: {
+    bucket: 'WAITING_FOR_CONFIRMATION',
+    label: 'WAITING FOR CONFIRMATION',
+    current_strategy_status: 'ENTER_NOW',
+    current_strategy_executable: true,
+    lifecycle_state: 'WAITING_FOR_CONFIRMATION',
+    lifecycle_entry_triggered: false,
+    actionable: false,
+  },
+};
+assert.strictEqual(context.simpleStatus(rankingExecutableLifecycleWaiting).label, 'WAITING FOR CONFIRMATION');
+assert.strictEqual(context.setupProgressState(rankingExecutableLifecycleWaiting).bucket, 'WAITING_FOR_CONFIRMATION');
+assert.ok(!htmlFor(rankingExecutableLifecycleWaiting).includes('data-normalized-status="ENTER_NOW"'));
+
+const lifecycleOnlyTriggered = {
+  ...aPlusSetup,
+  setupGrade: 'C',
+  setup_status: 'SKIPPED',
+  new_entry_signal: {
+    bucket: 'NO_CURRENT_ENTRY',
+    label: 'Entry Triggered Previously',
+    current_strategy_status: 'SKIP',
+    current_strategy_executable: false,
+    lifecycle_state: 'ENTRY_TRIGGERED',
+    lifecycle_entry_triggered: true,
+    actionable: false,
+  },
+};
+assert.strictEqual(context.simpleStatus(lifecycleOnlyTriggered).label, 'ENTRY TRIGGERED PREVIOUSLY');
+assert.strictEqual(context.setupProgressState(lifecycleOnlyTriggered).bucket, 'NO_CURRENT_ENTRY');
+
+const authoritativeEnterNow = {
+  ...aPlusSetup,
+  new_entry_signal: {
+    bucket: 'ENTER_NOW',
+    label: 'ENTER NOW',
+    current_strategy_status: 'ENTER_NOW',
+    current_strategy_executable: true,
+    lifecycle_state: 'ENTRY_TRIGGERED',
+    lifecycle_entry_triggered: true,
+    actionable: true,
+  },
+};
+assert.strictEqual(context.simpleStatus(authoritativeEnterNow).label, 'ENTER NOW');
+assert.strictEqual(context.setupProgressState(authoritativeEnterNow).bucket, 'ENTER_NOW');
+
 const earlyEntryCard = htmlFor(bPlusOnlySetup);
 assert.ok(earlyEntryCard.includes('data-normalized-status="EARLY_ENTRY"'));
 assert.ok(earlyEntryCard.includes('data-execution-state="SETUP_EARLY_ENTRY"'));

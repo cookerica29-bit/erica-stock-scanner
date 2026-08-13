@@ -2886,6 +2886,22 @@ def stock_early_entry_memory_key(row: dict) -> Optional[str]:
     ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
     timeframe = str(row.get("timeframe") or row.get("scanner_timeframe") or "").strip().upper()
     direction = str(row.get("direction") or "").strip().upper()
+    generation = _stock_early_setup_generation(row)
+    if not ticker or not timeframe or direction not in {"LONG", "SHORT"} or not generation:
+        return None
+    return "|".join([
+        ticker,
+        timeframe,
+        direction,
+        generation,
+        STOCK_EARLY_ENTRY_MEMORY_VERSION,
+    ])
+
+
+def _stock_early_legacy_plan_memory_key(row: dict) -> Optional[str]:
+    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
+    timeframe = str(row.get("timeframe") or row.get("scanner_timeframe") or "").strip().upper()
+    direction = str(row.get("direction") or "").strip().upper()
     entry = _safe_float(row.get("entry"))
     stop = _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop"))
     tp1 = _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target"))
@@ -2902,6 +2918,36 @@ def stock_early_entry_memory_key(row: dict) -> Optional[str]:
         generation,
         STOCK_EARLY_ENTRY_MEMORY_VERSION,
     ])
+
+
+def _stock_early_has_plan_identity_evidence(row: dict) -> bool:
+    return (
+        stock_early_entry_memory_key(row) is not None
+        and _safe_float(row.get("entry")) is not None
+        and _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop")) is not None
+        and _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target")) is not None
+    )
+
+
+def _stock_early_plan_snapshot(row: dict) -> dict:
+    return {
+        "entry": _safe_float(row.get("entry")),
+        "stop": _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop")),
+        "tp1": _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target")),
+        "tp2": _safe_float(row.get("tp2") if row.get("tp2") is not None else row.get("target2")),
+        "tp3": _safe_float(row.get("tp3") if row.get("tp3") is not None else row.get("target3")),
+        "signal_timestamp": _stock_early_setup_generation(row),
+    }
+
+
+def _stock_early_trackable_bucket(row: dict, bucket: str) -> bool:
+    if not _stock_early_has_plan_identity_evidence(row):
+        return False
+    if str(row.get("setup_status") or "").upper() == "SKIPPED":
+        return False
+    if bucket in {"SKIP", "MISSED_ENTRY", "TP1_BEFORE_CONFIRMATION", "INVALIDATED", "EXPIRED", "PLAN_REPLACED"}:
+        return False
+    return bucket in {"WAITING", "ALMOST_READY", "EARLY_ENTRY", "ENTER_NOW", "WAITING_FOR_RETEST"}
 
 
 def stock_event_memory_presentation_enabled() -> bool:
@@ -3023,6 +3069,105 @@ def stock_execution_lifecycle_presentation(row: Optional[dict]) -> dict:
     }
 
 
+def _stock_authoritative_lifecycle_state(row: Optional[dict]) -> str:
+    row = row or {}
+    expected_key = stock_early_entry_memory_key(row)
+    shadow = row.get("early_entry_shadow") if isinstance(row.get("early_entry_shadow"), dict) else {}
+    shadow_state = str(shadow.get("state") or "").upper()
+    shadow_key = str(shadow.get("candidate_id") or "").strip()
+    if shadow_state and expected_key and shadow_key == expected_key:
+        return shadow_state
+
+    lifecycle = row.get("execution_lifecycle") if isinstance(row.get("execution_lifecycle"), dict) else {}
+    lifecycle_state = str(
+        row.get("execution_lifecycle_state")
+        or lifecycle.get("state")
+        or ""
+    ).upper()
+    lifecycle_key = str(lifecycle.get("candidate_id") or "").strip()
+    if lifecycle_state and expected_key and lifecycle_key == expected_key:
+        return lifecycle_state
+    return ""
+
+
+def stock_new_entry_signal(row: Optional[dict]) -> dict:
+    row = row or {}
+    ranking_bucket = _ranking_status_bucket(row)
+    lifecycle_state = _stock_authoritative_lifecycle_state(row)
+    current_executable = ranking_bucket == "ENTER_NOW"
+    lifecycle_entry_triggered = lifecycle_state == "ENTRY_TRIGGERED"
+    terminal = lifecycle_state in {"MISSED_ENTRY", "TP1_BEFORE_CONFIRMATION", "INVALIDATED", "EXPIRED", "PLAN_REPLACED"}
+    if current_executable and lifecycle_entry_triggered and not terminal:
+        bucket = "ENTER_NOW"
+        label = "ENTER NOW"
+        reason = "Current strategy evaluation and same-setup lifecycle both confirm entry."
+        actionable = True
+    elif lifecycle_entry_triggered and not current_executable:
+        bucket = "NO_CURRENT_ENTRY"
+        label = "ENTRY TRIGGERED PREVIOUSLY"
+        reason = "Lifecycle records a prior entry trigger, but the current scanner evaluation is not executable."
+        actionable = False
+    elif terminal:
+        bucket = lifecycle_state
+        label = lifecycle_state.replace("_", " ")
+        reason = "Lifecycle is terminal for this setup."
+        actionable = False
+    elif lifecycle_state == "WAITING_FOR_CONFIRMATION":
+        bucket = "WAITING_FOR_CONFIRMATION"
+        label = "WAITING FOR CONFIRMATION"
+        reason = "Current ranking may be executable, but lifecycle has not confirmed a valid entry trigger."
+        actionable = False
+    elif lifecycle_state == "WAITING_FOR_RETEST":
+        bucket = "WAITING_FOR_RETEST"
+        label = "WAITING FOR RETEST"
+        reason = "Confirmation occurred after an early touch; a later valid retest is required."
+        actionable = False
+    elif lifecycle_state == "EARLY_TOUCH":
+        bucket = "EARLY_TOUCH"
+        label = "EARLY TOUCH"
+        reason = "Entry touched before confirmation."
+        actionable = False
+    elif lifecycle_state == "EARLY_ENTRY_BUILDING":
+        bucket = "EARLY_ENTRY"
+        label = "EARLY ENTRY"
+        reason = "Lifecycle is tracking a developing entry setup."
+        actionable = False
+    elif current_executable:
+        bucket = "ALMOST_READY"
+        label = "ALMOST READY"
+        reason = "Current strategy evaluation is executable, but same-setup lifecycle has not triggered entry."
+        actionable = False
+    else:
+        bucket = ranking_bucket
+        label = bucket.replace("_", " ").title() if bucket else "WAIT"
+        reason = "Current strategy evaluation is not an authoritative new-entry signal."
+        actionable = False
+    return {
+        "version": "stock-new-entry-signal-v1",
+        "bucket": bucket,
+        "label": label,
+        "actionable": actionable,
+        "current_strategy_status": ranking_bucket,
+        "current_strategy_executable": current_executable,
+        "lifecycle_state": lifecycle_state or None,
+        "lifecycle_entry_triggered": lifecycle_entry_triggered,
+        "terminal_or_invalidated": terminal,
+        "same_setup_identity": bool(lifecycle_state),
+        "reason": reason,
+    }
+
+
+def apply_stock_new_entry_signals(rows: list) -> None:
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        signal = stock_new_entry_signal(row)
+        row["new_entry_signal"] = signal
+        row["new_entry_signal_bucket"] = signal.get("bucket")
+        row["new_entry_signal_label"] = signal.get("label")
+        row["normalized_status_bucket"] = signal.get("bucket")
+
+
 _STOCK_MISSION_RESOLVED_STATES = {
     "MISSED_ENTRY",
     "TP1_BEFORE_CONFIRMATION",
@@ -3106,15 +3251,15 @@ def stock_mission_workflow_bucket(row: Optional[dict]) -> Optional[str]:
     tier = str(ranking.get("tier") or "").upper()
     bucket = _stock_mission_ranking_bucket(row)
     execution_state = _stock_mission_execution_state(row)
+    new_entry = row.get("new_entry_signal") if isinstance(row.get("new_entry_signal"), dict) else stock_new_entry_signal(row)
+    new_entry_bucket = str(new_entry.get("bucket") or "").upper()
 
     if execution_state in _STOCK_MISSION_RESOLVED_STATES:
         return "RESOLVED"
-    if execution_state == "ENTRY_TRIGGERED" and grade in {"A", "B"}:
+    if new_entry_bucket == "ENTER_NOW" and grade in {"A", "B"}:
         return "TRADE_NOW"
     if execution_state == "WAITING_FOR_RETEST" and grade in {"A", "B"}:
         return "WATCH_CLOSELY"
-    if bucket == "ENTER_NOW" and execution_state not in (_STOCK_MISSION_WATCH_STATES | _STOCK_MISSION_RESOLVED_STATES):
-        return "TRADE_NOW"
     if grade in {"A", "B"} and bucket in {"ALMOST_READY", "EARLY_ENTRY"}:
         return "WATCH_CLOSELY"
     if grade in {"A", "B"} and execution_state in _STOCK_MISSION_WATCH_STATES:
@@ -3401,6 +3546,7 @@ def _stock_early_terminal(state: str) -> bool:
 
 def _stock_early_mark_replaced_memories(memories: dict, row: dict, active_key: str, observed_at: str, bar_marker: str) -> bool:
     active_family = _stock_early_memory_family_identity(row)
+    active_setup = _stock_early_setup_identity(row)
     if not active_family[0]:
         return False
     changed = False
@@ -3410,6 +3556,8 @@ def _stock_early_mark_replaced_memories(memories: dict, row: dict, active_key: s
         if str(memory.get("version") or "") != STOCK_EARLY_ENTRY_MEMORY_VERSION:
             continue
         if _stock_early_memory_family_identity(memory) != active_family:
+            continue
+        if _stock_early_setup_identity(memory) == active_setup:
             continue
         if _stock_early_terminal(str(memory.get("state") or "")):
             continue
@@ -3455,6 +3603,39 @@ def _stock_early_memory_family_identity(row_or_memory: dict) -> tuple:
         str(row_or_memory.get("direction") or "").strip().upper(),
         STOCK_EARLY_ENTRY_MEMORY_VERSION,
     )
+
+
+def _stock_early_setup_identity(row_or_memory: dict) -> tuple:
+    return (
+        *_stock_early_memory_family_identity(row_or_memory),
+        str(row_or_memory.get("setup_generation") or _stock_early_setup_generation(row_or_memory) or "").strip(),
+    )
+
+
+def _stock_early_migrate_legacy_memory_key(memories: dict, row: dict, active_key: str) -> None:
+    if active_key in memories:
+        return
+    legacy_key = _stock_early_legacy_plan_memory_key(row)
+    if not legacy_key or legacy_key == active_key or legacy_key not in memories:
+        return
+    memory = dict(memories.pop(legacy_key) or {})
+    memory["legacy_candidate_id"] = memory.get("candidate_id") or legacy_key
+    memory["candidate_id"] = active_key
+    memory["identity_migration"] = {
+        "from": "plan_level_candidate_id",
+        "to": "setup_generation_candidate_id",
+        "legacy_candidate_id": legacy_key,
+    }
+    if not memory.get("original_plan"):
+        memory["original_plan"] = {
+            "entry": _safe_float(memory.get("entry")),
+            "stop": _safe_float(memory.get("stop")),
+            "tp1": _safe_float(memory.get("tp1")),
+            "tp2": _safe_float(memory.get("tp2")),
+            "tp3": _safe_float(memory.get("tp3")),
+            "signal_timestamp": memory.get("setup_generation"),
+        }
+    memories[active_key] = memory
 
 
 def _stock_early_migrate_boundary(memory: dict, row: dict, evidence_rows: list[dict], observed_at: str, *, new_memory: bool = False) -> bool:
@@ -3582,6 +3763,7 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
     bar_marker = _stock_early_bar_marker(row, observed_at)
     evidence_rows = _stock_early_completed_evidence_rows(row, observed_at)
     new_memory = not memory
+    current_plan = _stock_early_plan_snapshot(row)
 
     if new_memory:
         memory = {
@@ -3594,6 +3776,9 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
             "stop": _safe_float(row.get("sl") if row.get("sl") is not None else row.get("stop")),
             "tp1": _safe_float(row.get("tp1") if row.get("tp1") is not None else row.get("target")),
             "setup_generation": _stock_early_setup_generation(row),
+            "original_plan": current_plan,
+            "current_plan": current_plan,
+            "plan_observed_at": observed_at,
             "first_seen_at": observed_at,
             "first_seen_bar": bar_marker,
             "observed_at_initialization": True,
@@ -3603,6 +3788,27 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
             "transitions": [],
         }
         _stock_early_transition(memory, "EARLY_ENTRY_BUILDING", "early_entry_first_printed", observed_at, bar_marker, row)
+    else:
+        if not memory.get("original_plan"):
+            memory["original_plan"] = {
+                "entry": _safe_float(memory.get("entry")),
+                "stop": _safe_float(memory.get("stop")),
+                "tp1": _safe_float(memory.get("tp1")),
+                "tp2": _safe_float(memory.get("tp2")),
+                "tp3": _safe_float(memory.get("tp3")),
+                "signal_timestamp": memory.get("setup_generation"),
+            }
+        if memory.get("current_plan") != current_plan:
+            history = list(memory.get("plan_history") or [])
+            previous_plan = memory.get("current_plan") or memory.get("original_plan")
+            if previous_plan:
+                history.append({
+                    "observed_at": memory.get("plan_observed_at") or memory.get("last_seen_at") or memory.get("first_seen_at"),
+                    "plan": previous_plan,
+                })
+                memory["plan_history"] = history[-10:]
+            memory["current_plan"] = current_plan
+            memory["plan_observed_at"] = observed_at
 
     _stock_early_migrate_boundary(memory, row, evidence_rows, observed_at, new_memory=new_memory)
     boundary = memory.get("last_evaluated_bar_time")
@@ -3677,6 +3883,12 @@ def _stock_early_public_shadow(memory: Optional[dict]) -> Optional[dict]:
         "stop",
         "tp1",
         "setup_generation",
+        "legacy_candidate_id",
+        "identity_migration",
+        "original_plan",
+        "current_plan",
+        "plan_observed_at",
+        "plan_history",
         "first_seen_at",
         "observed_at_initialization",
         "initialization_evidence",
@@ -3877,8 +4089,9 @@ def update_stock_early_entry_shadow(rows: list, near_miss: list, scan_meta: Opti
             if not key:
                 continue
             bucket = _ranking_status_bucket(row)
+            _stock_early_migrate_legacy_memory_key(memories, row, key)
             has_existing = key in memories
-            if bucket != "EARLY_ENTRY" and not has_existing:
+            if not has_existing and not _stock_early_trackable_bucket(row, bucket):
                 continue
             before = json.dumps(memories.get(key, {}), sort_keys=True, default=str)
             bar_marker = _stock_early_bar_marker(row, observed_at)
@@ -3898,6 +4111,7 @@ def update_stock_early_entry_shadow(rows: list, near_miss: list, scan_meta: Opti
 
         for row in all_rows:
             row.pop("_lifecycle_completed_bars", None)
+        apply_stock_new_entry_signals(all_rows)
 
         for key in existing_keys - touched_keys:
             memory = memories.get(key)

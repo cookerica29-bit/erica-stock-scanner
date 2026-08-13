@@ -219,6 +219,26 @@ def test_same_ticker_timeframe_direction_memories_coexist_and_only_matching_plan
     replacement = setup(ticker="COL", timeframe="1D", direction="LONG", entry=100.5, sl=95, tp1=110, current_bar=2, price=100.6, current_bar_low=100.3, current_bar_high=100.8)
     scanner.update_stock_early_entry_shadow([replacement], [], {"ranking_generated_at": "2026-08-05T11:00:00Z"}, generated_at="2026-08-05T11:00:00Z")
     diag = scanner.stock_early_entry_shadow_diagnostics()
+    assert diag["total_memories"] == 3
+    assert diag["states"]["EARLY_TOUCH"] == 3
+    assert replacement["early_entry_shadow"]["original_plan"]["entry"] == 100
+    assert replacement["early_entry_shadow"]["current_plan"]["entry"] == 100.5
+
+    new_generation = setup(
+        ticker="COL",
+        timeframe="1D",
+        direction="LONG",
+        entry=101.5,
+        sl=96,
+        tp1=111,
+        signal_timestamp="2026-08-05T11:00:00Z",
+        current_bar=3,
+        price=101.6,
+        current_bar_low=101.3,
+        current_bar_high=101.8,
+    )
+    scanner.update_stock_early_entry_shadow([new_generation], [], {"ranking_generated_at": "2026-08-05T12:00:00Z"}, generated_at="2026-08-05T12:00:00Z")
+    diag = scanner.stock_early_entry_shadow_diagnostics()
     assert diag["total_memories"] == 4
     assert diag["states"]["PLAN_REPLACED"] == 1
     assert diag["states"]["EARLY_TOUCH"] == 3
