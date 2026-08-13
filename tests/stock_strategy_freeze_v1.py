@@ -464,6 +464,78 @@ DISPLACEMENT_CASES = [
 ]
 
 
+def executable_fixture(**overrides) -> dict:
+    row = {
+        "ticker": "EXECFIX",
+        "timeframe": "1D",
+        "direction": "LONG",
+        "entryStatus": "Tradeable",
+        "entry": 100.0,
+        "price": 100.0,
+        "current_quote_price": 100.0,
+        "atr": 4.0,
+        "distanceFromEntryAtr": 0.0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_executable_short_live_quote_above_entry_blocks() -> None:
+    row = executable_fixture(
+        direction="SHORT",
+        entry=1219.60,
+        price=1217.17,
+        current_quote_price=1243.99,
+        atr=25.80,
+        distanceFromEntryAtr=0.09,
+    )
+    assert_equal("short wrong-side live quote", scanner._ranking_entry_executable(row), False)
+
+
+def test_executable_long_live_quote_below_entry_blocks() -> None:
+    row = executable_fixture(
+        direction="LONG",
+        entry=100.0,
+        price=100.2,
+        current_quote_price=99.9,
+        atr=2.0,
+        distanceFromEntryAtr=0.1,
+    )
+    assert_equal("long wrong-side live quote", scanner._ranking_entry_executable(row), False)
+
+
+def test_executable_short_both_prices_below_entry_passes() -> None:
+    row = executable_fixture(
+        direction="SHORT",
+        entry=100.0,
+        price=99.8,
+        current_quote_price=99.7,
+        atr=2.0,
+        distanceFromEntryAtr=0.1,
+    )
+    assert_equal("short correct-side live quote", scanner._ranking_entry_executable(row), True)
+
+
+def test_executable_missing_live_quote_blocks() -> None:
+    row = executable_fixture(
+        direction="LONG",
+        entry=100.0,
+        price=100.1,
+        current_quote_price=None,
+        atr=2.0,
+        distanceFromEntryAtr=0.05,
+    )
+    assert_equal("missing live quote fails closed", scanner._ranking_entry_executable(row), False)
+
+
+EXECUTABLE_GATE_CASES = [
+    test_executable_short_live_quote_above_entry_blocks,
+    test_executable_long_live_quote_below_entry_blocks,
+    test_executable_short_both_prices_below_entry_passes,
+    test_executable_missing_live_quote_blocks,
+]
+
+
 def main() -> int:
     assert_equal("strategy version", scanner.STOCK_SCANNER_STRATEGY_VERSION, EXPECTED_VERSION)
     assert_equal("strategy baseline", scanner.STOCK_SCANNER_STRATEGY_BASELINE_COMMIT, EXPECTED_BASELINE)
@@ -489,9 +561,13 @@ def main() -> int:
     for displacement_case in DISPLACEMENT_CASES:
         displacement_case()
 
+    for executable_case in EXECUTABLE_GATE_CASES:
+        executable_case()
+
     print(
         f"Stock Scanner Strategy {EXPECTED_VERSION} regression passed "
-        f"({len(CASES)} snapshot cases + {len(DISPLACEMENT_CASES)} displacement cases)."
+        f"({len(CASES)} snapshot cases + {len(DISPLACEMENT_CASES)} displacement cases "
+        f"+ {len(EXECUTABLE_GATE_CASES)} executable gate cases)."
     )
     return 0
 

@@ -7550,7 +7550,8 @@ def _ranking_entry_executable(row: dict) -> bool:
     direction = str(row.get("direction") or row.get("trend") or "").upper()
     entry = _safe_float(row.get("entry"))
     price = _safe_float(row.get("price") if row.get("price") is not None else row.get("current_price"))
-    if direction not in {"LONG", "SHORT"} or entry is None or price is None:
+    quote_price = _safe_float(row.get("current_quote_price"))
+    if direction not in {"LONG", "SHORT"} or entry is None or price is None or quote_price is None:
         return False
 
     atr_distance = _safe_float(row.get("distanceFromEntryAtr"))
@@ -7558,8 +7559,8 @@ def _ranking_entry_executable(row: dict) -> bool:
         return False
 
     if direction == "LONG":
-        return price >= entry
-    return price <= entry
+        return quote_price >= entry
+    return quote_price <= entry
 
 
 def _ranking_status_bucket(row: dict) -> str:
