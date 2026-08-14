@@ -7451,9 +7451,16 @@ function renderMarketIntelligencePanel(rows = [], meta = {}) {
   const el = document.getElementById('marketIntelligence');
   if (!el) return;
   const allRows = Array.isArray(rows) ? rows : [];
-  const intel = meta.market_intelligence && Object.keys(meta.market_intelligence).length
+  const baseIntel = meta.market_intelligence && Object.keys(meta.market_intelligence).length
     ? meta.market_intelligence
     : marketIntelligenceFallback(allRows, meta);
+  const authoritativeIntel = marketIntelligenceFallback(allRows, meta);
+  const intel = {
+    ...baseIntel,
+    top_opportunity: authoritativeIntel.top_opportunity,
+    most_common_status: authoritativeIntel.most_common_status,
+    status_distribution: authoritativeIntel.status_distribution,
+  };
   const diag = meta.market_intelligence_diagnostics || {};
   const top = intel.top_opportunity || {};
   const status = intel.most_common_status || topDistributionLabel(intel.status_distribution || {});
