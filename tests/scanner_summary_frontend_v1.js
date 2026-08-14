@@ -161,7 +161,7 @@ const fullSetup = {
 
 const summaryHtml = context.renderCard(summarySetup);
 const fullHtml = context.renderCard(fullSetup);
-['MO', 'ENTER NOW', '$68.26', '$68.39', '$66.88', 'Budget Friendly'].forEach(fragment => {
+['MO', 'ENTER NOW', '$68.26', '$68.39', '$66.88', 'Lower Indicative Cost'].forEach(fragment => {
   assert.ok(summaryHtml.includes(fragment), `summary card should include ${fragment}`);
   assert.ok(fullHtml.includes(fragment), `full card should include ${fragment}`);
 });

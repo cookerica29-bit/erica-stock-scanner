@@ -264,13 +264,13 @@ assert.strictEqual(context.accessibilityScore(hydratedAffordable).key, 'easy');
 assert.strictEqual(context.accessibilityScore(pendingPricing).label, 'Pricing pending');
 assert.strictEqual(context.accessibilityScore(notRequestedPricing).label, 'Pricing not loaded');
 assert.strictEqual(context.selectedEstimatedContractCost(liveBudgetFriendly), 75);
-assert.strictEqual(context.budgetBadge(liveBudgetFriendly).displayLabel, 'Budget Friendly');
+assert.strictEqual(context.budgetBadge(liveBudgetFriendly).displayLabel, 'Lower Indicative Cost');
 assert.strictEqual(context.setupFitsTradingBudget(liveBudgetFriendly, 100), true);
 assert.strictEqual(context.selectedEstimatedContractCost(livePremiumTrade), 585);
-assert.strictEqual(context.budgetBadge(livePremiumTrade).displayLabel, 'Moderate Cost');
+assert.strictEqual(context.budgetBadge(livePremiumTrade).displayLabel, 'Mid Indicative Cost');
 assert.strictEqual(context.setupFitsTradingBudget(livePremiumTrade, 500), false);
 assert.strictEqual(context.selectedEstimatedContractCost(stalePremiumTrade), 585);
-assert.strictEqual(context.budgetBadge(stalePremiumTrade).displayLabel, 'Stale Estimate');
+assert.strictEqual(context.budgetBadge(stalePremiumTrade).displayLabel, 'Stale Indicative Cost');
 assert.strictEqual(context.budgetBadge(stalePremiumTrade).costText, 'Stale $585.00');
 assert.strictEqual(context.renderBudgetBadge(stalePremiumTrade).includes('Cost Unavailable'), false);
 assert.strictEqual(context.selectedEstimatedContractCost(notRequestedWithRawAsk), null);
@@ -282,7 +282,7 @@ assert.strictEqual(context.setupFitsTradingBudget(unavailablePricing, 1000), fal
 assert.strictEqual(context.selectedEstimatedContractCost(zeroQuote), null);
 assert.strictEqual(context.setupFitsTradingBudget(zeroQuote, 100), false);
 assert.strictEqual(context.accessibilityScore(premiumOnly).key, 'premium');
-assert.strictEqual(context.renderBudgetBadge(budgetFriendly).includes('Budget Friendly'), true);
+assert.strictEqual(context.renderBudgetBadge(budgetFriendly).includes('Lower Indicative Cost'), true);
 assert.strictEqual(context.renderBudgetBadge(pendingPricing).includes('Pricing loading...'), true);
 assert.strictEqual(context.renderBudgetBadge(notRequestedPricing).includes('Pricing not loaded'), true);
 
@@ -317,7 +317,7 @@ assert.ok(elements.topOpportunities.innerHTML.includes('No currently priced oppo
 elements.tradingBudgetFilter.value = '250';
 
 const cardHtml = context.renderCard(budgetFriendly);
-assert.ok(cardHtml.includes('Budget Friendly'));
-assert.ok(cardHtml.includes('Est. $85.00'));
+assert.ok(cardHtml.includes('Lower Indicative Cost'));
+assert.ok(cardHtml.includes('Indicative $85.00'));
 
 console.log('budget_opportunity_discovery_v1 passed');

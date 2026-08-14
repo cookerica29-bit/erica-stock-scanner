@@ -305,27 +305,26 @@ assert.ok(enterWaiting.includes('execute-waiting-entry'));
 assert.ok(enterWaiting.includes('Setup confirmed. Wait for price to reach the planned entry at $46.05.'));
 assert.ok(enterWaiting.includes('Set an alert at $46.05.'));
 assert.ok(enterWaiting.includes('<div class="index-simple-label">Why</div>'));
-assert.ok(enterWaiting.includes('Short setup with bearish trend; entry area is active.'));
-assert.ok(!enterWaiting.includes('Short setup with bearish trend; Setup confirmed. Wait'), 'Why summary should not duplicate Next Step wording verbatim');
+assert.ok(enterWaiting.includes('Model short setup with bearish trend; entry area is active.'));
+assert.ok(!enterWaiting.includes('Model short setup with bearish trend; Setup confirmed. Wait'), 'Why summary should not duplicate Next Step wording verbatim');
 assert.ok(!enterWaiting.includes('Continue monitoring. The setup is still developing.'));
-assert.ok(enterWaiting.includes('🎯 Option Plan'));
+assert.ok(enterWaiting.includes('🎯 Contract Candidate'));
 assert.ok(enterWaiting.includes('🔴 PUT'));
-assert.ok(enterWaiting.includes('Preferred Strike'));
+assert.ok(enterWaiting.includes('Strike'));
 assert.ok(enterWaiting.includes('$45.00'));
 assert.ok(enterWaiting.includes('21–35 DTE'));
-assert.ok(enterWaiting.includes('7–12 Trading Days'));
 assert.ok(enterWaiting.includes('-$2.05 (-4.5%)'));
-assert.ok(enterWaiting.includes('★★★★☆'));
 assert.ok(!enterWaiting.includes('Suggested Contract'));
 assert.ok(!enterWaiting.includes('Best Quality'));
 assert.ok(!enterWaiting.includes('top pick'));
-assert.ok(enterWaiting.includes('Budget Friendly'));
-assert.ok(enterWaiting.includes('Est. $120.00'));
+assert.ok(enterWaiting.includes('Lower Indicative Cost'));
+assert.ok(enterWaiting.includes('Indicative $120.00'));
 assert.ok(!enterWaiting.includes('Kairos Confidence'));
+assert.ok(!enterWaiting.includes('Expected Hold'));
 assert.ok(!enterWaiting.includes('View contract details'));
 assert.ok(enterWaiting.includes('data-plan-visual="risk-reward"'));
-assert.ok(enterWaiting.includes('>Now</text>'));
-assert.ok(enterWaiting.includes('>Target</text>'));
+assert.ok(enterWaiting.includes('>Quote Check</text>') || enterWaiting.includes('>Last Candle Close</text>'));
+assert.ok(enterWaiting.includes('>Planned TP1</text>'));
 assert.ok(enterWaiting.includes("openTerms('term-risk-reward')"));
 
 const longBar = context.riskRewardBarData({
@@ -382,16 +381,16 @@ const closeEntryNowHtml = htmlFor(setup({ price: 170.06, entry: 169.05, sl: 172.
 assert.ok(closeEntryNowHtml.includes('viewBox="0 0 300 86"'));
 assert.ok(closeEntryNowHtml.includes('x="24" y="8">Risk</text>'));
 assert.ok(closeEntryNowHtml.includes('x="276" y="8" text-anchor="end">Reward</text>'));
-assert.ok(closeEntryNowHtml.includes('y="24" text-anchor="middle">Entry</text>'));
-assert.ok(closeEntryNowHtml.includes('y="80" text-anchor="middle">Now</text>'));
+assert.ok(closeEntryNowHtml.includes('y="24" text-anchor="middle">Planned Entry</text>'));
+assert.ok(closeEntryNowHtml.includes('y="80" text-anchor="middle">Quote Check</text>') || closeEntryNowHtml.includes('y="80" text-anchor="middle">Last Candle Close</text>'));
 const riskAxisY = Number(closeEntryNowHtml.match(/<text class="rr-axis-label" x="24" y="([^"]+)">Risk<\/text>/)[1]);
-const closeEntryLabelY = Number(closeEntryNowHtml.match(/<text class="rr-point-label" x="[^"]+" y="([^"]+)" text-anchor="middle">Entry<\/text>/)[1]);
+const closeEntryLabelY = Number(closeEntryNowHtml.match(/<text class="rr-point-label" x="[^"]+" y="([^"]+)" text-anchor="middle">Planned Entry<\/text>/)[1]);
 assert.ok(closeEntryLabelY - riskAxisY >= 12, 'close Entry label must clear the Risk/Reward axis row');
 
 assert.ok(enterWaiting.includes('View Trade Chart'), 'Scanner setup cards should expose the guided trade chart expander');
 assert.ok(enterWaiting.includes('Planned Entry'));
-assert.ok(enterWaiting.includes('Stop Loss'));
-assert.ok(enterWaiting.includes('First Target'));
+assert.ok(enterWaiting.includes('Model Stop'));
+assert.ok(enterWaiting.includes('Planned TP1'));
 assert.ok(enterWaiting.includes('Price has not reached the planned entry yet.'));
 assert.ok(enterWaiting.includes('Set an alert at the planned entry and wait.'));
 assert.ok(enterWaiting.includes('Why Kairos Likes This Trade'));
@@ -414,7 +413,7 @@ const guidedLongSvg = context.renderGuidedTradeChartSvg(guidedLongPlan, [
   { timestamp: '2026-07-20T18:00:00Z', open: 101, high: 104, low: 100, close: 103 },
 ]);
 assert.ok(guidedLongSvg.includes('Planned Entry'));
-assert.ok(guidedLongSvg.includes('Current Price'));
+assert.ok(guidedLongSvg.includes('Quote Check / Last Close'));
 assert.ok(guidedLongSvg.includes('guided-risk-zone'));
 assert.ok(guidedLongSvg.includes('guided-reward-zone'));
 assert.ok(!guidedLongSvg.includes('NaN'), 'Guided chart SVG should not emit NaN coordinates');
@@ -435,7 +434,7 @@ assert.ok(guidedShortPlan.targets.every(([, value]) => value < guidedShortPlan.e
 assert.ok(context.guidedPriceContext(guidedShortPlan).includes('moving toward TP1'));
 
 const guidedMissingTargets = context.renderGuidedTradeChartBlock(setup({ tp1: 44, tp2: null, tp3: null }), 'setup');
-assert.ok(guidedMissingTargets.includes('First Target'));
+assert.ok(guidedMissingTargets.includes('Planned TP1'));
 assert.ok(!guidedMissingTargets.includes('TP2'));
 assert.ok(!guidedMissingTargets.includes('TP3'));
 assert.ok(!guidedMissingTargets.includes('null'));
@@ -569,7 +568,7 @@ delete storage.kairos_journal_admin_token;
 
 const missingPlanFallback = htmlFor(setup({ entry: null, sl: null, tp1: null }));
 assert.ok(!missingPlanFallback.includes('data-plan-visual="risk-reward"'));
-assert.ok(missingPlanFallback.includes('<div class="index-plan-row current-price"><span>Current Price</span>'));
+assert.ok(missingPlanFallback.includes('<div class="index-plan-row current-price"><span>Last Candle Close</span>'));
 
 // A setup with only b_plus_tradeable (no true trigger confirmation) must
 // NOT be labeled ENTER NOW. It gets its own lower-confirmation Early Entry
@@ -659,7 +658,7 @@ assert.ok(earlyEntryCard.includes('execute-early-entry'));
 assert.ok(earlyEntryCard.includes('EARLY ENTRY'));
 assert.ok(earlyEntryCard.includes("Structure has broken, but full confirmation hasn&#39;t happened yet."));
 assert.ok(earlyEntryCard.includes('Consider smaller size given lower confirmation.'));
-assert.ok(earlyEntryCard.includes('Short setup with mixed trend; structure has started, but full confirmation is not complete.'));
+assert.ok(earlyEntryCard.includes('Model short setup with mixed trend; structure has started, but full confirmation is not complete.'));
 assert.ok(!earlyEntryCard.includes('Price is at the planned entry. You can execute this trade.'));
 assert.ok(context.passesFrameworkFilters(bPlusOnlySetup, { status: 'EARLY_ENTRY', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
 assert.ok(!context.passesFrameworkFilters(bPlusOnlySetup, { status: 'ENTER_NOW', tickerSearch: [], direction: 'all', quality: 'all', contractType: 'all' }));
@@ -834,15 +833,15 @@ assert.ok(scannerRenderElements.summary.innerHTML.includes('Showing 1 of 2 setup
 assert.ok(scannerRenderElements.summary.innerHTML.includes('Opportunity Rank'));
 assert.ok(
   scannerRenderElements.marketSnapshot.innerHTML.includes(
-    '<span class="label">Top Setup</span><span class="count">1</span>'
+    '<span class="label">A Setup</span><span class="count">1</span>'
   ),
-  'Market Snapshot should keep full-universe Top Setup count while quality filter is active'
+  'Market Snapshot should keep full-universe A Setup count while quality filter is active'
 );
 assert.ok(
   scannerRenderElements.marketSnapshot.innerHTML.includes(
-    '<span class="label">Strong Setup</span><span class="count">1</span>'
+    '<span class="label">B Setup</span><span class="count">1</span>'
   ),
-  'Market Snapshot should keep full-universe Strong Setup count while quality filter is active'
+  'Market Snapshot should keep full-universe B Setup count while quality filter is active'
 );
 context.document.getElementById = originalGetElementById;
 
@@ -952,7 +951,7 @@ const reachedLive = htmlFor(setup({ price: 46.05, entryStatus: 'Tradeable', dist
 assert.ok(reachedLive.includes('data-execution-state="SETUP_CONFIRMED_ENTRY_REACHED"'));
 assert.ok(reachedLive.includes('data-execute-visual-state="ready"'));
 assert.ok(reachedLive.includes('execute-entry-ready'));
-assert.ok(reachedLive.includes('Price is at the planned entry. Use the Option Plan and confirm your selected contract in your broker.'));
+assert.ok(reachedLive.includes('Price is at the planned entry. Review the Contract Candidate and verify the selected contract in your broker.'));
 
 const reachedPotential = htmlFor(
   setup({ price: 46.05, entryStatus: 'Tradeable', distanceFromEntryAtr: 0.1, option_plan: null }),
@@ -960,32 +959,32 @@ const reachedPotential = htmlFor(
 );
 assert.ok(reachedPotential.includes('execute-entry-ready'));
 assert.ok(reachedPotential.includes('Price is at the planned entry.'));
-assert.ok(reachedPotential.includes('Use the Option Plan to select and confirm a contract in your broker before executing.'));
+assert.ok(reachedPotential.includes('Use the Contract Candidate as planning guidance and verify the contract in your broker before executing.'));
 
 const almostReady = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B', entryStatus: 'Near Entry', confirmationStarted: false }));
 assert.ok(almostReady.includes('data-normalized-status="ALMOST_READY"'));
 assert.ok(almostReady.includes('execute-not-ready'));
 assert.ok(almostReady.includes('Setup is still developing. Wait for full confirmation.'));
-assert.ok(almostReady.includes('Short setup with bearish trend; near the entry area and waiting on final confirmation.'));
+assert.ok(almostReady.includes('Model short setup with bearish trend; near the entry area and waiting on final confirmation.'));
 
 const building = htmlFor(setup({ trade_eval: { trade_stage: 'BUILDING / WATCHLIST' }, setupGrade: 'B', entryStatus: 'Waiting', confirmationStarted: false, direction: 'LONG' }));
 assert.ok(building.includes('data-normalized-status="BUILDING"'));
 assert.ok(building.includes('execute-not-ready'));
 assert.ok(building.includes('Continue monitoring. The setup is still developing.'));
-assert.ok(building.includes('Long setup with bearish trend; forming, but not ready yet.'));
+assert.ok(building.includes('Model long setup with bearish trend; forming, but not ready yet.'));
 
 const skipCard = htmlFor(setup({
   setupGrade: 'C',
   trade_eval: { trade_stage: 'RANGE / NO TRADE' },
 }));
-assert.ok(skipCard.includes('Short setup with bearish trend; not valid right now.'));
+assert.ok(skipCard.includes('Model short setup with bearish trend; not valid right now.'));
 
 const highQualityTooFar = htmlFor(setup({
   setupGrade: 'A',
   entryStatus: 'Too Far',
   trade_eval: { trade_stage: 'B+ TRADEABLE', b_plus_tradeable: true, no_trade_reasons: [] },
 }));
-assert.ok(highQualityTooFar.includes('Short setup with bearish trend; still Grade A — just too far from the ideal entry zone to act on right now.'));
+assert.ok(highQualityTooFar.includes('Model short setup with bearish trend; still Grade A — just too far from the ideal entry zone to act on right now.'));
 
 const strongTooFar = htmlFor(setup({
   setupGrade: 'B',
@@ -993,14 +992,14 @@ const strongTooFar = htmlFor(setup({
   confirmationStarted: false,
   trade_eval: { trade_stage: 'BUILDING / WATCHLIST', no_trade_reasons: [] },
 }));
-assert.ok(strongTooFar.includes('Short setup with bearish trend; still Grade B — just too far from the ideal entry zone to act on right now.'));
+assert.ok(strongTooFar.includes('Model short setup with bearish trend; still Grade B — just too far from the ideal entry zone to act on right now.'));
 
 const structurallyBlockedTooFar = htmlFor(setup({
   setupGrade: 'A',
   entryStatus: 'Too Far',
   trade_eval: { trade_stage: 'RANGE / NO TRADE', no_trade_reasons: ['Macro/context conflict'] },
 }));
-assert.ok(structurallyBlockedTooFar.includes('Short setup with bearish trend; not valid right now.'));
+assert.ok(structurallyBlockedTooFar.includes('Model short setup with bearish trend; not valid right now.'));
 assert.ok(!structurallyBlockedTooFar.includes('still Grade A — just too far'));
 
 const loadingEarnings = htmlFor(setup({ earnings: { status: 'loading', started_at: new Date().toISOString() } }));
@@ -1094,41 +1093,41 @@ assert.strictEqual(notPreservedForDifferentSetup[0].earnings.date, null);
 assert.strictEqual(notPreservedForDifferentSetup[0].earnings.source, 'background_refresh');
 
 const singleTarget = htmlFor(setup({ tp1: 44, tp2: null, tp3: null, final_target: null }));
-assert.ok(singleTarget.includes('<div class="rr-value-label">TP1</div>'));
+assert.ok(singleTarget.includes('<div class="rr-value-label">Planned TP1</div>'));
 assert.ok(singleTarget.includes('<div class="rr-value-price">$44.00</div>'));
-assert.ok(!singleTarget.includes('<div class="rr-value-label">TP2</div>'));
-assert.ok(!singleTarget.includes('<div class="rr-value-label">TP3</div>'));
+assert.ok(!singleTarget.includes('<div class="rr-value-label">Planned TP2</div>'));
+assert.ok(!singleTarget.includes('<div class="rr-value-label">Planned TP3</div>'));
 assert.ok(singleTarget.includes('data-current-pct="22.00"'), 'Risk/reward Now marker should fall back to candle-close price');
 
 const quoteCurrent = htmlFor(setup({ current_quote_price: 46.5, tp1: 44, tp2: null, tp3: null, final_target: null }));
 assert.ok(quoteCurrent.includes('data-current-pct="16.67"'), 'Risk/reward Now marker should prefer current quote price over candle-close price');
 
 const planValueLabels = [...singleTarget.matchAll(/<div class="rr-value-label">([^<]+)<\/div>/g)].map(match => match[1]);
-assert.deepStrictEqual(planValueLabels, ['Entry', 'Stop', 'TP1']);
+assert.deepStrictEqual(planValueLabels, ['Planned Entry', 'Model Stop', 'Planned TP1']);
 assert.ok(singleTarget.includes('<div class="rr-value-item entry">'));
 assert.ok(!singleTarget.includes('<div class="rr-value-label">Now</div>'));
 
 const threeTargets = htmlFor(setup({ tp1: 45, tp2: 44, tp3: 43 }));
 const threeTargetLabels = [...threeTargets.matchAll(/<div class="rr-value-label">([^<]+)<\/div>/g)].map(match => match[1]);
-assert.deepStrictEqual(threeTargetLabels, ['Entry', 'Stop', 'TP1', 'TP2', 'TP3']);
-assert.ok(threeTargets.includes('<div class="rr-value-label">TP1</div>'));
+assert.deepStrictEqual(threeTargetLabels, ['Planned Entry', 'Model Stop', 'Planned TP1', 'Planned TP2', 'Planned TP3']);
+assert.ok(threeTargets.includes('<div class="rr-value-label">Planned TP1</div>'));
 assert.ok(threeTargets.includes('<div class="rr-value-price">$45.00</div>'));
-assert.ok(threeTargets.includes('<div class="rr-value-label">TP2</div>'));
+assert.ok(threeTargets.includes('<div class="rr-value-label">Planned TP2</div>'));
 assert.ok(threeTargets.includes('<div class="rr-value-price">$44.00</div>'));
-assert.ok(threeTargets.includes('<div class="rr-value-label">TP3</div>'));
+assert.ok(threeTargets.includes('<div class="rr-value-label">Planned TP3</div>'));
 assert.ok(threeTargets.includes('<div class="rr-value-price">$43.00</div>'));
-assert.ok(!threeTargets.includes('<div class="rr-value-label">Final Target</div>'));
+assert.ok(!threeTargets.includes('<div class="rr-value-label">Planned Final Target</div>'));
 
 const finalTarget = htmlFor(setup({ tp1: 45, tp2: null, tp3: null, final_target: 42 }));
-assert.ok(finalTarget.includes('<div class="rr-value-label">TP1</div>'));
+assert.ok(finalTarget.includes('<div class="rr-value-label">Planned TP1</div>'));
 assert.ok(finalTarget.includes('<div class="rr-value-price">$45.00</div>'));
-assert.ok(finalTarget.includes('<div class="rr-value-label">Final Target</div>'));
+assert.ok(finalTarget.includes('<div class="rr-value-label">Planned Final Target</div>'));
 assert.ok(finalTarget.includes('<div class="rr-value-price">$42.00</div>'));
 
 const duplicateTargets = htmlFor(setup({ tp1: 44, tp2: 44, tp3: 43, final_target: 43 }));
-assert.strictEqual((duplicateTargets.match(/<div class="rr-value-label">TP2<\/div>/g) || []).length, 0);
-assert.strictEqual((duplicateTargets.match(/<div class="rr-value-label">Final Target<\/div>/g) || []).length, 0);
-assert.ok(duplicateTargets.includes('<div class="rr-value-label">TP3</div>'));
+assert.strictEqual((duplicateTargets.match(/<div class="rr-value-label">Planned TP2<\/div>/g) || []).length, 0);
+assert.strictEqual((duplicateTargets.match(/<div class="rr-value-label">Planned Final Target<\/div>/g) || []).length, 0);
+assert.ok(duplicateTargets.includes('<div class="rr-value-label">Planned TP3</div>'));
 assert.ok(duplicateTargets.includes('<div class="rr-value-price">$43.00</div>'));
 
 const snapshot = context.scannerSnapshotFromSetup(setup({
@@ -1196,9 +1195,9 @@ const tieredSetup = setup({
   },
 });
 const tieredHtml = context.renderBestContractBlock(tieredSetup);
-assert.ok(tieredHtml.includes('Best Quality'));
-assert.ok(tieredHtml.includes('Balanced'));
-assert.ok(tieredHtml.includes('Budget'));
+assert.ok(tieredHtml.includes('Primary Candidate'));
+assert.ok(tieredHtml.includes('Alternate Candidate'));
+assert.ok(tieredHtml.includes('Budget Candidate'));
 assert.ok(tieredHtml.includes('$800.00'));
 assert.ok(tieredHtml.includes('$550.00'));
 assert.ok(tieredHtml.includes('$395.00'));
@@ -1213,20 +1212,20 @@ assert.strictEqual(balancedSnapshot.premium_paid, 5.5);
 assert.strictEqual(balancedSnapshot.contract_guidance_source, 'balanced');
 assert.strictEqual(balancedSnapshot.contract_selection_source, 'balanced');
 assert.strictEqual(balancedSnapshot.contract_tier, 'balanced');
-assert.strictEqual(balancedSnapshot.contract_tier_label, 'Balanced');
+assert.strictEqual(balancedSnapshot.contract_tier_label, 'Alternate Candidate');
 assert.strictEqual(balancedSnapshot.estimated_contract_cost_at_entry, 550);
 
 context.selectContractTier(tieredId, 'best_quality');
 const bestQualitySnapshot = context.selectedContractFromSetup(tieredSetup);
 assert.strictEqual(bestQualitySnapshot.contract_tier, 'best_quality');
-assert.strictEqual(bestQualitySnapshot.contract_tier_label, 'Best Quality');
+assert.strictEqual(bestQualitySnapshot.contract_tier_label, 'Primary Candidate');
 assert.strictEqual(bestQualitySnapshot.strike_price, 45);
 assert.strictEqual(bestQualitySnapshot.estimated_contract_cost_at_entry, 800);
 
 context.selectContractTier(tieredId, 'budget');
 const budgetSnapshot = context.selectedContractFromSetup(tieredSetup);
 assert.strictEqual(budgetSnapshot.contract_tier, 'budget');
-assert.strictEqual(budgetSnapshot.contract_tier_label, 'Budget');
+assert.strictEqual(budgetSnapshot.contract_tier_label, 'Budget Candidate');
 assert.strictEqual(budgetSnapshot.strike_price, 43);
 assert.strictEqual(budgetSnapshot.estimated_contract_cost_at_entry, 395);
 

@@ -343,12 +343,12 @@
         if (hasAvailableContract(contractLifecycle)) {
           return {
             label: 'Next Step',
-            lines: ['Price is at the planned entry. Use the Option Plan and confirm your selected contract in your broker.'],
+            lines: ['Price is at the planned entry. Review the Contract Candidate and verify the selected contract in your broker.'],
           };
         }
         return {
           label: 'Next Step',
-          lines: ['Price is at the planned entry.', 'Use the Option Plan to select and confirm a contract in your broker before executing.'],
+          lines: ['Price is at the planned entry.', 'Use the Contract Candidate as planning guidance and verify the contract in your broker before executing.'],
         };
       }
       return {
@@ -406,18 +406,18 @@
       targetRows.push({ label, value, key });
     };
     if (tp2 === null && tp3 === null && finalTarget === null) {
-      pushDistinct('Target', tp1, 'target');
+      pushDistinct('Planned TP1', tp1, 'target');
     } else {
-      pushDistinct('TP1', tp1, 'tp1');
-      pushDistinct('TP2', tp2, 'tp2');
-      pushDistinct('TP3', tp3, 'tp3');
-      if (tp2 === null && tp3 === null) pushDistinct('Final Target', finalTarget, 'final-target');
-      else pushDistinct('Final Target', finalTarget, 'final-target');
+      pushDistinct('Planned TP1', tp1, 'tp1');
+      pushDistinct('Planned TP2', tp2, 'tp2');
+      pushDistinct('Planned TP3', tp3, 'tp3');
+      if (tp2 === null && tp3 === null) pushDistinct('Planned Final Target', finalTarget, 'final-target');
+      else pushDistinct('Planned Final Target', finalTarget, 'final-target');
     }
     return [
-      { label: 'Current Price', value: currentPrice(setup), key: 'current-price' },
+      { label: 'Quote Check / Last Close', value: currentPrice(setup), key: 'current-price' },
       { label: 'Planned Entry', value: plannedEntry(setup), key: 'planned-entry' },
-      { label: 'Stop', value: finiteNumber(setup.sl ?? setup.stop ?? setup.stop_price), key: 'stop' },
+      { label: 'Model Stop', value: finiteNumber(setup.sl ?? setup.stop ?? setup.stop_price), key: 'stop' },
       ...targetRows,
     ];
   }

@@ -16,18 +16,18 @@ function setup(overrides = {}) {
   };
 }
 
-// Label data for cards: Current Price and Planned Entry remain separate.
+// Label data for cards: quote/close and Planned Entry remain separate.
 const rows = guidance.executionPlanRows(setup());
-assert.deepStrictEqual(rows.map(row => row.label), ['Current Price', 'Planned Entry', 'Stop', 'Target']);
+assert.deepStrictEqual(rows.map(row => row.label), ['Quote Check / Last Close', 'Planned Entry', 'Model Stop', 'Planned TP1']);
 assert.strictEqual(rows.find(row => row.label === 'Planned Entry').key, 'planned-entry');
-assert.strictEqual(rows.find(row => row.label === 'Current Price').value, 75);
+assert.strictEqual(rows.find(row => row.label === 'Quote Check / Last Close').value, 75);
 assert.strictEqual(rows.find(row => row.label === 'Planned Entry').value, 70);
 assert.notStrictEqual(guidance.currentPrice(setup()), guidance.plannedEntry(setup()));
 
 const multiTargetRows = guidance.executionPlanRows(setup({ tp1: 65, tp3: 60 }));
-assert.deepStrictEqual(multiTargetRows.map(row => row.label), ['Current Price', 'Planned Entry', 'Stop', 'TP1', 'TP3']);
-assert.strictEqual(multiTargetRows.find(row => row.label === 'TP1').value, 65);
-assert.strictEqual(multiTargetRows.find(row => row.label === 'TP3').value, 60);
+assert.deepStrictEqual(multiTargetRows.map(row => row.label), ['Quote Check / Last Close', 'Planned Entry', 'Model Stop', 'Planned TP1', 'Planned TP3']);
+assert.strictEqual(multiTargetRows.find(row => row.label === 'Planned TP1').value, 65);
+assert.strictEqual(multiTargetRows.find(row => row.label === 'Planned TP3').value, 60);
 
 // Almost Ready is not setup-confirmed; it waits for confirmation, not entry fill.
 const almostReady = guidance.nextStep(setup(), { bucket: 'ALMOST_READY' }, 'pending');
@@ -122,10 +122,10 @@ const reachedStages = guidance.readinessStages(reached, { bucket: 'ENTER_NOW' })
 assert.deepStrictEqual(reachedStages.map(stage => `${stage.label}:${stage.status}`), ['Trend:Complete', 'Zone:Complete', 'Confirm:Complete', 'Execute:Ready']);
 assert.ok(reachedStages.find(stage => stage.label === 'Execute').state.includes('execute-entry-ready'));
 const enterWithContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'available');
-assert.deepStrictEqual(enterWithContract.lines, ['Price is at the planned entry. Use the Option Plan and confirm your selected contract in your broker.']);
+assert.deepStrictEqual(enterWithContract.lines, ['Price is at the planned entry. Review the Contract Candidate and verify the selected contract in your broker.']);
 
 const enterWithoutContract = guidance.nextStep(reached, { bucket: 'ENTER_NOW' }, 'potential');
-assert.deepStrictEqual(enterWithoutContract.lines, ['Price is at the planned entry.', 'Use the Option Plan to select and confirm a contract in your broker before executing.']);
+assert.deepStrictEqual(enterWithoutContract.lines, ['Price is at the planned entry.', 'Use the Contract Candidate as planning guidance and verify the contract in your broker before executing.']);
 
 // Tradeable but not Enter Now keeps the wording grounded in existing production meaning.
 const tradeable = guidance.nextStep(setup({ entryStatus: 'Tradeable' }), { bucket: 'ALMOST_READY' }, 'available');

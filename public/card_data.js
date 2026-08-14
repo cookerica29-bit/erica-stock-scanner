@@ -57,26 +57,26 @@
     const hasMultiple = tp2 !== null || tp3 !== null || finalTarget !== null;
 
     if (!hasMultiple) {
-      pushDistinct(rows, 'Target', tp1, 'target');
+      pushDistinct(rows, 'Planned TP1', tp1, 'target');
       return rows;
     }
 
-    pushDistinct(rows, 'TP1', tp1, 'tp1');
-    pushDistinct(rows, 'TP2', tp2, 'tp2');
-    pushDistinct(rows, 'TP3', tp3, 'tp3');
+    pushDistinct(rows, 'Planned TP1', tp1, 'tp1');
+    pushDistinct(rows, 'Planned TP2', tp2, 'tp2');
+    pushDistinct(rows, 'Planned TP3', tp3, 'tp3');
     if (tp2 === null && tp3 === null) {
-      pushDistinct(rows, 'Final Target', finalTarget, 'final-target');
+      pushDistinct(rows, 'Planned Final Target', finalTarget, 'final-target');
     } else if (finalTarget !== null && !rows.some(row => isSameLevel(row.value, finalTarget))) {
-      pushDistinct(rows, 'Final Target', finalTarget, 'final-target');
+      pushDistinct(rows, 'Planned Final Target', finalTarget, 'final-target');
     }
     return rows;
   }
 
   function executionPlanRows(setup = {}) {
     return [
-      { label: 'Current Price', value: finiteNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price)), key: 'current-price' },
+      { label: 'Last Candle Close', value: finiteNumber(firstPresent(setup.price, setup.current_price, setup.currentPrice, setup.underlying_price)), key: 'current-price' },
       { label: 'Planned Entry', value: finiteNumber(firstPresent(setup.entry, setup.entry_price)), key: 'planned-entry' },
-      { label: 'Stop', value: finiteNumber(firstPresent(setup.sl, setup.stop, setup.stop_price)), key: 'stop' },
+      { label: 'Model Stop', value: finiteNumber(firstPresent(setup.sl, setup.stop, setup.stop_price)), key: 'stop' },
       ...targetRows(setup),
     ];
   }

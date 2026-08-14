@@ -4,13 +4,13 @@ const fs = require('fs');
 const html = fs.readFileSync('public/index.html', 'utf8');
 
 assert.ok(html.includes('Execution Plan'), 'Execution Plan label should render');
-assert.ok(html.includes('Risk/Reward'), 'Risk/Reward row should render');
+assert.ok(html.includes('Planned TP1'), 'Planned TP1 row should render');
 assert.ok(html.includes('data-plan-visual="risk-reward"'), 'Risk/reward visual bar should render when full plan data exists');
 assert.ok(html.includes("openTerms('term-risk-reward')"), 'Execution Plan help should link to Terms');
 assert.ok(html.includes('id="term-planned-entry"'), 'Planned Entry term anchor should exist');
 assert.ok(html.includes('id="term-stop"'), 'Stop term anchor should exist');
 assert.ok(html.includes('id="term-target"'), 'Target term anchor should exist');
-assert.ok(html.includes('id="term-risk-reward"'), 'Risk/Reward term anchor should exist');
+assert.ok(html.includes('id="term-risk-reward"'), 'Planned TP1 term anchor should exist');
 assert.ok(html.includes('planned-entry'), 'Planned Entry row should have a distinct class');
 assert.ok(html.includes('.index-plan-row.planned-entry'), 'Planned Entry styling should exist');
 
@@ -24,11 +24,10 @@ assert.ok(html.includes('data-normalized-status'), 'Cards should expose normaliz
 assert.ok(html.includes('data-execution-state'), 'Cards should expose execution-state diagnostics');
 assert.ok(html.includes('data-execute-visual-state'), 'Cards should expose execute visual-state diagnostics');
 
-assert.ok(html.includes('🎯 Option Plan'), 'Scanner cards should render Option Plan heading');
-assert.ok(html.includes('Preferred Strike'), 'Option Plan should show preferred strike');
-assert.ok(html.includes('Suggested Expiration'), 'Option Plan should show DTE guidance');
-assert.ok(html.includes('Expected Hold'), 'Option Plan should show hold guidance');
-assert.ok(html.includes('term-option-plan-confidence'), 'Option Plan confidence should link to Terms');
+assert.ok(html.includes('🎯 Contract Candidate'), 'Scanner cards should render Contract Candidate heading');
+assert.ok(html.includes('Strike'), 'Contract Candidate should show strike');
+assert.ok(html.includes('Model DTE Window'), 'Contract Candidate should show DTE guidance');
+assert.ok(html.includes('term-contract'), 'Contract Candidate should link to Terms');
 
 assert.ok(html.includes('window.KairosExecutionGuidance.cardStatus'), 'Status badge should use the execution guidance status contract');
 assert.ok(html.includes('window.KairosExecutionGuidance.readinessStages'), 'Timeline should use the execution guidance stage contract');
