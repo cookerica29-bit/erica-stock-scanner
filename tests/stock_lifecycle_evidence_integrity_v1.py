@@ -117,7 +117,7 @@ def test_cached_capitalized_bars_replay_between_refresh_retest_after_confirmatio
 
     confirmed = setup(
         price=102.0,
-        _lifecycle_completed_bars=[bar("2026-08-05T11:00:00Z", high=102.4, low=101.4, close=102.0)],
+        _lifecycle_completed_bars=[bar("2026-08-05T11:00:00Z", high=102.4, low=101.4, close=102.0) | {"trigger_confirmed": True, "a_plus_ready": True}],
         trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
     )
     shadow = run(confirmed, "2026-08-05T11:05:00Z")
@@ -126,8 +126,8 @@ def test_cached_capitalized_bars_replay_between_refresh_retest_after_confirmatio
     retest = setup(
         price=100.05,
         _lifecycle_completed_bars=[
-            bar("2026-08-05T11:00:00Z", high=102.4, low=101.4, close=102.0),
-            bar("2026-08-05T12:00:00Z", high=100.4, low=99.9, close=100.05),
+            bar("2026-08-05T11:00:00Z", high=102.4, low=101.4, close=102.0) | {"trigger_confirmed": True, "a_plus_ready": True},
+            bar("2026-08-05T12:00:00Z", high=100.4, low=99.9, close=100.05) | {"trigger_confirmed": True, "a_plus_ready": True},
         ],
         trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
     )
@@ -136,12 +136,62 @@ def test_cached_capitalized_bars_replay_between_refresh_retest_after_confirmatio
     assert shadow["retest_at"] == "2026-08-05T12:00:00Z"
 
 
+def test_completed_bar_does_not_inherit_future_current_confirmation():
+    reset_memory()
+    monday_setup_with_friday_bar = setup(
+        signal_timestamp="2026-08-17T04:00:00Z",
+        current_candle_time="2026-08-14T04:00:00Z",
+        current_candle_complete=True,
+        current_bar_open=99.5,
+        current_bar_high=100.3,
+        current_bar_low=99.8,
+        current_bar_close=100.05,
+        price=100.05,
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    shadow = run(monday_setup_with_friday_bar, "2026-08-17T14:30:00Z")
+    assert shadow["state"] == "EARLY_ENTRY_BUILDING"
+    assert not shadow.get("confirmation_at")
+    assert shadow.get("trigger_confirmed") is False
+
+
+def test_historical_completed_bar_replay_uses_only_bar_owned_confirmation():
+    monday_setup_with_friday_history = setup(
+        signal_timestamp="2026-08-17T04:00:00Z",
+        _lifecycle_completed_bars=[
+            bar("2026-08-14T04:00:00Z", high=100.3, low=99.8, close=100.05),
+        ],
+        trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
+    )
+    shadow = run(monday_setup_with_friday_history, "2026-08-17T14:30:00Z")
+    assert shadow["state"] == "EARLY_ENTRY_BUILDING"
+    assert not shadow.get("confirmation_at")
+    assert shadow.get("trigger_confirmed") is False
+
+    owned_bar = setup(
+        signal_timestamp="2026-08-17T04:00:00Z",
+        _lifecycle_completed_bars=[
+            bar(
+                "2026-08-17T04:00:00Z",
+                high=100.3,
+                low=99.8,
+                close=100.05,
+            ) | {"trigger_confirmed": True, "a_plus_ready": True},
+        ],
+        trade_eval={"trigger_confirmed": False, "a_plus_ready": False, "b_plus_tradeable": False},
+    )
+    reset_memory()
+    shadow = run(owned_bar, "2026-08-17T21:00:00Z")
+    assert shadow["state"] == "ENTRY_TRIGGERED"
+    assert shadow["confirmation_at"] == "2026-08-17T04:00:00Z"
+
+
 def test_same_bar_confirmation_retest_blocked_and_later_wick_outside_window_rejected():
     reset_memory()
     run(setup(_lifecycle_completed_bars=[bar("2026-08-05T10:00:00Z")]), "2026-08-05T10:05:00Z")
     same_bar = setup(
         price=100.05,
-        _lifecycle_completed_bars=[bar("2026-08-05T11:00:00Z", high=100.4, low=99.9, close=100.05)],
+        _lifecycle_completed_bars=[bar("2026-08-05T11:00:00Z", high=100.4, low=99.9, close=100.05) | {"trigger_confirmed": True, "a_plus_ready": True}],
         trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
     )
     shadow = run(same_bar, "2026-08-05T11:05:00Z")
@@ -150,8 +200,8 @@ def test_same_bar_confirmation_retest_blocked_and_later_wick_outside_window_reje
     outside = setup(
         price=103.0,
         _lifecycle_completed_bars=[
-            bar("2026-08-05T11:00:00Z", high=100.4, low=99.9, close=100.05),
-            bar("2026-08-05T12:00:00Z", high=103.4, low=99.9, close=103.0),
+            bar("2026-08-05T11:00:00Z", high=100.4, low=99.9, close=100.05) | {"trigger_confirmed": True, "a_plus_ready": True},
+            bar("2026-08-05T12:00:00Z", high=103.4, low=99.9, close=103.0) | {"trigger_confirmed": True, "a_plus_ready": True},
         ],
         trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
     )
@@ -177,7 +227,7 @@ def test_short_valid_retest_uses_same_direction_window():
         sl=52.0,
         tp1=46.0,
         price=49.0,
-        _lifecycle_completed_bars=[bar("2026-08-05T11:00:00Z", high=49.4, low=48.8, close=49.0)],
+        _lifecycle_completed_bars=[bar("2026-08-05T11:00:00Z", high=49.4, low=48.8, close=49.0) | {"trigger_confirmed": True, "a_plus_ready": True}],
         trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
     )
     assert run(confirmed, "2026-08-05T11:05:00Z")["state"] == "WAITING_FOR_RETEST"
@@ -188,8 +238,8 @@ def test_short_valid_retest_uses_same_direction_window():
         tp1=46.0,
         price=49.95,
         _lifecycle_completed_bars=[
-            bar("2026-08-05T11:00:00Z", high=49.4, low=48.8, close=49.0),
-            bar("2026-08-05T12:00:00Z", high=50.1, low=49.7, close=49.95),
+            bar("2026-08-05T11:00:00Z", high=49.4, low=48.8, close=49.0) | {"trigger_confirmed": True, "a_plus_ready": True},
+            bar("2026-08-05T12:00:00Z", high=50.1, low=49.7, close=49.95) | {"trigger_confirmed": True, "a_plus_ready": True},
         ],
         trade_eval={"trigger_confirmed": True, "a_plus_ready": True, "b_plus_tradeable": False},
     )
@@ -346,6 +396,8 @@ if __name__ == "__main__":
     test_incomplete_latest_candle_excluded_and_latest_completed_included()
     test_enrichment_populates_completed_current_bar_fields_and_summary_preserves_them()
     test_cached_capitalized_bars_replay_between_refresh_retest_after_confirmation()
+    test_completed_bar_does_not_inherit_future_current_confirmation()
+    test_historical_completed_bar_replay_uses_only_bar_owned_confirmation()
     test_same_bar_confirmation_retest_blocked_and_later_wick_outside_window_rejected()
     test_short_valid_retest_uses_same_direction_window()
     test_reprocessing_is_idempotent_and_migration_is_bounded()

@@ -3,16 +3,12 @@ const fs = require('fs');
 
 const html = fs.readFileSync('public/index.html', 'utf8');
 
-assert.ok(html.includes('Execution Plan'), 'Execution Plan label should render');
-assert.ok(html.includes('Planned TP1'), 'Planned TP1 row should render');
-assert.ok(html.includes('data-plan-visual="risk-reward"'), 'Risk/reward visual bar should render when full plan data exists');
-assert.ok(html.includes("openTerms('term-risk-reward')"), 'Execution Plan help should link to Terms');
+assert.ok(!html.includes('function renderTradePlanBlock'), 'Scanner card Execution Plan renderer should be removed');
+assert.ok(!html.includes('data-plan-visual="risk-reward"'), 'Scanner card risk/reward rail should be removed');
 assert.ok(html.includes('id="term-planned-entry"'), 'Planned Entry term anchor should exist');
 assert.ok(html.includes('id="term-stop"'), 'Stop term anchor should exist');
 assert.ok(html.includes('id="term-target"'), 'Target term anchor should exist');
 assert.ok(html.includes('id="term-risk-reward"'), 'Planned TP1 term anchor should exist');
-assert.ok(html.includes('planned-entry'), 'Planned Entry row should have a distinct class');
-assert.ok(html.includes('.index-plan-row.planned-entry'), 'Planned Entry styling should exist');
 
 assert.ok(html.includes('execute-not-ready'), 'Execute not-ready state should exist');
 assert.ok(html.includes('execute-waiting-entry'), 'Execute waiting-for-entry state should exist');

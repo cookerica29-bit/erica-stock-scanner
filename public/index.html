@@ -1188,124 +1188,6 @@
     margin-top:10px;
     padding:8px 9px;
   }
-  .index-plan {
-    background: rgba(30,41,59,0.24);
-    border: 1px solid rgba(148,163,184,0.1);
-    border-radius: 12px;
-    display:grid;
-    gap:7px;
-    margin-top:11px;
-    padding:11px 12px;
-  }
-  .execution-plan-head {
-    align-items: center;
-    display: flex;
-    gap: 8px;
-    justify-content: space-between;
-  }
-  .risk-reward-visual {
-    display: grid;
-    gap: 10px;
-  }
-  .risk-reward-svg {
-    display: block;
-    height: 96px;
-    overflow: visible;
-    width: 100%;
-  }
-  .rr-track-bg {
-    stroke: rgba(148,163,184,0.18);
-    stroke-linecap: butt;
-    stroke-width: 8;
-  }
-  .rr-track-risk {
-    stroke: rgba(132,84,70,0.72);
-    stroke-linecap: butt;
-    stroke-width: 8;
-  }
-  .rr-track-reward {
-    stroke: rgba(43,111,82,0.76);
-    stroke-linecap: butt;
-    stroke-width: 8;
-  }
-  .rr-marker-line {
-    stroke: rgba(226,232,240,0.36);
-    stroke-width: 1;
-  }
-  .rr-marker-stop { fill: #a66a5c; stroke: rgba(255,255,255,0.42); stroke-width: 1; }
-  .rr-marker-entry { fill: #c4b5fd; stroke: rgba(255,255,255,0.58); stroke-width: 1; }
-  .rr-marker-now { fill: #bfdbfe; stroke: rgba(37,99,235,0.72); stroke-width: 1.4; }
-  .rr-marker-target { fill: #7fb99a; stroke: rgba(255,255,255,0.38); stroke-width: 1; }
-  .rr-axis-label {
-    fill: rgba(203,213,225,0.58);
-    font-size: 7px;
-    font-weight: 800;
-  }
-  .rr-point-label {
-    fill: rgba(241,245,249,0.9);
-    font-size: 10px;
-    font-weight: 900;
-  }
-  .plan-help-btn {
-    border-radius: 999px;
-    font-size: 10px;
-    height: 18px;
-    min-height: 18px;
-    min-width: 18px;
-    padding: 0;
-    width: 18px;
-  }
-  .rr-value-row {
-    display: grid;
-    gap: 6px;
-  }
-  .rr-value-item {
-    align-items: baseline;
-    display: flex;
-    gap: 14px;
-    justify-content: space-between;
-    min-width: 0;
-    padding: 2px 0;
-  }
-  .rr-value-item.entry {
-    background: rgba(124,92,255,0.08);
-    border: 1px solid rgba(124,92,255,0.18);
-    border-radius: 8px;
-    margin: 1px -4px;
-    padding: 6px 7px;
-  }
-  .rr-value-label {
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 800;
-  }
-  .rr-value-price {
-    color: var(--text);
-    font-size: 14px;
-    font-weight: 900;
-    text-align: right;
-  }
-  .rr-value-item.entry .rr-value-label {
-    color: #ddd6fe;
-    font-weight: 900;
-  }
-  .rr-value-item.entry .rr-value-price {
-    color: #fff;
-    font-size: 16px;
-    font-weight: 1000;
-  }
-  .index-plan-row { align-items:baseline; display:flex; justify-content:space-between; gap:12px; }
-  .index-plan-row span:first-child { color:var(--muted); font-size:11px; }
-  .index-plan-row span:last-child { color:var(--text); font-weight:900; }
-  .index-plan-row.planned-entry {
-    background: rgba(124,92,255,0.08);
-    border: 1px solid rgba(124,92,255,0.18);
-    border-radius: 8px;
-    margin: 1px -4px;
-    padding: 6px 7px;
-  }
-  .index-plan-row.planned-entry span:first-child { color:#ddd6fe; font-weight:900; }
-  .index-plan-row.planned-entry span:last-child { color:#fff; font-size:15px; font-weight:1000; }
   .index-contract {
     background:rgba(30,41,59,0.28);
     border:1px solid rgba(148,163,184,0.12);
@@ -2762,7 +2644,6 @@
       min-width: 0;
     }
     .index-simple-head > div:first-child,
-    .index-plan-row span,
     .index-contract-main,
     .index-contract-sub,
     .index-contract-note,
@@ -3039,14 +2920,6 @@
     }
     .index-simple-head {
       flex-direction: column;
-    }
-    .index-plan-row {
-      align-items: flex-start;
-      flex-direction: column;
-      gap: 2px;
-    }
-    .risk-reward-svg {
-      height: 96px;
     }
     .context-grid,
     .readiness-grid,
@@ -7011,8 +6884,6 @@ function frozenRankingBucket(setup = {}) {
   return String(firstPresent(
     setup.ranking_status_bucket,
     setup.ranking?.status_bucket,
-    setup.normalized_status_bucket,
-    setup.status_bucket,
     ''
   ) || '').toUpperCase();
 }
@@ -8095,7 +7966,7 @@ function simpleStatus(setup) {
   const lifecycle = stockExecutionLifecyclePresentation(setup);
   if (lifecycle) return { label: lifecycle.label, className: lifecycle.className };
   const explicitBucket = String(firstPresent(setup.status_bucket, setup.normalized_status_bucket, '') || '').toUpperCase();
-  if (explicitBucket === 'ENTER_NOW') return { label: 'ENTER NOW', className: 'enter-now' };
+  if (explicitBucket === 'ENTER_NOW') return { label: 'ALMOST READY', className: 'almost-ready' };
   if (explicitBucket === 'EARLY_ENTRY') return { label: 'EARLY ENTRY', className: 'early-entry' };
   if (explicitBucket === 'ALMOST_READY') return { label: 'ALMOST READY', className: 'almost-ready' };
   if (explicitBucket === 'WAITING') return { label: 'WAIT', className: 'wait' };
@@ -8117,7 +7988,7 @@ function simpleStatus(setup) {
   }
   if (entryStatus === 'Too Far') return { label: 'TOO LATE', className: 'too-late' };
   if (hasPlan && triggerConfirmed) {
-    return { label: 'ENTER NOW', className: 'enter-now' };
+    return { label: 'ALMOST READY', className: 'almost-ready' };
   }
   if (hasPlan && bPlusTradeable && entryStatus === 'Tradeable') {
     return { label: 'EARLY ENTRY', className: 'early-entry' };
@@ -8140,7 +8011,7 @@ function stockExecutionLifecyclePresentation(setup = {}) {
     EARLY_ENTRY_BUILDING: { label: 'EARLY ENTRY', bucket: 'EARLY_ENTRY', className: 'early-entry', stage: 3.75, percent: 82 },
     EARLY_TOUCH: { label: 'EARLY TOUCH', bucket: 'EARLY_TOUCH', className: 'early-touch', stage: 3.5, percent: 75 },
     WAITING_FOR_RETEST: { label: 'WAITING FOR RETEST', bucket: 'WAITING_FOR_RETEST', className: 'waiting-retest', stage: 4.75, percent: 98 },
-    ENTRY_TRIGGERED: { label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', stage: 5, percent: 100 },
+    ENTRY_TRIGGERED: { label: 'Entry Triggered Previously', bucket: 'NO_CURRENT_ENTRY', className: 'wait', stage: 3, percent: 60 },
     WAITING_FOR_CONFIRMATION: { label: 'WAITING FOR CONFIRMATION', bucket: 'WAITING_FOR_CONFIRMATION', className: 'wait', stage: 4.25, percent: 90 },
     MISSED_ENTRY: { label: 'MISSED ENTRY', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
     TP1_BEFORE_CONFIRMATION: { label: 'TP1 BEFORE CONFIRMATION', bucket: 'RESOLVED', className: 'too-late', stage: 0, percent: 0 },
@@ -8202,7 +8073,7 @@ function setupProgressState(setup) {
     };
   }
   const explicitBucket = String(firstPresent(setup.status_bucket, setup.normalized_status_bucket, '') || '').toUpperCase();
-  if (explicitBucket === 'ENTER_NOW') return { stage: 5, label: 'ENTER NOW', bucket: 'ENTER_NOW', className: 'enter-now', percent: 100 };
+  if (explicitBucket === 'ENTER_NOW') return { stage: 4, label: 'Almost Ready', bucket: 'ALMOST_READY', className: 'almost-ready', percent: 95 };
   if (explicitBucket === 'EARLY_ENTRY') return { stage: 4.5, label: 'Early Entry', bucket: 'EARLY_ENTRY', className: 'early-entry', percent: 97 };
   if (explicitBucket === 'ALMOST_READY') return { stage: 4, label: 'Almost Ready', bucket: 'ALMOST_READY', className: 'almost-ready', percent: 95 };
   if (explicitBucket === 'WAITING') return { stage: 3, label: 'Setup Building', bucket: 'WAITING', className: 'wait', percent: 60 };
@@ -8637,77 +8508,6 @@ function riskRewardBarData(setup) {
     rawXPositions,
     xPositions: adjustedMarkerPositions(rawXPositions),
   };
-}
-
-function renderExecutionPlanHelp() {
-  return `<button type="button" class="term-help-btn plan-help-btn" aria-label="Open risk and reward definition" onclick="event.stopPropagation(); openTerms('term-risk-reward')" onkeydown="event.stopPropagation();">?</button>`;
-}
-
-function plannedTp1RText(setup = {}) {
-  const text = rewardRiskText(setup);
-  if (!text || text === '—') return '—';
-  return `${String(text).replace(/\.0$/, '')}R`;
-}
-
-function renderRiskRewardBar(setup) {
-  const data = riskRewardBarData(setup);
-  if (!data) return '';
-  const x = key => data.xPositions[key].toFixed(2);
-  const pct = key => data.positions[key].toFixed(2);
-  const entryNowClose = Math.abs(data.xPositions.entry - data.xPositions.current) < RR_CLOSE_MARKER_THRESHOLD;
-  const entryLabelY = entryNowClose ? 24 : 22;
-  const nowLabelY = entryNowClose ? 80 : 68;
-  const optionalTargetMarkers = [
-    data.positions.tp2 !== null ? `<line class="rr-marker-line" x1="${x('tp2')}" x2="${x('tp2')}" y1="33" y2="49"></line><circle class="rr-marker-target" cx="${x('tp2')}" cy="41" r="3.5"></circle>` : '',
-    data.positions.tp3 !== null ? `<line class="rr-marker-line" x1="${x('tp3')}" x2="${x('tp3')}" y1="33" y2="49"></line><circle class="rr-marker-target" cx="${x('tp3')}" cy="41" r="3.5"></circle>` : '',
-    data.positions.finalTarget !== null ? `<line class="rr-marker-line" x1="${x('finalTarget')}" x2="${x('finalTarget')}" y1="33" y2="49"></line><circle class="rr-marker-target" cx="${x('finalTarget')}" cy="41" r="3.5"></circle>` : '',
-  ].join('');
-  const valueItems = [];
-  const pushValueItem = (label, value) => {
-    if (value === null) return;
-    if (valueItems.some(item => Math.abs(Number(item[1]) - Number(value)) < 0.000001)) return;
-    valueItems.push([label, value]);
-  };
-  pushValueItem('Planned Entry', data.entry);
-  pushValueItem('Model Stop', data.stop);
-  pushValueItem('Planned TP1', data.tp1);
-  pushValueItem('Planned TP2', data.tp2);
-  pushValueItem('Planned TP3', data.tp3);
-  pushValueItem('Planned Final Target', data.finalTarget);
-  return `
-    <div class="risk-reward-visual" data-plan-visual="risk-reward"
-      data-stop-pct="${pct('stop')}"
-      data-entry-pct="${pct('entry')}"
-      data-current-pct="${pct('current')}"
-      data-target-pct="${pct('tp1')}">
-      <svg class="risk-reward-svg" viewBox="0 0 ${RR_BAR_WIDTH} 86" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Risk and reward plan">
-        <text class="rr-axis-label" x="${RR_TRACK_START}" y="8">Risk</text>
-        <text class="rr-axis-label" x="${RR_TRACK_END}" y="8" text-anchor="end">Reward</text>
-        <line class="rr-track-bg" x1="${RR_TRACK_START}" y1="41" x2="${RR_TRACK_END}" y2="41"></line>
-        <line class="rr-track-risk" x1="${RR_TRACK_START}" y1="41" x2="${x('entry')}" y2="41"></line>
-        <line class="rr-track-reward" x1="${x('entry')}" y1="41" x2="${RR_TRACK_END}" y2="41"></line>
-        <line class="rr-marker-line" x1="${x('stop')}" x2="${x('stop')}" y1="30" y2="52"></line>
-        <circle class="rr-marker-stop" cx="${x('stop')}" cy="41" r="3.5"></circle>
-        <line class="rr-marker-line" x1="${x('entry')}" x2="${x('entry')}" y1="25" y2="57"></line>
-        <circle class="rr-marker-entry" cx="${x('entry')}" cy="41" r="4"></circle>
-        <line class="rr-marker-line" x1="${x('current')}" x2="${x('current')}" y1="20" y2="62"></line>
-        <circle class="rr-marker-now" cx="${x('current')}" cy="41" r="4.8"></circle>
-        <line class="rr-marker-line" x1="${x('tp1')}" x2="${x('tp1')}" y1="30" y2="52"></line>
-        <circle class="rr-marker-target" cx="${x('tp1')}" cy="41" r="3.5"></circle>
-        ${optionalTargetMarkers}
-        <text class="rr-point-label" x="${x('stop')}" y="75" text-anchor="middle">Model Stop</text>
-        <text class="rr-point-label" x="${x('entry')}" y="${entryLabelY}" text-anchor="middle">Planned Entry</text>
-        <text class="rr-point-label" x="${x('current')}" y="${nowLabelY}" text-anchor="middle">${escapeHtml(data.currentLabel)}</text>
-        <text class="rr-point-label" x="${x('tp1')}" y="75" text-anchor="middle">Planned TP1</text>
-      </svg>
-      <div class="rr-value-row">
-        ${valueItems.map(([label, value]) => `
-          <div class="rr-value-item${label === 'Planned Entry' ? ' entry' : ''}">
-            <div class="rr-value-label">${escapeHtml(label)}</div>
-            <div class="rr-value-price">${fmtMoney(value)}</div>
-          </div>`).join('')}
-      </div>
-	    </div>`;
 }
 
 const GUIDED_TRADE_CHART_VERSION = 'guided-trade-chart-v1';
@@ -9298,29 +9098,6 @@ function renderWhySummaryBlock(setup, status, trend) {
     <div class="why-summary">
       <div class="index-simple-label">Why</div>
       <div class="why-summary-line">${escapeHtml(summary)}</div>
-    </div>`;
-}
-
-function renderTradePlanBlock(setup) {
-  const rows = window.KairosCardData
-    ? window.KairosCardData.executionPlanRows(setup)
-    : window.KairosExecutionGuidance
-    ? window.KairosExecutionGuidance.executionPlanRows(setup)
-    : [
-      { label: 'Last Candle Close', value: setup.price },
-      { label: 'Planned Entry', value: setup.entry },
-      { label: 'Model Stop', value: setup.sl },
-      { label: 'Planned TP1', value: setup.tp1 },
-    ];
-  const bar = renderRiskRewardBar(setup);
-  return `
-    <div class="index-plan">
-      <div class="execution-plan-head">
-        <div class="index-simple-label">Execution Plan</div>
-        ${renderExecutionPlanHelp()}
-      </div>
-      ${bar || rows.map(row => `<div class="index-plan-row ${escapeHtml(row.key || '')}"><span>${escapeHtml(row.label)}</span><span>${fmtMoney(row.value)}</span></div>`).join('')}
-      <div class="index-plan-row risk-reward"><span>Planned TP1</span><span>${plannedTp1RText(setup)}</span></div>
     </div>`;
 }
 
@@ -11960,7 +11737,6 @@ function renderCard(s) {
       </div>
       ${renderTradeReadinessTimeline(s)}
       ${renderOpportunityRemainingBlock(s)}
-      ${renderTradePlanBlock(s)}
       ${renderGuidedTradeChartBlock(s, 'setup')}
       ${renderPositionManagement(s)}
       ${renderOptionPlanBlock(s)}

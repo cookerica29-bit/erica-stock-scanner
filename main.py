@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,11 +22,20 @@ from scanner import (
     stock_early_entry_shadow_diagnostics,
     stock_event_memory_presentation_enabled,
     stock_execution_lifecycle_presentation,
+    stock_new_entry_signal,
     stock_mission_workflow_bucket,
     stock_mission_workflow_enabled,
     stock_mission_workflow_identity,
     stock_mission_workflow_snapshot,
     build_bos_displacement_shadow_report,
+    build_stock_mtf_structure_shadow_report,
+    build_stock_mtf_structure_shadow_v2_report,
+    build_stock_mtf_structure_shadow_v3_report,
+    build_stock_mtf_structure_shadow_v3_historical_outcome_report,
+    persist_stock_mtf_structure_shadow_report,
+    persist_stock_mtf_structure_shadow_v2_report,
+    persist_stock_mtf_structure_shadow_v3_report,
+    persist_stock_mtf_structure_shadow_v3_historical_outcome_report,
     _batch_download,
     scan_cached,
     scan_ticker,
@@ -102,9 +112,11 @@ DISCOVERY_POOL_SOURCE = "alpaca"
 DISCOVERY_POOL_RANKING_VERSION = "alpaca-liquidity-ranking-v1"
 DISCOVERY_POOL_PATH_ENV = "KAIROS_DISCOVERY_POOL_PATH"
 DISCOVERY_REJECTION_EVIDENCE_PATH_ENV = "KAIROS_DISCOVERY_REJECTION_EVIDENCE_PATH"
-DISCOVERY_UNIVERSE_TTL_SECONDS = 7 * 24 * 60 * 60
-DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS = 2 * 60 * 60
+SCHEDULED_SCAN_STATE_PATH_ENV = "KAIROS_SCHEDULED_SCAN_STATE_PATH"
 DISCOVERY_REFRESH_WATCHDOG_SECONDS = 60 * 60
+DISCOVERED_SCAN_SCHEDULE_HOUR_ET = 10
+DISCOVERED_SCAN_SCHEDULE_MINUTE_ET = 0
+EASTERN_TZ = ZoneInfo("America/New_York")
 _discovery_universe_cache = {
     "version": DISCOVERY_POOL_VERSION,
     "source": DISCOVERY_POOL_SOURCE,
@@ -112,6 +124,10 @@ _discovery_universe_cache = {
     "symbols": [],
     "generated_at": None,
     "expires_at": None,
+    "trading_week_id": None,
+    "first_session_date": None,
+    "expires_after_session_date": None,
+    "refresh_reason": None,
     "pipeline_counts": {},
     "thresholds": {},
     "formula": {},
@@ -146,6 +162,21 @@ _discovered_scan_handoff_state = {
     "scanner_cache_generation": None,
     "last_checked_at": None,
     "last_result": None,
+}
+_scheduled_discovered_scan_lock = threading.RLock()
+_scheduled_discovered_scan_state = {
+    "version": "kairos-scheduled-discovered-scan-v1",
+    "scheduled_for": None,
+    "triggered_at": None,
+    "started_at": None,
+    "completed_at": None,
+    "status": "idle",
+    "universe": "discovered",
+    "trading_week_id": None,
+    "cache_generated_at": None,
+    "refresh_job_id": None,
+    "failure_reason": None,
+    "last_checked_at": None,
 }
 _journal_repository = SQLiteJournalRepository(default_journal_db_path())
 _notification_repository = SQLiteNotificationRepository(default_journal_db_path())
@@ -199,8 +230,144 @@ def _coerce_utc_datetime(value):
     return value.astimezone(timezone.utc)
 
 
+def _observed_market_holiday(actual: date) -> date:
+    if actual.weekday() == 5:
+        return actual - timedelta(days=1)
+    if actual.weekday() == 6:
+        return actual + timedelta(days=1)
+    return actual
+
+
+def _nth_weekday(year: int, month: int, weekday: int, nth: int) -> date:
+    current = date(year, month, 1)
+    offset = (weekday - current.weekday()) % 7
+    return current + timedelta(days=offset + 7 * (nth - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    current = date(year, month + 1, 1) - timedelta(days=1) if month < 12 else date(year, 12, 31)
+    return current - timedelta(days=(current.weekday() - weekday) % 7)
+
+
+def _easter_date(year: int) -> date:
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _us_market_holidays(year: int) -> set[date]:
+    holidays = {
+        _observed_market_holiday(date(year, 1, 1)),
+        _nth_weekday(year, 1, 0, 3),
+        _nth_weekday(year, 2, 0, 3),
+        _easter_date(year) - timedelta(days=2),
+        _last_weekday(year, 5, 0),
+        _observed_market_holiday(date(year, 6, 19)),
+        _observed_market_holiday(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),
+        _nth_weekday(year, 11, 3, 4),
+        _observed_market_holiday(date(year, 12, 25)),
+    }
+    return {item for item in holidays if item.year == year}
+
+
+def _is_us_trading_session(day: date) -> bool:
+    return day.weekday() < 5 and day not in _us_market_holidays(day.year)
+
+
+def _first_trading_session_for_week(day: date) -> date:
+    current = day - timedelta(days=day.weekday())
+    for offset in range(7):
+        candidate = current + timedelta(days=offset)
+        if _is_us_trading_session(candidate):
+            return candidate
+    return current
+
+
+def _last_trading_session_for_week(day: date) -> date:
+    current = day - timedelta(days=day.weekday()) + timedelta(days=6)
+    for offset in range(7):
+        candidate = current - timedelta(days=offset)
+        if _is_us_trading_session(candidate):
+            return candidate
+    return current
+
+
+def _trading_week_reference_date(now: Optional[datetime] = None) -> date:
+    eastern = _coerce_utc_datetime(now or _utc_now()).astimezone(EASTERN_TZ)
+    day = eastern.date()
+    if _is_us_trading_session(day):
+        return day
+    if day.weekday() >= 5:
+        current = day
+        for _ in range(10):
+            current += timedelta(days=1)
+            if _is_us_trading_session(current):
+                return current
+    return day
+
+
+def _discovery_trading_week(now: Optional[datetime] = None) -> dict:
+    reference = _trading_week_reference_date(now)
+    first_session = _first_trading_session_for_week(reference)
+    last_session = _last_trading_session_for_week(reference)
+    return {
+        "trading_week_id": f"{first_session.isocalendar().year}-W{first_session.isocalendar().week:02d}",
+        "first_session_date": first_session.isoformat(),
+        "expires_after_session_date": last_session.isoformat(),
+    }
+
+
+def _datetime_et_for_session(day: date, hour: int, minute: int) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=EASTERN_TZ).astimezone(timezone.utc)
+
+
+def _parse_iso_date(value) -> Optional[date]:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _next_trading_week_first_session(first_session: date) -> date:
+    return _first_trading_session_for_week(first_session + timedelta(days=7))
+
+
+def _next_discovery_refresh_at(now: Optional[datetime] = None) -> datetime:
+    week = _discovery_trading_week(now)
+    first_session = _parse_iso_date(week.get("first_session_date")) or _trading_week_reference_date(now)
+    next_first_session = _next_trading_week_first_session(first_session)
+    return _datetime_et_for_session(
+        next_first_session,
+        DISCOVERED_SCAN_SCHEDULE_HOUR_ET,
+        DISCOVERED_SCAN_SCHEDULE_MINUTE_ET,
+    )
+
+
 def _discovery_pool_path() -> Path:
     return Path(os.getenv(DISCOVERY_POOL_PATH_ENV) or "/data/kairos_weekly_discovery_pool_v1.json")
+
+
+def _scheduled_scan_state_path() -> Path:
+    return Path(os.getenv(SCHEDULED_SCAN_STATE_PATH_ENV) or "/data/kairos_scheduled_discovered_scan_v1.json")
 
 
 def _discovery_rejection_evidence_path() -> Path:
@@ -221,6 +388,10 @@ def _discovery_cache_defaults() -> dict:
         "symbols": [],
         "generated_at": None,
         "expires_at": None,
+        "trading_week_id": None,
+        "first_session_date": None,
+        "expires_after_session_date": None,
+        "refresh_reason": None,
         "pipeline_counts": {},
         "thresholds": {},
         "formula": {},
@@ -267,6 +438,10 @@ def _discovery_pool_payload_from_cache(cached: dict, persisted_at: Optional[date
         "generated_at": _format_timestamp(_coerce_utc_datetime(cached.get("generated_at"))),
         "expires_at": _format_timestamp(_coerce_utc_datetime(cached.get("expires_at"))),
         "next_scheduled_refresh": _format_timestamp(_coerce_utc_datetime(cached.get("expires_at"))),
+        "trading_week_id": cached.get("trading_week_id"),
+        "first_session_date": cached.get("first_session_date"),
+        "expires_after_session_date": cached.get("expires_after_session_date"),
+        "refresh_reason": cached.get("refresh_reason"),
         "persisted_at": _format_timestamp(persisted_at),
         "raw_source_count": pipeline_counts.get("raw_assets"),
         "optionable_tradable_count": pipeline_counts.get("tradable_optionable"),
@@ -404,6 +579,7 @@ def _load_discovery_pool_from_disk() -> bool:
         thresholds = {**thresholds, "kairos_intake_cap_resolution": payload.get("kairos_intake_cap_resolution")}
     formula = payload.get("formula") if isinstance(payload.get("formula"), dict) else {}
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    week = _discovery_trading_week(generated_at)
     with _discovery_universe_lock:
         _discovery_universe_cache.update({
             **_discovery_cache_defaults(),
@@ -413,6 +589,10 @@ def _load_discovery_pool_from_disk() -> bool:
             "symbols": symbols,
             "generated_at": generated_at,
             "expires_at": expires_at,
+            "trading_week_id": payload.get("trading_week_id") or week.get("trading_week_id"),
+            "first_session_date": payload.get("first_session_date") or week.get("first_session_date"),
+            "expires_after_session_date": payload.get("expires_after_session_date") or week.get("expires_after_session_date"),
+            "refresh_reason": payload.get("refresh_reason") or "loaded_from_legacy_or_persisted_pool",
             "pipeline_counts": pipeline_counts,
             "thresholds": thresholds,
             "formula": formula,
@@ -445,8 +625,8 @@ def _journal_admin_token() -> str:
     return os.getenv("JOURNAL_ADMIN_TOKEN", "").strip() or _discovery_admin_token()
 
 
-def _discovery_status_snapshot() -> dict:
-    now = _utc_now()
+def _discovery_status_snapshot(now: Optional[datetime] = None) -> dict:
+    now = _coerce_utc_datetime(now or _utc_now())
     with _discovery_universe_lock:
         cached = dict(_discovery_universe_cache)
     generated_at = _coerce_utc_datetime(cached.get("generated_at"))
@@ -459,7 +639,9 @@ def _discovery_status_snapshot() -> dict:
     expires_in_seconds = None
     if isinstance(expires_at, datetime):
         expires_in_seconds = round((expires_at - now).total_seconds(), 1)
-    stale = not generated_at or (isinstance(expires_at, datetime) and expires_at <= now)
+    current_week = _discovery_trading_week(now)
+    pool_week_id = cached.get("trading_week_id")
+    stale = not generated_at or not cached.get("symbols") or pool_week_id != current_week.get("trading_week_id")
     status = "refreshing" if cached.get("running") else "ready" if cached.get("symbols") else "warming"
     if cached.get("last_error") and not cached.get("symbols") and not cached.get("running"):
         status = "error"
@@ -478,6 +660,13 @@ def _discovery_status_snapshot() -> dict:
         "generated_at": _format_timestamp(generated_at),
         "expires_at": _format_timestamp(expires_at),
         "next_scheduled_refresh": _format_timestamp(expires_at),
+        "trading_week_id": pool_week_id,
+        "current_trading_week_id": current_week.get("trading_week_id"),
+        "first_session_date": cached.get("first_session_date"),
+        "expires_after_session_date": cached.get("expires_after_session_date"),
+        "current_first_session_date": current_week.get("first_session_date"),
+        "current_expires_after_session_date": current_week.get("expires_after_session_date"),
+        "refresh_reason": cached.get("refresh_reason"),
         "age_seconds": age_seconds,
         "expires_in_seconds": expires_in_seconds,
         "stale": bool(stale),
@@ -509,6 +698,7 @@ def _discovery_status_snapshot() -> dict:
         "last_error": cached.get("last_error"),
         "last_duration": cached.get("last_duration"),
         "metrics": cached.get("metrics") or {},
+        "scheduled_discovered_scan": _scheduled_scan_snapshot(),
     }
 
 
@@ -566,8 +756,284 @@ def _discovery_coverage_context() -> dict:
         "universe_source": "discovered",
         "universe_generated_at": cached.get("generated_at"),
         "universe_symbol_count": len(cached.get("symbols") or []),
+        "trading_week_id": cached.get("trading_week_id"),
         "discovery": cached.get("metrics") or {},
     }
+
+
+def _scheduled_scan_state_defaults() -> dict:
+    return {
+        "version": "kairos-scheduled-discovered-scan-v1",
+        "scheduled_for": None,
+        "triggered_at": None,
+        "started_at": None,
+        "completed_at": None,
+        "status": "idle",
+        "universe": "discovered",
+        "trading_week_id": None,
+        "cache_generated_at": None,
+        "refresh_job_id": None,
+        "failure_reason": None,
+        "last_checked_at": None,
+    }
+
+
+def _write_scheduled_scan_state_locked() -> None:
+    path = _scheduled_scan_state_path()
+    payload = _json_safe_discovery_value(dict(_scheduled_discovered_scan_state))
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp_path.open("w") as handle:
+            handle.write(serialized)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _load_scheduled_scan_state_from_disk() -> bool:
+    path = _scheduled_scan_state_path()
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:
+        _update_scheduled_scan_state(
+            status="state_load_error",
+            failure_reason=f"persisted scheduled scan state invalid: {exc.__class__.__name__}",
+            last_checked_at=_format_timestamp(_utc_now()),
+        )
+        return False
+    if not isinstance(payload, dict):
+        return False
+    with _scheduled_discovered_scan_lock:
+        merged = _scheduled_scan_state_defaults()
+        merged.update({
+            key: payload.get(key)
+            for key in merged
+            if key in payload
+        })
+        _scheduled_discovered_scan_state.update(merged)
+    return True
+
+
+def _update_scheduled_scan_state(**updates) -> None:
+    with _scheduled_discovered_scan_lock:
+        _scheduled_discovered_scan_state.update({
+            key: value
+            for key, value in updates.items()
+            if key in _scheduled_discovered_scan_state
+        })
+        try:
+            _write_scheduled_scan_state_locked()
+        except Exception:
+            logger.exception("scheduled_discovered_scan_state.persist_failed path=%s", _scheduled_scan_state_path())
+
+
+def _scheduled_scan_snapshot() -> dict:
+    with _scheduled_discovered_scan_lock:
+        return dict(_scheduled_discovered_scan_state)
+
+
+def _scheduled_scan_intended_run(now: Optional[datetime] = None) -> dict:
+    checked_at = _coerce_utc_datetime(now or _utc_now())
+    eastern = checked_at.astimezone(EASTERN_TZ)
+    session_date = eastern.date()
+    if not _is_us_trading_session(session_date):
+        return {
+            "due": False,
+            "reason": "non_trading_day",
+            "session_date": session_date.isoformat(),
+            "scheduled_for": None,
+            "checked_at": checked_at,
+        }
+    scheduled_for = _datetime_et_for_session(
+        session_date,
+        DISCOVERED_SCAN_SCHEDULE_HOUR_ET,
+        DISCOVERED_SCAN_SCHEDULE_MINUTE_ET,
+    )
+    return {
+        "due": checked_at >= scheduled_for,
+        "reason": "due" if checked_at >= scheduled_for else "not_due",
+        "session_date": session_date.isoformat(),
+        "scheduled_for": scheduled_for,
+        "checked_at": checked_at,
+    }
+
+
+def _scan_cache_generated_for_schedule(meta: dict, scheduled_for: datetime) -> bool:
+    generated_at = _coerce_utc_datetime((meta or {}).get("generated_at"))
+    return bool(generated_at and generated_at >= scheduled_for and (meta or {}).get("has_cache"))
+
+
+def _submit_scheduled_discovered_scan_if_due(now: Optional[datetime] = None) -> tuple[bool, str]:
+    run = _scheduled_scan_intended_run(now)
+    checked_at = run["checked_at"]
+    scheduled_for = run.get("scheduled_for")
+    checked_text = _format_timestamp(checked_at)
+    scheduled_text = _format_timestamp(scheduled_for)
+    if run.get("reason") == "non_trading_day":
+        _update_scheduled_scan_state(
+            last_checked_at=checked_text,
+            status="skipped_non_trading_day",
+            failure_reason=None,
+        )
+        return False, "non trading day"
+    if not run.get("due"):
+        _update_scheduled_scan_state(
+            scheduled_for=scheduled_text,
+            last_checked_at=checked_text,
+            status="waiting_for_schedule",
+            failure_reason=None,
+        )
+        return False, "not due"
+
+    with _scheduled_discovered_scan_lock:
+        current_state = dict(_scheduled_discovered_scan_state)
+    same_run = current_state.get("scheduled_for") == scheduled_text
+    if same_run and current_state.get("status") == "completed":
+        _update_scheduled_scan_state(last_checked_at=checked_text)
+        return False, "scheduled scan already completed"
+    if same_run and current_state.get("status") in {"running", "submitted", "observing_existing_scan"}:
+        ready, symbols, discovery_status = _discovery_symbols_ready(checked_at)
+        if not ready:
+            _update_scheduled_scan_state(
+                scheduled_for=scheduled_text,
+                last_checked_at=checked_text,
+                status="waiting_for_discovery",
+                failure_reason=f"discovery_not_ready:{discovery_status.get('status')}",
+            )
+            return False, "waiting for discovery"
+        meta = analysis_cache_status(symbols, universe="discovered")
+        if _scan_cache_generated_for_schedule(meta, scheduled_for):
+            _update_scheduled_scan_state(
+                scheduled_for=scheduled_text,
+                completed_at=meta.get("last_refresh_success_at") or meta.get("generated_at"),
+                status="completed",
+                trading_week_id=discovery_status.get("trading_week_id"),
+                cache_generated_at=meta.get("generated_at"),
+                refresh_job_id=meta.get("refresh_job_id") or current_state.get("refresh_job_id"),
+                failure_reason=None,
+                last_checked_at=checked_text,
+            )
+            return False, "scheduled scan completed"
+        if meta.get("refreshing"):
+            _update_scheduled_scan_state(
+                scheduled_for=scheduled_text,
+                status="observing_existing_scan",
+                trading_week_id=discovery_status.get("trading_week_id"),
+                started_at=meta.get("refresh_started_at") or current_state.get("started_at"),
+                cache_generated_at=meta.get("generated_at"),
+                refresh_job_id=meta.get("refresh_job_id") or current_state.get("refresh_job_id"),
+                failure_reason=None,
+                last_checked_at=checked_text,
+            )
+            return False, "scheduled scan already running"
+
+    ready, symbols, discovery_status = _discovery_symbols_ready(checked_at)
+    if not ready:
+        _submit_discovery_universe_job_if_needed(now=checked_at)
+        _update_scheduled_scan_state(
+            scheduled_for=scheduled_text,
+            triggered_at=checked_text,
+            status="waiting_for_discovery",
+            trading_week_id=discovery_status.get("current_trading_week_id") or discovery_status.get("trading_week_id"),
+            failure_reason=f"discovery_not_ready:{discovery_status.get('status')}",
+            last_checked_at=checked_text,
+        )
+        return False, "waiting for discovery"
+
+    meta = analysis_cache_status(symbols, universe="discovered")
+    if _scan_cache_generated_for_schedule(meta, scheduled_for):
+        _update_scheduled_scan_state(
+            scheduled_for=scheduled_text,
+            triggered_at=current_state.get("triggered_at") if same_run else None,
+            started_at=meta.get("refresh_started_at"),
+            completed_at=meta.get("last_refresh_success_at") or meta.get("generated_at"),
+            status="completed",
+            trading_week_id=discovery_status.get("trading_week_id"),
+            cache_generated_at=meta.get("generated_at"),
+            refresh_job_id=meta.get("refresh_job_id"),
+            failure_reason=None,
+            last_checked_at=checked_text,
+        )
+        return False, "current cache already satisfies schedule"
+    if meta.get("refreshing"):
+        _update_scheduled_scan_state(
+            scheduled_for=scheduled_text,
+            triggered_at=checked_text,
+            started_at=meta.get("refresh_started_at") or checked_text,
+            completed_at=None,
+            status="observing_existing_scan",
+            trading_week_id=discovery_status.get("trading_week_id"),
+            cache_generated_at=meta.get("generated_at"),
+            refresh_job_id=meta.get("refresh_job_id"),
+            failure_reason=None,
+            last_checked_at=checked_text,
+        )
+        return False, "observing existing scan"
+
+    _update_scheduled_scan_state(
+        scheduled_for=scheduled_text,
+        triggered_at=checked_text,
+        started_at=checked_text,
+        completed_at=None,
+        status="running",
+        trading_week_id=discovery_status.get("trading_week_id"),
+        cache_generated_at=meta.get("generated_at"),
+        refresh_job_id=meta.get("refresh_job_id"),
+        failure_reason=None,
+        last_checked_at=checked_text,
+    )
+    try:
+        result = scan_cached(
+            symbols,
+            force_refresh=True,
+            universe="discovered",
+            max_symbols=None,
+            coverage_context=_discovery_coverage_context(),
+            trusted_options_symbols=set(symbols),
+        )
+        result_meta = (result or {}).get("meta") or analysis_cache_status(symbols, universe="discovered")
+    except Exception as exc:
+        _update_scheduled_scan_state(
+            scheduled_for=scheduled_text,
+            completed_at=_format_timestamp(_utc_now()),
+            status="failed",
+            failure_reason=str(exc),
+            last_checked_at=checked_text,
+        )
+        return False, "scan failed"
+
+    if _scan_cache_generated_for_schedule(result_meta, scheduled_for):
+        status = "completed"
+        completed_at = result_meta.get("last_refresh_success_at") or result_meta.get("generated_at") or _format_timestamp(_utc_now())
+    elif result_meta.get("refreshing"):
+        status = "submitted"
+        completed_at = None
+    elif result_meta.get("last_refresh_error"):
+        status = "failed"
+        completed_at = _format_timestamp(_utc_now())
+    else:
+        status = "submitted"
+        completed_at = None
+    _update_scheduled_scan_state(
+        scheduled_for=scheduled_text,
+        completed_at=completed_at,
+        status=status,
+        trading_week_id=discovery_status.get("trading_week_id"),
+        cache_generated_at=result_meta.get("generated_at"),
+        refresh_job_id=result_meta.get("refresh_job_id"),
+        failure_reason=result_meta.get("last_refresh_error"),
+        last_checked_at=checked_text,
+    )
+    return True, result_meta.get("refresh_job_id") or status
 
 
 def _discovered_scan_handoff_snapshot() -> dict:
@@ -642,12 +1108,14 @@ def _maybe_enqueue_discovered_scan_handoff(reason: str = "discovery_ready_no_sca
     return bool(meta.get("refreshing")), meta.get("refresh_job_id") or "submitted"
 
 
-def _run_discovery_universe_job(job_id: str) -> None:
+def _run_discovery_universe_job(job_id: str, refresh_reason: str = "weekly_pool_due") -> None:
     started = time.perf_counter()
     started_at = _utc_now()
     try:
         result = build_ranked_discovery_universe(static_watchlist=WATCHLIST)
         now = _utc_now()
+        week = _discovery_trading_week(now)
+        expires_at = _next_discovery_refresh_at(now)
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         metrics = _discovery_metrics_from_result(result, started_at, now, duration_ms)
         with _discovery_universe_lock:
@@ -657,7 +1125,11 @@ def _run_discovery_universe_job(job_id: str) -> None:
                 "ranking_version": result.get("ranking_version") or DISCOVERY_POOL_RANKING_VERSION,
                 "symbols": result.get("symbols") or [],
                 "generated_at": now,
-                "expires_at": now + timedelta(seconds=DISCOVERY_UNIVERSE_TTL_SECONDS),
+                "expires_at": expires_at,
+                "trading_week_id": week.get("trading_week_id"),
+                "first_session_date": week.get("first_session_date"),
+                "expires_after_session_date": week.get("expires_after_session_date"),
+                "refresh_reason": refresh_reason,
                 "pipeline_counts": result.get("pipeline_counts") or {},
                 "thresholds": result.get("thresholds") or {},
                 "formula": result.get("formula") or {},
@@ -720,14 +1192,13 @@ def _run_discovery_universe_job(job_id: str) -> None:
             })
 
 
-def _submit_discovery_universe_job(force: bool = False) -> tuple[bool, str]:
+def _submit_discovery_universe_job(force: bool = False, reason: str = "weekly_pool_due", now: Optional[datetime] = None) -> tuple[bool, str]:
     with _discovery_universe_lock:
         if _discovery_universe_cache.get("running"):
             return False, "already running"
         if not force and _discovery_universe_cache.get("symbols"):
-            expires_at = _coerce_utc_datetime(_discovery_universe_cache.get("expires_at"))
-            refresh_due_at = _utc_now() + timedelta(seconds=DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS)
-            if isinstance(expires_at, datetime) and expires_at > refresh_due_at:
+            status = _discovery_status_snapshot(now)
+            if status.get("has_cache") and not status.get("stale"):
                 return False, "cache fresh"
         job_id = f"discovery:{int(time.time())}"
         _discovery_universe_cache.update({
@@ -735,9 +1206,10 @@ def _submit_discovery_universe_job(force: bool = False) -> tuple[bool, str]:
             "started_at": _utc_now(),
             "job_id": job_id,
             "last_error": None,
+            "refresh_reason": reason,
         })
     try:
-        _discovery_universe_executor.submit(_run_discovery_universe_job, job_id)
+        _discovery_universe_executor.submit(_run_discovery_universe_job, job_id, reason)
     except RuntimeError as exc:
         with _discovery_universe_lock:
             _discovery_universe_cache.update({
@@ -765,22 +1237,15 @@ def _require_journal_admin_token(header_value) -> None:
         raise HTTPException(status_code=403, detail="Invalid journal admin token")
 
 
-def _discovery_cache_needs_refresh() -> bool:
-    status = _discovery_status_snapshot()
-    if not status.get("has_cache") or bool(status.get("stale")):
-        return True
-    with _discovery_universe_lock:
-        expires_at = _coerce_utc_datetime(_discovery_universe_cache.get("expires_at"))
-    if not isinstance(expires_at, datetime):
-        return True
-    refresh_due_at = _utc_now() + timedelta(seconds=DISCOVERY_REFRESH_SAFETY_MARGIN_SECONDS)
-    return expires_at <= refresh_due_at
+def _discovery_cache_needs_refresh(now: Optional[datetime] = None) -> bool:
+    status = _discovery_status_snapshot(now)
+    return not status.get("has_cache") or bool(status.get("stale"))
 
 
-def _submit_discovery_universe_job_if_needed() -> tuple[bool, str]:
-    if not _discovery_cache_needs_refresh():
+def _submit_discovery_universe_job_if_needed(now: Optional[datetime] = None) -> tuple[bool, str]:
+    if not _discovery_cache_needs_refresh(now):
         return False, "cache fresh"
-    return _submit_discovery_universe_job(force=False)
+    return _submit_discovery_universe_job(force=False, reason="weekly_pool_missing_or_stale", now=now)
 
 
 def _register_discovery_background_refresh() -> None:
@@ -793,6 +1258,11 @@ def _register_discovery_background_refresh() -> None:
         "discovered_scan_handoff",
         30,
         lambda: _maybe_enqueue_discovered_scan_handoff("periodic_discovery_ready_no_scanner_cache"),
+    )
+    register_background_periodic_task(
+        "scheduled_discovered_scan_10am_et",
+        60,
+        _submit_scheduled_discovered_scan_if_due,
     )
 
 app.add_middleware(
@@ -817,9 +1287,11 @@ async def add_no_store_headers(request: Request, call_next):
 def startup_market_cache_refresh():
     _register_discovery_background_refresh()
     start_market_cache_refresh()
+    _load_scheduled_scan_state_from_disk()
     _load_discovery_pool_from_disk()
     _submit_discovery_universe_job_if_needed()
     _maybe_enqueue_discovered_scan_handoff("startup_discovery_ready_no_scanner_cache")
+    _submit_scheduled_discovered_scan_if_due()
 
 
 @app.get("/")
@@ -830,8 +1302,8 @@ def index():
     )
 
 
-def _discovery_symbols_ready():
-    status = _discovery_status_snapshot()
+def _discovery_symbols_ready(now: Optional[datetime] = None):
+    status = _discovery_status_snapshot(now)
     if not status.get("has_cache") or status.get("stale") or status.get("running"):
         return False, [], status
     with _discovery_universe_lock:
@@ -1100,6 +1572,8 @@ def _summary_row(row: dict, generation: Optional[str]) -> dict:
     status_bucket = _summary_status_bucket(row)
     execution_lifecycle = stock_execution_lifecycle_presentation(row)
     execution_lifecycle["ranking_status_bucket"] = status_bucket
+    new_entry_signal = row.get("new_entry_signal") if isinstance(row.get("new_entry_signal"), dict) else stock_new_entry_signal(row)
+    user_status_bucket = new_entry_signal.get("bucket") or status_bucket
     mission_identity = stock_mission_workflow_identity(row)
     mission_bucket = stock_mission_workflow_bucket(row)
     earnings = row.get("earnings") if isinstance(row.get("earnings"), dict) else {}
@@ -1129,10 +1603,14 @@ def _summary_row(row: dict, generation: Optional[str]) -> dict:
         "tp3": row.get("tp3"),
         "setupGrade": row.get("setupGrade"),
         "setupGradeReason": row.get("setupGradeReason"),
-        "display_status": status_bucket,
-        "status_bucket": status_bucket,
-        "normalized_status_bucket": status_bucket,
+        "display_status": user_status_bucket,
+        "status_bucket": user_status_bucket,
+        "normalized_status_bucket": user_status_bucket,
+        "raw_status_bucket": status_bucket,
         "ranking_status_bucket": execution_lifecycle.get("ranking_status_bucket") or status_bucket,
+        "new_entry_signal": new_entry_signal,
+        "new_entry_signal_bucket": new_entry_signal.get("bucket"),
+        "new_entry_signal_label": new_entry_signal.get("label"),
         "execution_lifecycle": execution_lifecycle,
         "execution_lifecycle_state": execution_lifecycle.get("state"),
         "execution_lifecycle_display": execution_lifecycle.get("display"),
@@ -1225,10 +1703,7 @@ def _summary_budget_counts(rows: list[dict]) -> dict:
 
 
 def _summary_today_counts(rows: list[dict]) -> dict:
-    if stock_event_memory_presentation_enabled() or stock_mission_workflow_enabled():
-        buckets = Counter(str((row.get("execution_lifecycle") or {}).get("bucket") or row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
-    else:
-        buckets = Counter(str(row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
+    buckets = Counter(str((row.get("new_entry_signal") or {}).get("bucket") or row.get("new_entry_signal_bucket") or row.get("normalized_status_bucket") or row.get("status_bucket") or "").upper() for row in rows)
     accessibility = Counter(str((row.get("accessibility") or {}).get("key") or "") for row in rows)
     return {
         "enter_now": buckets.get("ENTER_NOW", 0),
@@ -1624,6 +2099,7 @@ def api_cache_status(
         meta = {
             **meta,
             "handoff": _discovered_scan_handoff_snapshot(),
+            "scheduled_scan": _scheduled_scan_snapshot(),
         }
     elif selected_universe == "default":
         meta = analysis_cache_status(universe="default")
@@ -1710,7 +2186,7 @@ def api_discovery_run(
     x_kairos_admin_token: str = Header(default=""),
 ):
     _require_discovery_admin_token(x_kairos_admin_token)
-    accepted, reason_or_job = _submit_discovery_universe_job(force=refresh)
+    accepted, reason_or_job = _submit_discovery_universe_job(force=refresh, reason="manual_refresh" if refresh else "manual_request")
     return {
         "accepted": accepted,
         "reason": None if accepted else reason_or_job,
@@ -3273,6 +3749,24 @@ def _shadow_candle_data_for_rows(rows: list[dict], limit: int) -> dict:
     return candle_data
 
 
+def _mtf_shadow_candle_data_for_rows(rows: list[dict], limit: int) -> dict:
+    selected = [row for row in rows[:limit] if isinstance(row, dict) and row.get("ticker")]
+    symbols = list(dict.fromkeys(str(row.get("ticker")).upper() for row in selected))
+    requests = {
+        "1D": ("1y", "1d"),
+        "4H": ("60d", "4h"),
+        "1H": ("60d", "1h"),
+        "30M": ("60d", "30m"),
+    }
+    candle_data: dict = {symbol: {} for symbol in symbols}
+    for label, (period, interval) in requests.items():
+        fetched = _batch_download(symbols, period=period, interval=interval) if symbols else {}
+        for symbol, df in fetched.items():
+            ticker = str(symbol).upper()
+            candle_data.setdefault(ticker, {})[label] = df
+    return candle_data
+
+
 @app.get("/api/dev/bos-displacement-shadow")
 def api_dev_bos_displacement_shadow(
     universe: str = Query(default="default"),
@@ -3301,6 +3795,189 @@ def api_dev_bos_displacement_shadow(
         "scan_cache_meta": snapshot.get("scan_meta") or {},
         "candle_symbols_requested": min(len(rows), limit),
         "candle_symbols_returned": len(candle_data),
+        "live_strategy_changed": False,
+    }
+
+
+@app.get("/api/dev/stock-mtf-structure-shadow")
+def api_dev_stock_mtf_structure_shadow(
+    universe: str = Query(default="default"),
+    include_all_traces: bool = Query(default=False),
+    limit: int = Query(default=1000, ge=1, le=1000),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    snapshot, not_ready = _cached_scan_snapshot_for_shadow(universe)
+    if not snapshot:
+        return {
+            **not_ready,
+            "ready": False,
+            "message_guard": "Shadow MTF hierarchy study only. Live strategy unchanged.",
+        }
+    rows = [*(snapshot.get("rows") or []), *(snapshot.get("near_miss") or [])]
+    selected = rows[:limit]
+    candle_data = _mtf_shadow_candle_data_for_rows(selected, limit)
+    report = build_stock_mtf_structure_shadow_report(selected, candle_data)
+    persistence = persist_stock_mtf_structure_shadow_report(
+        report,
+        source={
+            "universe": str(universe or "default").strip().lower(),
+            "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+            "limit": limit,
+            "selected_rows": len(selected),
+        },
+    )
+    if not include_all_traces:
+        report.pop("all_traces", None)
+    return {
+        **report,
+        "ready": True,
+        "universe": str(universe or "default").strip().lower(),
+        "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+        "scan_cache_meta": snapshot.get("scan_meta") or {},
+        "candle_symbols_requested": len(selected),
+        "candle_symbols_returned": len(candle_data),
+        "shadow_persistence": persistence,
+        "live_strategy_changed": False,
+    }
+
+
+@app.get("/api/dev/stock-mtf-structure-shadow-v2")
+def api_dev_stock_mtf_structure_shadow_v2(
+    universe: str = Query(default="default"),
+    include_all_traces: bool = Query(default=False),
+    limit: int = Query(default=1000, ge=1, le=1000),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    snapshot, not_ready = _cached_scan_snapshot_for_shadow(universe)
+    if not snapshot:
+        return {
+            **not_ready,
+            "ready": False,
+            "message_guard": "Shadow MTF hierarchy V2 study only. Live strategy unchanged.",
+        }
+    rows = [*(snapshot.get("rows") or []), *(snapshot.get("near_miss") or [])]
+    selected = rows[:limit]
+    candle_data = _mtf_shadow_candle_data_for_rows(selected, limit)
+    v1_report = build_stock_mtf_structure_shadow_report(selected, candle_data)
+    report = build_stock_mtf_structure_shadow_v2_report(selected, candle_data, v1_report=v1_report)
+    persistence = persist_stock_mtf_structure_shadow_v2_report(
+        report,
+        source={
+            "universe": str(universe or "default").strip().lower(),
+            "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+            "limit": limit,
+            "selected_rows": len(selected),
+            "v1_compared": True,
+        },
+    )
+    if not include_all_traces:
+        report.pop("all_traces", None)
+    return {
+        **report,
+        "ready": True,
+        "universe": str(universe or "default").strip().lower(),
+        "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+        "scan_cache_meta": snapshot.get("scan_meta") or {},
+        "candle_symbols_requested": len(selected),
+        "candle_symbols_returned": len(candle_data),
+        "shadow_persistence": persistence,
+        "live_strategy_changed": False,
+    }
+
+
+@app.get("/api/dev/stock-mtf-structure-shadow-v3")
+def api_dev_stock_mtf_structure_shadow_v3(
+    universe: str = Query(default="default"),
+    include_all_traces: bool = Query(default=False),
+    limit: int = Query(default=1000, ge=1, le=1000),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    snapshot, not_ready = _cached_scan_snapshot_for_shadow(universe)
+    if not snapshot:
+        return {
+            **not_ready,
+            "ready": False,
+            "message_guard": "Shadow MTF hierarchy V3 study only. Live strategy unchanged.",
+        }
+    rows = [*(snapshot.get("rows") or []), *(snapshot.get("near_miss") or [])]
+    selected = rows[:limit]
+    candle_data = _mtf_shadow_candle_data_for_rows(selected, limit)
+    v1_report = build_stock_mtf_structure_shadow_report(selected, candle_data)
+    v2_report = build_stock_mtf_structure_shadow_v2_report(selected, candle_data, v1_report=v1_report)
+    report = build_stock_mtf_structure_shadow_v3_report(selected, candle_data, v2_report=v2_report)
+    persistence = persist_stock_mtf_structure_shadow_v3_report(
+        report,
+        source={
+            "universe": str(universe or "default").strip().lower(),
+            "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+            "limit": limit,
+            "selected_rows": len(selected),
+            "v2_compared": True,
+        },
+    )
+    if not include_all_traces:
+        report.pop("all_traces", None)
+    return {
+        **report,
+        "ready": True,
+        "universe": str(universe or "default").strip().lower(),
+        "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+        "scan_cache_meta": snapshot.get("scan_meta") or {},
+        "candle_symbols_requested": len(selected),
+        "candle_symbols_returned": len(candle_data),
+        "shadow_persistence": persistence,
+        "live_strategy_changed": False,
+    }
+
+
+@app.get("/api/dev/stock-mtf-structure-shadow-v3/history")
+def api_dev_stock_mtf_structure_shadow_v3_history(
+    universe: str = Query(default="default"),
+    limit: int = Query(default=50, ge=1, le=250),
+    max_events_per_symbol: Optional[int] = Query(default=None, ge=1, le=25),
+    x_kairos_admin_token: str = Header(default=""),
+):
+    _require_journal_admin_token(x_kairos_admin_token)
+    snapshot, not_ready = _cached_scan_snapshot_for_shadow(universe)
+    if not snapshot:
+        return {
+            **not_ready,
+            "ready": False,
+            "message_guard": "V3 historical outcome framework only. Live strategy unchanged.",
+        }
+    rows = [*(snapshot.get("rows") or []), *(snapshot.get("near_miss") or [])]
+    symbols = list(dict.fromkeys(
+        str(row.get("ticker") or "").upper()
+        for row in rows
+        if isinstance(row, dict) and row.get("ticker")
+    ))[:limit]
+    synthetic_rows = [{"ticker": symbol} for symbol in symbols]
+    candle_data = _mtf_shadow_candle_data_for_rows(synthetic_rows, len(synthetic_rows))
+    report = build_stock_mtf_structure_shadow_v3_historical_outcome_report(
+        symbols,
+        candle_data,
+        max_events_per_symbol=max_events_per_symbol,
+    )
+    persistence = persist_stock_mtf_structure_shadow_v3_historical_outcome_report(
+        report,
+        source={
+            "universe": str(universe or "default").strip().lower(),
+            "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+            "limit": limit,
+            "symbols": symbols,
+            "max_events_per_symbol": max_events_per_symbol,
+        },
+    )
+    return {
+        **report,
+        "ready": True,
+        "universe": str(universe or "default").strip().lower(),
+        "scan_cache_generated_at": _format_timestamp(snapshot.get("generated_at")),
+        "symbols_requested": len(symbols),
+        "shadow_persistence": persistence,
         "live_strategy_changed": False,
     }
 

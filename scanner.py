@@ -11,7 +11,7 @@ import resource
 import shutil
 import threading
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2998,11 +2998,11 @@ _STOCK_EXECUTION_LIFECYCLE_PRESENTATION = {
         "reason": "Confirmation completed after an early touch. Wait for a fresh retest of the entry area.",
     },
     "ENTRY_TRIGGERED": {
-        "display": "ENTER NOW",
-        "bucket": "ENTER_NOW",
-        "class_name": "enter-now",
-        "actionable": True,
-        "reason": "Confirmation is complete and a valid post-confirmation entry is available.",
+        "display": "ENTRY TRIGGERED PREVIOUSLY",
+        "bucket": "NO_CURRENT_ENTRY",
+        "class_name": "wait",
+        "actionable": False,
+        "reason": "Lifecycle records a completed entry trigger. Current ENTER NOW authority is resolved separately.",
     },
     "MISSED_ENTRY": {
         "display": "MISSED ENTRY",
@@ -3418,6 +3418,15 @@ def _stock_early_confirmation_complete(row: dict) -> bool:
     return bool(ev.get("trigger_confirmed") or ev.get("a_plus_ready"))
 
 
+def _stock_early_confirmation_owned_for_bar(row: dict, bar_marker: str) -> bool:
+    generation = _stock_early_setup_generation(row)
+    if not generation or not bar_marker:
+        return True
+    if _coerce_utc_datetime(bar_marker) is None or _coerce_utc_datetime(generation) is None:
+        return True
+    return not _stock_time_before(bar_marker, generation)
+
+
 def _stock_early_entry_touched(row: dict) -> bool:
     direction = str(row.get("direction") or "").upper()
     entry = _safe_float(row.get("entry"))
@@ -3446,6 +3455,15 @@ def _stock_early_bar_row(row: dict, bar: dict) -> dict:
     bar_row["current_bar_close"] = close_value
     bar_row["current_candle_time"] = bar.get("time")
     bar_row["current_candle_complete"] = True
+    bar_marker = _stock_early_bar_marker(bar_row, "")
+    confirmation_owned = _stock_early_confirmation_owned_for_bar(row, bar_marker)
+    bar_trade_eval = bar.get("trade_eval") if isinstance(bar.get("trade_eval"), dict) else {}
+    bar_row["trade_eval"] = {
+        **dict(row.get("trade_eval") or {}),
+        "trigger_confirmed": confirmation_owned and bool(bar_trade_eval.get("trigger_confirmed") or bar.get("trigger_confirmed")),
+        "a_plus_ready": confirmation_owned and bool(bar_trade_eval.get("a_plus_ready") or bar.get("a_plus_ready")),
+    }
+    bar_row["historical_confirmation_owned"] = confirmation_owned
     if atr_value and entry is not None and close_value is not None:
         bar_row["distanceFromEntryAtr"] = abs(close_value - entry) / atr_value
     return bar_row
@@ -3671,6 +3689,27 @@ def _stock_early_migrate_boundary(memory: dict, row: dict, evidence_rows: list[d
     return True
 
 
+def _stock_early_replay_blocked_by_timestamp_boundary(evidence_rows: list[dict], boundary: str, observed_at: str) -> bool:
+    if not evidence_rows or not boundary or _coerce_utc_datetime(boundary) is None:
+        return False
+    timestamped = []
+    for item in evidence_rows:
+        marker = _stock_early_bar_marker(item, observed_at)
+        if _coerce_utc_datetime(marker) is None:
+            return False
+        timestamped.append(marker)
+    return bool(timestamped) and all(not _stock_bar_after(marker, boundary) for marker in timestamped)
+
+
+def _stock_early_owned_boundary_confirmation(item: dict, boundary: str, observed_at: str) -> bool:
+    marker = _stock_early_bar_marker(item, observed_at)
+    if not marker or str(marker) != str(boundary):
+        return False
+    if item.get("historical_confirmation_owned") is False:
+        return False
+    return _stock_early_confirmation_complete(item)
+
+
 def _stock_early_process_evidence_row(
     row: dict,
     memory: dict,
@@ -3681,7 +3720,8 @@ def _stock_early_process_evidence_row(
     confirmation_allowed: bool,
 ) -> dict:
     bar_marker = _stock_early_bar_marker(row, observed_at)
-    confirmation_complete = _stock_early_confirmation_complete(row) and confirmation_allowed
+    confirmation_owned = _stock_early_confirmation_owned_for_bar(row, bar_marker)
+    confirmation_complete = _stock_early_confirmation_complete(row) and confirmation_allowed and confirmation_owned
     touched = _stock_early_entry_touched(row)
     tp1_reached = _stock_early_tp1_reached(row)
     stop_reached = _stock_early_stop_reached(row)
@@ -3694,7 +3734,8 @@ def _stock_early_process_evidence_row(
     memory["used_price_fallback"] = bool(evidence.get("used_price_fallback"))
     memory["production_bucket"] = _ranking_status_bucket(row)
     memory["production_entry_status"] = row.get("entryStatus")
-    memory["trigger_confirmed"] = _stock_early_confirmation_complete(row)
+    memory["trigger_confirmed"] = confirmation_complete
+    memory["confirmation_evidence_owned"] = confirmation_owned
     memory["b_plus_tradeable"] = bool((row.get("trade_eval") or {}).get("b_plus_tradeable"))
 
     state = str(memory.get("state") or "EARLY_ENTRY_BUILDING")
@@ -3814,7 +3855,11 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
     boundary = memory.get("last_evaluated_bar_time")
     replay_rows = [
         item for item in evidence_rows
-        if not boundary or _stock_bar_after(_stock_early_bar_marker(item, observed_at), boundary)
+        if (
+            not boundary
+            or _stock_bar_after(_stock_early_bar_marker(item, observed_at), boundary)
+            or _stock_early_owned_boundary_confirmation(item, boundary, observed_at)
+        )
     ]
     latest_replay_bar = _stock_early_bar_marker(replay_rows[-1], observed_at) if replay_rows else None
     for item in replay_rows:
@@ -3834,7 +3879,19 @@ def _stock_early_update_memory(row: dict, memory: dict, observed_at: str, scan_g
             break
 
     if not replay_rows:
-        if not (row.get("current_candle_time") and row.get("current_candle_complete") is False):
+        if _stock_early_replay_blocked_by_timestamp_boundary(evidence_rows, boundary, observed_at):
+            evidence = _stock_early_price_evidence(row)
+            memory["last_seen_at"] = observed_at
+            memory["last_seen_scan_generation"] = scan_generation
+            memory["last_seen_bar"] = bar_marker
+            memory["last_price"] = evidence.get("price")
+            memory["used_price_fallback"] = bool(evidence.get("used_price_fallback"))
+            memory["production_bucket"] = _ranking_status_bucket(row)
+            memory["production_entry_status"] = row.get("entryStatus")
+            memory["trigger_confirmed"] = False
+            memory["confirmation_evidence_owned"] = False
+            memory["b_plus_tradeable"] = bool((row.get("trade_eval") or {}).get("b_plus_tradeable"))
+        elif not (row.get("current_candle_time") and row.get("current_candle_complete") is False):
             memory = _stock_early_process_evidence_row(
                 row,
                 memory,
@@ -6237,6 +6294,2229 @@ def build_bos_displacement_shadow_report(rows: list, candle_data_by_symbol: dict
         ),
         "representative_traces": recovered[:25],
         "all_traces": traces,
+    }
+
+
+MTF_STRUCTURE_SHADOW_VERSION = "stock-mtf-structure-shadow-v1"
+STOCK_MTF_STRUCTURE_SHADOW_PATH = os.getenv("STOCK_MTF_STRUCTURE_SHADOW_PATH") or "/tmp/kairos_stock_mtf_structure_shadow_v1.json"
+
+
+def _json_safe_mtf_shadow_value(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe_mtf_shadow_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_mtf_shadow_value(item) for item in value]
+    if isinstance(value, (datetime, date)):
+        return _format_utc_timestamp(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
+
+def persist_stock_mtf_structure_shadow_report(report: dict, *, source: Optional[dict] = None) -> dict:
+    path = Path(STOCK_MTF_STRUCTURE_SHADOW_PATH)
+    persisted_at = _format_utc_timestamp(_utc_now())
+    payload = _json_safe_mtf_shadow_value({
+        "version": MTF_STRUCTURE_SHADOW_VERSION,
+        "persisted_at": persisted_at,
+        "source": source or {},
+        "report": report or {},
+        "live_strategy_changed": False,
+    })
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(serialized)
+    os.replace(tmp_path, path)
+    return {
+        "version": MTF_STRUCTURE_SHADOW_VERSION,
+        "persisted_at": persisted_at,
+        "path": str(path),
+        "bytes": len(serialized.encode("utf-8")),
+    }
+
+
+def _mtf_shadow_clean_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+    try:
+        return _flatten_columns(df.copy()).dropna().astype(float)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _mtf_shadow_timestamp(df: pd.DataFrame, index: Optional[int]) -> Optional[str]:
+    if index is None or df is None or getattr(df, "empty", True):
+        return None
+    try:
+        return _format_utc_timestamp(df.index[int(index)])
+    except Exception:
+        return None
+
+
+def _mtf_shadow_structure_event(df: pd.DataFrame, swings: list, direction: str) -> dict:
+    if df.empty or direction not in {"LONG", "SHORT"}:
+        return {
+            "type": None,
+            "direction": None,
+            "level": None,
+            "time": None,
+            "choch_reason": "no_direction",
+        }
+    bos_confirmed, bos_level = detect_structure_break(df, swings, direction)
+    bos_index = _first_bos_close_index(df, swings, direction, bos_level) if bos_confirmed else None
+    choch, choch_reason, bearish_choch_lvl, bullish_choch_lvl, choch_bar_idx = _detect_choch(swings, direction)
+    if bos_confirmed:
+        return {
+            "type": "BOS",
+            "direction": direction,
+            "level": round(float(bos_level), 4),
+            "time": _mtf_shadow_timestamp(df, bos_index),
+            "choch": bool(choch),
+            "choch_reason": choch_reason,
+            "bearish_choch_level": round(float(bearish_choch_lvl), 4) if bearish_choch_lvl is not None else None,
+            "bullish_choch_level": round(float(bullish_choch_lvl), 4) if bullish_choch_lvl is not None else None,
+            "choch_time": _mtf_shadow_timestamp(df, choch_bar_idx) if choch_bar_idx is not None and choch_bar_idx >= 0 else None,
+        }
+    if choch:
+        event_direction = "SHORT" if bearish_choch_lvl is not None and bullish_choch_lvl is None else "LONG" if bullish_choch_lvl is not None and bearish_choch_lvl is None else None
+        return {
+            "type": "CHoCH",
+            "direction": event_direction,
+            "level": round(float(bearish_choch_lvl or bullish_choch_lvl), 4) if (bearish_choch_lvl or bullish_choch_lvl) else None,
+            "time": _mtf_shadow_timestamp(df, choch_bar_idx) if choch_bar_idx is not None and choch_bar_idx >= 0 else None,
+            "choch": True,
+            "choch_reason": choch_reason,
+            "bearish_choch_level": round(float(bearish_choch_lvl), 4) if bearish_choch_lvl is not None else None,
+            "bullish_choch_level": round(float(bullish_choch_lvl), 4) if bullish_choch_lvl is not None else None,
+        }
+    return {
+        "type": None,
+        "direction": None,
+        "level": None,
+        "time": None,
+        "choch": False,
+        "choch_reason": choch_reason,
+    }
+
+
+def _mtf_shadow_parent_swing(df: pd.DataFrame, swings: list, thesis_direction: str) -> dict:
+    highs = [s for s in swings if s.get("type") == "high"]
+    lows = [s for s in swings if s.get("type") == "low"]
+    if thesis_direction not in {"LONG", "SHORT"} or not highs or not lows:
+        return {}
+
+    if thesis_direction == "LONG":
+        high = highs[-1]
+        prior_lows = [low for low in lows if int(low.get("index", -1)) <= int(high.get("index", -1))]
+        low = prior_lows[-1] if prior_lows else lows[-1]
+    else:
+        low = lows[-1]
+        prior_highs = [high for high in highs if int(high.get("index", -1)) <= int(low.get("index", -1))]
+        high = prior_highs[-1] if prior_highs else highs[-1]
+
+    high_price = float(high["price"])
+    low_price = float(low["price"])
+    if high_price <= low_price:
+        return {}
+
+    high_index = int(high.get("index", -1))
+    low_index = int(low.get("index", -1))
+    equilibrium = (high_price + low_price) / 2.0
+    return {
+        "id": f"4H:{thesis_direction}:{low_index}:{high_index}:{low_price:.4f}:{high_price:.4f}",
+        "high": round(high_price, 4),
+        "low": round(low_price, 4),
+        "high_time": _mtf_shadow_timestamp(df, high_index),
+        "low_time": _mtf_shadow_timestamp(df, low_index),
+        "equilibrium": round(equilibrium, 4),
+    }
+
+
+def _mtf_shadow_location(price: Optional[float], parent_swing: dict, direction: str) -> str:
+    if price is None or not parent_swing:
+        return "UNKNOWN"
+    high = _safe_float(parent_swing.get("high"))
+    low = _safe_float(parent_swing.get("low"))
+    if high is None or low is None or high <= low:
+        return "UNKNOWN"
+    pct = max(0.0, min(1.0, (float(price) - low) / (high - low)))
+    if pct >= 0.67:
+        zone = "PREMIUM"
+    elif pct <= 0.33:
+        zone = "DISCOUNT"
+    else:
+        zone = "MIDRANGE"
+    if direction == "LONG" and pct <= 0.50:
+        quality = "USABLE"
+    elif direction == "SHORT" and pct >= 0.50:
+        quality = "USABLE"
+    else:
+        quality = "POOR"
+    return f"{zone}_{quality}"
+
+
+def _mtf_shadow_structure_direction(df: pd.DataFrame, margin: int = 4) -> tuple[str, list]:
+    if df.empty or len(df) < 8:
+        return "NEUTRAL", []
+    swings = _find_swings(df, margin=margin)
+    return _get_trend(swings), swings
+
+
+def _mtf_shadow_relationship(child_direction: str, thesis_direction: str, event: Optional[dict] = None) -> str:
+    if thesis_direction not in {"LONG", "SHORT"}:
+        return "NEUTRAL"
+    if child_direction == thesis_direction:
+        return "WITH_THESIS"
+    if child_direction in {"LONG", "SHORT"} and child_direction != thesis_direction:
+        return "CORRECTION"
+    event_direction = (event or {}).get("direction")
+    if event_direction in {"LONG", "SHORT"}:
+        return "TRANSITION"
+    return "NEUTRAL"
+
+
+def _mtf_shadow_correction_state(h1_relationship: str, m30_relationship: str, execution_event: dict, thesis_direction: str) -> str:
+    execution_confirms = (
+        execution_event.get("direction") == thesis_direction
+        and execution_event.get("type") in {"BOS", "CHoCH"}
+    )
+    correction_present = h1_relationship == "CORRECTION" or m30_relationship == "CORRECTION"
+    if correction_present and execution_confirms and m30_relationship == "WITH_THESIS":
+        return "CONFIRMED_COMPLETE"
+    if h1_relationship == "CORRECTION" and m30_relationship == "CORRECTION":
+        return "MATURE"
+    if correction_present and execution_confirms:
+        return "REVERSAL_ATTEMPT"
+    if correction_present:
+        return "DEVELOPING"
+    return "NONE"
+
+
+def _mtf_shadow_entry_state(thesis_direction: str, thesis_state: str, location: str, correction_state: str, execution_event: dict) -> str:
+    if thesis_direction not in {"LONG", "SHORT"}:
+        return "NO_THESIS"
+    if thesis_state == "INVALIDATED":
+        return "INVALIDATED"
+    if not str(location or "").endswith("_USABLE"):
+        return "BUILDING"
+    if correction_state in {"DEVELOPING", "MATURE", "REVERSAL_ATTEMPT"}:
+        return "CORRECTING"
+    if correction_state == "CONFIRMED_COMPLETE" and execution_event.get("direction") == thesis_direction:
+        return "EXECUTION_CONFIRMED"
+    return "WAITING_FOR_EXECUTION"
+
+
+def _mtf_shadow_production_stage(row: dict) -> str:
+    signal = row.get("new_entry_signal") if isinstance(row.get("new_entry_signal"), dict) else {}
+    return str(
+        signal.get("bucket")
+        or row.get("new_entry_signal_bucket")
+        or row.get("normalized_status_bucket")
+        or row.get("ranking_status_bucket")
+        or _ranking_status_bucket(dict(row))
+        or "UNKNOWN"
+    ).upper()
+
+
+def _mtf_shadow_raw_ranking_stage(row: dict) -> str:
+    return str(
+        row.get("ranking_status_bucket")
+        or _ranking_status_bucket(dict(row))
+        or "UNKNOWN"
+    ).upper()
+
+
+def _mtf_shadow_disagreement(row: dict, shadow: dict) -> str:
+    production_direction = str(row.get("direction") or row.get("trend") or "").upper()
+    production_stage = _mtf_shadow_production_stage(row)
+    shadow_direction = str(shadow.get("shadow_thesis_direction") or "").upper()
+    shadow_state = str(shadow.get("shadow_entry_state") or "").upper()
+    correction_state = str(shadow.get("correction_state") or "").upper()
+
+    if production_direction in {"LONG", "SHORT"} and shadow_direction in {"LONG", "SHORT"} and production_direction != shadow_direction:
+        return "DIRECTION_DISAGREEMENT"
+    if not shadow.get("h4_parent_swing_id") and production_direction in {"LONG", "SHORT"}:
+        return "PARENT_SWING_DISAGREEMENT"
+    if production_stage == "ENTER_NOW" and shadow_state != "EXECUTION_CONFIRMED":
+        if correction_state in {"DEVELOPING", "MATURE", "REVERSAL_ATTEMPT"}:
+            return "CORRECTION_NOT_COMPLETE"
+        return "EXECUTION_NOT_CONFIRMED"
+    if production_stage in {"ENTER_NOW", "ALMOST_READY", "EARLY_ENTRY", "EARLY_TOUCH"} and shadow_state in {"NO_THESIS", "BUILDING", "CORRECTING", "WAITING_FOR_EXECUTION"}:
+        return "PRODUCTION_EARLY"
+    if production_stage in {"WAITING", "SKIP", "NO_CURRENT_ENTRY"} and shadow_state == "EXECUTION_CONFIRMED":
+        return "PRODUCTION_LATE"
+    return "SAME_STORY"
+
+
+def stock_mtf_structure_shadow_for_setup(row: dict, candle_data: dict) -> dict:
+    ticker = str(row.get("ticker") or "").upper()
+    daily_df = _mtf_shadow_clean_df(candle_data.get("1D"))
+    h4_df = _mtf_shadow_clean_df(candle_data.get("4H"))
+    h1_df = _mtf_shadow_clean_df(candle_data.get("1H"))
+    m30_df = _mtf_shadow_clean_df(candle_data.get("30M"))
+
+    daily_direction, daily_swings = _mtf_shadow_structure_direction(daily_df, margin=4)
+    daily_regime = _market_regime_for_df(daily_df).get("regime") if not daily_df.empty else "UNKNOWN"
+    daily_event = _mtf_shadow_structure_event(daily_df, daily_swings, daily_direction)
+
+    h4_direction, h4_swings = _mtf_shadow_structure_direction(h4_df, margin=4)
+    h4_price = float(h4_df["Close"].iloc[-1]) if not h4_df.empty else _safe_float(row.get("price"))
+    parent_swing = _mtf_shadow_parent_swing(h4_df, h4_swings, h4_direction)
+    h4_location = _mtf_shadow_location(h4_price, parent_swing, h4_direction)
+    h4_thesis_state = "VALID" if h4_direction in {"LONG", "SHORT"} else "NO_THESIS"
+    if parent_swing and h4_direction == "LONG" and h4_price is not None and h4_price < float(parent_swing["low"]):
+        h4_thesis_state = "INVALIDATED"
+    if parent_swing and h4_direction == "SHORT" and h4_price is not None and h4_price > float(parent_swing["high"]):
+        h4_thesis_state = "INVALIDATED"
+
+    h1_direction, h1_swings = _mtf_shadow_structure_direction(h1_df, margin=4)
+    h1_event = _mtf_shadow_structure_event(h1_df, h1_swings, h1_direction)
+    h1_relationship = _mtf_shadow_relationship(h1_direction, h4_direction, h1_event)
+
+    m30_direction, m30_swings = _mtf_shadow_structure_direction(m30_df, margin=4)
+    m30_event = _mtf_shadow_structure_event(m30_df, m30_swings, m30_direction)
+    m30_relationship = _mtf_shadow_relationship(m30_direction, h4_direction, m30_event)
+    execution_event = _mtf_shadow_structure_event(m30_df, m30_swings, h4_direction)
+
+    correction_state = _mtf_shadow_correction_state(h1_relationship, m30_relationship, execution_event, h4_direction)
+    active_correction_id = None
+    if correction_state != "NONE":
+        active_correction_id = f"{ticker}:4H:{parent_swing.get('id')}:1H:{h1_direction}:30M:{m30_direction}"
+    shadow_entry_state = _mtf_shadow_entry_state(h4_direction, h4_thesis_state, h4_location, correction_state, execution_event)
+
+    shadow = {
+        "version": MTF_STRUCTURE_SHADOW_VERSION,
+        "ticker": ticker,
+        "production_direction": row.get("direction") or row.get("trend"),
+        "production_stage": _mtf_shadow_production_stage(row),
+        "production_ranking_stage": _mtf_shadow_raw_ranking_stage(row),
+        "production_timeframe": row.get("timeframe"),
+        "daily_regime": daily_regime,
+        "daily_structure_direction": daily_direction,
+        "daily_structure_event": daily_event,
+        "h4_thesis_direction": h4_direction if h4_direction in {"LONG", "SHORT"} else None,
+        "h4_parent_swing_id": parent_swing.get("id"),
+        "h4_parent_swing_high": parent_swing.get("high"),
+        "h4_parent_swing_low": parent_swing.get("low"),
+        "h4_parent_swing_high_time": parent_swing.get("high_time"),
+        "h4_parent_swing_low_time": parent_swing.get("low_time"),
+        "h4_equilibrium": parent_swing.get("equilibrium"),
+        "h4_location": h4_location,
+        "h1_structure_direction": h1_direction,
+        "h1_structure_event": h1_event,
+        "h1_relationship_to_thesis": h1_relationship,
+        "m30_structure_direction": m30_direction,
+        "m30_structure_event": m30_event,
+        "m30_relationship_to_thesis": m30_relationship,
+        "execution_break_type": execution_event.get("type"),
+        "execution_break_direction": execution_event.get("direction"),
+        "execution_break_time": execution_event.get("time"),
+        "execution_break_level": execution_event.get("level"),
+        "execution_confirmation_components": {
+            "choch": execution_event.get("type") == "CHoCH",
+            "bos": execution_event.get("type") == "BOS",
+            "rejection": bool((row.get("trade_eval") or {}).get("rejection_confirmed")),
+            "displacement": (row.get("trade_eval") or {}).get("displacement"),
+            "liquidity_sweep": bool((row.get("trade_eval") or {}).get("sweep_taken")),
+        },
+        "active_correction_id": active_correction_id,
+        "correction_state": correction_state,
+        "mtf_thesis_state": h4_thesis_state,
+        "shadow_thesis_direction": h4_direction if h4_direction in {"LONG", "SHORT"} else None,
+        "shadow_entry_state": shadow_entry_state,
+        "live_strategy_changed": False,
+    }
+    shadow["comparison_classification"] = _mtf_shadow_disagreement(row, shadow)
+    return shadow
+
+
+def build_stock_mtf_structure_shadow_report(rows: list, candle_data_by_symbol: dict) -> dict:
+    traces = []
+    by_production_stage = defaultdict(Counter)
+    shadow_state_counts = Counter()
+    comparison_counts = Counter()
+    relationship_counts = {
+        "h1": Counter(),
+        "m30": Counter(),
+    }
+    for row in rows or []:
+        if not isinstance(row, dict) or not row.get("ticker"):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        trace = stock_mtf_structure_shadow_for_setup(row, candle_data_by_symbol.get(ticker, {}))
+        traces.append(trace)
+        production_stage = trace.get("production_stage") or "UNKNOWN"
+        shadow_state = trace.get("shadow_entry_state") or "UNKNOWN"
+        by_production_stage[production_stage][shadow_state] += 1
+        shadow_state_counts[shadow_state] += 1
+        comparison_counts[trace.get("comparison_classification") or "UNKNOWN"] += 1
+        relationship_counts["h1"][trace.get("h1_relationship_to_thesis") or "UNKNOWN"] += 1
+        relationship_counts["m30"][trace.get("m30_relationship_to_thesis") or "UNKNOWN"] += 1
+
+    watched_stages = ["ENTER_NOW", "ALMOST_READY", "WAITING", "EARLY_TOUCH"]
+    return {
+        "status": "ready",
+        "version": MTF_STRUCTURE_SHADOW_VERSION,
+        "message": "Shadow MTF hierarchy study only. Live strategy, lifecycle, ranking, alerts, cards and ENTER NOW are unchanged.",
+        "processed_setups": len(traces),
+        "shadow_state_distribution": dict(sorted(shadow_state_counts.items())),
+        "comparison_distribution": dict(sorted(comparison_counts.items())),
+        "relationship_distribution": {
+            key: dict(sorted(counter.items()))
+            for key, counter in relationship_counts.items()
+        },
+        "production_stage_shadow_matrix": {
+            stage: dict(sorted(counter.items()))
+            for stage, counter in sorted(by_production_stage.items())
+        },
+        "requested_stage_shadow_matrix": {
+            stage: dict(sorted(by_production_stage.get(stage, Counter()).items()))
+            for stage in watched_stages
+        },
+        "diagnostic_examples": traces[:25],
+        "all_traces": traces,
+        "live_strategy_changed": False,
+    }
+
+
+MTF_STRUCTURE_SHADOW_V2_VERSION = "stock-mtf-structure-shadow-v2"
+STOCK_MTF_STRUCTURE_SHADOW_V2_PATH = os.getenv("STOCK_MTF_STRUCTURE_SHADOW_V2_PATH") or "/tmp/kairos_stock_mtf_structure_shadow_v2.json"
+
+
+def _mtf_v2_swing_range_id(prefix: str, direction: str, low: Optional[dict], high: Optional[dict]) -> Optional[str]:
+    if not low or not high:
+        return None
+    try:
+        return (
+            f"{prefix}:{direction}:"
+            f"{int(low.get('index', -1))}:{int(high.get('index', -1))}:"
+            f"{float(low.get('price')):.4f}:{float(high.get('price')):.4f}"
+        )
+    except Exception:
+        return None
+
+
+def _mtf_v2_last_structural_range(df: pd.DataFrame, swings: list, direction: str, prefix: str) -> dict:
+    highs = [s for s in swings if s.get("type") == "high"]
+    lows = [s for s in swings if s.get("type") == "low"]
+    if not highs or not lows:
+        return {}
+    if direction == "LONG":
+        high = highs[-1]
+        prior_lows = [low for low in lows if int(low.get("index", -1)) <= int(high.get("index", -1))]
+        low = prior_lows[-1] if prior_lows else lows[-1]
+    elif direction == "SHORT":
+        low = lows[-1]
+        prior_highs = [high for high in highs if int(high.get("index", -1)) <= int(low.get("index", -1))]
+        high = prior_highs[-1] if prior_highs else highs[-1]
+    else:
+        latest_high = highs[-1]
+        latest_low = lows[-1]
+        high = latest_high
+        low = latest_low
+        direction = "LONG" if int(latest_high.get("index", -1)) > int(latest_low.get("index", -1)) else "SHORT"
+    try:
+        high_price = float(high["price"])
+        low_price = float(low["price"])
+    except Exception:
+        return {}
+    if high_price <= low_price:
+        return {}
+    return {
+        "id": _mtf_v2_swing_range_id(prefix, direction, low, high),
+        "direction": direction,
+        "high": round(high_price, 4),
+        "low": round(low_price, 4),
+        "high_time": _mtf_shadow_timestamp(df, int(high.get("index", -1))),
+        "low_time": _mtf_shadow_timestamp(df, int(low.get("index", -1))),
+        "equilibrium": round((high_price + low_price) / 2.0, 4),
+    }
+
+
+def _mtf_v2_active_4h_leg(df: pd.DataFrame, swings: list) -> dict:
+    leg = _mtf_v2_last_structural_range(df, swings, "NEUTRAL", "4H_LEG")
+    if not leg:
+        return {
+            "direction": None,
+            "id": None,
+            "high": None,
+            "low": None,
+            "state": "INSUFFICIENT_STRUCTURE",
+        }
+    price = float(df["Close"].iloc[-1]) if not df.empty else None
+    state = "ACTIVE"
+    if price is not None:
+        if leg["direction"] == "LONG" and price < float(leg["low"]):
+            state = "BROKEN"
+        elif leg["direction"] == "SHORT" and price > float(leg["high"]):
+            state = "BROKEN"
+        elif (leg["direction"] == "LONG" and price < float(leg["equilibrium"])) or (leg["direction"] == "SHORT" and price > float(leg["equilibrium"])):
+            state = "PULLBACK"
+    return {
+        "direction": leg.get("direction"),
+        "id": leg.get("id"),
+        "high": leg.get("high"),
+        "low": leg.get("low"),
+        "high_time": leg.get("high_time"),
+        "low_time": leg.get("low_time"),
+        "equilibrium": leg.get("equilibrium"),
+        "state": state,
+    }
+
+
+def _mtf_v2_location(price: Optional[float], structure_range: dict, thesis_direction: Optional[str]) -> dict:
+    if price is None or not structure_range or thesis_direction not in {"LONG", "SHORT"}:
+        return {
+            "location_range_id": None,
+            "location_range_high": None,
+            "location_range_low": None,
+            "location_equilibrium": None,
+            "location_relative_to_thesis": "UNKNOWN",
+        }
+    high = _safe_float(structure_range.get("high"))
+    low = _safe_float(structure_range.get("low"))
+    equilibrium = _safe_float(structure_range.get("equilibrium"))
+    if high is None or low is None or equilibrium is None or high <= low:
+        relative = "UNKNOWN"
+    elif thesis_direction == "LONG":
+        relative = "DISCOUNT" if price <= equilibrium else "PREMIUM"
+    else:
+        relative = "PREMIUM" if price >= equilibrium else "DISCOUNT"
+    return {
+        "location_range_id": structure_range.get("id"),
+        "location_range_high": high,
+        "location_range_low": low,
+        "location_equilibrium": equilibrium,
+        "location_relative_to_thesis": relative,
+    }
+
+
+def _mtf_v2_select_trade_thesis(
+    *,
+    regime_direction: str,
+    regime_range: dict,
+    active_leg: dict,
+    production_direction: str,
+) -> dict:
+    active_direction = active_leg.get("direction")
+    thesis_direction = None
+    thesis_type = "NO_VALID_THESIS"
+    parent = {}
+    reason = "insufficient_directional_structure"
+
+    if regime_direction in {"LONG", "SHORT"}:
+        thesis_direction = regime_direction
+        thesis_type = "REGIME_CONTINUATION"
+        parent = regime_range
+        if active_direction in {"LONG", "SHORT"} and active_direction != regime_direction:
+            reason = "regime_direction_with_countertrend_4h_active_leg"
+        elif active_direction == regime_direction:
+            reason = "regime_and_4h_active_leg_aligned"
+        else:
+            reason = "regime_direction_with_ambiguous_4h_active_leg"
+    elif active_direction in {"LONG", "SHORT"}:
+        thesis_direction = active_direction
+        thesis_type = "ACTIVE_LEG_CONTINUATION"
+        parent = active_leg
+        reason = "neutral_regime_with_directional_4h_active_leg"
+    elif production_direction in {"LONG", "SHORT"}:
+        thesis_direction = production_direction
+        thesis_type = "TRANSITIONAL"
+        parent = active_leg if active_leg.get("id") else regime_range
+        reason = "production_direction_used_as_transitional_shadow_context"
+
+    invalidation_level = None
+    invalidation_reason = None
+    if thesis_direction == "LONG":
+        invalidation_level = parent.get("low")
+        invalidation_reason = "break_below_thesis_parent_low" if invalidation_level is not None else None
+    elif thesis_direction == "SHORT":
+        invalidation_level = parent.get("high")
+        invalidation_reason = "break_above_thesis_parent_high" if invalidation_level is not None else None
+
+    return {
+        "trade_thesis_direction": thesis_direction,
+        "thesis_type": thesis_type,
+        "thesis_parent_structure_id": parent.get("id"),
+        "thesis_invalidation_level": invalidation_level,
+        "thesis_invalidation_reason": invalidation_reason,
+        "thesis_selection_reason": reason,
+        "thesis_parent_range": parent,
+    }
+
+
+def _mtf_v2_relationship(direction: str, thesis_direction: Optional[str]) -> str:
+    if thesis_direction not in {"LONG", "SHORT"}:
+        return "NEUTRAL"
+    if direction == thesis_direction:
+        return "WITH_THESIS"
+    if direction in {"LONG", "SHORT"}:
+        return "CORRECTION"
+    return "NEUTRAL"
+
+
+def _mtf_v2_execution_classification(m30_direction: str, relationship: str, event: dict, thesis_direction: Optional[str], correction_state: str) -> str:
+    event_type = event.get("type")
+    event_direction = event.get("direction")
+    if thesis_direction not in {"LONG", "SHORT"} or event_type not in {"BOS", "CHoCH"}:
+        return "AMBIGUOUS"
+    if event_direction == thesis_direction and correction_state in {"DEVELOPING", "MATURE", "REVERSAL_ATTEMPT"}:
+        return "CORRECTION_TERMINATION"
+    if event_direction == thesis_direction and relationship == "WITH_THESIS":
+        return "THESIS_CONTINUATION"
+    if event_direction in {"LONG", "SHORT"} and event_direction != thesis_direction:
+        return "COUNTERTREND_BREAK"
+    if m30_direction == thesis_direction and event_direction == thesis_direction:
+        return "THESIS_CONTINUATION"
+    return "AMBIGUOUS"
+
+
+def _mtf_v2_correction_state(h1_relationship: str, m30_relationship: str, execution_classification: str) -> tuple[Optional[str], str]:
+    if h1_relationship == "CORRECTION":
+        correction_direction = "1H"
+    elif m30_relationship == "CORRECTION":
+        correction_direction = "30M"
+    else:
+        correction_direction = None
+    if execution_classification == "CORRECTION_TERMINATION":
+        return correction_direction, "CONFIRMED_COMPLETE"
+    if h1_relationship == "CORRECTION" and m30_relationship == "CORRECTION":
+        return correction_direction, "MATURE"
+    if h1_relationship == "CORRECTION" or m30_relationship == "CORRECTION":
+        return correction_direction, "DEVELOPING"
+    return correction_direction, "NONE"
+
+
+def _mtf_v2_opposite_direction(direction: Optional[str]) -> Optional[str]:
+    if direction == "LONG":
+        return "SHORT"
+    if direction == "SHORT":
+        return "LONG"
+    return None
+
+
+def stock_mtf_structure_shadow_v2_for_setup(row: dict, candle_data: dict) -> dict:
+    ticker = str(row.get("ticker") or "").upper()
+    daily_df = _mtf_shadow_clean_df(candle_data.get("1D"))
+    h4_df = _mtf_shadow_clean_df(candle_data.get("4H"))
+    h1_df = _mtf_shadow_clean_df(candle_data.get("1H"))
+    m30_df = _mtf_shadow_clean_df(candle_data.get("30M"))
+
+    regime_direction, daily_swings = _mtf_shadow_structure_direction(daily_df, margin=4)
+    regime_range = _mtf_v2_last_structural_range(daily_df, daily_swings, regime_direction, "1D_REGIME")
+    active_4h_direction, h4_swings = _mtf_shadow_structure_direction(h4_df, margin=4)
+    active_leg = _mtf_v2_active_4h_leg(h4_df, h4_swings)
+    h4_price = float(h4_df["Close"].iloc[-1]) if not h4_df.empty else _safe_float(row.get("price"))
+    production_direction = str(row.get("direction") or row.get("trend") or "").upper()
+    thesis = _mtf_v2_select_trade_thesis(
+        regime_direction=regime_direction,
+        regime_range=regime_range,
+        active_leg=active_leg,
+        production_direction=production_direction,
+    )
+    thesis_direction = thesis.get("trade_thesis_direction")
+    location = _mtf_v2_location(h4_price, thesis.get("thesis_parent_range") or {}, thesis_direction)
+
+    h1_direction, h1_swings = _mtf_shadow_structure_direction(h1_df, margin=4)
+    h1_relationship = _mtf_v2_relationship(h1_direction, thesis_direction)
+    m30_direction, m30_swings = _mtf_shadow_structure_direction(m30_df, margin=4)
+    m30_relationship = _mtf_v2_relationship(m30_direction, thesis_direction)
+    execution_event = _mtf_shadow_structure_event(m30_df, m30_swings, thesis_direction or "")
+    preliminary_correction = "MATURE" if h1_relationship == "CORRECTION" and m30_relationship == "CORRECTION" else "DEVELOPING" if (h1_relationship == "CORRECTION" or m30_relationship == "CORRECTION") else "NONE"
+    execution_type = _mtf_v2_execution_classification(m30_direction, m30_relationship, execution_event, thesis_direction, preliminary_correction)
+    correction_direction_source, correction_state = _mtf_v2_correction_state(h1_relationship, m30_relationship, execution_type)
+
+    thesis_state = "NO_VALID_THESIS" if thesis_direction not in {"LONG", "SHORT"} else "VALID"
+    invalidation_level = _safe_float(thesis.get("thesis_invalidation_level"))
+    if h4_price is not None and invalidation_level is not None:
+        if thesis_direction == "LONG" and h4_price < invalidation_level:
+            thesis_state = "INVALIDATED"
+        elif thesis_direction == "SHORT" and h4_price > invalidation_level:
+            thesis_state = "INVALIDATED"
+
+    if thesis_state == "NO_VALID_THESIS":
+        shadow_entry_state = "NO_THESIS"
+    elif thesis_state == "INVALIDATED":
+        shadow_entry_state = "INVALIDATED"
+    elif correction_state in {"DEVELOPING", "MATURE"}:
+        shadow_entry_state = "CORRECTING"
+    elif correction_state == "CONFIRMED_COMPLETE" or execution_type == "THESIS_CONTINUATION":
+        shadow_entry_state = "EXECUTION_CONFIRMED"
+    else:
+        shadow_entry_state = "WAITING_FOR_EXECUTION"
+
+    return {
+        "version": MTF_STRUCTURE_SHADOW_V2_VERSION,
+        "ticker": ticker,
+        "production_direction": row.get("direction") or row.get("trend"),
+        "production_stage": _mtf_shadow_production_stage(row),
+        "production_ranking_stage": _mtf_shadow_raw_ranking_stage(row),
+        "production_timeframe": row.get("timeframe"),
+        "regime_direction": regime_direction if regime_direction in {"LONG", "SHORT"} else None,
+        "regime_structure_id": regime_range.get("id"),
+        "active_4h_leg_direction": active_leg.get("direction"),
+        "active_4h_dominant_trend_direction": active_4h_direction if active_4h_direction in {"LONG", "SHORT"} else None,
+        "active_4h_leg_id": active_leg.get("id"),
+        "active_4h_leg_high": active_leg.get("high"),
+        "active_4h_leg_low": active_leg.get("low"),
+        "active_4h_leg_state": active_leg.get("state"),
+        "trade_thesis_direction": thesis_direction,
+        "thesis_type": thesis.get("thesis_type"),
+        "thesis_parent_structure_id": thesis.get("thesis_parent_structure_id"),
+        "thesis_invalidation_level": thesis.get("thesis_invalidation_level"),
+        "thesis_invalidation_reason": thesis.get("thesis_invalidation_reason"),
+        "thesis_selection_reason": thesis.get("thesis_selection_reason"),
+        **location,
+        "h1_direction": h1_direction if h1_direction in {"LONG", "SHORT"} else None,
+        "h1_relationship_to_thesis": h1_relationship,
+        "correction_direction": (
+            _mtf_v2_opposite_direction(thesis_direction) if correction_direction_source else None
+        ),
+        "correction_state": correction_state,
+        "m30_direction": m30_direction if m30_direction in {"LONG", "SHORT"} else None,
+        "m30_relationship_to_thesis": m30_relationship,
+        "execution_confirmation_type": execution_type,
+        "execution_confirmation_direction": execution_event.get("direction"),
+        "execution_confirmation_time": execution_event.get("time"),
+        "execution_confirmation_break_type": execution_event.get("type"),
+        "execution_confirmation_level": execution_event.get("level"),
+        "mtf_thesis_state": thesis_state,
+        "shadow_entry_state": shadow_entry_state,
+        "live_strategy_changed": False,
+    }
+
+
+def _mtf_v2_compare_to_v1(v1: dict, v2: dict) -> dict:
+    return {
+        "ticker": v2.get("ticker"),
+        "production_stage": v2.get("production_stage"),
+        "production_direction": v2.get("production_direction"),
+        "v1_thesis_direction": v1.get("shadow_thesis_direction"),
+        "v2_thesis_direction": v2.get("trade_thesis_direction"),
+        "v1_entry_state": v1.get("shadow_entry_state"),
+        "v2_entry_state": v2.get("shadow_entry_state"),
+        "v1_comparison": v1.get("comparison_classification"),
+        "v2_thesis_type": v2.get("thesis_type"),
+    }
+
+
+def build_stock_mtf_structure_shadow_v2_report(rows: list, candle_data_by_symbol: dict, v1_report: Optional[dict] = None) -> dict:
+    traces = []
+    state_counts = Counter()
+    thesis_type_counts = Counter()
+    no_thesis = 0
+    invalidated = 0
+    execution_confirmed = 0
+    correction_counts = Counter()
+    production_matrix = defaultdict(Counter)
+    v1_by_ticker = {trace.get("ticker"): trace for trace in (v1_report or {}).get("all_traces", []) if isinstance(trace, dict)}
+    comparisons = []
+    for row in rows or []:
+        if not isinstance(row, dict) or not row.get("ticker"):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        trace = stock_mtf_structure_shadow_v2_for_setup(row, candle_data_by_symbol.get(ticker, {}))
+        traces.append(trace)
+        state = trace.get("shadow_entry_state") or "UNKNOWN"
+        state_counts[state] += 1
+        thesis_type_counts[trace.get("thesis_type") or "UNKNOWN"] += 1
+        correction_counts[trace.get("correction_state") or "UNKNOWN"] += 1
+        production_matrix[trace.get("production_stage") or "UNKNOWN"][state] += 1
+        no_thesis += 1 if state == "NO_THESIS" else 0
+        invalidated += 1 if state == "INVALIDATED" else 0
+        execution_confirmed += 1 if state == "EXECUTION_CONFIRMED" else 0
+        if ticker in v1_by_ticker:
+            comparisons.append(_mtf_v2_compare_to_v1(v1_by_ticker[ticker], trace))
+    return {
+        "status": "ready",
+        "version": MTF_STRUCTURE_SHADOW_V2_VERSION,
+        "message": "Shadow MTF hierarchy V2 only. Live strategy, lifecycle, ranking, alerts, cards and ENTER NOW are unchanged.",
+        "processed_setups": len(traces),
+        "shadow_state_distribution": dict(sorted(state_counts.items())),
+        "thesis_type_distribution": dict(sorted(thesis_type_counts.items())),
+        "correction_state_distribution": dict(sorted(correction_counts.items())),
+        "no_thesis_rate": round(no_thesis / len(traces), 4) if traces else None,
+        "invalidation_rate": round(invalidated / len(traces), 4) if traces else None,
+        "execution_confirmed_cases": execution_confirmed,
+        "production_stage_shadow_matrix": {
+            stage: dict(sorted(counter.items()))
+            for stage, counter in sorted(production_matrix.items())
+        },
+        "v1_v2_comparison_samples": comparisons[:50],
+        "diagnostic_examples": traces[:25],
+        "all_traces": traces,
+        "live_strategy_changed": False,
+    }
+
+
+def persist_stock_mtf_structure_shadow_v2_report(report: dict, *, source: Optional[dict] = None) -> dict:
+    path = Path(STOCK_MTF_STRUCTURE_SHADOW_V2_PATH)
+    persisted_at = _format_utc_timestamp(_utc_now())
+    payload = _json_safe_mtf_shadow_value({
+        "version": MTF_STRUCTURE_SHADOW_V2_VERSION,
+        "persisted_at": persisted_at,
+        "source": source or {},
+        "report": report or {},
+        "live_strategy_changed": False,
+    })
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(serialized)
+    os.replace(tmp_path, path)
+    return {
+        "version": MTF_STRUCTURE_SHADOW_V2_VERSION,
+        "persisted_at": persisted_at,
+        "path": str(path),
+        "bytes": len(serialized.encode("utf-8")),
+    }
+
+
+MTF_STRUCTURE_SHADOW_V3_VERSION = "stock-mtf-structure-shadow-v3"
+STOCK_MTF_STRUCTURE_SHADOW_V3_PATH = os.getenv("STOCK_MTF_STRUCTURE_SHADOW_V3_PATH") or "/tmp/kairos_stock_mtf_structure_shadow_v3.json"
+STOCK_MTF_STRUCTURE_SHADOW_V3_HISTORY_PATH = os.getenv("STOCK_MTF_STRUCTURE_SHADOW_V3_HISTORY_PATH") or "/tmp/kairos_stock_mtf_structure_shadow_v3_history.json"
+STOCK_MTF_STRUCTURE_SHADOW_V3_FEATURE_DATASET_PATH = (
+    os.getenv("STOCK_MTF_STRUCTURE_SHADOW_V3_FEATURE_DATASET_PATH")
+    or "/tmp/kairos_v3_independent_thesis_feature_dataset_v3_0.json"
+)
+
+
+def _mtf_v3_range_start_time(structure_range: dict, direction: Optional[str]) -> Optional[str]:
+    if not structure_range:
+        return None
+    if direction == "LONG":
+        return structure_range.get("low_time")
+    if direction == "SHORT":
+        return structure_range.get("high_time")
+    candidates = [structure_range.get("low_time"), structure_range.get("high_time")]
+    return min([c for c in candidates if c], default=None)
+
+
+def _mtf_v3_range_completion_time(structure_range: dict, direction: Optional[str]) -> Optional[str]:
+    if not structure_range:
+        return None
+    if direction == "LONG":
+        return structure_range.get("high_time")
+    if direction == "SHORT":
+        return structure_range.get("low_time")
+    candidates = [structure_range.get("low_time"), structure_range.get("high_time")]
+    return max([c for c in candidates if c], default=None)
+
+
+def _mtf_v3_iso_sort_key(value: Optional[str]) -> str:
+    return str(value or "")
+
+
+def _mtf_v3_time_after(value: Optional[str], floor: Optional[str]) -> bool:
+    if not value or not floor:
+        return False
+    return _mtf_v3_iso_sort_key(value) > _mtf_v3_iso_sort_key(floor)
+
+
+def _mtf_v3_latest_time(*values: Optional[str]) -> Optional[str]:
+    present = [str(value) for value in values if value]
+    return max(present) if present else None
+
+
+def _mtf_v3_event_id(event: dict) -> Optional[str]:
+    event_type = event.get("type")
+    event_direction = event.get("direction")
+    event_time = event.get("time")
+    event_level = event.get("level")
+    if not event_type or not event_time:
+        return None
+    return f"30M:{event_type}:{event_direction or 'NEUTRAL'}:{event_time}:{event_level}"
+
+
+def _mtf_v3_setup_generation(row: dict) -> Optional[str]:
+    for key in (
+        "setup_generation",
+        "setupGeneration",
+        "generation",
+        "setup_id",
+        "setupId",
+        "id",
+    ):
+        value = row.get(key)
+        if value is not None:
+            return str(value)
+    ticker = str(row.get("ticker") or "").upper()
+    timeframe = str(row.get("timeframe") or "").upper()
+    direction = str(row.get("direction") or row.get("trend") or "").upper()
+    entry = row.get("entry")
+    stop = row.get("stop") or row.get("stopLoss")
+    tp1 = row.get("tp1") or row.get("target1")
+    if ticker and timeframe and direction in {"LONG", "SHORT"} and entry is not None:
+        return f"{ticker}:{timeframe}:{direction}:{entry}:{stop}:{tp1}"
+    return None
+
+
+def _mtf_v3_location_touch_times(df: pd.DataFrame, structure_range: dict, thesis_direction: Optional[str], start_at: Optional[str]) -> dict:
+    if df.empty or thesis_direction not in {"LONG", "SHORT"} or not structure_range:
+        return {
+            "thesis_location_first_touched_at": None,
+            "thesis_location_last_touched_at": None,
+        }
+    equilibrium = _safe_float(structure_range.get("equilibrium"))
+    if equilibrium is None:
+        return {
+            "thesis_location_first_touched_at": None,
+            "thesis_location_last_touched_at": None,
+        }
+    touches = []
+    for idx, row in enumerate(df.itertuples()):
+        ts = _mtf_shadow_timestamp(df, idx)
+        if start_at and ts and _mtf_v3_iso_sort_key(ts) < _mtf_v3_iso_sort_key(start_at):
+            continue
+        high = _safe_float(getattr(row, "High", None))
+        low = _safe_float(getattr(row, "Low", None))
+        close = _safe_float(getattr(row, "Close", None))
+        touched = False
+        if thesis_direction == "LONG":
+            touched = any(value is not None and value <= equilibrium for value in (low, close))
+        elif thesis_direction == "SHORT":
+            touched = any(value is not None and value >= equilibrium for value in (high, close))
+        if touched and ts:
+            touches.append(ts)
+    return {
+        "thesis_location_first_touched_at": touches[0] if touches else None,
+        "thesis_location_last_touched_at": touches[-1] if touches else None,
+    }
+
+
+def _mtf_v3_child_context(df: pd.DataFrame, direction: str, thesis_direction: Optional[str], prefix: str) -> dict:
+    relationship = _mtf_v2_relationship(direction, thesis_direction)
+    structure_range = _mtf_v2_last_structural_range(df, _find_swings(df, margin=4) if not df.empty and len(df) >= 8 else [], direction, prefix) if direction in {"LONG", "SHORT"} else {}
+    return {
+        "direction": direction if direction in {"LONG", "SHORT"} else None,
+        "relationship": relationship,
+        "range": structure_range,
+        "started_at": _mtf_v3_range_start_time(structure_range, direction),
+        "completed_at": _mtf_v3_range_completion_time(structure_range, direction),
+    }
+
+
+def _mtf_v3_select_trade_thesis(
+    *,
+    regime_direction: str,
+    regime_range: dict,
+    active_leg: dict,
+) -> dict:
+    active_direction = active_leg.get("direction")
+    thesis_direction = None
+    thesis_type = "NO_VALID_THESIS"
+    parent = {}
+    reason = "insufficient_directional_structure"
+
+    if regime_direction in {"LONG", "SHORT"} and regime_range.get("id"):
+        thesis_direction = regime_direction
+        thesis_type = "REGIME_CONTINUATION"
+        parent = regime_range
+        if active_direction in {"LONG", "SHORT"} and active_direction != regime_direction:
+            reason = "regime_direction_with_countertrend_4h_active_leg"
+        elif active_direction == regime_direction:
+            reason = "regime_and_4h_active_leg_aligned"
+        else:
+            reason = "regime_direction_with_ambiguous_4h_active_leg"
+    elif active_direction in {"LONG", "SHORT"} and active_leg.get("id"):
+        thesis_direction = active_direction
+        thesis_type = "ACTIVE_LEG_CONTINUATION"
+        parent = active_leg
+        reason = "neutral_regime_with_directional_4h_active_leg"
+    elif regime_direction in {"LONG", "SHORT"} or active_direction in {"LONG", "SHORT"}:
+        thesis_type = "TRANSITIONAL_UNRESOLVED"
+        reason = "directional_structure_without_explicit_parent"
+
+    invalidation_level = None
+    invalidation_reason = None
+    if thesis_direction == "LONG":
+        invalidation_level = parent.get("low")
+        invalidation_reason = "break_below_trade_thesis_parent_low" if invalidation_level is not None else None
+    elif thesis_direction == "SHORT":
+        invalidation_level = parent.get("high")
+        invalidation_reason = "break_above_trade_thesis_parent_high" if invalidation_level is not None else None
+
+    return {
+        "trade_thesis_direction": thesis_direction,
+        "thesis_type": thesis_type,
+        "thesis_parent_structure_id": parent.get("id"),
+        "trade_thesis_created_at": _mtf_v3_range_completion_time(parent, thesis_direction),
+        "trade_thesis_invalidation_level": invalidation_level,
+        "trade_thesis_invalidation_reason": invalidation_reason,
+        "trade_thesis_invalidation_owner_id": parent.get("id"),
+        "thesis_selection_reason": reason,
+        "thesis_parent_range": parent,
+    }
+
+
+def _mtf_v3_invalidation_state(price: Optional[float], direction: Optional[str], level: Optional[float]) -> bool:
+    if price is None or level is None or direction not in {"LONG", "SHORT"}:
+        return False
+    if direction == "LONG":
+        return price < level
+    return price > level
+
+
+def _mtf_v3_execution_event_type(event: dict, thesis_direction: Optional[str], correction_state: str, row: dict) -> str:
+    event_type = event.get("type")
+    event_direction = event.get("direction")
+    if thesis_direction not in {"LONG", "SHORT"} or event_type not in {"BOS", "CHoCH"} or event_direction != thesis_direction:
+        return "AMBIGUOUS"
+    trade_eval = row.get("trade_eval") if isinstance(row.get("trade_eval"), dict) else {}
+    sweep = bool(trade_eval.get("sweep_taken") or trade_eval.get("liquidity_sweep"))
+    rejection = bool(trade_eval.get("rejection_confirmed") or trade_eval.get("rejection"))
+    if sweep:
+        return "LIQUIDITY_SWEEP_PLUS_BREAK"
+    if rejection:
+        return "REJECTION_PLUS_BREAK"
+    if correction_state in {"DEVELOPING", "MATURE", "CONFIRMED_COMPLETE"}:
+        return f"CORRECTION_TERMINATION_{event_type}"
+    return "THESIS_CONTINUATION_NO_CORRECTION"
+
+
+def _mtf_v3_correction_context(
+    *,
+    thesis_direction: Optional[str],
+    active_leg: dict,
+    active_leg_started_at: Optional[str],
+    h1_context: dict,
+    m30_context: dict,
+    execution_event: dict,
+) -> dict:
+    correction_direction = None
+    correction_started_at = None
+    correction_source = None
+    correction_state = "NONE"
+    if thesis_direction in {"LONG", "SHORT"}:
+        if active_leg.get("direction") in {"LONG", "SHORT"} and active_leg.get("direction") != thesis_direction:
+            correction_direction = active_leg.get("direction")
+            correction_started_at = active_leg_started_at
+            correction_source = "4H_ACTIVE_LEG"
+            correction_state = "DEVELOPING"
+        for source, context in (("1H", h1_context), ("30M", m30_context)):
+            if context.get("relationship") == "CORRECTION":
+                candidate_time = context.get("started_at")
+                if not correction_started_at:
+                    correction_started_at = candidate_time
+                    correction_source = source
+                correction_direction = _mtf_v2_opposite_direction(thesis_direction)
+                correction_state = "MATURE" if correction_state == "DEVELOPING" else "DEVELOPING"
+        if h1_context.get("relationship") == "CORRECTION" and m30_context.get("relationship") == "CORRECTION":
+            correction_state = "MATURE"
+    event_confirms = (
+        execution_event.get("direction") == thesis_direction
+        and execution_event.get("type") in {"BOS", "CHoCH"}
+        and correction_started_at is not None
+        and _mtf_v3_time_after(execution_event.get("time"), correction_started_at)
+    )
+    if event_confirms and correction_state in {"DEVELOPING", "MATURE"}:
+        correction_state = "CONFIRMED_COMPLETE"
+    return {
+        "correction_direction": correction_direction,
+        "correction_started_at": correction_started_at,
+        "correction_source": correction_source,
+        "correction_state": correction_state,
+    }
+
+
+def _mtf_v3_shadow_state(
+    *,
+    thesis_type: str,
+    thesis_direction: Optional[str],
+    trade_thesis_invalidated: bool,
+    regime_invalidated: bool,
+    correction_state: str,
+    location: str,
+    location_first_touched_at: Optional[str],
+    execution_event: dict,
+    execution_event_type: str,
+    correction_started_at: Optional[str],
+    trade_thesis_created_at: Optional[str],
+) -> tuple[str, bool, list]:
+    reasons = []
+    if thesis_type in {"NO_VALID_THESIS", "TRANSITIONAL_UNRESOLVED"} or thesis_direction not in {"LONG", "SHORT"}:
+        return "NO_VALID_THESIS", False, ["no_explicit_structural_thesis"]
+    if trade_thesis_invalidated:
+        return "TRADE_THESIS_INVALIDATED", False, ["trade_thesis_parent_boundary_breached"]
+    if regime_invalidated:
+        return "REGIME_INVALIDATED", False, ["regime_boundary_breached"]
+    usable_location = location in {"PREMIUM", "DISCOUNT"}
+    if not usable_location:
+        return "THESIS_BUILDING", False, ["thesis_location_not_usable"]
+    if not location_first_touched_at:
+        return "THESIS_BUILDING", False, ["thesis_location_not_touched"]
+    event_time = execution_event.get("time")
+    event_direction = execution_event.get("direction")
+    event_kind = execution_event.get("type")
+    event_agrees = event_direction == thesis_direction and event_kind in {"BOS", "CHoCH"}
+    fresh_after_location = _mtf_v3_time_after(event_time, location_first_touched_at)
+    fresh_after_correction = _mtf_v3_time_after(event_time, correction_started_at)
+    fresh_after_thesis = _mtf_v3_time_after(event_time, trade_thesis_created_at)
+    if correction_state in {"DEVELOPING", "MATURE"}:
+        return "CORRECTION_DEVELOPING", False, ["correction_not_terminated"]
+    if location_first_touched_at and not event_agrees:
+        return "AT_THESIS_LOCATION", False, ["no_thesis_direction_execution_event"]
+    if event_agrees and not correction_started_at:
+        return "WITH_THESIS_NO_FRESH_TRIGGER", False, ["same_direction_event_without_qualifying_correction"]
+    if event_agrees and not fresh_after_location:
+        reasons.append("execution_not_after_location_touch")
+    if event_agrees and not fresh_after_correction:
+        reasons.append("execution_not_after_correction_start")
+    if event_agrees and not fresh_after_thesis:
+        reasons.append("execution_not_after_trade_thesis_creation")
+    chronology_ok = event_agrees and fresh_after_location and fresh_after_correction and fresh_after_thesis
+    if chronology_ok and execution_event_type in {
+        "CORRECTION_TERMINATION_CHOCH",
+        "CORRECTION_TERMINATION_BOS",
+        "REJECTION_PLUS_BREAK",
+        "LIQUIDITY_SWEEP_PLUS_BREAK",
+    }:
+        return "EXECUTION_CONFIRMED", True, []
+    if event_agrees:
+        return "EXECUTION_CANDIDATE", False, reasons or ["execution_event_not_classified_as_correction_termination"]
+    return "WAITING_FOR_EXECUTION", False, reasons or ["waiting_for_fresh_thesis_direction_execution"]
+
+
+def stock_mtf_structure_shadow_v3_for_setup(row: dict, candle_data: dict) -> dict:
+    ticker = str(row.get("ticker") or "").upper()
+    daily_df = _mtf_shadow_clean_df(candle_data.get("1D"))
+    h4_df = _mtf_shadow_clean_df(candle_data.get("4H"))
+    h1_df = _mtf_shadow_clean_df(candle_data.get("1H"))
+    m30_df = _mtf_shadow_clean_df(candle_data.get("30M"))
+
+    regime_direction, daily_swings = _mtf_shadow_structure_direction(daily_df, margin=4)
+    regime_range = _mtf_v2_last_structural_range(daily_df, daily_swings, regime_direction, "1D_REGIME")
+    regime_established_at = _mtf_v3_range_completion_time(regime_range, regime_direction)
+    regime_invalidation_level = None
+    regime_invalidation_reason = None
+    if regime_direction == "LONG":
+        regime_invalidation_level = regime_range.get("low")
+        regime_invalidation_reason = "break_below_regime_parent_low" if regime_invalidation_level is not None else None
+    elif regime_direction == "SHORT":
+        regime_invalidation_level = regime_range.get("high")
+        regime_invalidation_reason = "break_above_regime_parent_high" if regime_invalidation_level is not None else None
+
+    active_4h_direction, h4_swings = _mtf_shadow_structure_direction(h4_df, margin=4)
+    active_leg = _mtf_v2_active_4h_leg(h4_df, h4_swings)
+    active_leg_started_at = _mtf_v3_range_start_time(active_leg, active_leg.get("direction"))
+    active_leg_completed_at = _mtf_v3_range_completion_time(active_leg, active_leg.get("direction"))
+    h4_price = float(h4_df["Close"].iloc[-1]) if not h4_df.empty else _safe_float(row.get("price"))
+
+    thesis = _mtf_v3_select_trade_thesis(
+        regime_direction=regime_direction,
+        regime_range=regime_range,
+        active_leg=active_leg,
+    )
+    thesis_direction = thesis.get("trade_thesis_direction")
+    location = _mtf_v2_location(h4_price, thesis.get("thesis_parent_range") or {}, thesis_direction)
+    location_touches = _mtf_v3_location_touch_times(
+        h4_df,
+        thesis.get("thesis_parent_range") or {},
+        thesis_direction,
+        thesis.get("trade_thesis_created_at"),
+    )
+
+    h1_direction, _h1_swings = _mtf_shadow_structure_direction(h1_df, margin=4)
+    h1_context = _mtf_v3_child_context(h1_df, h1_direction, thesis_direction, "1H_STRUCTURE")
+    m30_direction, m30_swings = _mtf_shadow_structure_direction(m30_df, margin=4)
+    m30_context = _mtf_v3_child_context(m30_df, m30_direction, thesis_direction, "30M_STRUCTURE")
+    execution_event = _mtf_shadow_structure_event(m30_df, m30_swings, thesis_direction or "")
+    correction = _mtf_v3_correction_context(
+        thesis_direction=thesis_direction,
+        active_leg=active_leg,
+        active_leg_started_at=active_leg_started_at,
+        h1_context=h1_context,
+        m30_context=m30_context,
+        execution_event=execution_event,
+    )
+    execution_event_type = _mtf_v3_execution_event_type(
+        execution_event,
+        thesis_direction,
+        correction.get("correction_state") or "NONE",
+        row,
+    )
+
+    trade_thesis_invalidated = _mtf_v3_invalidation_state(
+        h4_price,
+        thesis_direction,
+        _safe_float(thesis.get("trade_thesis_invalidation_level")),
+    )
+    regime_invalidated = _mtf_v3_invalidation_state(
+        h4_price,
+        regime_direction if regime_direction in {"LONG", "SHORT"} else None,
+        _safe_float(regime_invalidation_level),
+    )
+    active_leg_invalidated = active_leg.get("state") == "BROKEN"
+
+    shadow_state, chronology_proven, state_reasons = _mtf_v3_shadow_state(
+        thesis_type=thesis.get("thesis_type"),
+        thesis_direction=thesis_direction,
+        trade_thesis_invalidated=trade_thesis_invalidated,
+        regime_invalidated=regime_invalidated and thesis.get("thesis_type") != "REGIME_CONTINUATION",
+        correction_state=correction.get("correction_state") or "NONE",
+        location=location.get("location_relative_to_thesis"),
+        location_first_touched_at=location_touches.get("thesis_location_first_touched_at"),
+        execution_event=execution_event,
+        execution_event_type=execution_event_type,
+        correction_started_at=correction.get("correction_started_at"),
+        trade_thesis_created_at=thesis.get("trade_thesis_created_at"),
+    )
+
+    return {
+        "version": MTF_STRUCTURE_SHADOW_V3_VERSION,
+        "ticker": ticker,
+        "production_direction": row.get("direction") or row.get("trend"),
+        "production_stage": _mtf_shadow_production_stage(row),
+        "production_ranking_stage": _mtf_shadow_raw_ranking_stage(row),
+        "production_timeframe": row.get("timeframe"),
+        "regime_direction": regime_direction if regime_direction in {"LONG", "SHORT"} else None,
+        "regime_structure_id": regime_range.get("id"),
+        "regime_established_at": regime_established_at,
+        "regime_invalidation_level": regime_invalidation_level,
+        "regime_invalidation_reason": regime_invalidation_reason,
+        "regime_invalidated": bool(regime_invalidated),
+        "active_4h_leg_direction": active_leg.get("direction"),
+        "active_4h_dominant_trend_direction": active_4h_direction if active_4h_direction in {"LONG", "SHORT"} else None,
+        "active_4h_leg_id": active_leg.get("id"),
+        "active_4h_leg_high": active_leg.get("high"),
+        "active_4h_leg_low": active_leg.get("low"),
+        "active_4h_leg_state": active_leg.get("state"),
+        "active_leg_started_at": active_leg_started_at,
+        "active_leg_completed_at": active_leg_completed_at,
+        "active_leg_invalidated": bool(active_leg_invalidated),
+        "trade_thesis_direction": thesis_direction,
+        "thesis_type": thesis.get("thesis_type"),
+        "thesis_parent_structure_id": thesis.get("thesis_parent_structure_id"),
+        "trade_thesis_created_at": thesis.get("trade_thesis_created_at"),
+        "trade_thesis_invalidation_level": thesis.get("trade_thesis_invalidation_level"),
+        "trade_thesis_invalidation_reason": thesis.get("trade_thesis_invalidation_reason"),
+        "trade_thesis_invalidation_owner_id": thesis.get("trade_thesis_invalidation_owner_id"),
+        "trade_thesis_invalidated": bool(trade_thesis_invalidated),
+        "thesis_selection_reason": thesis.get("thesis_selection_reason"),
+        **location,
+        **location_touches,
+        "h1_direction": h1_context.get("direction"),
+        "h1_relationship_to_thesis": h1_context.get("relationship"),
+        "h1_structure_started_at": h1_context.get("started_at"),
+        "h1_structure_completed_at": h1_context.get("completed_at"),
+        "correction_direction": correction.get("correction_direction"),
+        "correction_state": correction.get("correction_state"),
+        "correction_started_at": correction.get("correction_started_at"),
+        "correction_source": correction.get("correction_source"),
+        "m30_direction": m30_context.get("direction"),
+        "m30_relationship_to_thesis": m30_context.get("relationship"),
+        "m30_structure_started_at": m30_context.get("started_at"),
+        "m30_structure_completed_at": m30_context.get("completed_at"),
+        "execution_event_id": _mtf_v3_event_id(execution_event),
+        "execution_event_type": execution_event_type,
+        "execution_event_at": execution_event.get("time"),
+        "execution_event_direction": execution_event.get("direction"),
+        "execution_event_break_type": execution_event.get("type"),
+        "execution_event_level": execution_event.get("level"),
+        "execution_setup_generation": _mtf_v3_setup_generation(row),
+        "execution_chronology_proven": bool(chronology_proven),
+        "execution_sequence_reasons": state_reasons,
+        "shadow_entry_state": shadow_state,
+        "live_strategy_changed": False,
+    }
+
+
+def _mtf_v3_compare_to_v2(v2: dict, v3: dict) -> dict:
+    return {
+        "ticker": v3.get("ticker"),
+        "production_stage": v3.get("production_stage"),
+        "production_direction": v3.get("production_direction"),
+        "v2_thesis_type": v2.get("thesis_type"),
+        "v3_thesis_type": v3.get("thesis_type"),
+        "v2_entry_state": v2.get("shadow_entry_state"),
+        "v3_entry_state": v3.get("shadow_entry_state"),
+        "v2_execution_type": v2.get("execution_confirmation_type"),
+        "v3_execution_type": v3.get("execution_event_type"),
+        "v3_chronology_proven": v3.get("execution_chronology_proven"),
+    }
+
+
+def build_stock_mtf_structure_shadow_v3_report(rows: list, candle_data_by_symbol: dict, v2_report: Optional[dict] = None) -> dict:
+    traces = []
+    state_counts = Counter()
+    thesis_type_counts = Counter()
+    correction_counts = Counter()
+    execution_type_counts = Counter()
+    production_matrix = defaultdict(Counter)
+    v2_by_ticker = {trace.get("ticker"): trace for trace in (v2_report or {}).get("all_traces", []) if isinstance(trace, dict)}
+    comparisons = []
+    v2_exec_to_v3 = Counter()
+    v2_invalid_to_v3 = Counter()
+    v3_chronology_confirmed = 0
+    transitional_removed = 0
+    for row in rows or []:
+        if not isinstance(row, dict) or not row.get("ticker"):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        trace = stock_mtf_structure_shadow_v3_for_setup(row, candle_data_by_symbol.get(ticker, {}))
+        traces.append(trace)
+        state = trace.get("shadow_entry_state") or "UNKNOWN"
+        state_counts[state] += 1
+        thesis_type_counts[trace.get("thesis_type") or "UNKNOWN"] += 1
+        correction_counts[trace.get("correction_state") or "UNKNOWN"] += 1
+        execution_type_counts[trace.get("execution_event_type") or "UNKNOWN"] += 1
+        production_matrix[trace.get("production_stage") or "UNKNOWN"][state] += 1
+        if state == "EXECUTION_CONFIRMED" and trace.get("execution_chronology_proven"):
+            v3_chronology_confirmed += 1
+        v2 = v2_by_ticker.get(ticker)
+        if v2:
+            comparisons.append(_mtf_v3_compare_to_v2(v2, trace))
+            if v2.get("shadow_entry_state") == "EXECUTION_CONFIRMED":
+                v2_exec_to_v3[state] += 1
+            if v2.get("shadow_entry_state") == "INVALIDATED":
+                v2_invalid_to_v3[state] += 1
+            if v2.get("thesis_type") == "TRANSITIONAL" and trace.get("thesis_type") in {"NO_VALID_THESIS", "TRANSITIONAL_UNRESOLVED"}:
+                transitional_removed += 1
+    return {
+        "status": "ready",
+        "version": MTF_STRUCTURE_SHADOW_V3_VERSION,
+        "message": "Shadow MTF hierarchy V3 only. Live strategy, lifecycle, ranking, alerts, cards and ENTER NOW are unchanged.",
+        "processed_setups": len(traces),
+        "shadow_state_distribution": dict(sorted(state_counts.items())),
+        "thesis_type_distribution": dict(sorted(thesis_type_counts.items())),
+        "correction_state_distribution": dict(sorted(correction_counts.items())),
+        "execution_event_type_distribution": dict(sorted(execution_type_counts.items())),
+        "execution_confirmed_cases": state_counts.get("EXECUTION_CONFIRMED", 0),
+        "execution_chronology_proven_cases": v3_chronology_confirmed,
+        "production_stage_shadow_matrix": {
+            stage: dict(sorted(counter.items()))
+            for stage, counter in sorted(production_matrix.items())
+        },
+        "v2_execution_confirmed_to_v3_state": dict(sorted(v2_exec_to_v3.items())),
+        "v2_invalidated_to_v3_state": dict(sorted(v2_invalid_to_v3.items())),
+        "v2_transitional_theses_removed": transitional_removed,
+        "v2_v3_comparison_samples": comparisons[:50],
+        "diagnostic_examples": traces[:25],
+        "all_traces": traces,
+        "live_strategy_changed": False,
+    }
+
+
+def persist_stock_mtf_structure_shadow_v3_report(report: dict, *, source: Optional[dict] = None) -> dict:
+    path = Path(STOCK_MTF_STRUCTURE_SHADOW_V3_PATH)
+    persisted_at = _format_utc_timestamp(_utc_now())
+    payload = _json_safe_mtf_shadow_value({
+        "version": MTF_STRUCTURE_SHADOW_V3_VERSION,
+        "persisted_at": persisted_at,
+        "source": source or {},
+        "report": report or {},
+        "live_strategy_changed": False,
+    })
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(serialized)
+    os.replace(tmp_path, path)
+    return {
+        "version": MTF_STRUCTURE_SHADOW_V3_VERSION,
+        "persisted_at": persisted_at,
+        "path": str(path),
+        "bytes": len(serialized.encode("utf-8")),
+    }
+
+
+def _mtf_v3_historical_slice(df: pd.DataFrame, timestamp: str) -> pd.DataFrame:
+    clean = _mtf_shadow_clean_df(df)
+    if clean.empty or not timestamp:
+        return clean.iloc[0:0].copy()
+    cutoff = pd.Timestamp(timestamp)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.tz_localize("UTC")
+    else:
+        cutoff = cutoff.tz_convert("UTC")
+    index = pd.to_datetime(clean.index, utc=True)
+    return clean.loc[index <= cutoff].copy()
+
+
+def _mtf_v3_historical_candidate_row(ticker: str, timestamp: str, setup_generation: Optional[str] = None) -> dict:
+    return {
+        "ticker": str(ticker or "").upper(),
+        "timeframe": "30M",
+        "direction": "NEUTRAL",
+        "trend": "NEUTRAL",
+        "ranking_status_bucket": "HISTORICAL_UNAVAILABLE",
+        "new_entry_signal": {"bucket": "HISTORICAL_UNAVAILABLE"},
+        "setup_generation": setup_generation or f"{ticker}:V3_HISTORY:{timestamp}",
+    }
+
+
+def _mtf_v3_historical_trace_at(ticker: str, candle_data: dict, timestamp: str) -> dict:
+    sliced = {
+        "1D": _mtf_v3_historical_slice(candle_data.get("1D"), timestamp),
+        "4H": _mtf_v3_historical_slice(candle_data.get("4H"), timestamp),
+        "1H": _mtf_v3_historical_slice(candle_data.get("1H"), timestamp),
+        "30M": _mtf_v3_historical_slice(candle_data.get("30M"), timestamp),
+    }
+    row = _mtf_v3_historical_candidate_row(ticker, timestamp)
+    trace = stock_mtf_structure_shadow_v3_for_setup(row, sliced)
+    trace["historical_replay_timestamp"] = timestamp
+    trace["anti_lookahead"] = {
+        "slice_cutoff": timestamp,
+        "max_1d_bar": _mtf_shadow_timestamp(sliced["1D"], len(sliced["1D"]) - 1) if len(sliced["1D"]) else None,
+        "max_4h_bar": _mtf_shadow_timestamp(sliced["4H"], len(sliced["4H"]) - 1) if len(sliced["4H"]) else None,
+        "max_1h_bar": _mtf_shadow_timestamp(sliced["1H"], len(sliced["1H"]) - 1) if len(sliced["1H"]) else None,
+        "max_30m_bar": _mtf_shadow_timestamp(sliced["30M"], len(sliced["30M"]) - 1) if len(sliced["30M"]) else None,
+        "swing_confirmation_delay_bars": 4,
+        "confirmed_swing_rule": "_find_swings only iterates margin..len(df)-margin on timestamp-sliced candles",
+    }
+    return trace
+
+
+def _mtf_v3_price_at(df: pd.DataFrame, timestamp: str) -> Optional[float]:
+    clean = _mtf_shadow_clean_df(df)
+    if clean.empty:
+        return None
+    sliced = _mtf_v3_historical_slice(clean, timestamp)
+    if sliced.empty:
+        return None
+    return _safe_float(sliced["Close"].iloc[-1])
+
+
+def _mtf_v3_outcome_targets(direction: str, entry: float, invalidation: float) -> dict:
+    risk = abs(float(entry) - float(invalidation))
+    if not math.isfinite(risk) or risk <= 0:
+        return {"risk": None, "r1": None, "r2": None, "r3": None}
+    if direction == "LONG":
+        return {
+            "risk": risk,
+            "r1": entry + risk,
+            "r2": entry + 2 * risk,
+            "r3": entry + 3 * risk,
+        }
+    return {
+        "risk": risk,
+        "r1": entry - risk,
+        "r2": entry - 2 * risk,
+        "r3": entry - 3 * risk,
+    }
+
+
+def _mtf_v3_outcome_touch(direction: str, high: float, low: float, level: Optional[float], *, favorable: bool) -> bool:
+    if level is None or direction not in {"LONG", "SHORT"}:
+        return False
+    if direction == "LONG":
+        return high >= level if favorable else low <= level
+    return low <= level if favorable else high >= level
+
+
+def _mtf_v3_trading_day_returns(df: pd.DataFrame, entry_time: str, entry_price: float, direction: str) -> dict:
+    clean = _mtf_shadow_clean_df(df)
+    future = clean.loc[pd.to_datetime(clean.index, utc=True) > pd.Timestamp(entry_time).tz_convert("UTC")]
+    if future.empty:
+        return {f"return_after_{days}_trading_days": None for days in (1, 3, 5, 10)}
+    result = {}
+    dates = []
+    for ts in pd.to_datetime(future.index, utc=True):
+        day = ts.date().isoformat()
+        if day not in dates:
+            dates.append(day)
+    for days in (1, 3, 5, 10):
+        value = None
+        if len(dates) >= days:
+            target_day = dates[days - 1]
+            day_rows = future[[ts.date().isoformat() == target_day for ts in pd.to_datetime(future.index, utc=True)]]
+            if not day_rows.empty:
+                close = _safe_float(day_rows["Close"].iloc[-1])
+                if close is not None and entry_price:
+                    raw = (close - entry_price) / entry_price
+                    value = raw if direction == "LONG" else -raw
+        result[f"return_after_{days}_trading_days"] = round(value, 6) if value is not None else None
+    return result
+
+
+def _mtf_v3_measure_underlying_outcome(trace: dict, candle_data: dict) -> dict:
+    direction = trace.get("trade_thesis_direction")
+    event_time = trace.get("execution_event_at")
+    invalidation = _safe_float(trace.get("trade_thesis_invalidation_level"))
+    execution_df = _mtf_shadow_clean_df(candle_data.get("30M"))
+    entry = _mtf_v3_price_at(execution_df, event_time)
+    if direction not in {"LONG", "SHORT"} or not event_time or entry is None or invalidation is None:
+        return {
+            "status": "NOT_MEASURABLE",
+            "reason": "missing direction, execution time, entry price, or invalidation",
+        }
+    targets = _mtf_v3_outcome_targets(direction, entry, invalidation)
+    risk = targets.get("risk")
+    if risk is None:
+        return {
+            "status": "NOT_MEASURABLE",
+            "reason": "invalid risk distance",
+            "entry_price": entry,
+            "thesis_invalidation_level": invalidation,
+        }
+    future = execution_df.loc[pd.to_datetime(execution_df.index, utc=True) > pd.Timestamp(event_time).tz_convert("UTC")]
+    mfe = 0.0
+    mae = 0.0
+    touches = {
+        "r1_reached_at": None,
+        "r2_reached_at": None,
+        "r3_reached_at": None,
+        "invalidation_reached_at": None,
+        "r1_bars": None,
+        "r2_bars": None,
+        "r3_bars": None,
+        "invalidation_bars": None,
+    }
+    for offset, (idx, row) in enumerate(future.iterrows(), start=1):
+        high = _safe_float(row.get("High"))
+        low = _safe_float(row.get("Low"))
+        if high is None or low is None:
+            continue
+        if direction == "LONG":
+            favorable = high - entry
+            adverse = low - entry
+        else:
+            favorable = entry - low
+            adverse = entry - high
+        mfe = max(mfe, favorable / risk)
+        mae = min(mae, adverse / risk)
+        ts = _format_utc_timestamp(idx)
+        for label, level in (("r1", targets["r1"]), ("r2", targets["r2"]), ("r3", targets["r3"])):
+            key = f"{label}_reached_at"
+            if touches[key] is None and _mtf_v3_outcome_touch(direction, high, low, level, favorable=True):
+                touches[key] = ts
+                touches[f"{label}_bars"] = offset
+        if touches["invalidation_reached_at"] is None and _mtf_v3_outcome_touch(direction, high, low, invalidation, favorable=False):
+            touches["invalidation_reached_at"] = ts
+            touches["invalidation_bars"] = offset
+    returns = _mtf_v3_trading_day_returns(execution_df, event_time, entry, direction)
+    return {
+        "status": "MEASURED",
+        "entry_price": round(float(entry), 4),
+        "entry_price_convention": "30M close of the V3 execution_event_at bar",
+        "thesis_invalidation_level": round(float(invalidation), 4),
+        "risk_dollars": round(float(risk), 4),
+        "r1_level": round(float(targets["r1"]), 4),
+        "r2_level": round(float(targets["r2"]), 4),
+        "r3_level": round(float(targets["r3"]), 4),
+        "MFE": round(float(mfe), 4),
+        "MAE": round(float(mae), 4),
+        **touches,
+        **returns,
+        "bars_evaluated_after_entry": int(len(future)),
+    }
+
+
+def _mtf_v3_historical_event_record(trace: dict, outcome: dict) -> dict:
+    return {
+        "symbol": trace.get("ticker"),
+        "timestamp": trace.get("execution_event_at"),
+        "direction": trace.get("trade_thesis_direction"),
+        "thesis_type": trace.get("thesis_type"),
+        "regime_direction": trace.get("regime_direction"),
+        "active_4h_leg": {
+            "direction": trace.get("active_4h_leg_direction"),
+            "id": trace.get("active_4h_leg_id"),
+            "started_at": trace.get("active_leg_started_at"),
+            "state": trace.get("active_4h_leg_state"),
+        },
+        "correction_direction": trace.get("correction_direction"),
+        "location": {
+            "range_id": trace.get("location_range_id"),
+            "range_high": trace.get("location_range_high"),
+            "range_low": trace.get("location_range_low"),
+            "equilibrium": trace.get("location_equilibrium"),
+            "relative_to_thesis": trace.get("location_relative_to_thesis"),
+            "first_touched_at": trace.get("thesis_location_first_touched_at"),
+            "last_touched_at": trace.get("thesis_location_last_touched_at"),
+        },
+        "execution_event_type": trace.get("execution_event_type"),
+        "chronology": {
+            "regime_structure_id": trace.get("regime_structure_id"),
+            "regime_established_at": trace.get("regime_established_at"),
+            "active_4h_leg_id": trace.get("active_4h_leg_id"),
+            "active_leg_started_at": trace.get("active_leg_started_at"),
+            "thesis_parent_structure_id": trace.get("thesis_parent_structure_id"),
+            "trade_thesis_created_at": trace.get("trade_thesis_created_at"),
+            "correction_started_at": trace.get("correction_started_at"),
+            "thesis_location_first_touched_at": trace.get("thesis_location_first_touched_at"),
+            "execution_event_id": trace.get("execution_event_id"),
+            "execution_event_at": trace.get("execution_event_at"),
+        },
+        "execution_setup_generation": trace.get("execution_setup_generation"),
+        "thesis_invalidation_level": trace.get("trade_thesis_invalidation_level"),
+        "outcome": outcome,
+        "production_comparison": {
+            "historical_production_state": "UNAVAILABLE",
+            "reason": "framework does not reconstruct production scanner state unless historical snapshots are supplied",
+        },
+    }
+
+
+def _mtf_v3_historical_segments(events: list[dict]) -> dict:
+    def rate(items, predicate):
+        total = len(items)
+        if not total:
+            return {"sample_size": 0, "rate": None}
+        return {"sample_size": total, "rate": round(sum(1 for item in items if predicate(item)) / total, 4)}
+
+    segments: dict[str, dict] = {}
+    dimensions = {
+        "thesis_type": lambda e: e.get("thesis_type") or "UNKNOWN",
+        "direction": lambda e: e.get("direction") or "UNKNOWN",
+        "execution_event_type": lambda e: e.get("execution_event_type") or "UNKNOWN",
+        "location": lambda e: ((e.get("location") or {}).get("relative_to_thesis") or "UNKNOWN"),
+        "daily_4h_relationship": lambda e: "ALIGNED" if e.get("regime_direction") == ((e.get("active_4h_leg") or {}).get("direction")) else "COUNTERTREND" if e.get("regime_direction") in {"LONG", "SHORT"} and ((e.get("active_4h_leg") or {}).get("direction")) in {"LONG", "SHORT"} else "UNKNOWN",
+    }
+    for name, getter in dimensions.items():
+        groups = defaultdict(list)
+        for event in events:
+            groups[getter(event)].append(event)
+        segments[name] = {
+            key: {
+                "sample_size": len(items),
+                "r1_reached": rate(items, lambda e: bool((e.get("outcome") or {}).get("r1_reached_at"))),
+                "r2_reached": rate(items, lambda e: bool((e.get("outcome") or {}).get("r2_reached_at"))),
+                "r3_reached": rate(items, lambda e: bool((e.get("outcome") or {}).get("r3_reached_at"))),
+                "invalidation_reached": rate(items, lambda e: bool((e.get("outcome") or {}).get("invalidation_reached_at"))),
+            }
+            for key, items in sorted(groups.items())
+        }
+    return segments
+
+
+def build_stock_mtf_structure_shadow_v3_historical_outcome_report(
+    symbols: list[str],
+    candle_data_by_symbol: dict,
+    *,
+    max_events_per_symbol: Optional[int] = None,
+) -> dict:
+    events = []
+    skipped = []
+    for symbol in [str(s or "").upper() for s in symbols or [] if s]:
+        candle_data = candle_data_by_symbol.get(symbol) or {}
+        m30_df = _mtf_shadow_clean_df(candle_data.get("30M"))
+        if m30_df.empty:
+            skipped.append({"symbol": symbol, "reason": "missing_30m_candles"})
+            continue
+        previous_state = None
+        symbol_events = 0
+        for idx in range(len(m30_df)):
+            timestamp = _mtf_shadow_timestamp(m30_df, idx)
+            if not timestamp:
+                continue
+            trace = _mtf_v3_historical_trace_at(symbol, candle_data, timestamp)
+            state = trace.get("shadow_entry_state")
+            if state == "EXECUTION_CONFIRMED" and previous_state != "EXECUTION_CONFIRMED":
+                outcome = _mtf_v3_measure_underlying_outcome(trace, candle_data)
+                events.append(_mtf_v3_historical_event_record(trace, outcome))
+                symbol_events += 1
+                if max_events_per_symbol is not None and symbol_events >= max_events_per_symbol:
+                    break
+            previous_state = state
+    return {
+        "status": "ready",
+        "version": f"{MTF_STRUCTURE_SHADOW_V3_VERSION}-historical-outcome-v1",
+        "message": "Developer-only V3 historical outcome framework. Production strategy, V1, V2 and V3 semantics are unchanged.",
+        "anti_lookahead_contract": {
+            "candle_slicing": "At each timestamp, 1D/4H/1H/30M inputs are sliced to bars with index <= timestamp.",
+            "confirmed_swings": "_find_swings runs on each sliced frame; with margin=4, a pivot cannot appear until four later bars exist in that same slice.",
+            "production_state": "Historical production scanner state is unavailable unless supplied as real historical snapshots.",
+            "options": "Options pricing is intentionally excluded.",
+        },
+        "symbols_requested": len(symbols or []),
+        "events": events,
+        "event_count": len(events),
+        "skipped": skipped,
+        "comparison_buckets": {
+            "A_all_v3_execution_confirmed": len(events),
+            "B_production_enter_now_without_v3_confirmation": "UNAVAILABLE",
+            "C_production_enter_now_with_v3_confirmation": "UNAVAILABLE",
+            "D_v3_confirmation_without_production_enter_now": "UNAVAILABLE",
+            "reason": "historical production state was not reconstructed",
+        },
+        "segments": _mtf_v3_historical_segments(events),
+        "live_strategy_changed": False,
+    }
+
+
+def _mtf_v3_swing_cache_key(df: pd.DataFrame, margin: int, tolerance: Optional[float]) -> tuple:
+    clean = _mtf_shadow_clean_df(df)
+    if clean.empty:
+        return ("empty", margin, tolerance)
+    high = clean["High"]
+    low = clean["Low"]
+    return (
+        len(clean),
+        str(clean.index[0]),
+        str(clean.index[-1]),
+        margin,
+        tolerance,
+        round(float(high.iloc[0]), 8),
+        round(float(low.iloc[0]), 8),
+        round(float(high.iloc[-1]), 8),
+        round(float(low.iloc[-1]), 8),
+    )
+
+
+def build_stock_mtf_structure_shadow_v3_historical_outcome_report_cached(
+    symbols: list[str],
+    candle_data_by_symbol: dict,
+    *,
+    max_events_per_symbol: Optional[int] = None,
+) -> dict:
+    original_find_swings = globals()["_find_swings"]
+    cache: dict[tuple, list] = {}
+
+    def cached_find_swings(df: pd.DataFrame, margin: int = 4, tolerance: Optional[float] = None) -> list:
+        key = _mtf_v3_swing_cache_key(df, margin, tolerance)
+        if key not in cache:
+            cache[key] = original_find_swings(df, margin=margin, tolerance=tolerance)
+        return [dict(item) for item in cache[key]]
+
+    globals()["_find_swings"] = cached_find_swings
+    try:
+        report = build_stock_mtf_structure_shadow_v3_historical_outcome_report(
+            symbols,
+            candle_data_by_symbol,
+            max_events_per_symbol=max_events_per_symbol,
+        )
+    finally:
+        globals()["_find_swings"] = original_find_swings
+    report["replay_optimization"] = {
+        "type": "confirmed_swing_prefix_cache",
+        "cache_entries": len(cache),
+        "equivalence_requirement": "must match frozen replay events and outcomes for identical candle inputs",
+        "live_strategy_changed": False,
+    }
+    return report
+
+
+def persist_stock_mtf_structure_shadow_v3_historical_outcome_report(report: dict, *, source: Optional[dict] = None) -> dict:
+    path = Path(STOCK_MTF_STRUCTURE_SHADOW_V3_HISTORY_PATH)
+    persisted_at = _format_utc_timestamp(_utc_now())
+    payload = _json_safe_mtf_shadow_value({
+        "version": f"{MTF_STRUCTURE_SHADOW_V3_VERSION}-historical-outcome-v1",
+        "persisted_at": persisted_at,
+        "source": source or {},
+        "report": report or {},
+        "live_strategy_changed": False,
+    })
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(serialized)
+    os.replace(tmp_path, path)
+    return {
+        "version": f"{MTF_STRUCTURE_SHADOW_V3_VERSION}-historical-outcome-v1",
+        "persisted_at": persisted_at,
+        "path": str(path),
+        "bytes": len(serialized.encode("utf-8")),
+    }
+
+
+def _mtf_v3_feature_cell(
+    value=None,
+    *,
+    status: str = "AVAILABLE",
+    source: str,
+    timeframe: Optional[str] = None,
+    evidence_timestamp: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> dict:
+    if status == "AVAILABLE" and value is None:
+        status = "UNAVAILABLE"
+        reason = reason or "value not present at execution timestamp"
+    return {
+        "status": status,
+        "value": value if status == "AVAILABLE" else None,
+        "source": source,
+        "source_timeframe": timeframe,
+        "evidence_timestamp": evidence_timestamp,
+        "reason": reason,
+    }
+
+
+def _mtf_v3_unavailable_feature(name: str, reason: str) -> dict:
+    return _mtf_v3_feature_cell(
+        None,
+        status="UNAVAILABLE",
+        source=name,
+        reason=reason,
+    )
+
+
+def _mtf_v3_parse_time(value: Optional[str]) -> Optional[pd.Timestamp]:
+    if not value:
+        return None
+    try:
+        parsed = pd.Timestamp(value)
+        return parsed.tz_localize("UTC") if parsed.tzinfo is None else parsed.tz_convert("UTC")
+    except Exception:
+        return None
+
+
+def _mtf_v3_hours_between(start: Optional[str], end: Optional[str]) -> Optional[float]:
+    start_ts = _mtf_v3_parse_time(start)
+    end_ts = _mtf_v3_parse_time(end)
+    if start_ts is None or end_ts is None:
+        return None
+    return round((end_ts - start_ts).total_seconds() / 3600.0, 4)
+
+
+def _mtf_v3_bars_between(df: pd.DataFrame, start: Optional[str], end: Optional[str]) -> Optional[int]:
+    clean = _mtf_shadow_clean_df(df)
+    start_ts = _mtf_v3_parse_time(start)
+    end_ts = _mtf_v3_parse_time(end)
+    if clean.empty or start_ts is None or end_ts is None:
+        return None
+    index = pd.to_datetime(clean.index, utc=True)
+    return int(((index > start_ts) & (index <= end_ts)).sum())
+
+
+def _mtf_v3_independent_thesis_identity(event: dict) -> str:
+    chronology = event.get("chronology") if isinstance(event.get("chronology"), dict) else {}
+    symbol = str(event.get("symbol") or "").upper()
+    parent_id = chronology.get("thesis_parent_structure_id") or ((event.get("location") or {}).get("range_id"))
+    direction = event.get("direction") or "UNKNOWN"
+    thesis_type = event.get("thesis_type") or "UNKNOWN"
+    return f"{symbol}|{parent_id or 'NO_PARENT'}|{direction}|{thesis_type}"
+
+
+def _mtf_v3_independent_first_confirmation_events(events: list[dict]) -> tuple[list[dict], list[dict]]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for event in events or []:
+        if isinstance(event, dict):
+            grouped[_mtf_v3_independent_thesis_identity(event)].append(event)
+    first_events = []
+    reentries = []
+    for identity, group in grouped.items():
+        ordered = sorted(group, key=lambda item: _mtf_v3_iso_sort_key(item.get("timestamp")))
+        if not ordered:
+            continue
+        first = dict(ordered[0])
+        first["independent_thesis_identity"] = identity
+        first["confirmation_count"] = len(ordered)
+        first["subsequent_confirmation_count"] = max(0, len(ordered) - 1)
+        first_events.append(first)
+        for extra in ordered[1:]:
+            item = dict(extra)
+            item["independent_thesis_identity"] = identity
+            reentries.append(item)
+    return sorted(first_events, key=lambda item: (_mtf_v3_iso_sort_key(item.get("timestamp")), item.get("symbol") or "")), reentries
+
+
+def _mtf_v3_primary_outcome_group(outcome: dict) -> str:
+    r1_time = outcome.get("r1_reached_at") if isinstance(outcome, dict) else None
+    invalidation_time = outcome.get("invalidation_reached_at") if isinstance(outcome, dict) else None
+    if r1_time and (not invalidation_time or _mtf_v3_iso_sort_key(r1_time) < _mtf_v3_iso_sort_key(invalidation_time)):
+        return "1R_BEFORE_INVALIDATION"
+    if invalidation_time and (not r1_time or _mtf_v3_iso_sort_key(invalidation_time) < _mtf_v3_iso_sort_key(r1_time)):
+        return "INVALIDATION_BEFORE_1R"
+    return "NEITHER_WITHIN_OBSERVATION_WINDOW"
+
+
+def _mtf_v3_normalized_position(price: Optional[float], high: Optional[float], low: Optional[float]) -> Optional[float]:
+    if price is None or high is None or low is None:
+        return None
+    span = float(high) - float(low)
+    if span <= 0:
+        return None
+    return round((float(price) - float(low)) / span, 4)
+
+
+def _mtf_v3_distance_from_equilibrium(price: Optional[float], equilibrium: Optional[float], high: Optional[float], low: Optional[float]) -> Optional[float]:
+    if price is None or equilibrium is None or high is None or low is None:
+        return None
+    span = float(high) - float(low)
+    if span <= 0:
+        return None
+    return round((float(price) - float(equilibrium)) / span, 4)
+
+
+def _mtf_v3_feature_distance_to_invalidation_r(event: dict) -> Optional[float]:
+    outcome = event.get("outcome") if isinstance(event.get("outcome"), dict) else {}
+    entry = _safe_float(outcome.get("entry_price"))
+    invalidation = _safe_float(event.get("thesis_invalidation_level") or outcome.get("thesis_invalidation_level"))
+    risk = _safe_float(outcome.get("risk_dollars"))
+    if entry is None or invalidation is None or not risk:
+        return None
+    return round(abs(entry - invalidation) / risk, 4)
+
+
+def _mtf_v3_reconstruct_production_quality_features(event: dict, candle_data: dict) -> dict:
+    symbol = str(event.get("symbol") or "").upper()
+    direction = event.get("direction")
+    event_time = event.get("timestamp")
+    m30_full = _mtf_shadow_clean_df((candle_data or {}).get("30M"))
+    if m30_full.empty or not event_time:
+        unavailable = "missing timestamp-sliced 30M candles"
+        return {
+            "displacement_strength": _mtf_v3_unavailable_feature("detect_displacement", unavailable),
+            "displacement_score": _mtf_v3_unavailable_feature("detect_displacement", unavailable),
+            "displacement_avg_body_atr": _mtf_v3_unavailable_feature("_displacement_measurement_components", unavailable),
+            "displacement_last_range_atr": _mtf_v3_unavailable_feature("_displacement_measurement_components", unavailable),
+            "displacement_directional_count": _mtf_v3_unavailable_feature("_displacement_measurement_components", unavailable),
+            "liquidity_sweep": _mtf_v3_unavailable_feature("detect_liquidity_sweep", unavailable),
+            "liquidity_sweep_level": _mtf_v3_unavailable_feature("detect_liquidity_sweep", unavailable),
+            "liquidity_sweep_type": _mtf_v3_unavailable_feature("detect_liquidity_sweep", unavailable),
+            "rejection_confirmed": _mtf_v3_unavailable_feature("detect_rejection", unavailable),
+            "bos_choch_event_type": _mtf_v3_unavailable_feature("V3 execution_event_break_type", unavailable),
+            "bos_magnitude_atr": _mtf_v3_unavailable_feature("execution close versus break level", unavailable),
+            "order_block_interaction": _mtf_v3_unavailable_feature("_find_order_block", unavailable),
+            "available_room_to_opposing_structure_r": _mtf_v3_unavailable_feature("_room_to_target", unavailable),
+            "structural_rr": _mtf_v3_unavailable_feature("_room_to_target", unavailable),
+            "weak_high_low_relationship": _mtf_v3_unavailable_feature("production helper", "no deterministic stock weak-high/weak-low helper exists"),
+            "supply_demand_interaction": _mtf_v3_unavailable_feature("production helper", "stock scanner exposes order-block interaction, not separate supply/demand scoring"),
+        }
+    sliced = _mtf_v3_historical_slice(m30_full, event_time)
+    if sliced.empty or direction not in {"LONG", "SHORT"}:
+        return {
+            "displacement_strength": _mtf_v3_unavailable_feature("detect_displacement", "invalid direction or empty timestamp slice"),
+            "displacement_score": _mtf_v3_unavailable_feature("detect_displacement", "invalid direction or empty timestamp slice"),
+            "displacement_avg_body_atr": _mtf_v3_unavailable_feature("_displacement_measurement_components", "invalid direction or empty timestamp slice"),
+            "displacement_last_range_atr": _mtf_v3_unavailable_feature("_displacement_measurement_components", "invalid direction or empty timestamp slice"),
+            "displacement_directional_count": _mtf_v3_unavailable_feature("_displacement_measurement_components", "invalid direction or empty timestamp slice"),
+            "liquidity_sweep": _mtf_v3_unavailable_feature("detect_liquidity_sweep", "invalid direction or empty timestamp slice"),
+            "liquidity_sweep_level": _mtf_v3_unavailable_feature("detect_liquidity_sweep", "invalid direction or empty timestamp slice"),
+            "liquidity_sweep_type": _mtf_v3_unavailable_feature("detect_liquidity_sweep", "invalid direction or empty timestamp slice"),
+            "rejection_confirmed": _mtf_v3_unavailable_feature("detect_rejection", "invalid direction or empty timestamp slice"),
+            "bos_choch_event_type": _mtf_v3_unavailable_feature("V3 execution_event_break_type", "invalid direction or empty timestamp slice"),
+            "bos_magnitude_atr": _mtf_v3_unavailable_feature("execution close versus break level", "invalid direction or empty timestamp slice"),
+            "order_block_interaction": _mtf_v3_unavailable_feature("_find_order_block", "invalid direction or empty timestamp slice"),
+            "available_room_to_opposing_structure_r": _mtf_v3_unavailable_feature("_room_to_target", "invalid direction or empty timestamp slice"),
+            "structural_rr": _mtf_v3_unavailable_feature("_room_to_target", "invalid direction or empty timestamp slice"),
+            "weak_high_low_relationship": _mtf_v3_unavailable_feature("production helper", "no deterministic stock weak-high/weak-low helper exists"),
+            "supply_demand_interaction": _mtf_v3_unavailable_feature("production helper", "stock scanner exposes order-block interaction, not separate supply/demand scoring"),
+        }
+    swings = _find_swings(sliced, margin=4)
+    atr_series = _atr_series(sliced).dropna()
+    atr = _safe_float(atr_series.iloc[-1]) if not atr_series.empty else None
+    bos_confirmed, bos_level = detect_structure_break(sliced, swings, direction)
+    bos_index = _first_bos_close_index(sliced, swings, direction, bos_level) if bos_confirmed else None
+    if atr and atr > 0:
+        displacement, displacement_score = detect_displacement(sliced, atr, direction, bos_confirmed, bos_index=bos_index)
+        components = _displacement_measurement_components(sliced, atr, direction, bos_index=bos_index) if bos_confirmed else {}
+    else:
+        displacement, displacement_score, components = "NONE", 0.0, {}
+    sweep_taken, sweep_level = detect_liquidity_sweep(sliced, swings, direction)
+    rejection_confirmed = detect_rejection(sliced, direction, sweep_level)
+    ob = _find_order_block(sliced, direction, swings)
+    latest_high = _safe_float(sliced["High"].iloc[-1])
+    latest_low = _safe_float(sliced["Low"].iloc[-1])
+    in_ob = False
+    near_ob = False
+    if ob:
+        if latest_high is not None and latest_low is not None:
+            in_ob = bool(latest_high >= ob.get("low") and latest_low <= ob.get("high"))
+        if atr and atr > 0:
+            price = _safe_float(sliced["Close"].iloc[-1])
+            if price is not None:
+                near_ob = bool(abs(price - float(ob.get("high"))) <= atr or abs(price - float(ob.get("low"))) <= atr)
+    outcome = event.get("outcome") if isinstance(event.get("outcome"), dict) else {}
+    entry = _safe_float(outcome.get("entry_price"))
+    stop = _safe_float(event.get("thesis_invalidation_level") or outcome.get("thesis_invalidation_level"))
+    price = _safe_float(sliced["Close"].iloc[-1])
+    room = _room_to_target(price, direction, swings, entry, stop, atr=atr or 0.0) if price is not None else {}
+    structural_rr = room.get("estimated_rr")
+    bos_magnitude = None
+    if atr and atr > 0 and bos_level and price is not None:
+        raw = price - float(bos_level) if direction == "LONG" else float(bos_level) - price
+        bos_magnitude = round(raw / atr, 4)
+    directional_count = None
+    directional = components.get("directional") if isinstance(components, dict) else None
+    if directional is not None:
+        directional_count = int(len(directional))
+    return {
+        "displacement_strength": _mtf_v3_feature_cell(displacement, source="detect_displacement", timeframe="30M", evidence_timestamp=event_time),
+        "displacement_score": _mtf_v3_feature_cell(displacement_score, source="detect_displacement", timeframe="30M", evidence_timestamp=event_time),
+        "displacement_avg_body_atr": _mtf_v3_feature_cell(round(float(components.get("avg_body_atr")), 4) if components.get("avg_body_atr") is not None else None, source="_displacement_measurement_components", timeframe="30M", evidence_timestamp=event_time),
+        "displacement_last_range_atr": _mtf_v3_feature_cell(round(float(components.get("last_range_atr")), 4) if components.get("last_range_atr") is not None else None, source="_displacement_measurement_components", timeframe="30M", evidence_timestamp=event_time),
+        "displacement_directional_count": _mtf_v3_feature_cell(directional_count, source="_displacement_measurement_components", timeframe="30M", evidence_timestamp=event_time),
+        "liquidity_sweep": _mtf_v3_feature_cell(bool(sweep_taken), source="detect_liquidity_sweep", timeframe="30M", evidence_timestamp=event_time),
+        "liquidity_sweep_level": _mtf_v3_feature_cell(round(float(sweep_level), 4) if sweep_level is not None else None, source="detect_liquidity_sweep", timeframe="30M", evidence_timestamp=event_time),
+        "liquidity_sweep_type": _mtf_v3_feature_cell("LOW_SWEEP" if direction == "LONG" and sweep_taken else "HIGH_SWEEP" if direction == "SHORT" and sweep_taken else None, source="detect_liquidity_sweep", timeframe="30M", evidence_timestamp=event_time),
+        "rejection_confirmed": _mtf_v3_feature_cell(bool(rejection_confirmed), source="detect_rejection", timeframe="30M", evidence_timestamp=event_time),
+        "bos_choch_event_type": _mtf_v3_feature_cell(((event.get("chronology") or {}).get("execution_event_id") or "").split(":")[1] if ":" in str((event.get("chronology") or {}).get("execution_event_id")) else event.get("execution_event_type"), source="V3 execution_event_id", timeframe="30M", evidence_timestamp=event_time),
+        "bos_magnitude_atr": _mtf_v3_feature_cell(bos_magnitude, source="execution close versus detect_structure_break level", timeframe="30M", evidence_timestamp=event_time),
+        "order_block_interaction": _mtf_v3_feature_cell("IN_OB" if in_ob else "NEAR_OB" if near_ob else "NO_INTERACTION" if ob else "NO_ORDER_BLOCK", source="_find_order_block", timeframe="30M", evidence_timestamp=event_time),
+        "available_room_to_opposing_structure_r": _mtf_v3_feature_cell(structural_rr, source="_room_to_target", timeframe="30M", evidence_timestamp=event_time),
+        "structural_rr": _mtf_v3_feature_cell(structural_rr, source="_room_to_target", timeframe="30M", evidence_timestamp=event_time),
+        "weak_high_low_relationship": _mtf_v3_unavailable_feature("production helper", "no deterministic stock weak-high/weak-low helper exists"),
+        "supply_demand_interaction": _mtf_v3_unavailable_feature("production helper", "stock scanner exposes order-block interaction, not separate supply/demand scoring"),
+    }
+
+
+def _mtf_v3_feature_row(event: dict, cohort_id: str, candle_data: dict) -> dict:
+    chronology = event.get("chronology") if isinstance(event.get("chronology"), dict) else {}
+    location = event.get("location") if isinstance(event.get("location"), dict) else {}
+    active_leg = event.get("active_4h_leg") if isinstance(event.get("active_4h_leg"), dict) else {}
+    outcome = event.get("outcome") if isinstance(event.get("outcome"), dict) else {}
+    event_time = event.get("timestamp")
+    symbol = str(event.get("symbol") or "").upper()
+    entry = _safe_float(outcome.get("entry_price"))
+    high = _safe_float(location.get("range_high"))
+    low = _safe_float(location.get("range_low"))
+    equilibrium = _safe_float(location.get("equilibrium"))
+    risk = _safe_float(outcome.get("risk_dollars"))
+    active_range = None
+    if active_leg.get("id") and isinstance(active_leg.get("id"), str):
+        parts = active_leg["id"].split(":")
+        if len(parts) >= 6:
+            active_high = _safe_float(parts[-1])
+            active_low = _safe_float(parts[-2])
+            if active_high is not None and active_low is not None:
+                active_range = round(abs(active_high - active_low), 4)
+    relationship = "UNKNOWN"
+    if event.get("regime_direction") in {"LONG", "SHORT"} and active_leg.get("direction") in {"LONG", "SHORT"}:
+        relationship = "ALIGNED" if event.get("regime_direction") == active_leg.get("direction") else "OPPOSED"
+    m30_df = _mtf_shadow_clean_df((candle_data or {}).get("30M"))
+    production_features = _mtf_v3_reconstruct_production_quality_features(event, candle_data or {})
+    pre_entry_features = {
+        "thesis_type": _mtf_v3_feature_cell(event.get("thesis_type"), source="V3 event", timeframe="mixed", evidence_timestamp=event_time),
+        "direction": _mtf_v3_feature_cell(event.get("direction"), source="V3 event", timeframe="mixed", evidence_timestamp=event_time),
+        "regime_direction": _mtf_v3_feature_cell(event.get("regime_direction"), source="V3 event", timeframe="1D", evidence_timestamp=chronology.get("regime_established_at")),
+        "active_4h_leg_direction": _mtf_v3_feature_cell(active_leg.get("direction"), source="V3 event", timeframe="4H", evidence_timestamp=active_leg.get("started_at")),
+        "daily_4h_relationship": _mtf_v3_feature_cell(relationship, source="V3 event regime_direction vs active_4h_leg.direction", timeframe="1D/4H", evidence_timestamp=event_time),
+        "active_4h_leg_state": _mtf_v3_feature_cell(active_leg.get("state"), source="V3 event", timeframe="4H", evidence_timestamp=event_time),
+        "correction_direction": _mtf_v3_feature_cell(event.get("correction_direction"), source="V3 event", timeframe="mixed", evidence_timestamp=chronology.get("correction_started_at")),
+        "correction_age_hours": _mtf_v3_feature_cell(_mtf_v3_hours_between(chronology.get("correction_started_at"), event_time), source="V3 chronology", timeframe="mixed", evidence_timestamp=event_time),
+        "correction_start_to_execution_bars": _mtf_v3_feature_cell(_mtf_v3_bars_between(m30_df, chronology.get("correction_started_at"), event_time), source="timestamp-sliced 30M index count", timeframe="30M", evidence_timestamp=event_time),
+        "thesis_age_hours": _mtf_v3_feature_cell(_mtf_v3_hours_between(chronology.get("trade_thesis_created_at"), event_time), source="V3 chronology", timeframe="mixed", evidence_timestamp=event_time),
+        "location_touch_to_execution_hours": _mtf_v3_feature_cell(_mtf_v3_hours_between(location.get("first_touched_at"), event_time), source="V3 chronology", timeframe="4H/30M", evidence_timestamp=event_time),
+        "location_touch_to_execution_bars": _mtf_v3_feature_cell(_mtf_v3_bars_between(m30_df, location.get("first_touched_at"), event_time), source="timestamp-sliced 30M index count", timeframe="30M", evidence_timestamp=event_time),
+        "location": _mtf_v3_feature_cell(location.get("relative_to_thesis"), source="V3 location", timeframe="4H", evidence_timestamp=location.get("first_touched_at")),
+        "normalized_location_inside_parent_range": _mtf_v3_feature_cell(_mtf_v3_normalized_position(entry, high, low), source="entry versus V3 thesis parent range", timeframe="4H", evidence_timestamp=event_time),
+        "distance_from_equilibrium_range": _mtf_v3_feature_cell(_mtf_v3_distance_from_equilibrium(entry, equilibrium, high, low), source="entry versus V3 thesis parent equilibrium", timeframe="4H", evidence_timestamp=event_time),
+        "distance_from_thesis_invalidation_r": _mtf_v3_feature_cell(_mtf_v3_feature_distance_to_invalidation_r(event), source="entry/invalidation/risk from V3 outcome convention", timeframe="30M/parent", evidence_timestamp=event_time),
+        "risk_dollars": _mtf_v3_feature_cell(risk, source="V3 outcome entry minus thesis invalidation", timeframe="30M/parent", evidence_timestamp=event_time),
+        "active_leg_range_dollars": _mtf_v3_feature_cell(active_range, source="V3 active_4h_leg.id", timeframe="4H", evidence_timestamp=active_leg.get("started_at")),
+        "execution_event_type": _mtf_v3_feature_cell(event.get("execution_event_type"), source="V3 event", timeframe="30M", evidence_timestamp=event_time),
+        **production_features,
+    }
+    return {
+        "cohort": cohort_id,
+        "symbol": symbol,
+        "thesis_identity": event.get("independent_thesis_identity") or _mtf_v3_independent_thesis_identity(event),
+        "first_execution_timestamp": event_time,
+        "direction": event.get("direction"),
+        "thesis_type": event.get("thesis_type"),
+        "outcomes": {
+            "primary_outcome_group": _mtf_v3_primary_outcome_group(outcome),
+            "r1_before_invalidation": _mtf_v3_primary_outcome_group(outcome) == "1R_BEFORE_INVALIDATION",
+            "invalidation_before_1r": _mtf_v3_primary_outcome_group(outcome) == "INVALIDATION_BEFORE_1R",
+            "r2_before_invalidation": bool(outcome.get("r2_reached_at")) and (not outcome.get("invalidation_reached_at") or _mtf_v3_iso_sort_key(outcome.get("r2_reached_at")) < _mtf_v3_iso_sort_key(outcome.get("invalidation_reached_at"))),
+            "r3_before_invalidation": bool(outcome.get("r3_reached_at")) and (not outcome.get("invalidation_reached_at") or _mtf_v3_iso_sort_key(outcome.get("r3_reached_at")) < _mtf_v3_iso_sort_key(outcome.get("invalidation_reached_at"))),
+            "MFE": outcome.get("MFE"),
+            "MAE": outcome.get("MAE"),
+            "return_after_1_trading_days": outcome.get("return_after_1_trading_days"),
+            "return_after_3_trading_days": outcome.get("return_after_3_trading_days"),
+            "return_after_5_trading_days": outcome.get("return_after_5_trading_days"),
+            "return_after_10_trading_days": outcome.get("return_after_10_trading_days"),
+            "raw_outcome": outcome,
+        },
+        "features": pre_entry_features,
+        "feature_construction_contract": {
+            "features_use_candles_at_or_before": event_time,
+            "outcomes_are_separate": True,
+            "historical_production_rows_attached": False,
+        },
+    }
+
+
+def build_stock_mtf_structure_shadow_v3_feature_dataset(
+    cohort_reports: dict[str, dict],
+    candle_data_by_cohort: Optional[dict[str, dict]] = None,
+    *,
+    source: Optional[dict] = None,
+) -> dict:
+    rows = []
+    reentry_rows = []
+    cohort_counts = {}
+    for cohort_id, report in sorted((cohort_reports or {}).items()):
+        events = report.get("events") or report.get("independent_first_confirmation_events") or []
+        if "first_event" in (events[0] if events else {}):
+            first_events = [item.get("first_event") for item in events if isinstance(item, dict) and isinstance(item.get("first_event"), dict)]
+            reentries = []
+        else:
+            first_events, reentries = _mtf_v3_independent_first_confirmation_events(events)
+        candle_data_by_symbol = (candle_data_by_cohort or {}).get(cohort_id) or {}
+        for event in first_events:
+            rows.append(_mtf_v3_feature_row(event, cohort_id, candle_data_by_symbol.get(str(event.get("symbol") or "").upper(), {})))
+        for event in reentries:
+            reentry_rows.append(_mtf_v3_feature_row(event, cohort_id, candle_data_by_symbol.get(str(event.get("symbol") or "").upper(), {})))
+        cohort_counts[cohort_id] = {
+            "independent_thesis_rows": len(first_events),
+            "reentry_rows": len(reentries),
+        }
+    return {
+        "status": "ready",
+        "version": f"{MTF_STRUCTURE_SHADOW_V3_VERSION}-feature-dataset-v3-0",
+        "message": "Analysis-only row-level feature dataset for frozen V3.0 independent structural theses. Production and V3 semantics unchanged.",
+        "source": source or {},
+        "row_count": len(rows),
+        "reentry_row_count": len(reentry_rows),
+        "cohort_counts": cohort_counts,
+        "rows": rows,
+        "reentry_rows": reentry_rows,
+        "outcomes_separated_from_features": True,
+        "anti_lookahead_contract": {
+            "feature_reconstruction": "All candle-derived features are computed from timestamp-sliced frames with index <= first_execution_timestamp.",
+            "historical_production_rows": "Current production scan rows are not attached to historical events.",
+            "unavailable_policy": "Features that cannot be reconstructed from timestamp-sliced candles and existing helpers are marked UNAVAILABLE.",
+        },
+        "live_strategy_changed": False,
+    }
+
+
+def _mtf_v3_feature_completeness(rows: list[dict]) -> dict:
+    result = {}
+    cohorts = sorted(set(row.get("cohort") or "UNKNOWN" for row in rows))
+    features = sorted({key for row in rows for key in (row.get("features") or {}).keys()})
+    for feature in features:
+        result[feature] = {}
+        for cohort in cohorts + ["POOLED"]:
+            subset = rows if cohort == "POOLED" else [row for row in rows if row.get("cohort") == cohort]
+            total = len(subset)
+            available = sum(1 for row in subset if ((row.get("features") or {}).get(feature) or {}).get("status") == "AVAILABLE")
+            result[feature][cohort] = {
+                "available": available,
+                "total": total,
+                "availability_rate": round(available / total, 4) if total else None,
+            }
+    return result
+
+
+def _mtf_v3_outcome_rate(rows: list[dict]) -> dict:
+    total = len(rows)
+    if not total:
+        return {"n": 0, "r1_before_invalidation_rate": None, "invalidation_before_1r_rate": None}
+    return {
+        "n": total,
+        "r1_before_invalidation_rate": round(sum(1 for row in rows if (row.get("outcomes") or {}).get("primary_outcome_group") == "1R_BEFORE_INVALIDATION") / total, 4),
+        "invalidation_before_1r_rate": round(sum(1 for row in rows if (row.get("outcomes") or {}).get("primary_outcome_group") == "INVALIDATION_BEFORE_1R") / total, 4),
+    }
+
+
+def _mtf_v3_quantile_buckets(values: list[float]) -> list[tuple[float, float]]:
+    if not values:
+        return []
+    series = pd.Series(values, dtype="float64")
+    cuts = sorted(set(float(series.quantile(q)) for q in (0.0, 0.25, 0.5, 0.75, 1.0)))
+    return list(zip(cuts[:-1], cuts[1:]))
+
+
+def _mtf_v3_bucket_label(value: float, buckets: list[tuple[float, float]]) -> str:
+    for idx, (lo, hi) in enumerate(buckets, start=1):
+        if idx == len(buckets):
+            if lo <= value <= hi:
+                return f"Q{idx} [{lo:.4g},{hi:.4g}]"
+        elif lo <= value < hi:
+            return f"Q{idx} [{lo:.4g},{hi:.4g})"
+    return "OUT_OF_RANGE"
+
+
+def _mtf_v3_relationship_classification(cohort_results: dict) -> str:
+    signs = []
+    adequate = 0
+    for cohort, payload in cohort_results.items():
+        if cohort == "POOLED":
+            continue
+        groups = [item for item in payload.get("groups", {}).values() if item.get("n", 0) >= 10]
+        if len(groups) < 2:
+            continue
+        adequate += 1
+        rates = [item.get("r1_before_invalidation_rate") for item in groups if item.get("r1_before_invalidation_rate") is not None]
+        if len(rates) < 2 or max(rates) - min(rates) < 0.05:
+            signs.append(0)
+        else:
+            ordered = list(payload.get("groups", {}).values())
+            first = ordered[0].get("r1_before_invalidation_rate")
+            last = ordered[-1].get("r1_before_invalidation_rate")
+            signs.append(1 if last is not None and first is not None and last > first else -1)
+    if adequate < 2:
+        return "INSUFFICIENT_DATA"
+    non_zero = [sign for sign in signs if sign != 0]
+    if not non_zero:
+        return "NO_OBVIOUS_ASSOCIATION"
+    if all(sign > 0 for sign in non_zero) and len(non_zero) == adequate:
+        return "CONSISTENT_POSITIVE_ASSOCIATION"
+    if all(sign < 0 for sign in non_zero) and len(non_zero) == adequate:
+        return "CONSISTENT_NEGATIVE_ASSOCIATION"
+    return "MIXED_OR_UNSTABLE"
+
+
+def build_stock_mtf_structure_shadow_v3_feature_audit(dataset: dict) -> dict:
+    rows = dataset.get("rows") or []
+    cohorts = sorted(set(row.get("cohort") or "UNKNOWN" for row in rows))
+    feature_names = sorted({key for row in rows for key in (row.get("features") or {}).keys()})
+    analysis = {}
+    for feature in feature_names:
+        values = [
+            ((row.get("features") or {}).get(feature) or {}).get("value")
+            for row in rows
+            if ((row.get("features") or {}).get(feature) or {}).get("status") == "AVAILABLE"
+        ]
+        numeric_values = [float(value) for value in values if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))]
+        is_numeric = len(numeric_values) >= max(12, len(values) * 0.8) if values else False
+        buckets = _mtf_v3_quantile_buckets(numeric_values) if is_numeric else []
+        cohort_results = {}
+        for cohort in cohorts + ["POOLED"]:
+            subset = rows if cohort == "POOLED" else [row for row in rows if row.get("cohort") == cohort]
+            groups = defaultdict(list)
+            for row in subset:
+                cell = ((row.get("features") or {}).get(feature) or {})
+                if cell.get("status") != "AVAILABLE":
+                    groups["UNAVAILABLE"].append(row)
+                    continue
+                value = cell.get("value")
+                if is_numeric and isinstance(value, (int, float)) and buckets:
+                    groups[_mtf_v3_bucket_label(float(value), buckets)].append(row)
+                else:
+                    groups[str(value)].append(row)
+            cohort_results[cohort] = {
+                "sample_size": len(subset),
+                "groups": {key: _mtf_v3_outcome_rate(items) for key, items in sorted(groups.items())},
+            }
+        analysis[feature] = {
+            "type": "continuous_quantile" if is_numeric else "categorical",
+            "bucket_source": "pooled quartiles from available values" if is_numeric else "observed categories",
+            "cohorts": cohort_results,
+            "relationship_classification": _mtf_v3_relationship_classification(cohort_results),
+        }
+    return {
+        "status": "ready",
+        "version": f"{MTF_STRUCTURE_SHADOW_V3_VERSION}-feature-audit-v3-0",
+        "message": "Descriptive/univariate analysis only. No thresholds, scores or strategy rules changed.",
+        "row_count": len(rows),
+        "cohort_counts": dict(Counter(row.get("cohort") or "UNKNOWN" for row in rows)),
+        "primary_outcome_distribution": dict(Counter((row.get("outcomes") or {}).get("primary_outcome_group") for row in rows)),
+        "feature_completeness": _mtf_v3_feature_completeness(rows),
+        "univariate": analysis,
+        "live_strategy_changed": False,
+    }
+
+
+def persist_stock_mtf_structure_shadow_v3_feature_dataset(dataset: dict, audit: Optional[dict] = None) -> dict:
+    path = Path(STOCK_MTF_STRUCTURE_SHADOW_V3_FEATURE_DATASET_PATH)
+    persisted_at = _format_utc_timestamp(_utc_now())
+    payload = _json_safe_mtf_shadow_value({
+        "version": f"{MTF_STRUCTURE_SHADOW_V3_VERSION}-feature-dataset-v3-0",
+        "persisted_at": persisted_at,
+        "dataset": dataset or {},
+        "audit": audit or {},
+        "live_strategy_changed": False,
+    })
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(serialized)
+    os.replace(tmp_path, path)
+    return {
+        "version": f"{MTF_STRUCTURE_SHADOW_V3_VERSION}-feature-dataset-v3-0",
+        "persisted_at": persisted_at,
+        "path": str(path),
+        "bytes": len(serialized.encode("utf-8")),
     }
 
 

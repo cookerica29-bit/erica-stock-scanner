@@ -138,6 +138,15 @@ function setup(overrides = {}) {
     stockLocation: 'Premium',
     confirmationStarted: true,
     trade_eval: { trade_stage: 'A+ READY', trigger_confirmed: true },
+    new_entry_signal: {
+      bucket: 'ENTER_NOW',
+      label: 'ENTER NOW',
+      current_strategy_status: 'ENTER_NOW',
+      current_strategy_executable: true,
+      lifecycle_state: 'ENTRY_TRIGGERED',
+      lifecycle_entry_triggered: true,
+      actionable: true,
+    },
     ranking: { rank: 1, tier: 'TOP_OPPORTUNITY', score: 95, positive_reasons: ['A-grade setup'], cautions: [] },
     best_contract: {
       available: true,

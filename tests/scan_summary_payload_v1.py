@@ -30,6 +30,13 @@ def row(
     pricing_quality: str = "live_ask",
     heavy_note: str = "debug payload",
 ) -> dict:
+    new_entry_signal = {
+        "bucket": status,
+        "label": status.replace("_", " "),
+        "current_strategy_status": status,
+        "lifecycle_state": "ENTRY_TRIGGERED" if status == "ENTER_NOW" else None,
+        "actionable": status == "ENTER_NOW",
+    }
     return {
         "ticker": ticker,
         "timeframe": "4H",
@@ -61,6 +68,9 @@ def row(
             "ranking_components": {"heavy": True},
             "version": "opportunity-ranking-v1",
         },
+        "new_entry_signal": new_entry_signal,
+        "new_entry_signal_bucket": new_entry_signal["bucket"],
+        "new_entry_signal_label": new_entry_signal["label"],
         "earnings": {"status": "NO_EARNINGS_RISK", "date": None, "days_until": None, "source": "test"},
         "option": {
             "type": "CALL",
@@ -184,6 +194,9 @@ def test_full_response_remains_backward_compatible_and_summary_is_additive():
         assert summary["rows"][0]["option_plan"]["suggested_expiration"]["label"] == "21-35 DTE"
         assert summary["rows"][0]["option_plan"]["source"] == "kairos_trade_plan"
         assert summary["rows"][0]["ranking_status_bucket"] == "ENTER_NOW"
+        assert summary["rows"][0]["new_entry_signal"]["bucket"] == "ENTER_NOW"
+        assert summary["rows"][0]["raw_status_bucket"] == "ENTER_NOW"
+        assert summary["rows"][0]["display_status"] == "ENTER_NOW"
         assert summary["rows"][0]["execution_lifecycle"]["ranking_status_bucket"] == "ENTER_NOW"
         assert summary["meta"]["view"] == "summary"
         assert summary["meta"]["summary_version"] == main.SUMMARY_SCAN_VIEW_VERSION
@@ -210,6 +223,38 @@ def test_summary_preserves_budget_and_market_outcomes():
     assert summary["rows"][0]["lazy_hydration"]["ticker"] == "AAA"
     assert summary["rows"][0]["lazy_hydration"]["expiration"] == "2026-09-18"
     assert summary["rows"][0]["option_plan"]["preferred_strike"] == full_payload()["rows"][0]["option_plan"]["preferred_strike"]
+
+
+def test_summary_enter_now_uses_authoritative_new_entry_signal_not_raw_ranking():
+    raw_enter_waiting = row("RAW", 1, "ENTER_NOW", "A", 1.0)
+    raw_enter_waiting["new_entry_signal"] = {
+        "bucket": "WAITING_FOR_CONFIRMATION",
+        "label": "WAITING FOR CONFIRMATION",
+        "current_strategy_status": "ENTER_NOW",
+        "current_strategy_executable": True,
+        "lifecycle_state": "WAITING_FOR_CONFIRMATION",
+        "lifecycle_entry_triggered": False,
+        "actionable": False,
+    }
+    lifecycle_only = row("LIFE", 2, "EARLY_ENTRY", "A", 1.0)
+    lifecycle_only["new_entry_signal"] = {
+        "bucket": "NO_CURRENT_ENTRY",
+        "label": "ENTRY TRIGGERED PREVIOUSLY",
+        "current_strategy_status": "EARLY_ENTRY",
+        "current_strategy_executable": False,
+        "lifecycle_state": "ENTRY_TRIGGERED",
+        "lifecycle_entry_triggered": True,
+        "actionable": False,
+    }
+    both = row("BOTH", 3, "ENTER_NOW", "A", 1.0)
+    summary = main._summarize_scan_response({"rows": [raw_enter_waiting, lifecycle_only, both], "near_miss": [], "meta": {"generated_at": GENERATION}})
+    by_ticker = {item["ticker"]: item for item in summary["rows"]}
+    assert by_ticker["RAW"]["raw_status_bucket"] == "ENTER_NOW"
+    assert by_ticker["RAW"]["display_status"] == "WAITING_FOR_CONFIRMATION"
+    assert by_ticker["LIFE"]["raw_status_bucket"] == "EARLY_ENTRY"
+    assert by_ticker["LIFE"]["display_status"] == "NO_CURRENT_ENTRY"
+    assert by_ticker["BOTH"]["display_status"] == "ENTER_NOW"
+    assert summary["meta"]["today_market_counts"]["enter_now"] == 1
 
 
 def test_detail_lookup_returns_matching_full_row_and_rejects_stale_generation():
@@ -244,5 +289,6 @@ def test_detail_lookup_returns_matching_full_row_and_rejects_stale_generation():
 if __name__ == "__main__":
     test_full_response_remains_backward_compatible_and_summary_is_additive()
     test_summary_preserves_budget_and_market_outcomes()
+    test_summary_enter_now_uses_authoritative_new_entry_signal_not_raw_ranking()
     test_detail_lookup_returns_matching_full_row_and_rejects_stale_generation()
     print("scan_summary_payload_v1 passed")

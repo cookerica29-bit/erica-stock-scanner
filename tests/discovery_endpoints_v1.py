@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -39,6 +40,35 @@ def reset_handoff_state():
             "scanner_cache_generation": None,
             "last_checked_at": None,
             "last_result": None,
+        })
+
+
+def reset_scheduled_scan_state():
+    os.environ.setdefault(main.SCHEDULED_SCAN_STATE_PATH_ENV, "/tmp/kairos_scheduled_discovered_scan_test.json")
+    with main._scheduled_discovered_scan_lock:
+        main._scheduled_discovered_scan_state.update(main._scheduled_scan_state_defaults())
+
+
+def iso_utc(year, month, day, hour=0, minute=0):
+    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+
+
+def seed_discovery_pool(symbols=None, now=None):
+    now = now or main._utc_now()
+    week = main._discovery_trading_week(now)
+    with main._discovery_universe_lock:
+        main._discovery_universe_cache.update({
+            **main._discovery_cache_defaults(),
+            "symbols": symbols or ["AAPL", "MSFT", "F"],
+            "generated_at": now,
+            "expires_at": main._next_discovery_refresh_at(now),
+            "trading_week_id": week["trading_week_id"],
+            "first_session_date": week["first_session_date"],
+            "expires_after_session_date": week["expires_after_session_date"],
+            "pipeline_counts": {"selected": len(symbols or ["AAPL", "MSFT", "F"])},
+            "thresholds": {"kairos_intake_cap": 1000, "target_universe_size": 1000},
+            "running": False,
+            "last_error": None,
         })
 
 
@@ -288,15 +318,9 @@ def test_legacy_persisted_pool_exposes_live_cap_resolution_metadata():
         os.environ["KAIROS_INTAKE_CAP"] = "1000"
         os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
         reset_discovery_cache()
+        seed_discovery_pool(["AAPL"])
         with main._discovery_universe_lock:
-            main._discovery_universe_cache.update({
-                **main._discovery_cache_defaults(),
-                "symbols": ["AAPL"],
-                "generated_at": main._utc_now(),
-                "expires_at": main._utc_now() + __import__("datetime").timedelta(days=7),
-                "thresholds": {"kairos_intake_cap": 1000, "target_universe_size": 1000},
-                "loaded_from_disk": True,
-            })
+            main._discovery_universe_cache["loaded_from_disk"] = True
         status = main._discovery_status_snapshot()
         assert status["kairos_intake_cap"] == 1000
         assert status["kairos_intake_cap_resolution"]["resolved_value"] == 1000
@@ -692,14 +716,7 @@ def test_scan_discovered_universe_returns_warming_when_cache_missing():
 def test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz():
     original_scan_cached = main.scan_cached
     calls = []
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": ["AAPL", "F", "KMI"],
-            "generated_at": __import__("datetime").datetime.utcnow(),
-            "expires_at": __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=1),
-            "running": False,
-            "last_error": None,
-        })
+    seed_discovery_pool(["AAPL", "F", "KMI"])
 
     def fake_scan_cached(watchlist=None, **kwargs):
         calls.append((watchlist, kwargs))
@@ -734,14 +751,7 @@ def test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncat
     original_scan_cached = main.scan_cached
     calls = []
     symbols = [f"T{i}" for i in range(550)]
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": symbols,
-            "generated_at": __import__("datetime").datetime.utcnow(),
-            "expires_at": __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=1),
-            "running": False,
-            "last_error": None,
-        })
+    seed_discovery_pool(symbols)
 
     def fake_scan_cached(watchlist=None, **kwargs):
         calls.append((watchlist, kwargs))
@@ -775,14 +785,7 @@ def test_scan_default_route_uses_discovered_universe_by_default():
     original_scan_cached = main.scan_cached
     calls = []
     symbols = [f"T{i}" for i in range(750)]
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": symbols,
-            "generated_at": __import__("datetime").datetime.utcnow(),
-            "expires_at": __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=1),
-            "running": False,
-            "last_error": None,
-        })
+    seed_discovery_pool(symbols)
 
     def fake_scan_cached(watchlist=None, **kwargs):
         calls.append((watchlist, kwargs))
@@ -836,26 +839,78 @@ def test_scan_explicit_default_and_finviz_modes_remain_available():
 
 def test_discovery_cache_refresh_needed_for_missing_and_stale_cache():
     reset_discovery_cache()
-    assert main._discovery_cache_needs_refresh() is True
+    assert main._discovery_cache_needs_refresh(iso_utc(2026, 8, 17, 14, 0)) is True
 
-    now = __import__("datetime").datetime.utcnow()
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": ["AAPL"],
-            "generated_at": now,
-            "expires_at": now + __import__("datetime").timedelta(hours=3),
-            "running": False,
-            "last_error": None,
-        })
-    assert main._discovery_cache_needs_refresh() is False
+    monday = iso_utc(2026, 8, 17, 14, 0)
+    seed_discovery_pool(["AAPL"], monday)
+    assert main._discovery_cache_needs_refresh(iso_utc(2026, 8, 21, 18, 0)) is False
 
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache["expires_at"] = now + __import__("datetime").timedelta(minutes=30)
-    assert main._discovery_cache_needs_refresh() is True
+    prior_tuesday = iso_utc(2026, 8, 11, 14, 0)
+    seed_discovery_pool(["AAPL"], prior_tuesday)
+    assert main._discovery_cache_needs_refresh(monday) is True
 
+    prior_week_before_monday_holiday = iso_utc(2026, 9, 1, 14, 0)
+    labor_day = iso_utc(2026, 9, 7, 14, 0)
+    seed_discovery_pool(["AAPL"], prior_week_before_monday_holiday)
+    assert main._discovery_cache_needs_refresh(labor_day) is True
+    reset_discovery_cache()
+
+
+def test_trading_week_pool_validity_rules():
+    reset_discovery_cache()
+    prior_tuesday = iso_utc(2026, 8, 11, 14, 0)
+    next_monday = iso_utc(2026, 8, 17, 14, 0)
+    seed_discovery_pool(["AAPL"], prior_tuesday)
+    assert main._discovery_status_snapshot(next_monday)["stale"] is True
+
+    monday = iso_utc(2026, 8, 17, 14, 0)
+    friday = iso_utc(2026, 8, 21, 19, 0)
+    seed_discovery_pool(["AAPL"], monday)
+    status = main._discovery_status_snapshot(friday)
+    assert status["stale"] is False
+    assert status["trading_week_id"] == status["current_trading_week_id"]
+
+    labor_day = iso_utc(2026, 9, 7, 13, 0)
+    week = main._discovery_trading_week(labor_day)
+    assert week["first_session_date"] == "2026-09-08"
+    seed_discovery_pool(["AAPL"], iso_utc(2026, 9, 1, 14, 0))
+    assert main._discovery_status_snapshot(labor_day)["stale"] is True
+    reset_discovery_cache()
+
+
+def test_app_restart_during_same_week_reuses_current_week_pool():
+    previous_path = os.environ.get(main.DISCOVERY_POOL_PATH_ENV)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "pool.json"
+        os.environ[main.DISCOVERY_POOL_PATH_ENV] = str(path)
+        reset_discovery_cache()
+        monday = iso_utc(2026, 8, 17, 14, 0)
+        seed_discovery_pool(["AAPL", "MSFT"], monday)
+        with main._discovery_universe_lock:
+            main._write_discovery_pool_locked()
+        reset_discovery_cache()
+        try:
+            assert main._load_discovery_pool_from_disk() is True
+            assert main._discovery_cache_needs_refresh(iso_utc(2026, 8, 20, 15, 0)) is False
+        finally:
+            reset_discovery_cache()
+            if previous_path is None:
+                os.environ.pop(main.DISCOVERY_POOL_PATH_ENV, None)
+            else:
+                os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
+
+
+def test_discovery_expiry_metadata_points_to_next_trading_week():
+    reset_discovery_cache()
+    monday = iso_utc(2026, 8, 17, 14, 0)
+    seed_discovery_pool(["AAPL"], monday)
+    status = main._discovery_status_snapshot(monday)
+    assert status["first_session_date"] == "2026-08-17"
+    assert status["expires_after_session_date"] == "2026-08-21"
+    assert status["next_scheduled_refresh"].startswith("2026-08-24T14:00:00")
     with main._discovery_universe_lock:
-        main._discovery_universe_cache["expires_at"] = now - __import__("datetime").timedelta(seconds=1)
-    assert main._discovery_cache_needs_refresh() is True
+        main._discovery_universe_cache["expires_at"] = monday - timedelta(days=1)
+    assert main._discovery_cache_needs_refresh(monday) is False
     reset_discovery_cache()
 
 
@@ -881,9 +936,15 @@ def test_discovery_auto_submit_skips_fresh_cache_and_running_job():
             assert reason == "cache fresh"
 
             with main._discovery_universe_lock:
-                near_expiry = __import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(minutes=30)
-                main._discovery_universe_cache["expires_at"] = near_expiry
-            accepted, job_id = main._submit_discovery_universe_job_if_needed()
+                main._discovery_universe_cache["expires_at"] = main._utc_now() + timedelta(minutes=30)
+            accepted, reason = main._submit_discovery_universe_job_if_needed()
+            assert accepted is False
+            assert reason == "cache fresh"
+
+            prior_tuesday = iso_utc(2026, 8, 11, 14, 0)
+            next_monday = iso_utc(2026, 8, 17, 14, 0)
+            seed_discovery_pool(["OLD"], prior_tuesday)
+            accepted, job_id = main._submit_discovery_universe_job_if_needed(now=next_monday)
             assert accepted is True
             assert job_id.startswith("discovery:")
             assert main._discovery_status_snapshot()["status"] == "ready"
@@ -913,30 +974,40 @@ def test_startup_registers_and_submits_discovery_refresh():
     previous_register = main.register_background_periodic_task
     previous_submit = main._submit_discovery_universe_job_if_needed
     previous_load = main._load_discovery_pool_from_disk
+    previous_load_scheduled = main._load_scheduled_scan_state_from_disk
     previous_start_market_cache = main.start_market_cache_refresh
     previous_handoff = main._maybe_enqueue_discovered_scan_handoff
+    previous_scheduled = main._submit_scheduled_discovered_scan_if_due
     calls = []
     main.register_background_periodic_task = lambda key, ttl, callback: calls.append(("register", key, ttl, callback))
     main._load_discovery_pool_from_disk = lambda: calls.append(("load_pool",)) or False
+    main._load_scheduled_scan_state_from_disk = lambda: calls.append(("load_scheduled",)) or False
     main._submit_discovery_universe_job_if_needed = lambda: calls.append(("submit",)) or (True, "job")
     main.start_market_cache_refresh = lambda: calls.append(("market_cache",))
     main._maybe_enqueue_discovered_scan_handoff = lambda reason="": calls.append(("handoff", reason)) or (False, "stubbed")
+    main._submit_scheduled_discovered_scan_if_due = lambda: calls.append(("scheduled",)) or (False, "not due")
     try:
         main.startup_market_cache_refresh()
         assert calls[0][0:3] == ("register", "discovery_universe", main.DISCOVERY_REFRESH_WATCHDOG_SECONDS)
         assert callable(calls[0][3])
         assert calls[1][0:3] == ("register", "discovered_scan_handoff", 30)
         assert callable(calls[1][3])
-        assert calls[2] == ("market_cache",)
-        assert calls[3] == ("load_pool",)
-        assert calls[4] == ("submit",)
-        assert calls[5] == ("handoff", "startup_discovery_ready_no_scanner_cache")
+        assert calls[2][0:3] == ("register", "scheduled_discovered_scan_10am_et", 60)
+        assert callable(calls[2][3])
+        assert calls[3] == ("market_cache",)
+        assert calls[4] == ("load_scheduled",)
+        assert calls[5] == ("load_pool",)
+        assert calls[6] == ("submit",)
+        assert calls[7] == ("handoff", "startup_discovery_ready_no_scanner_cache")
+        assert calls[8] == ("scheduled",)
     finally:
         main.register_background_periodic_task = previous_register
         main._submit_discovery_universe_job_if_needed = previous_submit
         main._load_discovery_pool_from_disk = previous_load
+        main._load_scheduled_scan_state_from_disk = previous_load_scheduled
         main.start_market_cache_refresh = previous_start_market_cache
         main._maybe_enqueue_discovered_scan_handoff = previous_handoff
+        main._submit_scheduled_discovered_scan_if_due = previous_scheduled
 
 
 def test_discovered_scan_handoff_queues_when_discovery_ready_and_scan_cache_missing():
@@ -945,15 +1016,7 @@ def test_discovered_scan_handoff_queues_when_discovery_ready_and_scan_cache_miss
     previous_status = main.analysis_cache_status
     previous_scan_cached = main.scan_cached
     calls = []
-    now = __import__("datetime").datetime.utcnow()
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": ["AAPL", "MSFT"],
-            "generated_at": now,
-            "expires_at": now + __import__("datetime").timedelta(hours=1),
-            "running": False,
-            "last_error": None,
-        })
+    seed_discovery_pool(["AAPL", "MSFT"])
 
     def fake_status(watchlist=None, **kwargs):
         return {
@@ -1005,15 +1068,7 @@ def test_discovered_scan_handoff_does_not_duplicate_running_or_ready_cache():
     previous_status = main.analysis_cache_status
     previous_scan_cached = main.scan_cached
     calls = []
-    now = __import__("datetime").datetime.utcnow()
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": ["AAPL"],
-            "generated_at": now,
-            "expires_at": now + __import__("datetime").timedelta(hours=1),
-            "running": False,
-            "last_error": None,
-        })
+    seed_discovery_pool(["AAPL"])
 
     main.scan_cached = lambda *args, **kwargs: calls.append((args, kwargs))
     try:
@@ -1052,15 +1107,7 @@ def test_discovered_cache_status_triggers_handoff_and_exposes_diagnostics():
     previous_status = main.analysis_cache_status
     previous_scan_cached = main.scan_cached
     calls = []
-    now = __import__("datetime").datetime.utcnow()
-    with main._discovery_universe_lock:
-        main._discovery_universe_cache.update({
-            "symbols": ["AAPL"],
-            "generated_at": now,
-            "expires_at": now + __import__("datetime").timedelta(hours=1),
-            "running": False,
-            "last_error": None,
-        })
+    seed_discovery_pool(["AAPL"])
 
     def fake_status(watchlist=None, **kwargs):
         return {
@@ -1102,6 +1149,240 @@ def test_discovered_cache_status_triggers_handoff_and_exposes_diagnostics():
         main.scan_cached = previous_scan_cached
         reset_discovery_cache()
         reset_handoff_state()
+
+
+def test_scheduled_scan_fires_at_10am_trading_day():
+    reset_discovery_cache()
+    reset_scheduled_scan_state()
+    previous_status = main.analysis_cache_status
+    previous_scan_cached = main.scan_cached
+    previous_state_path = os.environ.get(main.SCHEDULED_SCAN_STATE_PATH_ENV)
+    calls = []
+    now = iso_utc(2026, 8, 17, 14, 0)
+    seed_discovery_pool(["AAPL", "MSFT"], now)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ[main.SCHEDULED_SCAN_STATE_PATH_ENV] = str(Path(temp_dir) / "scheduled.json")
+
+        def fake_status(watchlist=None, **kwargs):
+            return {"has_cache": False, "refreshing": False, "generated_at": None}
+
+        def fake_scan_cached(watchlist=None, **kwargs):
+            calls.append((watchlist, kwargs))
+            return {
+                "rows": [],
+                "near_miss": [],
+                "meta": {
+                    "has_cache": True,
+                    "refreshing": False,
+                    "generated_at": "2026-08-17T14:05:00Z",
+                    "last_refresh_success_at": "2026-08-17T14:05:00Z",
+                    "refresh_job_id": "scheduled-job",
+                },
+            }
+
+        main.analysis_cache_status = fake_status
+        main.scan_cached = fake_scan_cached
+        try:
+            accepted, job = main._submit_scheduled_discovered_scan_if_due(now)
+            assert accepted is True
+            assert job == "scheduled-job"
+            assert calls[0][0] == ["AAPL", "MSFT"]
+            assert calls[0][1]["force_refresh"] is True
+            snapshot = main._scheduled_scan_snapshot()
+            assert snapshot["status"] == "completed"
+            assert snapshot["scheduled_for"] == "2026-08-17T14:00:00Z"
+            assert snapshot["cache_generated_at"] == "2026-08-17T14:05:00Z"
+            assert Path(os.environ[main.SCHEDULED_SCAN_STATE_PATH_ENV]).exists()
+        finally:
+            main.analysis_cache_status = previous_status
+            main.scan_cached = previous_scan_cached
+            reset_discovery_cache()
+            reset_scheduled_scan_state()
+            if previous_state_path is None:
+                os.environ.pop(main.SCHEDULED_SCAN_STATE_PATH_ENV, None)
+            else:
+                os.environ[main.SCHEDULED_SCAN_STATE_PATH_ENV] = previous_state_path
+
+
+def test_scheduled_scan_skips_weekend_and_market_holiday():
+    reset_scheduled_scan_state()
+    assert main._submit_scheduled_discovered_scan_if_due(iso_utc(2026, 8, 15, 15, 0)) == (False, "non trading day")
+    assert main._scheduled_scan_snapshot()["status"] == "skipped_non_trading_day"
+    assert main._submit_scheduled_discovered_scan_if_due(iso_utc(2026, 9, 7, 15, 0)) == (False, "non trading day")
+    assert main._scheduled_scan_snapshot()["status"] == "skipped_non_trading_day"
+    reset_scheduled_scan_state()
+
+
+def test_scheduled_scan_restart_before_10_waits():
+    reset_discovery_cache()
+    reset_scheduled_scan_state()
+    calls = []
+    previous_scan_cached = main.scan_cached
+    main.scan_cached = lambda *args, **kwargs: calls.append((args, kwargs))
+    try:
+        seed_discovery_pool(["AAPL"], iso_utc(2026, 8, 17, 13, 30))
+        accepted, reason = main._submit_scheduled_discovered_scan_if_due(iso_utc(2026, 8, 17, 13, 30))
+        assert accepted is False
+        assert reason == "not due"
+        assert calls == []
+        assert main._scheduled_scan_snapshot()["status"] == "waiting_for_schedule"
+    finally:
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_scheduled_scan_state()
+
+
+def test_scheduled_scan_restart_after_10_recovers_missed_run():
+    reset_discovery_cache()
+    reset_scheduled_scan_state()
+    previous_status = main.analysis_cache_status
+    previous_scan_cached = main.scan_cached
+    calls = []
+    now = iso_utc(2026, 8, 17, 14, 10)
+    seed_discovery_pool(["AAPL"], now)
+    main.analysis_cache_status = lambda *args, **kwargs: {"has_cache": False, "refreshing": False, "generated_at": None}
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        return {"meta": {"has_cache": False, "refreshing": True, "refresh_job_id": "missed-run-job", "generated_at": None}}
+
+    main.scan_cached = fake_scan_cached
+    try:
+        accepted, job = main._submit_scheduled_discovered_scan_if_due(now)
+        assert accepted is True
+        assert job == "missed-run-job"
+        assert len(calls) == 1
+        assert main._scheduled_scan_snapshot()["status"] == "submitted"
+    finally:
+        main.analysis_cache_status = previous_status
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_scheduled_scan_state()
+
+
+def test_scheduled_scan_observes_existing_stale_read_refresh_without_duplicate():
+    reset_discovery_cache()
+    reset_scheduled_scan_state()
+    previous_status = main.analysis_cache_status
+    previous_scan_cached = main.scan_cached
+    calls = []
+    now = iso_utc(2026, 8, 17, 14, 0)
+    seed_discovery_pool(["AAPL"], now)
+    main.analysis_cache_status = lambda *args, **kwargs: {
+        "has_cache": False,
+        "refreshing": True,
+        "generated_at": None,
+        "refresh_job_id": "stale-read-job",
+        "refresh_started_at": "2026-08-17T13:59:30Z",
+    }
+    main.scan_cached = lambda *args, **kwargs: calls.append((args, kwargs))
+    try:
+        accepted, reason = main._submit_scheduled_discovered_scan_if_due(now)
+        assert accepted is False
+        assert reason == "observing existing scan"
+        assert calls == []
+        snapshot = main._scheduled_scan_snapshot()
+        assert snapshot["status"] == "observing_existing_scan"
+        assert snapshot["refresh_job_id"] == "stale-read-job"
+    finally:
+        main.analysis_cache_status = previous_status
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_scheduled_scan_state()
+
+
+def test_scheduled_scan_records_failure_and_allows_retry():
+    reset_discovery_cache()
+    reset_scheduled_scan_state()
+    previous_status = main.analysis_cache_status
+    previous_scan_cached = main.scan_cached
+    calls = []
+    now = iso_utc(2026, 8, 17, 14, 0)
+    seed_discovery_pool(["AAPL"], now)
+    main.analysis_cache_status = lambda *args, **kwargs: {"has_cache": False, "refreshing": False, "generated_at": None}
+
+    def fake_scan_cached(watchlist=None, **kwargs):
+        calls.append((watchlist, kwargs))
+        if len(calls) == 1:
+            return {"meta": {"has_cache": False, "refreshing": False, "last_refresh_error": "provider timeout", "generated_at": None}}
+        return {"meta": {"has_cache": False, "refreshing": True, "refresh_job_id": "retry-job", "generated_at": None}}
+
+    main.scan_cached = fake_scan_cached
+    try:
+        accepted, reason = main._submit_scheduled_discovered_scan_if_due(now)
+        assert accepted is True
+        assert reason == "failed"
+        snapshot = main._scheduled_scan_snapshot()
+        assert snapshot["status"] == "failed"
+        assert snapshot["failure_reason"] == "provider timeout"
+
+        accepted, job = main._submit_scheduled_discovered_scan_if_due(now + timedelta(minutes=5))
+        assert accepted is True
+        assert job == "retry-job"
+        assert len(calls) == 2
+    finally:
+        main.analysis_cache_status = previous_status
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_scheduled_scan_state()
+
+
+def test_scheduled_scan_state_persists_and_hydrates():
+    reset_scheduled_scan_state()
+    previous_state_path = os.environ.get(main.SCHEDULED_SCAN_STATE_PATH_ENV)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ[main.SCHEDULED_SCAN_STATE_PATH_ENV] = str(Path(temp_dir) / "scheduled.json")
+        try:
+            main._update_scheduled_scan_state(
+                scheduled_for="2026-08-17T14:00:00Z",
+                triggered_at="2026-08-17T14:00:01Z",
+                started_at="2026-08-17T14:00:02Z",
+                completed_at="2026-08-17T14:05:00Z",
+                status="completed",
+                trading_week_id="2026-W34",
+                cache_generated_at="2026-08-17T14:05:00Z",
+                refresh_job_id="scheduled-job",
+            )
+            reset_scheduled_scan_state()
+            assert main._scheduled_scan_snapshot()["status"] == "idle"
+            assert main._load_scheduled_scan_state_from_disk() is True
+            snapshot = main._scheduled_scan_snapshot()
+            assert snapshot["status"] == "completed"
+            assert snapshot["scheduled_for"] == "2026-08-17T14:00:00Z"
+            assert snapshot["trading_week_id"] == "2026-W34"
+            assert snapshot["cache_generated_at"] == "2026-08-17T14:05:00Z"
+        finally:
+            reset_scheduled_scan_state()
+            if previous_state_path is None:
+                os.environ.pop(main.SCHEDULED_SCAN_STATE_PATH_ENV, None)
+            else:
+                os.environ[main.SCHEDULED_SCAN_STATE_PATH_ENV] = previous_state_path
+
+
+def test_scheduled_scan_completed_run_does_not_duplicate_same_day():
+    reset_discovery_cache()
+    reset_scheduled_scan_state()
+    previous_scan_cached = main.scan_cached
+    calls = []
+    now = iso_utc(2026, 8, 17, 16, 30)
+    seed_discovery_pool(["AAPL"], now)
+    main.scan_cached = lambda *args, **kwargs: calls.append((args, kwargs))
+    try:
+        main._update_scheduled_scan_state(
+            scheduled_for="2026-08-17T14:00:00Z",
+            completed_at="2026-08-17T14:05:00Z",
+            status="completed",
+            trading_week_id="2026-W34",
+            cache_generated_at="2026-08-17T14:05:00Z",
+        )
+        accepted, reason = main._submit_scheduled_discovered_scan_if_due(now)
+        assert accepted is False
+        assert reason == "scheduled scan already completed"
+        assert calls == []
+    finally:
+        main.scan_cached = previous_scan_cached
+        reset_discovery_cache()
+        reset_scheduled_scan_state()
 
 
 def test_coverage_baseline_endpoint_warms_without_completed_discovered_scan():
@@ -1170,11 +1451,22 @@ def main_test() -> int:
     test_scan_default_route_uses_discovered_universe_by_default()
     test_scan_explicit_default_and_finviz_modes_remain_available()
     test_discovery_cache_refresh_needed_for_missing_and_stale_cache()
+    test_trading_week_pool_validity_rules()
+    test_app_restart_during_same_week_reuses_current_week_pool()
+    test_discovery_expiry_metadata_points_to_next_trading_week()
     test_discovery_auto_submit_skips_fresh_cache_and_running_job()
     test_startup_registers_and_submits_discovery_refresh()
     test_discovered_scan_handoff_queues_when_discovery_ready_and_scan_cache_missing()
     test_discovered_scan_handoff_does_not_duplicate_running_or_ready_cache()
     test_discovered_cache_status_triggers_handoff_and_exposes_diagnostics()
+    test_scheduled_scan_fires_at_10am_trading_day()
+    test_scheduled_scan_skips_weekend_and_market_holiday()
+    test_scheduled_scan_restart_before_10_waits()
+    test_scheduled_scan_restart_after_10_recovers_missed_run()
+    test_scheduled_scan_observes_existing_stale_read_refresh_without_duplicate()
+    test_scheduled_scan_records_failure_and_allows_retry()
+    test_scheduled_scan_state_persists_and_hydrates()
+    test_scheduled_scan_completed_run_does_not_duplicate_same_day()
     test_coverage_baseline_endpoint_warms_without_completed_discovered_scan()
     test_coverage_baseline_endpoint_returns_latest_snapshot_without_starting_work()
     print("Discovery endpoints v1 tests passed")
