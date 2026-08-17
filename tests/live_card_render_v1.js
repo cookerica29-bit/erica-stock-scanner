@@ -1627,6 +1627,88 @@ const completedNoSetupPayload = {
     partial_result_reasons: [],
   },
 };
+
+const freshnessElements = {
+  ...scannerLifecycleElements,
+  results: elementStub(),
+  summary: elementStub(),
+  marketCoverage: elementStub(),
+  marketSnapshot: elementStub(),
+  marketIntelligence: elementStub(),
+  topOpportunities: elementStub(),
+  dataStatus: elementStub(),
+};
+context.document.getElementById = id => freshnessElements[id] || elementStub();
+vm.runInContext(`
+  renderScannerResults = globalThis.__savedLifecycleRenderScannerResults;
+  scannerRows = [];
+  scannerNearMiss = [];
+  latestScannerMeta = null;
+  appliedScannerPayloadGeneration = '';
+  scannerPayloadFreshness = { stale: false, backendGeneration: '', appliedGeneration: '' };
+`, context);
+context.applyScanPayload({
+  rows: [setup({ ticker: 'OLDGEN', setupGrade: 'A', direction: 'LONG', scan_generation: '2026-08-17T14:00:00Z' })],
+  near_miss: [],
+  meta: { universe: 'discovered', cache_key: 'discovered', view: 'summary', generated_at: '2026-08-17T14:00:00Z' },
+});
+assert.strictEqual(vm.runInContext('appliedScannerPayloadGeneration', context), '2026-08-17T14:00:00Z');
+assert.ok(freshnessElements.dataStatus.innerHTML.includes('Viewing scan'));
+context.updateDataStatus({
+  universe: 'discovered',
+  cache_key: 'discovered',
+  cache: 'hit',
+  generated_at: '2026-08-17T16:49:22Z',
+  stale: false,
+  has_cache: true,
+});
+assert.strictEqual(vm.runInContext('scannerPayloadFreshness.stale', context), true);
+assert.ok(freshnessElements.dataStatus.innerHTML.includes('New scan available'));
+assert.ok(freshnessElements.dataStatus.innerHTML.includes('Refresh Results'));
+assert.strictEqual(vm.runInContext('scannerRows[0].ticker', context), 'OLDGEN');
+
+let freshnessRunScanCount = 0;
+const originalFreshnessRunScan = context.runScan;
+const originalFreshnessFetchWithTimeout = context.fetchWithTimeout;
+context.runScan = () => { freshnessRunScanCount += 1; return Promise.resolve(); };
+context.fetchWithTimeout = url => {
+  assert.strictEqual(url, '/api/cache/status?universe=discovered');
+  return Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({
+      universe: 'discovered',
+      cache_key: 'discovered',
+      cache: 'hit',
+      generated_at: '2026-08-17T16:49:22Z',
+      stale: false,
+      has_cache: true,
+    }),
+  });
+};
+await context.loadCacheStatus();
+assert.strictEqual(freshnessRunScanCount, 0, 'cache-status freshness checks must not trigger a scan');
+context.runScan = originalFreshnessRunScan;
+context.fetchWithTimeout = originalFreshnessFetchWithTimeout;
+
+context.applyScanPayload({
+  rows: [setup({ ticker: 'NEWGEN', setupGrade: 'B', direction: 'SHORT', scan_generation: '2026-08-17T16:49:22Z' })],
+  near_miss: [],
+  meta: { universe: 'discovered', cache_key: 'discovered', view: 'summary', generated_at: '2026-08-17T16:49:22Z' },
+});
+assert.strictEqual(vm.runInContext('appliedScannerPayloadGeneration', context), '2026-08-17T16:49:22Z');
+assert.strictEqual(vm.runInContext('scannerPayloadFreshness.stale', context), false);
+assert.ok(!freshnessElements.dataStatus.innerHTML.includes('New scan available'));
+assert.ok(freshnessElements.results.innerHTML.includes('NEWGEN'));
+assert.ok(freshnessElements.marketSnapshot.innerHTML.includes('<span class="label">B Setup</span><span class="count">1</span>'));
+assert.ok(!freshnessElements.marketSnapshot.innerHTML.includes('<span class="label">A Setup</span><span class="count">1</span>'));
+context.document.getElementById = id => scannerLifecycleElements[id] || elementStub();
+vm.runInContext(`
+  renderScannerResults = () => {
+    globalThis.__scannerLifecycleRenderCount += 1;
+    document.getElementById('results').innerHTML = 'completed result rendered';
+  };
+`, context);
+
 let scannerLifecyclePollScheduled = false;
 context.setTimeout = () => { scannerLifecyclePollScheduled = true; return 1; };
 context.fetchWithTimeout = (url) => {

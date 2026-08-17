@@ -317,6 +317,7 @@
   .data-status-dot.stale { background: #ff2d55; box-shadow: 0 0 0 4px rgba(255,45,85,0.12); }
   .data-status-main { color: var(--text); font-size: 11px; font-weight: 900; white-space: nowrap; }
   .data-status-sub { color: var(--muted); font-size: 10px; margin-top: 2px; white-space: nowrap; }
+  .data-status-sub .link-button { appearance:none; border:0; background:transparent; color:var(--accent); font:inherit; font-weight:900; padding:0; cursor:pointer; }
   .discovery-warmup-card {
     grid-column: 1 / -1;
     background: rgba(53,66,88,0.86);
@@ -4633,6 +4634,8 @@ let scannerRows = [];
 let scannerNearMiss = [];
 let indexWatchRows = [];
 let latestScannerMeta = null;
+let appliedScannerPayloadGeneration = '';
+let scannerPayloadFreshness = { stale: false, backendGeneration: '', appliedGeneration: '' };
 const optionPricingLazyRequestedKeys = new Set();
 const SCANNER_INITIAL_RENDER_LIMIT = 60;
 const SCANNER_RENDER_INCREMENT = 60;
@@ -5288,6 +5291,48 @@ function scannerCacheStatusUrl(universe = currentScannerUniverse()) {
   return `${API}/api/cache/status?${params.toString()}`;
 }
 
+function scannerPayloadGeneration(meta = {}) {
+  return String(firstPresent(
+    meta.generated_at,
+    meta.cache_generated_at,
+    meta.scan_generation,
+    meta.ranking_generated_at,
+    meta.scanner_cache_generation
+  ) || '').trim();
+}
+
+function scannerGenerationTime(value) {
+  const parsed = Date.parse(value || '');
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function backendGenerationNewerThanApplied(backendGeneration, appliedGeneration = appliedScannerPayloadGeneration) {
+  const backendTime = scannerGenerationTime(backendGeneration);
+  const appliedTime = scannerGenerationTime(appliedGeneration);
+  if (backendTime == null || appliedTime == null) return false;
+  return backendTime > appliedTime;
+}
+
+function refreshAvailableScannerPayload() {
+  runScan().catch(error => console.warn('[Scanner] refresh available payload failed:', error));
+}
+
+function updateScannerPayloadFreshnessFromStatus(meta = {}) {
+  if (!cacheStatusMatchesActiveUniverse(meta)) return scannerPayloadFreshness;
+  const backendGeneration = scannerPayloadGeneration(meta);
+  const stale = Boolean(
+    appliedScannerPayloadGeneration
+    && backendGeneration
+    && backendGenerationNewerThanApplied(backendGeneration)
+  );
+  scannerPayloadFreshness = {
+    stale,
+    backendGeneration,
+    appliedGeneration: appliedScannerPayloadGeneration,
+  };
+  return scannerPayloadFreshness;
+}
+
 function scannerDetailKey(setup = {}) {
   const setupId = firstPresent(setup.setup_id, setup.setupId, setup.lazy_hydration?.setup_id);
   const generation = firstPresent(setup.scan_generation, setup.scanGeneration, setup.lazy_hydration?.scan_generation);
@@ -5411,6 +5456,8 @@ function handleUniverseChange() {
   scannerRows = [];
   scannerNearMiss = [];
   latestScannerMeta = null;
+  appliedScannerPayloadGeneration = '';
+  scannerPayloadFreshness = { stale: false, backendGeneration: '', appliedGeneration: '' };
   scannerDetailCache.clear();
   scannerDetailRequests.clear();
   contractRefreshAttempts = 0;
@@ -5685,6 +5732,8 @@ function clearResults() {
   contractPendingTimedOutKeys = new Set();
   scannerRows = [];
   scannerNearMiss = [];
+  appliedScannerPayloadGeneration = '';
+  scannerPayloadFreshness = { stale: false, backendGeneration: '', appliedGeneration: '' };
   invalidateScannerDerivedViews({ resetWindow: true });
   rebuildScannerSetupLookup();
   previousTradeStages = new Map();
@@ -6310,6 +6359,7 @@ function updateDiscoveryPoolStatusFromMeta(meta = {}) {
 function updateDataStatus(meta = {}) {
   const el = document.getElementById('dataStatus');
   updateDiscoveryPoolStatusFromMeta(meta);
+  const payloadFreshness = updateScannerPayloadFreshnessFromStatus(meta);
   if (!el) return;
   if (!cacheStatusMatchesActiveUniverse(meta)) {
     el.innerHTML = `
@@ -6345,8 +6395,22 @@ function updateDataStatus(meta = {}) {
       </div>`;
     return;
   }
+  if (payloadFreshness.stale) {
+    const applied = payloadFreshness.appliedGeneration ? new Date(payloadFreshness.appliedGeneration).toLocaleString() : 'unknown';
+    const backend = payloadFreshness.backendGeneration ? new Date(payloadFreshness.backendGeneration).toLocaleString() : 'available';
+    el.innerHTML = `
+    <span class="data-status-dot stale"></span>
+    <div>
+      <div class="data-status-main">🔴 New scan available</div>
+      <div class="data-status-sub">Viewing ${escapeHtml(applied)} · latest ${escapeHtml(backend)} · <button type="button" class="link-button" onclick="refreshAvailableScannerPayload()">Refresh Results</button></div>
+    </div>`;
+    return;
+  }
   const status = cacheStatusFromMeta(meta);
   const age = formatScanAge(firstPresent(meta.cache_age_seconds, meta.age_seconds));
+  const appliedGeneration = appliedScannerPayloadGeneration
+    ? `Viewing scan ${new Date(appliedScannerPayloadGeneration).toLocaleString()}`
+    : '';
   const nextText = nextScanAt ? formatScheduledScan(nextScanAt).replace(/^Next scan /, 'next scan ') : '';
   const scheduleText = nextText
     ? (isMarketHours() ? `Waiting for ${nextText}` : `Market closed — ${nextText}`)
@@ -6355,7 +6419,7 @@ function updateDataStatus(meta = {}) {
     ? 'Last scan failed'
     : scheduleText || 'Scanner data is stale';
   const labels = {
-    fresh: { icon: '🟢', label: age ? `Fresh · Updated ${age}` : 'Fresh', sub: scheduleText || 'Ready to scan' },
+    fresh: { icon: '🟢', label: age ? `Fresh · Updated ${age}` : 'Fresh', sub: appliedGeneration || scheduleText || 'Ready to scan' },
     warming: { icon: '🟡', label: age ? `Warming · Updated ${age}` : 'Warming', sub: age ? 'Refreshing market cache' : 'Building market cache' },
     stale: { icon: '🔴', label: age ? `Stale · Updated ${age}` : 'Stale', sub: staleReason },
   };
@@ -6443,6 +6507,12 @@ function applyScanPayload(data = {}) {
   const scanMeta = data.meta || {};
   try {
     latestScannerMeta = scanMeta;
+    appliedScannerPayloadGeneration = scannerPayloadGeneration(scanMeta);
+    scannerPayloadFreshness = {
+      stale: false,
+      backendGeneration: appliedScannerPayloadGeneration,
+      appliedGeneration: appliedScannerPayloadGeneration,
+    };
     updateDataStatus(scanMeta || {});
 
     const previousRows = [...scannerRows, ...scannerNearMiss];
@@ -6483,9 +6553,11 @@ function applyScanPayload(data = {}) {
 
 function renderScannerWarming(data = {}) {
   latestScannerMeta = data.meta || latestScannerMeta || {};
-  updateDataStatus(latestScannerMeta || {});
   scannerRows = [];
   scannerNearMiss = [];
+  appliedScannerPayloadGeneration = '';
+  scannerPayloadFreshness = { stale: false, backendGeneration: scannerPayloadGeneration(latestScannerMeta || {}), appliedGeneration: '' };
+  updateDataStatus(latestScannerMeta || {});
   invalidateScannerDerivedViews({ resetWindow: true });
   rebuildScannerSetupLookup();
   renderScannerResults();
