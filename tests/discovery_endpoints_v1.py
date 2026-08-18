@@ -978,6 +978,8 @@ def test_startup_registers_and_submits_discovery_refresh():
     previous_start_market_cache = main.start_market_cache_refresh
     previous_handoff = main._maybe_enqueue_discovered_scan_handoff
     previous_scheduled = main._submit_scheduled_discovered_scan_if_due
+    previous_short_ingestion = main._safe_submit_momentum_short_lifecycle_ingestion
+    previous_short_watcher = main._submit_momentum_short_lifecycle_watcher
     calls = []
     main.register_background_periodic_task = lambda key, ttl, callback: calls.append(("register", key, ttl, callback))
     main._load_discovery_pool_from_disk = lambda: calls.append(("load_pool",)) or False
@@ -986,6 +988,8 @@ def test_startup_registers_and_submits_discovery_refresh():
     main.start_market_cache_refresh = lambda: calls.append(("market_cache",))
     main._maybe_enqueue_discovered_scan_handoff = lambda reason="": calls.append(("handoff", reason)) or (False, "stubbed")
     main._submit_scheduled_discovered_scan_if_due = lambda: calls.append(("scheduled",)) or (False, "not due")
+    main._safe_submit_momentum_short_lifecycle_ingestion = lambda reason="", symbols=None: calls.append(("short_ingestion", reason, symbols)) or (True, "submitted")
+    main._submit_momentum_short_lifecycle_watcher = lambda reason="": calls.append(("short_watcher", reason)) or (True, "submitted")
     try:
         main.startup_market_cache_refresh()
         assert calls[0][0:3] == ("register", "discovery_universe", main.DISCOVERY_REFRESH_WATCHDOG_SECONDS)
@@ -994,12 +998,18 @@ def test_startup_registers_and_submits_discovery_refresh():
         assert callable(calls[1][3])
         assert calls[2][0:3] == ("register", "scheduled_discovered_scan_10am_et", 60)
         assert callable(calls[2][3])
-        assert calls[3] == ("market_cache",)
-        assert calls[4] == ("load_scheduled",)
-        assert calls[5] == ("load_pool",)
-        assert calls[6] == ("submit",)
-        assert calls[7] == ("handoff", "startup_discovery_ready_no_scanner_cache")
-        assert calls[8] == ("scheduled",)
+        assert calls[3][0:3] == ("register", "momentum_pullback_short_lifecycle_ingestion", 3600)
+        assert callable(calls[3][3])
+        assert calls[4][0:3] == ("register", "momentum_pullback_short_lifecycle_watcher", 3600)
+        assert callable(calls[4][3])
+        assert calls[5] == ("market_cache",)
+        assert calls[6] == ("load_scheduled",)
+        assert calls[7] == ("load_pool",)
+        assert calls[8] == ("submit",)
+        assert calls[9] == ("handoff", "startup_discovery_ready_no_scanner_cache")
+        assert calls[10] == ("scheduled",)
+        assert calls[11] == ("short_ingestion", "startup", None)
+        assert calls[12] == ("short_watcher", "startup")
     finally:
         main.register_background_periodic_task = previous_register
         main._submit_discovery_universe_job_if_needed = previous_submit
@@ -1008,6 +1018,8 @@ def test_startup_registers_and_submits_discovery_refresh():
         main.start_market_cache_refresh = previous_start_market_cache
         main._maybe_enqueue_discovered_scan_handoff = previous_handoff
         main._submit_scheduled_discovered_scan_if_due = previous_scheduled
+        main._safe_submit_momentum_short_lifecycle_ingestion = previous_short_ingestion
+        main._submit_momentum_short_lifecycle_watcher = previous_short_watcher
 
 
 def test_discovered_scan_handoff_queues_when_discovery_ready_and_scan_cache_missing():

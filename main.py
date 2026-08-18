@@ -10,6 +10,7 @@ import time
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -103,6 +104,8 @@ from verified_history import (
     verification_to_pipeline_status,
 )
 from verified_history_store import SQLiteVerifiedHistoryRepository
+import momentum_pullback_shadow as momentum_pullback
+import momentum_pullback_short_lifecycle_experiment as short_lifecycle_experiment
 
 app = FastAPI(title="Stock Options Scanner")
 logger = logging.getLogger(__name__)
@@ -177,6 +180,33 @@ _scheduled_discovered_scan_state = {
     "refresh_job_id": None,
     "failure_reason": None,
     "last_checked_at": None,
+}
+_momentum_short_lifecycle_executor = ThreadPoolExecutor(max_workers=1)
+_momentum_short_lifecycle_lock = threading.RLock()
+_momentum_short_lifecycle_state = {
+    "version": short_lifecycle_experiment.EXPERIMENT_VERSION,
+    "last_ingestion_run": None,
+    "last_watcher_run": None,
+    "last_success": None,
+    "last_error": None,
+    "ingestion": {
+        "last_started_at": None,
+        "last_completed_at": None,
+        "signals_evaluated": 0,
+        "newly_captured": 0,
+        "duplicates_skipped": 0,
+        "errors": [],
+        "running": False,
+    },
+    "watcher": {
+        "last_started_at": None,
+        "last_completed_at": None,
+        "records_checked": 0,
+        "records_changed": 0,
+        "intraday_fetch_failures": 0,
+        "errors": [],
+        "running": False,
+    },
 }
 _journal_repository = SQLiteJournalRepository(default_journal_db_path())
 _notification_repository = SQLiteNotificationRepository(default_journal_db_path())
@@ -922,6 +952,7 @@ def _submit_scheduled_discovered_scan_if_due(now: Optional[datetime] = None) -> 
                 failure_reason=None,
                 last_checked_at=checked_text,
             )
+            _safe_submit_momentum_short_lifecycle_ingestion("scheduled_scan_completed_observed", symbols)
             return False, "scheduled scan completed"
         if meta.get("refreshing"):
             _update_scheduled_scan_state(
@@ -963,6 +994,7 @@ def _submit_scheduled_discovered_scan_if_due(now: Optional[datetime] = None) -> 
             failure_reason=None,
             last_checked_at=checked_text,
         )
+        _safe_submit_momentum_short_lifecycle_ingestion("scheduled_scan_cache_ready", symbols)
         return False, "current cache already satisfies schedule"
     if meta.get("refreshing"):
         _update_scheduled_scan_state(
@@ -1033,6 +1065,8 @@ def _submit_scheduled_discovered_scan_if_due(now: Optional[datetime] = None) -> 
         failure_reason=result_meta.get("last_refresh_error"),
         last_checked_at=checked_text,
     )
+    if status in {"completed", "submitted"}:
+        _safe_submit_momentum_short_lifecycle_ingestion("scheduled_scan_result", symbols)
     return True, result_meta.get("refresh_job_id") or status
 
 
@@ -1105,6 +1139,8 @@ def _maybe_enqueue_discovered_scan_handoff(reason: str = "discovery_ready_no_sca
     )
     meta = (result or {}).get("meta") or analysis_cache_status(symbols, universe="discovered")
     _update_discovered_scan_handoff_from_meta(meta)
+    if meta.get("has_cache") or meta.get("refreshing"):
+        _safe_submit_momentum_short_lifecycle_ingestion("discovered_scan_handoff", symbols)
     return bool(meta.get("refreshing")), meta.get("refresh_job_id") or "submitted"
 
 
@@ -1264,6 +1300,16 @@ def _register_discovery_background_refresh() -> None:
         60,
         _submit_scheduled_discovered_scan_if_due,
     )
+    register_background_periodic_task(
+        "momentum_pullback_short_lifecycle_ingestion",
+        60 * 60,
+        lambda: _safe_submit_momentum_short_lifecycle_ingestion("periodic"),
+    )
+    register_background_periodic_task(
+        "momentum_pullback_short_lifecycle_watcher",
+        60 * 60,
+        lambda: _submit_momentum_short_lifecycle_watcher("periodic"),
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -1292,6 +1338,8 @@ def startup_market_cache_refresh():
     _submit_discovery_universe_job_if_needed()
     _maybe_enqueue_discovered_scan_handoff("startup_discovery_ready_no_scanner_cache")
     _submit_scheduled_discovered_scan_if_due()
+    _safe_submit_momentum_short_lifecycle_ingestion("startup")
+    _submit_momentum_short_lifecycle_watcher("startup")
 
 
 @app.get("/")
@@ -1942,6 +1990,7 @@ def api_scan(
     if tickers:
         watchlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
         result = _attach_notification_metrics(scan_cached(watchlist, force_refresh=refresh))
+        _safe_submit_momentum_short_lifecycle_ingestion("manual_custom_scan", watchlist)
         return _summarize_scan_response(result) if requested_view == "summary" else result
 
     selected_universe = str(universe or "discovered").strip().lower()
@@ -1960,11 +2009,14 @@ def api_scan(
             coverage_context=_discovery_coverage_context(),
             trusted_options_symbols=set(symbols),
         )
+        _safe_submit_momentum_short_lifecycle_ingestion("manual_discovered_scan", symbols)
     elif selected_universe == "default":
         result = scan_cached(force_refresh=refresh, discover=False)
+        _safe_submit_momentum_short_lifecycle_ingestion("manual_default_scan", WATCHLIST)
     else:
         use_finviz = selected_universe == "finviz"
         result = scan_cached(force_refresh=refresh, discover=use_finviz)
+        _safe_submit_momentum_short_lifecycle_ingestion("manual_finviz_scan")
     result = _attach_notification_metrics(result)
     return _summarize_scan_response(result) if requested_view == "summary" else result
 
@@ -2153,6 +2205,12 @@ def api_dev_option_pricing(
 def api_dev_stock_early_entry_memory(x_kairos_admin_token: str = Header(default="")):
     _require_journal_admin_token(x_kairos_admin_token)
     return stock_early_entry_shadow_diagnostics()
+
+
+@app.get("/api/dev/momentum-pullback-short-lifecycle-experiment")
+def api_dev_momentum_pullback_short_lifecycle_experiment(x_kairos_admin_token: str = Header(default="")):
+    _require_journal_admin_token(x_kairos_admin_token)
+    return _momentum_short_lifecycle_snapshot()
 
 
 @app.post("/api/option-pricing/hydrate")
@@ -2484,6 +2542,260 @@ def _download_chart_candles(ticker: str, period: str, interval: str, limit: int,
         "provider_attempts": attempts,
         "fallback_used": len(attempts) > 1,
         "failure_reason": failure_reason,
+    }
+
+
+def _momentum_short_lifecycle_update_state(section: Optional[str] = None, **updates) -> None:
+    with _momentum_short_lifecycle_lock:
+        if section:
+            current = dict(_momentum_short_lifecycle_state.get(section) or {})
+            current.update(updates)
+            _momentum_short_lifecycle_state[section] = current
+        else:
+            _momentum_short_lifecycle_state.update(updates)
+
+
+def _momentum_short_lifecycle_submit(kind: str, fn, *args) -> tuple[bool, str]:
+    section = "ingestion" if kind == "ingestion" else "watcher"
+    with _momentum_short_lifecycle_lock:
+        if (_momentum_short_lifecycle_state.get(section) or {}).get("running"):
+            return False, f"{section}_already_running"
+        _momentum_short_lifecycle_update_state(section, running=True)
+    try:
+        _momentum_short_lifecycle_executor.submit(fn, *args)
+    except RuntimeError as exc:
+        _momentum_short_lifecycle_update_state(section, running=False, errors=[exc.__class__.__name__])
+        return False, f"{section}_submit_failed"
+    return True, "submitted"
+
+
+def _momentum_short_lifecycle_symbols(symbols: Optional[list[str]] = None) -> list[str]:
+    if symbols:
+        return list(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
+    ready, discovered, _ = _discovery_symbols_ready()
+    if ready:
+        return list(dict.fromkeys(discovered))
+    return list(dict.fromkeys(WATCHLIST))
+
+
+def _momentum_short_lifecycle_fetch_daily(symbols: list[str]) -> dict:
+    return _batch_download(symbols, "1y", "1d")
+
+
+def _momentum_short_lifecycle_ingest(symbols: Optional[list[str]] = None, reason: str = "periodic") -> dict:
+    started = _utc_now()
+    _momentum_short_lifecycle_update_state("ingestion", last_started_at=_format_timestamp(started), running=True, errors=[])
+    metrics = {
+        "reason": reason,
+        "symbols": 0,
+        "signals_evaluated": 0,
+        "newly_captured": 0,
+        "duplicates_skipped": 0,
+        "errors": [],
+    }
+    try:
+        universe = _momentum_short_lifecycle_symbols(symbols)
+        metrics["symbols"] = len(universe)
+        if not universe:
+            return metrics
+        daily = _momentum_short_lifecycle_fetch_daily(universe)
+        spy_daily = _momentum_short_lifecycle_fetch_daily(["SPY"]).get("SPY")
+        ledger = short_lifecycle_experiment.load_ledger()
+        for symbol, df in daily.items():
+            try:
+                report = momentum_pullback.replay_symbol(symbol, df, spy_daily)
+            except Exception as exc:
+                metrics["errors"].append({"symbol": symbol, "stage": "replay", "error": exc.__class__.__name__})
+                continue
+            for signal in report.get("signals") or []:
+                if signal.get("direction") != momentum_pullback.SHORT:
+                    continue
+                metrics["signals_evaluated"] += 1
+                try:
+                    spy_context = (
+                        short_lifecycle_experiment.spy_context_at(spy_daily, signal.get("signal_timestamp"))
+                        if spy_daily is not None and not getattr(spy_daily, "empty", True)
+                        else {"available": False, "reason": "spy_daily_unavailable"}
+                    )
+                    ledger, status = short_lifecycle_experiment.capture_signal(ledger, signal, spy_context=spy_context)
+                    if status == "added":
+                        metrics["newly_captured"] += 1
+                    elif status == "duplicate":
+                        metrics["duplicates_skipped"] += 1
+                except Exception as exc:
+                    metrics["errors"].append({"symbol": symbol, "stage": "capture", "error": exc.__class__.__name__})
+        short_lifecycle_experiment.save_ledger(ledger)
+        return metrics
+    except Exception as exc:
+        metrics["errors"].append({"stage": "ingestion", "error": exc.__class__.__name__, "message": str(exc)[:240]})
+        return metrics
+    finally:
+        completed = _utc_now()
+        success = not metrics.get("errors")
+        _momentum_short_lifecycle_update_state(
+            "ingestion",
+            last_completed_at=_format_timestamp(completed),
+            signals_evaluated=metrics.get("signals_evaluated", 0),
+            newly_captured=metrics.get("newly_captured", 0),
+            duplicates_skipped=metrics.get("duplicates_skipped", 0),
+            errors=metrics.get("errors", [])[:20],
+            running=False,
+        )
+        _momentum_short_lifecycle_update_state(
+            last_ingestion_run=_format_timestamp(completed),
+            last_success=_format_timestamp(completed) if success else _momentum_short_lifecycle_state.get("last_success"),
+            last_error=None if success else (metrics.get("errors") or [{}])[-1],
+        )
+
+
+def _momentum_short_lifecycle_candles_from_records(records: list[dict]) -> pd.DataFrame:
+    rows = []
+    index = []
+    for item in records or []:
+        ts = item.get("timestamp")
+        if not ts:
+            continue
+        rows.append({
+            "Open": item.get("open"),
+            "High": item.get("high"),
+            "Low": item.get("low"),
+            "Close": item.get("close"),
+            "Volume": item.get("volume"),
+        })
+        index.append(pd.Timestamp(ts))
+    if not rows:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    return pd.DataFrame(rows, index=pd.DatetimeIndex(index))
+
+
+def _momentum_short_lifecycle_fetch_intraday(symbol: str) -> tuple[pd.DataFrame, dict]:
+    providers = _chart_provider_candidates("30M")
+    records, diagnostics = _download_chart_candles(symbol, "60d", "30m", 2000, providers)
+    return _momentum_short_lifecycle_candles_from_records(records), diagnostics
+
+
+def _momentum_short_lifecycle_watch_open_records(reason: str = "periodic") -> dict:
+    started = _utc_now()
+    _momentum_short_lifecycle_update_state("watcher", last_started_at=_format_timestamp(started), running=True, errors=[])
+    metrics = {
+        "reason": reason,
+        "records_checked": 0,
+        "records_changed": 0,
+        "intraday_fetch_failures": 0,
+        "errors": [],
+    }
+    try:
+        ledger = short_lifecycle_experiment.load_ledger()
+        records = ledger.get("records") or []
+        if not records:
+            return metrics
+        symbols_needing_daily = list(dict.fromkeys(
+            row.get("symbol")
+            for row in records
+            if row.get("state") == short_lifecycle_experiment.STATE_ENTRY_PENDING
+        ))
+        daily = _momentum_short_lifecycle_fetch_daily(symbols_needing_daily) if symbols_needing_daily else {}
+        updated_ledger = dict(ledger)
+        updated_ledger["records"] = []
+        for record in records:
+            current = record
+            terminal = current.get("state") in {
+                short_lifecycle_experiment.STATE_EXPERIMENT_COMPLETE,
+                short_lifecycle_experiment.STATE_SEQUENCE_AMBIGUOUS,
+            }
+            if terminal:
+                updated_ledger["records"].append(current)
+                continue
+            metrics["records_checked"] += 1
+            before = json.dumps(current, sort_keys=True, default=str)
+            symbol = str(current.get("symbol") or "").upper()
+            try:
+                if current.get("state") == short_lifecycle_experiment.STATE_ENTRY_PENDING:
+                    current = short_lifecycle_experiment.resolve_next_session_entry(current, daily.get(symbol, pd.DataFrame()))
+                if current.get("state") != short_lifecycle_experiment.STATE_ENTRY_PENDING:
+                    intraday, diagnostics = _momentum_short_lifecycle_fetch_intraday(symbol)
+                    if intraday.empty:
+                        metrics["intraday_fetch_failures"] += 1
+                        current.setdefault("diagnostics", {})["last_intraday_failure"] = diagnostics.get("failure_reason") or "no_30m_candles"
+                    else:
+                        current = short_lifecycle_experiment.evaluate_record_with_intraday(current, intraday)
+            except Exception as exc:
+                metrics["errors"].append({"symbol": symbol, "stage": "watch", "error": exc.__class__.__name__})
+            after = json.dumps(current, sort_keys=True, default=str)
+            if before != after:
+                metrics["records_changed"] += 1
+            updated_ledger["records"].append(current)
+        short_lifecycle_experiment.save_ledger(updated_ledger)
+        return metrics
+    except Exception as exc:
+        metrics["errors"].append({"stage": "watcher", "error": exc.__class__.__name__, "message": str(exc)[:240]})
+        return metrics
+    finally:
+        completed = _utc_now()
+        success = not metrics.get("errors")
+        _momentum_short_lifecycle_update_state(
+            "watcher",
+            last_completed_at=_format_timestamp(completed),
+            records_checked=metrics.get("records_checked", 0),
+            records_changed=metrics.get("records_changed", 0),
+            intraday_fetch_failures=metrics.get("intraday_fetch_failures", 0),
+            errors=metrics.get("errors", [])[:20],
+            running=False,
+        )
+        _momentum_short_lifecycle_update_state(
+            last_watcher_run=_format_timestamp(completed),
+            last_success=_format_timestamp(completed) if success else _momentum_short_lifecycle_state.get("last_success"),
+            last_error=None if success else (metrics.get("errors") or [{}])[-1],
+        )
+
+
+def _submit_momentum_short_lifecycle_ingestion(reason: str = "scan_observed", symbols: Optional[list[str]] = None) -> tuple[bool, str]:
+    return _momentum_short_lifecycle_submit("ingestion", _momentum_short_lifecycle_ingest, symbols, reason)
+
+
+def _safe_submit_momentum_short_lifecycle_ingestion(reason: str = "scan_observed", symbols: Optional[list[str]] = None) -> tuple[bool, str]:
+    try:
+        return _submit_momentum_short_lifecycle_ingestion(reason, symbols)
+    except Exception as exc:
+        error = {"stage": "submit_ingestion", "reason": reason, "error": exc.__class__.__name__}
+        logger.warning("[momentum-short-lifecycle] ingestion submit failed reason=%s error=%s", reason, exc.__class__.__name__)
+        _momentum_short_lifecycle_update_state(last_error=error)
+        return False, "submit_failed"
+
+
+def _submit_momentum_short_lifecycle_watcher(reason: str = "periodic") -> tuple[bool, str]:
+    return _momentum_short_lifecycle_submit("watcher", _momentum_short_lifecycle_watch_open_records, reason)
+
+
+def _momentum_short_lifecycle_snapshot() -> dict:
+    ledger = short_lifecycle_experiment.load_ledger()
+    status = short_lifecycle_experiment.experiment_status(ledger)
+    metrics = short_lifecycle_experiment.comparative_metrics(ledger)
+    with _momentum_short_lifecycle_lock:
+        runtime = json.loads(json.dumps(_momentum_short_lifecycle_state, default=str))
+    entry_pending = sum(
+        1 for row in ledger.get("records") or []
+        if row.get("state") == short_lifecycle_experiment.STATE_ENTRY_PENDING
+    )
+    return {
+        **status,
+        "entry_pending": entry_pending,
+        "control_a_counts": status.get("control_a_outcome_counts") or {},
+        "test_b_counts": status.get("test_b_outcome_counts") or {},
+        "sacrificed_1R_continuations": status.get("be_then_control_win_1r"),
+        "sacrificed_2R_continuations": status.get("be_then_later_2r"),
+        "sacrificed_3R_continuations": status.get("be_then_later_3r"),
+        "metrics": metrics,
+        "runtime": runtime,
+        "last_ingestion_run": runtime.get("last_ingestion_run"),
+        "last_watcher_run": runtime.get("last_watcher_run"),
+        "last_success": runtime.get("last_success"),
+        "last_error": runtime.get("last_error"),
+        "ledger": {
+            "path": short_lifecycle_experiment.DEFAULT_LEDGER_PATH,
+            "exists": Path(short_lifecycle_experiment.DEFAULT_LEDGER_PATH).exists(),
+            "records": len(ledger.get("records") or []),
+        },
     }
 
 
