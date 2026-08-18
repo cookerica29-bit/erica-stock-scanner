@@ -185,6 +185,9 @@ _momentum_short_lifecycle_executor = ThreadPoolExecutor(max_workers=1)
 _momentum_short_lifecycle_lock = threading.RLock()
 _momentum_short_lifecycle_state = {
     "version": short_lifecycle_experiment.EXPERIMENT_VERSION,
+    "startup_ready": False,
+    "startup_ready_at": None,
+    "deferred_before_ready": 0,
     "last_ingestion_run": None,
     "last_watcher_run": None,
     "last_success": None,
@@ -1338,8 +1341,7 @@ def startup_market_cache_refresh():
     _submit_discovery_universe_job_if_needed()
     _maybe_enqueue_discovered_scan_handoff("startup_discovery_ready_no_scanner_cache")
     _submit_scheduled_discovered_scan_if_due()
-    _safe_submit_momentum_short_lifecycle_ingestion("startup")
-    _submit_momentum_short_lifecycle_watcher("startup")
+    _momentum_short_lifecycle_mark_startup_ready()
 
 
 @app.get("/")
@@ -2555,6 +2557,27 @@ def _momentum_short_lifecycle_update_state(section: Optional[str] = None, **upda
             _momentum_short_lifecycle_state.update(updates)
 
 
+def _momentum_short_lifecycle_is_startup_ready() -> bool:
+    with _momentum_short_lifecycle_lock:
+        return bool(_momentum_short_lifecycle_state.get("startup_ready"))
+
+
+def _momentum_short_lifecycle_mark_startup_ready() -> None:
+    _momentum_short_lifecycle_update_state(
+        startup_ready=True,
+        startup_ready_at=_format_timestamp(_utc_now()),
+    )
+
+
+def _momentum_short_lifecycle_defer_until_ready(kind: str, reason: str) -> tuple[bool, str]:
+    with _momentum_short_lifecycle_lock:
+        _momentum_short_lifecycle_state["deferred_before_ready"] = int(
+            _momentum_short_lifecycle_state.get("deferred_before_ready") or 0
+        ) + 1
+    logger.info("[momentum-short-lifecycle] deferred %s reason=%s until startup ready", kind, reason)
+    return False, "startup_not_ready"
+
+
 def _momentum_short_lifecycle_submit(kind: str, fn, *args) -> tuple[bool, str]:
     section = "ingestion" if kind == "ingestion" else "watcher"
     with _momentum_short_lifecycle_lock:
@@ -2750,6 +2773,8 @@ def _momentum_short_lifecycle_watch_open_records(reason: str = "periodic") -> di
 
 
 def _submit_momentum_short_lifecycle_ingestion(reason: str = "scan_observed", symbols: Optional[list[str]] = None) -> tuple[bool, str]:
+    if not _momentum_short_lifecycle_is_startup_ready():
+        return _momentum_short_lifecycle_defer_until_ready("ingestion", reason)
     return _momentum_short_lifecycle_submit("ingestion", _momentum_short_lifecycle_ingest, symbols, reason)
 
 
@@ -2764,6 +2789,8 @@ def _safe_submit_momentum_short_lifecycle_ingestion(reason: str = "scan_observed
 
 
 def _submit_momentum_short_lifecycle_watcher(reason: str = "periodic") -> tuple[bool, str]:
+    if not _momentum_short_lifecycle_is_startup_ready():
+        return _momentum_short_lifecycle_defer_until_ready("watcher", reason)
     return _momentum_short_lifecycle_submit("watcher", _momentum_short_lifecycle_watch_open_records, reason)
 
 

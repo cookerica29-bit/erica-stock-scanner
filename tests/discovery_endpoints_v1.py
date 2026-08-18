@@ -980,6 +980,8 @@ def test_startup_registers_and_submits_discovery_refresh():
     previous_scheduled = main._submit_scheduled_discovered_scan_if_due
     previous_short_ingestion = main._safe_submit_momentum_short_lifecycle_ingestion
     previous_short_watcher = main._submit_momentum_short_lifecycle_watcher
+    previous_ready = main._momentum_short_lifecycle_state.get("startup_ready")
+    previous_ready_at = main._momentum_short_lifecycle_state.get("startup_ready_at")
     calls = []
     main.register_background_periodic_task = lambda key, ttl, callback: calls.append(("register", key, ttl, callback))
     main._load_discovery_pool_from_disk = lambda: calls.append(("load_pool",)) or False
@@ -1008,8 +1010,9 @@ def test_startup_registers_and_submits_discovery_refresh():
         assert calls[8] == ("submit",)
         assert calls[9] == ("handoff", "startup_discovery_ready_no_scanner_cache")
         assert calls[10] == ("scheduled",)
-        assert calls[11] == ("short_ingestion", "startup", None)
-        assert calls[12] == ("short_watcher", "startup")
+        assert not any(call[0] in {"short_ingestion", "short_watcher"} for call in calls)
+        assert main._momentum_short_lifecycle_state["startup_ready"] is True
+        assert main._momentum_short_lifecycle_state["startup_ready_at"]
     finally:
         main.register_background_periodic_task = previous_register
         main._submit_discovery_universe_job_if_needed = previous_submit
@@ -1020,6 +1023,8 @@ def test_startup_registers_and_submits_discovery_refresh():
         main._submit_scheduled_discovered_scan_if_due = previous_scheduled
         main._safe_submit_momentum_short_lifecycle_ingestion = previous_short_ingestion
         main._submit_momentum_short_lifecycle_watcher = previous_short_watcher
+        main._momentum_short_lifecycle_state["startup_ready"] = previous_ready
+        main._momentum_short_lifecycle_state["startup_ready_at"] = previous_ready_at
 
 
 def test_discovered_scan_handoff_queues_when_discovery_ready_and_scan_cache_missing():

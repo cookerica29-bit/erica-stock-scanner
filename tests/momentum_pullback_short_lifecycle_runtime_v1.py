@@ -78,6 +78,35 @@ def reset_runtime_state():
         main._momentum_short_lifecycle_state["last_error"] = None
 
 
+def test_submitters_do_not_fetch_market_data_before_startup_ready():
+    previous_ready = main._momentum_short_lifecycle_state.get("startup_ready")
+    previous_deferred = main._momentum_short_lifecycle_state.get("deferred_before_ready")
+    previous_daily = main._momentum_short_lifecycle_fetch_daily
+    previous_intraday = main._momentum_short_lifecycle_fetch_intraday
+    calls = []
+    try:
+        with main._momentum_short_lifecycle_lock:
+            main._momentum_short_lifecycle_state["startup_ready"] = False
+            main._momentum_short_lifecycle_state["deferred_before_ready"] = 0
+            main._momentum_short_lifecycle_state["ingestion"]["running"] = False
+            main._momentum_short_lifecycle_state["watcher"]["running"] = False
+        main._momentum_short_lifecycle_fetch_daily = lambda symbols: calls.append(("daily", symbols)) or {}
+        main._momentum_short_lifecycle_fetch_intraday = lambda symbol: calls.append(("intraday", symbol)) or (pd.DataFrame(), {})
+
+        assert main._submit_momentum_short_lifecycle_ingestion("periodic") == (False, "startup_not_ready")
+        assert main._submit_momentum_short_lifecycle_watcher("periodic") == (False, "startup_not_ready")
+        assert calls == []
+        assert main._momentum_short_lifecycle_state["deferred_before_ready"] == 2
+    finally:
+        main._momentum_short_lifecycle_fetch_daily = previous_daily
+        main._momentum_short_lifecycle_fetch_intraday = previous_intraday
+        with main._momentum_short_lifecycle_lock:
+            main._momentum_short_lifecycle_state["startup_ready"] = previous_ready
+            main._momentum_short_lifecycle_state["deferred_before_ready"] = previous_deferred
+            main._momentum_short_lifecycle_state["ingestion"]["running"] = False
+            main._momentum_short_lifecycle_state["watcher"]["running"] = False
+
+
 def with_temp_ledger(fn):
     def wrapper():
         previous_path = exp.DEFAULT_LEDGER_PATH
