@@ -16,8 +16,12 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from scanner import _batch_download, _compute_atr, _find_swings, _flatten_columns
+
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
+ATR_MULTIPLIER = 1.5
+RR_WARNING_THRESHOLD = 1.5
 
 
 def default_candidates_db_path() -> str:
@@ -80,6 +84,27 @@ def _get_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_promotions (
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            stop REAL NOT NULL,
+            target REAL NOT NULL,
+            risk_reward REAL NOT NULL,
+            rr_warning INTEGER NOT NULL,
+            promoted_at TEXT NOT NULL,
+            position_size REAL,
+            atr14 REAL NOT NULL,
+            atr_multiplier REAL NOT NULL,
+            rr_warning_threshold REAL NOT NULL,
+            target_source TEXT NOT NULL,
+            PRIMARY KEY (ticker, source)
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -116,6 +141,23 @@ class CandidateOut(BaseModel):
     updated_at: str
 
 
+class CandidatePromotionOut(BaseModel):
+    ticker: str
+    source: str
+    direction: str
+    entry_price: float
+    stop: float
+    target: float
+    risk_reward: float
+    rr_warning: bool
+    promoted_at: str
+    position_size: Optional[float]
+    atr14: float
+    atr_multiplier: float
+    rr_warning_threshold: float
+    target_source: str
+
+
 class RejectedEntry(BaseModel):
     ticker: str
     reason: str
@@ -145,6 +187,131 @@ def _check_api_key(x_api_key: Optional[str]) -> None:
 
 def _valid_ticker(ticker: str) -> bool:
     return bool(ticker) and ticker.replace(".", "").replace("-", "").isalnum()
+
+
+def _row_to_promotion(row: sqlite3.Row) -> dict:
+    output = dict(row)
+    output["rr_warning"] = bool(output.get("rr_warning"))
+    return output
+
+
+def _nearest_structural_target(entry: float, direction: str, swings: list) -> Optional[float]:
+    if direction == "long":
+        highs = sorted(float(swing["price"]) for swing in swings if swing.get("type") == "high" and float(swing["price"]) > entry)
+        return highs[0] if highs else None
+    if direction == "short":
+        lows = sorted(
+            (float(swing["price"]) for swing in swings if swing.get("type") == "low" and float(swing["price"]) < entry),
+            reverse=True,
+        )
+        return lows[0] if lows else None
+    return None
+
+
+def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
+    ticker = str(candidate["ticker"] or "").strip().upper()
+    direction = str(candidate["signal"] or "").strip().lower()
+    entry = candidate["entry_price"]
+    if direction not in {"long", "short"}:
+        raise HTTPException(status_code=422, detail=f"Unsupported candidate signal for {ticker}: {direction}")
+    if entry is None:
+        raise HTTPException(status_code=422, detail=f"Candidate {ticker} has no entry_price")
+
+    try:
+        entry_price = float(entry)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"Candidate {ticker} has invalid entry_price")
+    if entry_price <= 0:
+        raise HTTPException(status_code=422, detail=f"Candidate {ticker} entry_price must be positive")
+
+    daily = _batch_download([ticker], period="1y", interval="1d").get(ticker)
+    if daily is None or getattr(daily, "empty", True):
+        raise HTTPException(status_code=422, detail=f"No daily candles available for {ticker}")
+    try:
+        df = _flatten_columns(daily.copy()).dropna().astype(float)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Daily candles for {ticker} are not usable: {exc.__class__.__name__}")
+    if len(df) < 20:
+        raise HTTPException(status_code=422, detail=f"Not enough daily candles for {ticker}")
+
+    atr14 = float(_compute_atr(df, period=14))
+    if atr14 <= 0:
+        raise HTTPException(status_code=422, detail=f"ATR14 is not usable for {ticker}")
+
+    swings = _find_swings(df)
+    target = _nearest_structural_target(entry_price, direction, swings)
+    if target is None:
+        raise HTTPException(status_code=422, detail=f"No opposing structural target found for {ticker}")
+
+    if direction == "short":
+        stop = entry_price + (ATR_MULTIPLIER * atr14)
+    else:
+        stop = entry_price - (ATR_MULTIPLIER * atr14)
+
+    risk = abs(entry_price - stop)
+    reward = abs(target - entry_price)
+    if risk <= 0:
+        raise HTTPException(status_code=422, detail=f"Computed risk is not usable for {ticker}")
+    risk_reward = reward / risk
+
+    promoted_at = datetime.now(timezone.utc).isoformat()
+    return {
+        "ticker": ticker,
+        "source": str(candidate["source"]),
+        "direction": direction,
+        "entry_price": round(entry_price, 4),
+        "stop": round(stop, 4),
+        "target": round(float(target), 4),
+        "risk_reward": round(risk_reward, 2),
+        "rr_warning": risk_reward < RR_WARNING_THRESHOLD,
+        "promoted_at": promoted_at,
+        "position_size": None,
+        "atr14": round(atr14, 4),
+        "atr_multiplier": ATR_MULTIPLIER,
+        "rr_warning_threshold": RR_WARNING_THRESHOLD,
+        "target_source": "daily_swing_structure",
+    }
+
+
+def _store_promotion(conn, promotion: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO candidate_promotions
+            (ticker, source, direction, entry_price, stop, target, risk_reward,
+             rr_warning, promoted_at, position_size, atr14, atr_multiplier,
+             rr_warning_threshold, target_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, source) DO UPDATE SET
+            direction=excluded.direction,
+            entry_price=excluded.entry_price,
+            stop=excluded.stop,
+            target=excluded.target,
+            risk_reward=excluded.risk_reward,
+            rr_warning=excluded.rr_warning,
+            promoted_at=excluded.promoted_at,
+            position_size=excluded.position_size,
+            atr14=excluded.atr14,
+            atr_multiplier=excluded.atr_multiplier,
+            rr_warning_threshold=excluded.rr_warning_threshold,
+            target_source=excluded.target_source
+        """,
+        (
+            promotion["ticker"],
+            promotion["source"],
+            promotion["direction"],
+            promotion["entry_price"],
+            promotion["stop"],
+            promotion["target"],
+            promotion["risk_reward"],
+            1 if promotion["rr_warning"] else 0,
+            promotion["promoted_at"],
+            promotion["position_size"],
+            promotion["atr14"],
+            promotion["atr_multiplier"],
+            promotion["rr_warning_threshold"],
+            promotion["target_source"],
+        ),
+    )
 
 
 @router.post("/candidates", response_model=IngestResponse)
@@ -268,20 +435,36 @@ def update_candidate_status(
 ):
     """Change review status only; this does not open or manage a live trade."""
     _check_api_key(x_api_key)
+    normalized_ticker = ticker.strip().upper()
     conn = _get_db()
     try:
+        candidate = conn.execute(
+            "SELECT * FROM candidates WHERE ticker=? AND source=?",
+            (normalized_ticker, source),
+        ).fetchone()
+        if not candidate:
+            raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {source}")
+
+        promotion = None
+        if update.status == "active":
+            promotion = _compute_candidate_promotion(candidate)
+            _store_promotion(conn, promotion)
+
         result = conn.execute(
             "UPDATE candidates SET status=?, updated_at=? WHERE ticker=? AND source=?",
             (
                 update.status,
                 datetime.now(timezone.utc).isoformat(),
-                ticker.strip().upper(),
+                normalized_ticker,
                 source,
             ),
         )
         conn.commit()
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {source}")
-        return {"ticker": ticker.strip().upper(), "source": source, "status": update.status}
+        response = {"ticker": normalized_ticker, "source": source, "status": update.status}
+        if promotion:
+            response["promotion"] = promotion
+        return response
     finally:
         conn.close()
