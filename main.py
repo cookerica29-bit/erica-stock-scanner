@@ -104,10 +104,12 @@ from verified_history import (
     verification_to_pipeline_status,
 )
 from verified_history_store import SQLiteVerifiedHistoryRepository
+from candidates_router import router as candidates_router
 import momentum_pullback_shadow as momentum_pullback
 import momentum_pullback_short_lifecycle_experiment as short_lifecycle_experiment
 
 app = FastAPI(title="Stock Options Scanner")
+app.include_router(candidates_router)
 logger = logging.getLogger(__name__)
 
 DISCOVERY_POOL_VERSION = "kairos-weekly-discovery-pool-v1"
