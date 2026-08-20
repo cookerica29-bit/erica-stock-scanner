@@ -22,6 +22,7 @@ from scanner import _batch_download, _compute_atr, _find_swings, _flatten_column
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
 ATR_MULTIPLIER = 1.5
 RR_WARNING_THRESHOLD = 1.5
+MIN_TARGET_ATR_MULTIPLE_DEFAULT = 2.0
 
 
 def default_candidates_db_path() -> str:
@@ -39,6 +40,75 @@ def default_candidates_db_path() -> str:
 
 def _get_api_key() -> Optional[str]:
     return os.environ.get("KAIROS_SCANNER_API_KEY")
+
+
+def _float_env(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _min_target_atr_multiple() -> float:
+    return _float_env("MIN_TARGET_ATR_MULTIPLE", MIN_TARGET_ATR_MULTIPLE_DEFAULT)
+
+
+def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='candidate_promotions'"
+    ).fetchone()
+    needs_rebuild = bool(row and ("target REAL NOT NULL" in row["sql"] or "risk_reward REAL NOT NULL" in row["sql"]))
+    if needs_rebuild:
+        conn.execute("ALTER TABLE candidate_promotions RENAME TO candidate_promotions_old")
+        conn.execute(
+            """
+            CREATE TABLE candidate_promotions (
+                ticker TEXT NOT NULL,
+                source TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                stop REAL NOT NULL,
+                target REAL,
+                risk_reward REAL,
+                rr_warning INTEGER NOT NULL,
+                no_valid_target INTEGER NOT NULL DEFAULT 0,
+                promoted_at TEXT NOT NULL,
+                position_size REAL,
+                atr14 REAL NOT NULL,
+                atr_multiplier REAL NOT NULL,
+                rr_warning_threshold REAL NOT NULL,
+                min_target_atr_multiple REAL NOT NULL DEFAULT 2.0,
+                target_source TEXT NOT NULL,
+                PRIMARY KEY (ticker, source)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO candidate_promotions
+                (ticker, source, direction, entry_price, stop, target, risk_reward,
+                 rr_warning, no_valid_target, promoted_at, position_size, atr14,
+                 atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
+                 target_source)
+            SELECT ticker, source, direction, entry_price, stop, target, risk_reward,
+                   rr_warning, 0, promoted_at, position_size, atr14, atr_multiplier,
+                   rr_warning_threshold, 2.0, target_source
+            FROM candidate_promotions_old
+            """
+        )
+        conn.execute("DROP TABLE candidate_promotions_old")
+        return
+
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(candidate_promotions)").fetchall()}
+    if "no_valid_target" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN no_valid_target INTEGER NOT NULL DEFAULT 0")
+    if "min_target_atr_multiple" not in columns:
+        conn.execute(
+            "ALTER TABLE candidate_promotions ADD COLUMN min_target_atr_multiple REAL NOT NULL DEFAULT 2.0"
+        )
 
 
 def _get_db():
@@ -92,19 +162,22 @@ def _get_db():
             direction TEXT NOT NULL,
             entry_price REAL NOT NULL,
             stop REAL NOT NULL,
-            target REAL NOT NULL,
-            risk_reward REAL NOT NULL,
+            target REAL,
+            risk_reward REAL,
             rr_warning INTEGER NOT NULL,
+            no_valid_target INTEGER NOT NULL DEFAULT 0,
             promoted_at TEXT NOT NULL,
             position_size REAL,
             atr14 REAL NOT NULL,
             atr_multiplier REAL NOT NULL,
             rr_warning_threshold REAL NOT NULL,
+            min_target_atr_multiple REAL NOT NULL DEFAULT 2.0,
             target_source TEXT NOT NULL,
             PRIMARY KEY (ticker, source)
         )
         """
     )
+    _ensure_candidate_promotions_schema(conn)
     conn.commit()
     return conn
 
@@ -147,14 +220,16 @@ class CandidatePromotionOut(BaseModel):
     direction: str
     entry_price: float
     stop: float
-    target: float
-    risk_reward: float
+    target: Optional[float]
+    risk_reward: Optional[float]
     rr_warning: bool
+    no_valid_target: bool
     promoted_at: str
     position_size: Optional[float]
     atr14: float
     atr_multiplier: float
     rr_warning_threshold: float
+    min_target_atr_multiple: float
     target_source: str
 
 
@@ -192,19 +267,25 @@ def _valid_ticker(ticker: str) -> bool:
 def _row_to_promotion(row: sqlite3.Row) -> dict:
     output = dict(row)
     output["rr_warning"] = bool(output.get("rr_warning"))
+    output["no_valid_target"] = bool(output.get("no_valid_target"))
     return output
 
 
-def _nearest_structural_target(entry: float, direction: str, swings: list) -> Optional[float]:
+def _nearest_structural_target(
+    entry: float,
+    direction: str,
+    swings: list,
+    min_distance: float,
+) -> Optional[float]:
     if direction == "long":
         highs = sorted(float(swing["price"]) for swing in swings if swing.get("type") == "high" and float(swing["price"]) > entry)
-        return highs[0] if highs else None
+        return next((price for price in highs if abs(price - entry) >= min_distance), None)
     if direction == "short":
         lows = sorted(
             (float(swing["price"]) for swing in swings if swing.get("type") == "low" and float(swing["price"]) < entry),
             reverse=True,
         )
-        return lows[0] if lows else None
+        return next((price for price in lows if abs(price - entry) >= min_distance), None)
     return None
 
 
@@ -238,21 +319,26 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     if atr14 <= 0:
         raise HTTPException(status_code=422, detail=f"ATR14 is not usable for {ticker}")
 
-    swings = _find_swings(df)
-    target = _nearest_structural_target(entry_price, direction, swings)
-    if target is None:
-        raise HTTPException(status_code=422, detail=f"No opposing structural target found for {ticker}")
-
     if direction == "short":
         stop = entry_price + (ATR_MULTIPLIER * atr14)
     else:
         stop = entry_price - (ATR_MULTIPLIER * atr14)
 
     risk = abs(entry_price - stop)
-    reward = abs(target - entry_price)
     if risk <= 0:
         raise HTTPException(status_code=422, detail=f"Computed risk is not usable for {ticker}")
-    risk_reward = reward / risk
+
+    min_target_atr_multiple = _min_target_atr_multiple()
+    min_target_distance = min_target_atr_multiple * atr14
+    swings = _find_swings(df)
+    target = _nearest_structural_target(entry_price, direction, swings, min_target_distance)
+    no_valid_target = target is None
+    risk_reward = None
+    rr_warning = True
+    if target is not None:
+        reward = abs(target - entry_price)
+        risk_reward = reward / risk
+        rr_warning = risk_reward < RR_WARNING_THRESHOLD
 
     promoted_at = datetime.now(timezone.utc).isoformat()
     return {
@@ -261,14 +347,16 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "direction": direction,
         "entry_price": round(entry_price, 4),
         "stop": round(stop, 4),
-        "target": round(float(target), 4),
-        "risk_reward": round(risk_reward, 2),
-        "rr_warning": risk_reward < RR_WARNING_THRESHOLD,
+        "target": round(float(target), 4) if target is not None else None,
+        "risk_reward": round(risk_reward, 2) if risk_reward is not None else None,
+        "rr_warning": rr_warning,
+        "no_valid_target": no_valid_target,
         "promoted_at": promoted_at,
         "position_size": None,
         "atr14": round(atr14, 4),
         "atr_multiplier": ATR_MULTIPLIER,
         "rr_warning_threshold": RR_WARNING_THRESHOLD,
+        "min_target_atr_multiple": min_target_atr_multiple,
         "target_source": "daily_swing_structure",
     }
 
@@ -278,9 +366,10 @@ def _store_promotion(conn, promotion: dict) -> None:
         """
         INSERT INTO candidate_promotions
             (ticker, source, direction, entry_price, stop, target, risk_reward,
-             rr_warning, promoted_at, position_size, atr14, atr_multiplier,
-             rr_warning_threshold, target_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             rr_warning, no_valid_target, promoted_at, position_size, atr14,
+             atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
+             target_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             direction=excluded.direction,
             entry_price=excluded.entry_price,
@@ -288,11 +377,13 @@ def _store_promotion(conn, promotion: dict) -> None:
             target=excluded.target,
             risk_reward=excluded.risk_reward,
             rr_warning=excluded.rr_warning,
+            no_valid_target=excluded.no_valid_target,
             promoted_at=excluded.promoted_at,
             position_size=excluded.position_size,
             atr14=excluded.atr14,
             atr_multiplier=excluded.atr_multiplier,
             rr_warning_threshold=excluded.rr_warning_threshold,
+            min_target_atr_multiple=excluded.min_target_atr_multiple,
             target_source=excluded.target_source
         """,
         (
@@ -304,11 +395,13 @@ def _store_promotion(conn, promotion: dict) -> None:
             promotion["target"],
             promotion["risk_reward"],
             1 if promotion["rr_warning"] else 0,
+            1 if promotion["no_valid_target"] else 0,
             promotion["promoted_at"],
             promotion["position_size"],
             promotion["atr14"],
             promotion["atr_multiplier"],
             promotion["rr_warning_threshold"],
+            promotion["min_target_atr_multiple"],
             promotion["target_source"],
         ),
     )

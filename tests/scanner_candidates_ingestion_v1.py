@@ -25,11 +25,12 @@ def _promotion_daily_frame():
         close = 100.0 - i * 0.1
         rows.append({
             "Open": close + 0.2,
-            "High": close + 5.0,
-            "Low": close - 5.0,
+            "High": close + 0.5,
+            "Low": close - 0.5,
             "Close": close,
             "Volume": 1_000_000,
         })
+    rows[5]["Low"] = 99.0
     rows[10]["Low"] = 90.0
     rows[10]["Close"] = 91.0
     rows[10]["Open"] = 92.0
@@ -163,7 +164,9 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert promotion["target"] == 90.0
             assert promotion["stop"] > 100.0
             assert promotion["risk_reward"] > 0
-            assert promotion["rr_warning"] is True
+            assert promotion["rr_warning"] is False
+            assert promotion["no_valid_target"] is False
+            assert promotion["min_target_atr_multiple"] == 2.0
             assert promotion["position_size"] is None
 
             conn = sqlite3.connect(db_path)
