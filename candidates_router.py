@@ -519,6 +519,17 @@ def list_candidates(
         conn.close()
 
 
+@router.get("/candidate-promotions", response_model=list[CandidatePromotionOut])
+def list_candidate_promotions(x_api_key: Optional[str] = Header(default=None)):
+    _check_api_key(x_api_key)
+    conn = _get_db()
+    try:
+        rows = conn.execute("SELECT * FROM candidate_promotions ORDER BY promoted_at DESC").fetchall()
+        return [_row_to_promotion(row) for row in rows]
+    finally:
+        conn.close()
+
+
 @router.patch("/candidates/{ticker}")
 def update_candidate_status(
     ticker: str,

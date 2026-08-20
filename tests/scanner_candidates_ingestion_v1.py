@@ -180,11 +180,26 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert len(active) == 1
             assert active[0]["ticker"] == "NVDA"
 
+            promotions = client.get("/api/v1/scanner/candidate-promotions", headers=headers)
+            assert promotions.status_code == 200
+            promotion_rows = promotions.json()
+            assert len(promotion_rows) == 1
+            assert promotion_rows[0]["ticker"] == "NVDA"
+            assert promotion_rows[0]["source"] == "ma_pipeline"
+            assert promotion_rows[0]["direction"] == "short"
+            assert promotion_rows[0]["rr_warning"] is False
+            assert promotion_rows[0]["no_valid_target"] is False
+            assert promotion_rows[0]["position_size"] is None
+
             restarted_client = _client()
             after_restart = restarted_client.get("/api/v1/scanner/candidates", headers=headers).json()
             assert len(after_restart) == 1
             assert after_restart[0]["ticker"] == "NVDA"
             assert after_restart[0]["status"] == "active"
+
+            after_restart_promotions = restarted_client.get("/api/v1/scanner/candidate-promotions", headers=headers).json()
+            assert len(after_restart_promotions) == 1
+            assert after_restart_promotions[0]["ticker"] == "NVDA"
         finally:
             candidates_router._batch_download = previous_download
 

@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kairos Candidate Command Center</title>
+  <style>
+    :root {
+      --bg: #080d14;
+      --surface: #0d1520;
+      --surface2: #121d2b;
+      --surface3: #172437;
+      --border: rgba(142, 163, 185, 0.22);
+      --text: #e8eef6;
+      --muted: #8ea0b5;
+      --accent: #38bdf8;
+      --accent2: #22c55e;
+      --pass: #22c55e;
+      --fail: #fb7185;
+      --warn: #f59e0b;
+      --shadow: rgba(0, 0, 0, 0.35);
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .page-shell {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      background: #070b11;
+      padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    h1 {
+      font-size: clamp(1.2rem, 2vw, 1.7rem);
+      letter-spacing: 0;
+      margin: 0;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 4px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    a, button {
+      color: inherit;
+      font: inherit;
+    }
+
+    .legacy-link,
+    button {
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      border-radius: 8px;
+      min-height: 38px;
+      padding: 0 14px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    button:hover,
+    .legacy-link:hover {
+      border-color: rgba(56, 189, 248, 0.55);
+      background: var(--surface3);
+    }
+
+    .btn-secondary {
+      background: rgba(251, 113, 133, 0.1);
+      color: #fecdd3;
+    }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+    }
+
+    main {
+      width: min(1500px, 100%);
+      margin: 0 auto;
+      padding: 22px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .control-band,
+    .candidate-section {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      box-shadow: 0 18px 40px var(--shadow);
+      border-radius: 8px;
+    }
+
+    .control-band {
+      padding: 16px;
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto;
+      gap: 14px;
+      align-items: end;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 7px;
+    }
+
+    input {
+      width: 100%;
+      min-height: 42px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #07101a;
+      color: var(--text);
+      padding: 0 12px;
+      font: inherit;
+    }
+
+    input:focus {
+      outline: 2px solid rgba(56, 189, 248, 0.22);
+      border-color: var(--accent);
+    }
+
+    #candidateStatus {
+      color: var(--muted);
+      font-size: 0.9rem;
+      min-height: 20px;
+      align-self: center;
+    }
+
+    .candidate-toolbar {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .candidate-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .candidate-tab.active {
+      border-color: rgba(56, 189, 248, 0.65);
+      color: #e0f2fe;
+      background: rgba(56, 189, 248, 0.14);
+    }
+
+    #candidateStats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 10px;
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .candidate-stat {
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 74px;
+    }
+
+    .candidate-stat-label {
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .candidate-stat-value {
+      margin-top: 7px;
+      font-size: 1.35rem;
+      font-weight: 750;
+    }
+
+    #candidateList {
+      padding: 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+      gap: 14px;
+    }
+
+    .candidate-card {
+      border: 1px solid var(--border);
+      background: #0a121d;
+      border-radius: 8px;
+      padding: 15px;
+      display: grid;
+      gap: 13px;
+    }
+
+    .candidate-card.active-plan {
+      border-color: rgba(34, 197, 94, 0.45);
+    }
+
+    .candidate-card.dismissed {
+      opacity: 0.68;
+    }
+
+    .candidate-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .candidate-ticker {
+      font-size: 1.25rem;
+      font-weight: 800;
+    }
+
+    .candidate-meta {
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    .candidate-pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+
+    .candidate-pill {
+      border: 1px solid var(--border);
+      background: rgba(142, 160, 181, 0.1);
+      color: #dbeafe;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .candidate-pill.long,
+    .candidate-pill.high {
+      color: #bbf7d0;
+      background: rgba(34, 197, 94, 0.12);
+      border-color: rgba(34, 197, 94, 0.34);
+    }
+
+    .candidate-pill.short,
+    .candidate-pill.bad {
+      color: #fecdd3;
+      background: rgba(251, 113, 133, 0.12);
+      border-color: rgba(251, 113, 133, 0.34);
+    }
+
+    .candidate-pill.medium,
+    .candidate-pill.warn {
+      color: #fde68a;
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.34);
+    }
+
+    .candidate-kv {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .candidate-kv > div {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      min-width: 0;
+    }
+
+    .candidate-kv span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 5px;
+    }
+
+    .candidate-kv strong {
+      font-size: 1rem;
+      overflow-wrap: anywhere;
+    }
+
+    .candidate-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .candidate-empty {
+      border: 1px dashed var(--border);
+      color: var(--muted);
+      border-radius: 8px;
+      padding: 24px;
+      grid-column: 1 / -1;
+      text-align: center;
+      background: rgba(142, 160, 181, 0.06);
+    }
+
+    .guardrail {
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.55;
+      padding: 0 2px;
+    }
+
+    @media (max-width: 760px) {
+      header,
+      .control-band {
+        grid-template-columns: 1fr;
+      }
+
+      header {
+        align-items: stretch;
+      }
+
+      .header-actions,
+      .control-actions {
+        justify-content: stretch;
+      }
+
+      .header-actions > *,
+      .control-actions > *,
+      button,
+      .legacy-link {
+        width: 100%;
+      }
+
+      main {
+        padding: 14px;
+      }
+
+      #candidateStats,
+      #candidateList,
+      .candidate-kv {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page-shell">
+    <header>
+      <div>
+        <h1>Kairos Candidate Command Center</h1>
+        <div class="subtitle">Review pushed scanner candidates, promote plans, and keep legacy scan behavior isolated.</div>
+      </div>
+      <div class="header-actions">
+        <a class="legacy-link" href="/">Legacy Scanner</a>
+        <button type="button" onclick="loadCandidateDashboard(true)">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="control-band" aria-label="Candidate API controls">
+        <div>
+          <label for="candidateApiKeyInput">Scanner API Key</label>
+          <input id="candidateApiKeyInput" type="password" autocomplete="off" placeholder="Paste X-API-Key for candidate endpoints" />
+        </div>
+        <div class="header-actions control-actions">
+          <button type="button" onclick="saveCandidateApiKey()">Save Key</button>
+          <button type="button" class="btn-ghost" onclick="loadCandidateDashboard(true)">Reload Data</button>
+        </div>
+        <div id="candidateStatus">Enter the scanner API key, then refresh.</div>
+      </section>
+
+      <div class="guardrail">
+        Promotions create Kairos management plans only. This page does not place broker orders, write journal entries, change scanner ranking, or run discovery.
+      </div>
+
+      <section class="candidate-section" aria-label="Candidate dashboard">
+        <div class="candidate-toolbar">
+          <div class="candidate-tabs" role="tablist" aria-label="Candidate views">
+            <button type="button" class="candidate-tab active" data-candidate-view="new" onclick="setCandidateView('new')">Inbox</button>
+            <button type="button" class="candidate-tab" data-candidate-view="active" onclick="setCandidateView('active')">Active Plans</button>
+            <button type="button" class="candidate-tab" data-candidate-view="dismissed" onclick="setCandidateView('dismissed')">Dismissed</button>
+            <button type="button" class="candidate-tab" data-candidate-view="all" onclick="setCandidateView('all')">All</button>
+          </div>
+        </div>
+        <div id="candidateStats"></div>
+        <div id="candidateList"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/candidate_dashboard.js?v=20260820-candidate-command"></script>
+  <script>
+    loadCandidateDashboard(false);
+  </script>
+</body>
+</html>

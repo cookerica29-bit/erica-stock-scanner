@@ -1354,6 +1354,14 @@ def index():
     )
 
 
+@app.get("/candidates")
+def candidates_dashboard():
+    return FileResponse(
+        "public/candidates.html",
+        headers=NO_STORE_HEADERS,
+    )
+
+
 def _discovery_symbols_ready(now: Optional[datetime] = None):
     status = _discovery_status_snapshot(now)
     if not status.get("has_cache") or status.get("stale") or status.get("running"):
