@@ -104,7 +104,8 @@ from verified_history import (
     verification_to_pipeline_status,
 )
 from verified_history_store import SQLiteVerifiedHistoryRepository
-from candidates_router import router as candidates_router
+from candidates_router import CandidateIn, ShortlistIn, router as candidates_router, upsert_candidate_shortlist
+from ma_pipeline import MA_PIPELINE_SOURCE, scan_ma_pipeline_candidates
 import momentum_pullback_shadow as momentum_pullback
 import momentum_pullback_short_lifecycle_experiment as short_lifecycle_experiment
 
@@ -182,6 +183,21 @@ _scheduled_discovered_scan_state = {
     "refresh_job_id": None,
     "failure_reason": None,
     "last_checked_at": None,
+}
+_ma_pipeline_scan_lock = threading.RLock()
+_ma_pipeline_scan_state = {
+    "version": "kairos-ma-pipeline-auto-ingestion-v1",
+    "status": "idle",
+    "last_checked_at": None,
+    "last_started_at": None,
+    "last_completed_at": None,
+    "last_result": None,
+    "last_error": None,
+    "last_run_key": None,
+    "last_symbol_count": 0,
+    "last_candidate_count": 0,
+    "last_ingest": None,
+    "last_meta": None,
 }
 _momentum_short_lifecycle_executor = ThreadPoolExecutor(max_workers=1)
 _momentum_short_lifecycle_lock = threading.RLock()
@@ -1289,6 +1305,115 @@ def _submit_discovery_universe_job_if_needed(now: Optional[datetime] = None) -> 
     return _submit_discovery_universe_job(force=False, reason="weekly_pool_missing_or_stale", now=now)
 
 
+def _ma_pipeline_scan_schedules() -> list[tuple[int, int]]:
+    raw = os.getenv("MA_PIPELINE_SCAN_TIMES_ET", "09:45,15:30")
+    schedules = []
+    for part in raw.split(","):
+        try:
+            hour, minute = [int(piece) for piece in part.strip().split(":", 1)]
+        except Exception:
+            continue
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            schedules.append((hour, minute))
+    return schedules or [(9, 45), (15, 30)]
+
+
+def _ma_pipeline_max_symbols() -> Optional[int]:
+    raw = os.getenv("MA_PIPELINE_MAX_SYMBOLS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _ma_pipeline_state_snapshot() -> dict:
+    with _ma_pipeline_scan_lock:
+        return dict(_ma_pipeline_scan_state)
+
+
+def _update_ma_pipeline_state(**updates) -> None:
+    with _ma_pipeline_scan_lock:
+        _ma_pipeline_scan_state.update({key: value for key, value in updates.items() if value is not None})
+
+
+def _run_ma_pipeline_ingestion(reason: str = "manual") -> dict:
+    started_at = _utc_now()
+    ready, symbols, discovery_status = _discovery_symbols_ready(started_at)
+    _update_ma_pipeline_state(
+        status="running",
+        last_checked_at=_format_timestamp(started_at),
+        last_started_at=_format_timestamp(started_at),
+        last_error=None,
+        last_result=reason,
+    )
+    if not ready:
+        message = f"discovery_not_ready:{discovery_status.get('status')}"
+        _update_ma_pipeline_state(status="waiting_for_discovery", last_error=message, last_result=message)
+        return {"status": "waiting_for_discovery", "message": message, "discovery_status": discovery_status}
+
+    max_symbols = _ma_pipeline_max_symbols()
+    scan = scan_ma_pipeline_candidates(symbols, max_symbols=max_symbols)
+    candidates = [CandidateIn(**candidate) for candidate in scan.get("candidates") or []]
+    payload = ShortlistIn(source=MA_PIPELINE_SOURCE, scanned_at=_utc_now(), candidates=candidates)
+    ingest = upsert_candidate_shortlist(payload)
+    completed_at = _utc_now()
+    result = {
+        "status": "completed",
+        "source": MA_PIPELINE_SOURCE,
+        "reason": reason,
+        "discovery_symbol_count": len(symbols),
+        "scanned_symbol_count": (scan.get("meta") or {}).get("requested"),
+        "candidate_count": len(candidates),
+        "ingest": ingest.dict(),
+        "meta": scan.get("meta") or {},
+        "completed_at": _format_timestamp(completed_at),
+    }
+    _update_ma_pipeline_state(
+        status="completed",
+        last_completed_at=_format_timestamp(completed_at),
+        last_result="completed",
+        last_symbol_count=len(symbols),
+        last_candidate_count=len(candidates),
+        last_ingest=ingest.dict(),
+        last_meta=result["meta"],
+    )
+    return result
+
+
+def _submit_ma_pipeline_scan_if_due(now: Optional[datetime] = None) -> tuple[bool, str]:
+    current = _coerce_utc_datetime(now or _utc_now()).astimezone(EASTERN_TZ)
+    _update_ma_pipeline_state(last_checked_at=_format_timestamp(current.astimezone(timezone.utc)))
+    if not _is_us_trading_session(current.date()):
+        return False, "not a trading session"
+    due_schedule = None
+    for hour, minute in _ma_pipeline_scan_schedules():
+        scheduled = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if scheduled <= current < scheduled + timedelta(minutes=10):
+            due_schedule = scheduled
+            break
+    if due_schedule is None:
+        return False, "not due"
+    run_key = f"{due_schedule.date().isoformat()}T{due_schedule.hour:02d}:{due_schedule.minute:02d}"
+    state = _ma_pipeline_state_snapshot()
+    if state.get("last_run_key") == run_key and state.get("status") in {"running", "completed"}:
+        return False, "already handled"
+    _update_ma_pipeline_state(last_run_key=run_key)
+    try:
+        _run_ma_pipeline_ingestion(f"scheduled:{run_key}")
+    except Exception as exc:
+        _update_ma_pipeline_state(
+            status="failed",
+            last_error=str(exc),
+            last_completed_at=_format_timestamp(_utc_now()),
+            last_result="failed",
+        )
+        return False, "failed"
+    return True, run_key
+
+
 def _register_discovery_background_refresh() -> None:
     register_background_periodic_task(
         "discovery_universe",
@@ -1304,6 +1429,11 @@ def _register_discovery_background_refresh() -> None:
         "scheduled_discovered_scan_10am_et",
         60,
         _submit_scheduled_discovered_scan_if_due,
+    )
+    register_background_periodic_task(
+        "ma_pipeline_candidate_ingestion",
+        60,
+        _submit_ma_pipeline_scan_if_due,
     )
     register_background_periodic_task(
         "momentum_pullback_short_lifecycle_ingestion",
@@ -2280,6 +2410,30 @@ def api_discovery_symbols():
         "count": len(symbols),
         "status": status,
     }
+
+
+@app.get("/api/v1/scanner/ma-pipeline/status")
+def api_ma_pipeline_status():
+    ready, symbols, discovery_status = _discovery_symbols_ready()
+    return {
+        **_ma_pipeline_state_snapshot(),
+        "source": MA_PIPELINE_SOURCE,
+        "discovery_ready": ready,
+        "discovery_symbol_count": len(symbols),
+        "discovery_status": discovery_status,
+        "schedule_times_et": [f"{hour:02d}:{minute:02d}" for hour, minute in _ma_pipeline_scan_schedules()],
+        "max_symbols": _ma_pipeline_max_symbols(),
+        "alpaca_configured": alpaca_credentials_configured(),
+    }
+
+
+@app.post("/api/v1/scanner/ma-pipeline/run")
+def api_ma_pipeline_run(x_kairos_admin_token: str = Header(default="")):
+    _require_discovery_admin_token(x_kairos_admin_token)
+    try:
+        return _run_ma_pipeline_ingestion("manual_api")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.get("/api/coverage/baseline")

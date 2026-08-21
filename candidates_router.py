@@ -12,7 +12,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -20,7 +20,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from market_data import AlpacaMarketDataProvider
-from scanner import _batch_download, _compute_atr, _find_swings, _flatten_columns
+from scanner import _batch_download, _best_contract, _compute_atr, _find_swings, _flatten_columns
 
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
@@ -205,6 +205,31 @@ def _get_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_plan_previews (
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            signal TEXT NOT NULL,
+            entry_price REAL,
+            stop REAL,
+            target REAL,
+            risk_reward REAL,
+            rr_warning INTEGER NOT NULL DEFAULT 0,
+            no_valid_target INTEGER NOT NULL DEFAULT 0,
+            atr14 REAL,
+            atr_multiplier REAL NOT NULL DEFAULT 1.5,
+            rr_warning_threshold REAL NOT NULL DEFAULT 1.5,
+            min_target_atr_multiple REAL NOT NULL DEFAULT 2.0,
+            target_source TEXT,
+            option_contract_json TEXT,
+            preview_error TEXT,
+            computed_at TEXT NOT NULL,
+            candidate_updated_at TEXT,
+            PRIMARY KEY (ticker, source)
+        )
+        """
+    )
     _ensure_candidate_promotions_schema(conn)
     conn.commit()
     return conn
@@ -276,6 +301,27 @@ class CandidateChartReviewOut(BaseModel):
     bars_end: Optional[str]
 
 
+class CandidatePlanPreviewOut(BaseModel):
+    ticker: str
+    source: str
+    signal: str
+    entry_price: Optional[float]
+    stop: Optional[float]
+    target: Optional[float]
+    risk_reward: Optional[float]
+    rr_warning: bool
+    no_valid_target: bool
+    atr14: Optional[float]
+    atr_multiplier: float
+    rr_warning_threshold: float
+    min_target_atr_multiple: float
+    target_source: Optional[str]
+    option_contract: Optional[dict[str, Any]]
+    preview_error: Optional[str]
+    computed_at: str
+    candidate_updated_at: Optional[str]
+
+
 class RejectedEntry(BaseModel):
     ticker: str
     reason: str
@@ -318,6 +364,36 @@ def _row_to_chart_review(row: sqlite3.Row) -> dict:
     output = dict(row)
     output.pop("raw_response", None)
     return output
+
+
+def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
+    output = dict(row)
+    output["rr_warning"] = bool(output.get("rr_warning"))
+    output["no_valid_target"] = bool(output.get("no_valid_target"))
+    raw_contract = output.pop("option_contract_json", None)
+    if raw_contract:
+        try:
+            output["option_contract"] = json.loads(raw_contract)
+        except json.JSONDecodeError:
+            output["option_contract"] = {"available": False, "reason": "Stored option contract JSON is not usable"}
+    else:
+        output["option_contract"] = None
+    return output
+
+
+def _safe_option_contract_for_candidate(ticker: str, direction: str, entry_price: Optional[float]) -> dict:
+    if entry_price is None or entry_price <= 0:
+        return {"available": False, "execution": "No Clean Contract", "reason": "Missing candidate entry price", "source": "candidate_preview"}
+    try:
+        contract = _best_contract(ticker, "LONG" if direction == "long" else "SHORT", float(entry_price), block_on_miss=True)
+    except Exception as exc:
+        return {
+            "available": False,
+            "execution": "No Clean Contract",
+            "reason": f"Existing option selector failed: {exc.__class__.__name__}",
+            "source": "option_chain",
+        }
+    return contract if isinstance(contract, dict) else {"available": False, "reason": "Existing option selector returned no contract", "source": "option_chain"}
 
 
 def _anthropic_api_key() -> Optional[str]:
@@ -665,10 +741,117 @@ def _store_promotion(conn, promotion: dict) -> None:
     )
 
 
+def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
+    computed_at = datetime.now(timezone.utc).isoformat()
+    try:
+        promotion_like = _compute_candidate_promotion(candidate)
+        direction = str(promotion_like["direction"])
+        option_contract = _safe_option_contract_for_candidate(
+            promotion_like["ticker"],
+            direction,
+            promotion_like["entry_price"],
+        )
+        return {
+            "ticker": promotion_like["ticker"],
+            "source": promotion_like["source"],
+            "signal": direction,
+            "entry_price": promotion_like["entry_price"],
+            "stop": promotion_like["stop"],
+            "target": promotion_like["target"],
+            "risk_reward": promotion_like["risk_reward"],
+            "rr_warning": promotion_like["rr_warning"],
+            "no_valid_target": promotion_like["no_valid_target"],
+            "atr14": promotion_like["atr14"],
+            "atr_multiplier": promotion_like["atr_multiplier"],
+            "rr_warning_threshold": promotion_like["rr_warning_threshold"],
+            "min_target_atr_multiple": promotion_like["min_target_atr_multiple"],
+            "target_source": promotion_like["target_source"],
+            "option_contract": option_contract,
+            "preview_error": None,
+            "computed_at": computed_at,
+            "candidate_updated_at": candidate["updated_at"],
+        }
+    except HTTPException as exc:
+        return {
+            "ticker": str(candidate["ticker"] or "").strip().upper(),
+            "source": str(candidate["source"]),
+            "signal": str(candidate["signal"] or "").strip().lower(),
+            "entry_price": candidate["entry_price"],
+            "stop": None,
+            "target": None,
+            "risk_reward": None,
+            "rr_warning": True,
+            "no_valid_target": True,
+            "atr14": None,
+            "atr_multiplier": ATR_MULTIPLIER,
+            "rr_warning_threshold": RR_WARNING_THRESHOLD,
+            "min_target_atr_multiple": _min_target_atr_multiple(),
+            "target_source": "daily_swing_structure",
+            "option_contract": None,
+            "preview_error": str(exc.detail),
+            "computed_at": computed_at,
+            "candidate_updated_at": candidate["updated_at"],
+        }
+
+
+def _store_plan_preview(conn, preview: dict) -> None:
+    option_contract = preview.get("option_contract")
+    conn.execute(
+        """
+        INSERT INTO candidate_plan_previews
+            (ticker, source, signal, entry_price, stop, target, risk_reward,
+             rr_warning, no_valid_target, atr14, atr_multiplier, rr_warning_threshold,
+             min_target_atr_multiple, target_source, option_contract_json, preview_error,
+             computed_at, candidate_updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, source) DO UPDATE SET
+            signal=excluded.signal,
+            entry_price=excluded.entry_price,
+            stop=excluded.stop,
+            target=excluded.target,
+            risk_reward=excluded.risk_reward,
+            rr_warning=excluded.rr_warning,
+            no_valid_target=excluded.no_valid_target,
+            atr14=excluded.atr14,
+            atr_multiplier=excluded.atr_multiplier,
+            rr_warning_threshold=excluded.rr_warning_threshold,
+            min_target_atr_multiple=excluded.min_target_atr_multiple,
+            target_source=excluded.target_source,
+            option_contract_json=excluded.option_contract_json,
+            preview_error=excluded.preview_error,
+            computed_at=excluded.computed_at,
+            candidate_updated_at=excluded.candidate_updated_at
+        """,
+        (
+            preview["ticker"],
+            preview["source"],
+            preview["signal"],
+            preview["entry_price"],
+            preview["stop"],
+            preview["target"],
+            preview["risk_reward"],
+            1 if preview["rr_warning"] else 0,
+            1 if preview["no_valid_target"] else 0,
+            preview["atr14"],
+            preview["atr_multiplier"],
+            preview["rr_warning_threshold"],
+            preview["min_target_atr_multiple"],
+            preview["target_source"],
+            json.dumps(option_contract, separators=(",", ":")) if option_contract else None,
+            preview["preview_error"],
+            preview["computed_at"],
+            preview["candidate_updated_at"],
+        ),
+    )
+
+
 @router.post("/candidates", response_model=IngestResponse)
 def ingest_candidates(payload: ShortlistIn, x_api_key: Optional[str] = Header(default=None)):
     _check_api_key(x_api_key)
+    return upsert_candidate_shortlist(payload)
 
+
+def upsert_candidate_shortlist(payload: ShortlistIn) -> IngestResponse:
     conn = _get_db()
     created, updated = 0, 0
     rejected: list[RejectedEntry] = []
@@ -784,6 +967,30 @@ def list_candidate_promotions(x_api_key: Optional[str] = Header(default=None)):
     try:
         rows = conn.execute("SELECT * FROM candidate_promotions ORDER BY promoted_at DESC").fetchall()
         return [_row_to_promotion(row) for row in rows]
+    finally:
+        conn.close()
+
+
+@router.get("/candidate-plan-previews", response_model=list[CandidatePlanPreviewOut])
+def list_candidate_plan_previews(x_api_key: Optional[str] = Header(default=None)):
+    _check_api_key(x_api_key)
+    conn = _get_db()
+    try:
+        candidates = conn.execute("SELECT * FROM candidates ORDER BY updated_at DESC").fetchall()
+        previews: list[dict] = []
+        for candidate in candidates:
+            existing = conn.execute(
+                "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
+                (candidate["ticker"], candidate["source"]),
+            ).fetchone()
+            if existing and existing["candidate_updated_at"] == candidate["updated_at"]:
+                previews.append(_row_to_plan_preview(existing))
+                continue
+            preview = _compute_candidate_plan_preview(candidate)
+            _store_plan_preview(conn, preview)
+            previews.append(preview)
+        conn.commit()
+        return previews
     finally:
         conn.close()
 

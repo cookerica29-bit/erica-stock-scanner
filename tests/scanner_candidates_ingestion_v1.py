@@ -51,10 +51,21 @@ def test_scanner_candidate_ingestion_lifecycle():
         previous_download = candidates_router._batch_download
         previous_alpaca_bars = candidates_router._alpaca_daily_bars_for_review
         previous_call_anthropic = candidates_router._call_anthropic_chart_review
+        previous_best_contract = candidates_router._best_contract
         candidates_router._batch_download = lambda tickers, period, interval: {
             str(tickers[0]).upper(): _promotion_daily_frame()
         }
         candidates_router._alpaca_daily_bars_for_review = lambda ticker: _promotion_daily_frame()
+        candidates_router._best_contract = lambda ticker, direction, entry, **kwargs: {
+            "available": True,
+            "execution": "Fair",
+            "type": "PUT" if direction == "SHORT" else "CALL",
+            "strike": 100.0,
+            "expiry": "2026-09-18",
+            "dte": 29,
+            "symbol": "MOCK",
+            "source": "option_chain",
+        }
         candidates_router._call_anthropic_chart_review = lambda prompt: (
             {
                 "classification": "choppy_range_bound",
@@ -159,6 +170,22 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert current_count == 1
             assert history_count == 2
 
+            previews = client.get("/api/v1/scanner/candidate-plan-previews", headers=headers)
+            assert previews.status_code == 200
+            preview_rows = previews.json()
+            assert len(preview_rows) == 1
+            preview = preview_rows[0]
+            assert preview["ticker"] == "NVDA"
+            assert preview["source"] == "ma_pipeline"
+            assert preview["signal"] == "short"
+            assert preview["target"] == 90.0
+            assert preview["stop"] > 100.0
+            assert preview["risk_reward"] > 0
+            assert preview["rr_warning"] is False
+            assert preview["no_valid_target"] is False
+            assert preview["option_contract"]["type"] == "PUT"
+            assert preview["option_contract"]["strike"] == 100.0
+
             promoted = client.patch(
                 "/api/v1/scanner/candidates/NVDA?source=ma_pipeline",
                 headers=headers,
@@ -179,6 +206,9 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert promotion["no_valid_target"] is False
             assert promotion["min_target_atr_multiple"] == 2.0
             assert promotion["position_size"] is None
+            assert promotion["stop"] == preview["stop"]
+            assert promotion["target"] == preview["target"]
+            assert promotion["risk_reward"] == preview["risk_reward"]
 
             conn = sqlite3.connect(db_path)
             try:
@@ -236,6 +266,7 @@ def test_scanner_candidate_ingestion_lifecycle():
             candidates_router._batch_download = previous_download
             candidates_router._alpaca_daily_bars_for_review = previous_alpaca_bars
             candidates_router._call_anthropic_chart_review = previous_call_anthropic
+            candidates_router._best_contract = previous_best_contract
 
 
 def test_chart_review_parser_accepts_fenced_json():

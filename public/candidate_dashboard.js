@@ -6,6 +6,7 @@
     view: 'new',
     candidates: [],
     promotions: [],
+    planPreviews: [],
     chartReviews: [],
     error: null,
   };
@@ -74,6 +75,12 @@
     return map;
   }
 
+  function planPreviewsByKey() {
+    const map = new Map();
+    state.planPreviews.forEach(item => map.set(promotionKey(item), item));
+    return map;
+  }
+
   function setStatus(message, kind = '') {
     const el = document.getElementById('candidateStatus');
     if (!el) return;
@@ -111,16 +118,18 @@
     setStatus('Loading candidate inbox...');
     render();
     try {
-      const [candidates, promotions, chartReviews] = await Promise.all([
+      const [candidates, promotions, planPreviews, chartReviews] = await Promise.all([
         fetchJson('/api/v1/scanner/candidates'),
         fetchJson('/api/v1/scanner/candidate-promotions'),
+        fetchJson('/api/v1/scanner/candidate-plan-previews'),
         fetchJson('/api/v1/scanner/candidate-chart-reviews'),
       ]);
       state.candidates = Array.isArray(candidates) ? candidates : [];
       state.promotions = Array.isArray(promotions) ? promotions : [];
+      state.planPreviews = Array.isArray(planPreviews) ? planPreviews : [];
       state.chartReviews = Array.isArray(chartReviews) ? chartReviews : [];
       state.loaded = true;
-      setStatus(`Loaded ${state.candidates.length} candidates, ${state.promotions.length} active plans, and ${state.chartReviews.length} AI chart notes.`, 'ok');
+      setStatus(`Loaded ${state.candidates.length} candidates, ${state.promotions.length} active plans, ${state.planPreviews.length} plan previews, and ${state.chartReviews.length} AI chart notes.`, 'ok');
     } catch (error) {
       state.error = error.message || String(error);
       setStatus(state.error, 'error');
@@ -192,11 +201,12 @@
       return;
     }
     const promoMap = promotionsByKey();
+    const previewMap = planPreviewsByKey();
     const reviewMap = chartReviewsByKey();
-    list.innerHTML = items.map(item => renderCandidateCard(item, promoMap.get(promotionKey(item)), reviewMap.get(promotionKey(item)))).join('');
+    list.innerHTML = items.map(item => renderCandidateCard(item, promoMap.get(promotionKey(item)), previewMap.get(promotionKey(item)), reviewMap.get(promotionKey(item)))).join('');
   }
 
-  function renderCandidateCard(item, promotion, chartReview) {
+  function renderCandidateCard(item, promotion, planPreview, chartReview) {
     const status = String(item.status || 'new').toLowerCase();
     const direction = String(item.signal || '').toLowerCase();
     const confidence = String(item.confidence || 'unknown').toLowerCase();
@@ -222,6 +232,7 @@
           <div><span>SMA50 Daily</span><strong>${escapeHtml(fmtMoney(item.sma50_daily))}</strong></div>
           <div><span>SMA200 Daily</span><strong>${escapeHtml(fmtMoney(item.sma200_daily))}</strong></div>
         </div>
+        ${planPreview ? renderPlanPreview(planPreview, Boolean(promotion)) : ''}
         ${promotion ? renderPromotion(promotion) : ''}
         ${chartReview ? renderChartReview(chartReview) : ''}
         ${renderActions(item)}
@@ -243,6 +254,36 @@
         <div><span>ATR14</span><strong>${escapeHtml(fmtNumber(promotion.atr14, 2))}</strong></div>
       </div>
       <div class="candidate-meta">Promoted ${escapeHtml(fmtTime(promotion.promoted_at))} · target source ${escapeHtml(promotion.target_source || '—')}</div>
+    `;
+  }
+
+  function renderPlanPreview(preview, hasPromotion) {
+    const warnings = [];
+    if (preview.preview_error) warnings.push(`<span class="candidate-pill bad">${escapeHtml(preview.preview_error)}</span>`);
+    if (preview.rr_warning) warnings.push('<span class="candidate-pill warn">R:R warning</span>');
+    if (preview.no_valid_target) warnings.push('<span class="candidate-pill bad">No valid target</span>');
+    const contract = preview.option_contract || {};
+    const contractAvailable = Boolean(contract.available);
+    const contractLabel = contractAvailable
+      ? `${fmtMoney(contract.strike)} ${String(contract.type || '').toUpperCase()}`
+      : (contract.execution || 'No Clean Contract');
+    const contractMeta = contractAvailable
+      ? `${contract.expiry || contract.expiration || '—'} · ${contract.dte ?? '—'} DTE · ${contract.execution || '—'}`
+      : (contract.reason || 'Contract unavailable');
+    return `
+      <div class="candidate-pill-row">
+        <span class="candidate-pill">${hasPromotion ? 'Current Plan Math' : 'Plan Preview'}</span>
+        ${warnings.join('')}
+      </div>
+      <div class="candidate-kv">
+        <div><span>Stop</span><strong>${escapeHtml(fmtMoney(preview.stop))}</strong></div>
+        <div><span>Target</span><strong>${escapeHtml(fmtMoney(preview.target))}</strong></div>
+        <div><span>R:R</span><strong>${escapeHtml(preview.risk_reward == null ? '—' : fmtNumber(preview.risk_reward, 2))}</strong></div>
+        <div><span>ATR14</span><strong>${escapeHtml(fmtNumber(preview.atr14, 2))}</strong></div>
+        <div><span>Contract</span><strong>${escapeHtml(contractLabel)}</strong></div>
+        <div><span>Expiry</span><strong>${escapeHtml(contractMeta)}</strong></div>
+      </div>
+      <div class="candidate-meta">Preview computed ${escapeHtml(fmtTime(preview.computed_at))} · target source ${escapeHtml(preview.target_source || '—')}</div>
     `;
   }
 
