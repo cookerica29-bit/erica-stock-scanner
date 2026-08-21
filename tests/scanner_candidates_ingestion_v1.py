@@ -213,9 +213,17 @@ def test_scanner_candidate_ingestion_lifecycle():
             conn = sqlite3.connect(db_path)
             try:
                 promotion_count = conn.execute("SELECT COUNT(*) FROM candidate_promotions").fetchone()[0]
+                status_history = conn.execute(
+                    """
+                    SELECT ticker, source, previous_status, new_status, trigger
+                    FROM candidate_status_history
+                    ORDER BY id
+                    """
+                ).fetchall()
             finally:
                 conn.close()
             assert promotion_count == 1
+            assert status_history == [("NVDA", "ma_pipeline", "new", "active", "api_status_update")]
 
             active = client.get("/api/v1/scanner/candidates?status=active", headers=headers).json()
             assert len(active) == 1

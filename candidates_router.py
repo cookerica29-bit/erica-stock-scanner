@@ -231,6 +231,19 @@ def _get_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            previous_status TEXT,
+            new_status TEXT NOT NULL,
+            changed_at TEXT NOT NULL,
+            trigger TEXT NOT NULL
+        )
+        """
+    )
     _ensure_candidate_promotions_schema(conn)
     conn.commit()
     return conn
@@ -381,6 +394,26 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     else:
         output["option_contract"] = None
     return output
+
+
+def _record_status_change(
+    conn: sqlite3.Connection,
+    *,
+    ticker: str,
+    source: str,
+    previous_status: Optional[str],
+    new_status: str,
+    changed_at: str,
+    trigger: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO candidate_status_history
+            (ticker, source, previous_status, new_status, changed_at, trigger)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (ticker, source, previous_status, new_status, changed_at, trigger),
+    )
 
 
 def _safe_option_contract_for_candidate(ticker: str, direction: str, entry_price: Optional[float]) -> dict:
@@ -1125,15 +1158,27 @@ def update_candidate_status(
             promotion = _compute_candidate_promotion(candidate)
             _store_promotion(conn, promotion)
 
+        changed_at = datetime.now(timezone.utc).isoformat()
+        previous_status = candidate["status"] if "status" in candidate.keys() else None
         result = conn.execute(
             "UPDATE candidates SET status=?, updated_at=? WHERE ticker=? AND source=?",
             (
                 update.status,
-                datetime.now(timezone.utc).isoformat(),
+                changed_at,
                 normalized_ticker,
                 source,
             ),
         )
+        if result.rowcount:
+            _record_status_change(
+                conn,
+                ticker=normalized_ticker,
+                source=source,
+                previous_status=previous_status,
+                new_status=update.status,
+                changed_at=changed_at,
+                trigger="api_status_update",
+            )
         conn.commit()
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {source}")

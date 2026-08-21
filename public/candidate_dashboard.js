@@ -310,21 +310,29 @@
     const source = encodeURIComponent(item.source || '');
     const ticker = encodeURIComponent(item.ticker || '');
     const promote = status !== 'active'
-      ? `<button onclick="updateCandidateStatus('${ticker}','${source}','active')">Promote</button>`
+      ? `<button onclick="updateCandidateStatus('${ticker}','${source}','active','${status}')">Promote</button>`
       : '';
     const chartRead = `<button class="btn-ghost" onclick="requestChartReview('${ticker}','${source}')">Get AI Chart Read</button>`;
-    const dismiss = status !== 'dismissed'
-      ? `<button class="btn-secondary" onclick="updateCandidateStatus('${ticker}','${source}','dismissed')">Dismiss</button>`
+    const dismiss = status !== 'dismissed' && status !== 'active'
+      ? `<button class="btn-secondary" onclick="updateCandidateStatus('${ticker}','${source}','dismissed','${status}')">Dismiss</button>`
       : '';
     const restore = status !== 'new'
-      ? `<button class="btn-ghost" onclick="updateCandidateStatus('${ticker}','${source}','new')">Back to Inbox</button>`
+      ? `<button class="btn-ghost" onclick="updateCandidateStatus('${ticker}','${source}','new','${status}')">Back to Inbox</button>`
       : '';
     return `<div class="candidate-actions">${promote}${chartRead}${dismiss}${restore}</div>`;
   }
 
-  async function updateCandidateStatus(ticker, source, status) {
+  async function updateCandidateStatus(ticker, source, status, currentStatus = '') {
     const decodedTicker = decodeURIComponent(ticker);
     const decodedSource = decodeURIComponent(source);
+    if (status === 'dismissed') {
+      const ok = window.confirm(`Dismiss ${decodedTicker} from the candidate inbox?`);
+      if (!ok) return;
+    }
+    if (String(currentStatus).toLowerCase() === 'active' && status === 'new') {
+      const ok = window.confirm(`Move active plan ${decodedTicker} back to the inbox? The saved promotion math will remain available.`);
+      if (!ok) return;
+    }
     setStatus(`${status === 'active' ? 'Promoting' : 'Updating'} ${decodedTicker}...`);
     try {
       await fetchJson(`/api/v1/scanner/candidates/${encodeURIComponent(decodedTicker)}?source=${encodeURIComponent(decodedSource)}`, {
