@@ -281,7 +281,23 @@ def test_chart_review_parser_accepts_fenced_json():
     }
 
 
+def test_preview_contract_normalizes_expiration_data_unavailable():
+    import candidates_router
+
+    normalized = candidates_router._normalize_preview_option_contract({
+        "available": False,
+        "execution": "No Clean Contract",
+        "reason": "No option expirations available",
+        "source": "unavailable",
+    })
+    assert normalized["execution"] == "Contract Data Unavailable"
+    assert "retry later" in normalized["reason"]
+    assert normalized["source"] == "data_unavailable"
+    assert normalized["transient_unavailable"] is True
+
+
 if __name__ == "__main__":
     test_scanner_candidate_ingestion_lifecycle()
     test_chart_review_parser_accepts_fenced_json()
+    test_preview_contract_normalizes_expiration_data_unavailable()
     print("scanner_candidates_ingestion_v1 passed")

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.error import HTTPError, URLError
@@ -31,6 +31,7 @@ ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-4-5"
 AI_CHART_REVIEW_RUBRIC_VERSION = "kairos-chart-note-v1"
+CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
 
 
 def default_candidates_db_path() -> str:
@@ -389,11 +390,76 @@ def _safe_option_contract_for_candidate(ticker: str, direction: str, entry_price
     except Exception as exc:
         return {
             "available": False,
-            "execution": "No Clean Contract",
+            "execution": "Contract Data Unavailable",
             "reason": f"Existing option selector failed: {exc.__class__.__name__}",
             "source": "option_chain",
         }
-    return contract if isinstance(contract, dict) else {"available": False, "reason": "Existing option selector returned no contract", "source": "option_chain"}
+    if not isinstance(contract, dict):
+        return {
+            "available": False,
+            "execution": "Contract Data Unavailable",
+            "reason": "Existing option selector returned no contract",
+            "source": "option_chain",
+        }
+    return _normalize_preview_option_contract(contract)
+
+
+def _normalize_preview_option_contract(contract: dict) -> dict:
+    normalized = dict(contract)
+    reason = str(normalized.get("reason") or "").strip().lower()
+    source = str(normalized.get("source") or "").strip().lower()
+    if not normalized.get("available") and (
+        "no option expirations available" in reason
+        or "no option expirations returned" in reason
+        or source == "unavailable"
+    ):
+        normalized["execution"] = "Contract Data Unavailable"
+        normalized["reason"] = "Option expiration data unavailable from the legacy option-chain provider; retry later."
+        normalized["source"] = "data_unavailable"
+        normalized["transient_unavailable"] = True
+    return normalized
+
+
+def _preview_has_transient_option_unavailable(row: sqlite3.Row) -> bool:
+    raw_contract = row["option_contract_json"] if "option_contract_json" in row.keys() else None
+    if not raw_contract:
+        return False
+    try:
+        contract = json.loads(raw_contract)
+    except json.JSONDecodeError:
+        return True
+    reason = str(contract.get("reason") or "").lower()
+    source = str(contract.get("source") or "").lower()
+    return (
+        bool(contract.get("transient_unavailable"))
+        or source in {"unavailable", "data_unavailable"}
+        or "no option expirations available" in reason
+        or "option expiration data unavailable" in reason
+    )
+
+
+def _preview_transient_refresh_due(row: sqlite3.Row) -> bool:
+    if not _preview_has_transient_option_unavailable(row):
+        return False
+    computed = _coerce_iso_datetime(row["computed_at"] if "computed_at" in row.keys() else None)
+    if computed is None:
+        return True
+    return datetime.now(timezone.utc) - computed >= CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL
+
+
+def _coerce_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _anthropic_api_key() -> Optional[str]:
@@ -983,7 +1049,11 @@ def list_candidate_plan_previews(x_api_key: Optional[str] = Header(default=None)
                 "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
                 (candidate["ticker"], candidate["source"]),
             ).fetchone()
-            if existing and existing["candidate_updated_at"] == candidate["updated_at"]:
+            if (
+                existing
+                and existing["candidate_updated_at"] == candidate["updated_at"]
+                and not _preview_transient_refresh_due(existing)
+            ):
                 previews.append(_row_to_plan_preview(existing))
                 continue
             preview = _compute_candidate_plan_preview(candidate)
