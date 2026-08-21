@@ -46,6 +46,22 @@ def _chunks(items: list[str], size: int):
         yield items[index:index + size]
 
 
+def _download_with_fallback(provider: AlpacaMarketDataProvider, symbols: list[str], period: str, interval: str) -> pd.DataFrame:
+    frame = provider.download(symbols, period=period, interval=interval, auto_adjust=True)
+    if frame is not None and not frame.empty:
+        return frame
+    if len(symbols) <= 1:
+        return frame
+    frames = {}
+    for symbol in symbols:
+        single = provider.download([symbol], period=period, interval=interval, auto_adjust=True)
+        if single is not None and not single.empty:
+            frames[symbol] = single
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, axis=1)
+
+
 def _candidate_from_frames(symbol: str, daily: pd.DataFrame, four_hour: pd.DataFrame) -> dict[str, Any] | None:
     if daily is None or four_hour is None or len(daily) < 220 or len(four_hour) < 30:
         return None
@@ -104,8 +120,8 @@ def scan_ma_pipeline_candidates(symbols: list[str], max_symbols: int | None = No
     provider = AlpacaMarketDataProvider()
     chunk_size = _chunk_size()
     for chunk in _chunks(requested, chunk_size):
-        daily = provider.download(chunk, period="1y", interval="1d", auto_adjust=True)
-        four_hour = provider.download(chunk, period="60d", interval="4h", auto_adjust=True)
+        daily = _download_with_fallback(provider, chunk, period="1y", interval="1d")
+        four_hour = _download_with_fallback(provider, chunk, period="60d", interval="4h")
         for symbol in chunk:
             candidate = _candidate_from_frames(
                 symbol,
