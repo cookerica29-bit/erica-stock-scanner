@@ -7,6 +7,7 @@ plans, or alter the legacy Kairos scanner cache.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from typing import Any
 
 import pandas as pd
@@ -30,6 +31,19 @@ def _frame_for_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 def _ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
+
+
+def _chunk_size() -> int:
+    try:
+        value = int(os.getenv("MA_PIPELINE_ALPACA_CHUNK_SIZE", "50"))
+    except ValueError:
+        value = 50
+    return min(max(value, 1), 100)
+
+
+def _chunks(items: list[str], size: int):
+    for index in range(0, len(items), size):
+        yield items[index:index + size]
 
 
 def _candidate_from_frames(symbol: str, daily: pd.DataFrame, four_hour: pd.DataFrame) -> dict[str, Any] | None:
@@ -85,21 +99,23 @@ def scan_ma_pipeline_candidates(symbols: list[str], max_symbols: int | None = No
     if not alpaca_credentials_configured():
         raise RuntimeError("Alpaca credentials are not configured")
 
-    provider = AlpacaMarketDataProvider()
-    daily = provider.download(requested, period="1y", interval="1d", auto_adjust=True)
-    four_hour = provider.download(requested, period="60d", interval="4h", auto_adjust=True)
     candidates = []
     failures = 0
-    for symbol in requested:
-        candidate = _candidate_from_frames(
-            symbol,
-            _frame_for_symbol(daily, symbol),
-            _frame_for_symbol(four_hour, symbol),
-        )
-        if candidate:
-            candidates.append(candidate)
-        else:
-            failures += 1
+    provider = AlpacaMarketDataProvider()
+    chunk_size = _chunk_size()
+    for chunk in _chunks(requested, chunk_size):
+        daily = provider.download(chunk, period="1y", interval="1d", auto_adjust=True)
+        four_hour = provider.download(chunk, period="60d", interval="4h", auto_adjust=True)
+        for symbol in chunk:
+            candidate = _candidate_from_frames(
+                symbol,
+                _frame_for_symbol(daily, symbol),
+                _frame_for_symbol(four_hour, symbol),
+            )
+            if candidate:
+                candidates.append(candidate)
+            else:
+                failures += 1
 
     return {
         "version": MA_PIPELINE_VERSION,
@@ -114,5 +130,6 @@ def scan_ma_pipeline_candidates(symbols: list[str], max_symbols: int | None = No
             "entry_timeframe": "4h",
             "regime": "Daily 50/200 SMA",
             "entry_pullback": "4H EMA21 proximity within 3%",
+            "alpaca_chunk_size": chunk_size,
         },
     }
