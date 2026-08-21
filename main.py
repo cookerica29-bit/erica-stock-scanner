@@ -1321,11 +1321,11 @@ def _ma_pipeline_scan_schedules() -> list[tuple[int, int]]:
 def _ma_pipeline_max_symbols() -> Optional[int]:
     raw = os.getenv("MA_PIPELINE_MAX_SYMBOLS", "").strip()
     if not raw:
-        return None
+        return 550
     try:
         value = int(raw)
     except ValueError:
-        return None
+        return 550
     return value if value > 0 else None
 
 
