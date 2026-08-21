@@ -118,18 +118,22 @@
     setStatus('Loading candidate inbox...');
     render();
     try {
-      const [candidates, promotions, planPreviews, chartReviews] = await Promise.all([
+      const [candidates, promotions, planPreviewsResult, chartReviews] = await Promise.all([
         fetchJson('/api/v1/scanner/candidates'),
         fetchJson('/api/v1/scanner/candidate-promotions'),
-        fetchJson('/api/v1/scanner/candidate-plan-previews'),
+        fetchJson('/api/v1/scanner/candidate-plan-previews').catch((error) => ({ __previewError: error.message || String(error) })),
         fetchJson('/api/v1/scanner/candidate-chart-reviews'),
       ]);
       state.candidates = Array.isArray(candidates) ? candidates : [];
       state.promotions = Array.isArray(promotions) ? promotions : [];
-      state.planPreviews = Array.isArray(planPreviews) ? planPreviews : [];
+      const previewError = planPreviewsResult && planPreviewsResult.__previewError;
+      state.planPreviews = Array.isArray(planPreviewsResult) ? planPreviewsResult : [];
       state.chartReviews = Array.isArray(chartReviews) ? chartReviews : [];
       state.loaded = true;
-      setStatus(`Loaded ${state.candidates.length} candidates, ${state.promotions.length} active plans, ${state.planPreviews.length} plan previews, and ${state.chartReviews.length} AI chart notes.`, 'ok');
+      const previewStatus = previewError
+        ? ` Plan previews unavailable temporarily: ${previewError}`
+        : '';
+      setStatus(`Loaded ${state.candidates.length} candidates, ${state.promotions.length} active plans, ${state.planPreviews.length} plan previews, and ${state.chartReviews.length} AI chart notes.${previewStatus}`, previewError ? 'error' : 'ok');
     } catch (error) {
       state.error = error.message || String(error);
       setStatus(state.error, 'error');

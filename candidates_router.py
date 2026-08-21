@@ -124,8 +124,9 @@ def _get_db():
     db_path = Path(default_candidates_db_path())
     if db_path.parent and str(db_path.parent) not in {"", "."}:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candidates (
@@ -1091,9 +1092,21 @@ def list_candidate_plan_previews(x_api_key: Optional[str] = Header(default=None)
                 previews.append(_row_to_plan_preview(existing))
                 continue
             preview = _compute_candidate_plan_preview(candidate)
-            _store_plan_preview(conn, preview)
+            try:
+                _store_plan_preview(conn, preview)
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower():
+                    raise
+                preview["preview_error"] = (
+                    preview.get("preview_error")
+                    or "Plan preview cache is temporarily busy; showing uncached computed preview."
+                )
             previews.append(preview)
-        conn.commit()
+        try:
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
         return previews
     finally:
         conn.close()
