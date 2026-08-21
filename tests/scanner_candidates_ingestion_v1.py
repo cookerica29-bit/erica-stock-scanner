@@ -49,9 +49,20 @@ def test_scanner_candidate_ingestion_lifecycle():
         import candidates_router
 
         previous_download = candidates_router._batch_download
+        previous_alpaca_bars = candidates_router._alpaca_daily_bars_for_review
+        previous_call_anthropic = candidates_router._call_anthropic_chart_review
         candidates_router._batch_download = lambda tickers, period, interval: {
             str(tickers[0]).upper(): _promotion_daily_frame()
         }
+        candidates_router._alpaca_daily_bars_for_review = lambda ticker: _promotion_daily_frame()
+        candidates_router._call_anthropic_chart_review = lambda prompt: (
+            {
+                "classification": "choppy_range_bound",
+                "rationale": "Price is oscillating around the same area instead of trending cleanly. Treat this as an informational second opinion only.",
+            },
+            '{"content":[{"type":"text","text":"mock"}]}',
+            "mock-claude",
+        )
 
         client = _client()
         headers = {"X-API-Key": "test-scanner-key"}
@@ -200,8 +211,31 @@ def test_scanner_candidate_ingestion_lifecycle():
             after_restart_promotions = restarted_client.get("/api/v1/scanner/candidate-promotions", headers=headers).json()
             assert len(after_restart_promotions) == 1
             assert after_restart_promotions[0]["ticker"] == "NVDA"
+
+            chart_review = client.post(
+                "/api/v1/scanner/candidates/NVDA/ai-chart-review?source=ma_pipeline",
+                headers=headers,
+            )
+            assert chart_review.status_code == 200
+            review_payload = chart_review.json()
+            assert review_payload["ticker"] == "NVDA"
+            assert review_payload["source"] == "ma_pipeline"
+            assert review_payload["signal"] == "short"
+            assert review_payload["classification"] == "choppy_range_bound"
+            assert "informational" in review_payload["caveat"].lower()
+            assert review_payload["data_source"] == "alpaca_adjusted_daily_ohlcv"
+            assert review_payload["model"] == "mock-claude"
+
+            chart_reviews = client.get("/api/v1/scanner/candidate-chart-reviews", headers=headers)
+            assert chart_reviews.status_code == 200
+            review_rows = chart_reviews.json()
+            assert len(review_rows) == 1
+            assert review_rows[0]["ticker"] == "NVDA"
+            assert review_rows[0]["classification"] == "choppy_range_bound"
         finally:
             candidates_router._batch_download = previous_download
+            candidates_router._alpaca_daily_bars_for_review = previous_alpaca_bars
+            candidates_router._call_anthropic_chart_review = previous_call_anthropic
 
 
 if __name__ == "__main__":

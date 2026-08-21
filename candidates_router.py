@@ -8,14 +8,18 @@ explicit workflow.
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from market_data import AlpacaMarketDataProvider
 from scanner import _batch_download, _compute_atr, _find_swings, _flatten_columns
 
 
@@ -23,6 +27,10 @@ router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
 ATR_MULTIPLIER = 1.5
 RR_WARNING_THRESHOLD = 1.5
 MIN_TARGET_ATR_MULTIPLE_DEFAULT = 2.0
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-4-5"
+AI_CHART_REVIEW_RUBRIC_VERSION = "kairos-chart-note-v1"
 
 
 def default_candidates_db_path() -> str:
@@ -177,6 +185,26 @@ def _get_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_ai_chart_reviews (
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            signal TEXT NOT NULL,
+            classification TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            caveat TEXT NOT NULL,
+            reviewed_at TEXT NOT NULL,
+            model TEXT NOT NULL,
+            rubric_version TEXT NOT NULL,
+            data_source TEXT NOT NULL,
+            bars_start TEXT,
+            bars_end TEXT,
+            raw_response TEXT,
+            PRIMARY KEY (ticker, source)
+        )
+        """
+    )
     _ensure_candidate_promotions_schema(conn)
     conn.commit()
     return conn
@@ -233,6 +261,21 @@ class CandidatePromotionOut(BaseModel):
     target_source: str
 
 
+class CandidateChartReviewOut(BaseModel):
+    ticker: str
+    source: str
+    signal: str
+    classification: str
+    rationale: str
+    caveat: str
+    reviewed_at: str
+    model: str
+    rubric_version: str
+    data_source: str
+    bars_start: Optional[str]
+    bars_end: Optional[str]
+
+
 class RejectedEntry(BaseModel):
     ticker: str
     reason: str
@@ -269,6 +312,202 @@ def _row_to_promotion(row: sqlite3.Row) -> dict:
     output["rr_warning"] = bool(output.get("rr_warning"))
     output["no_valid_target"] = bool(output.get("no_valid_target"))
     return output
+
+
+def _row_to_chart_review(row: sqlite3.Row) -> dict:
+    output = dict(row)
+    output.pop("raw_response", None)
+    return output
+
+
+def _anthropic_api_key() -> Optional[str]:
+    return os.environ.get("ANTHROPIC_API_KEY")
+
+
+def _anthropic_model() -> str:
+    return os.environ.get("ANTHROPIC_MODEL") or ANTHROPIC_MODEL_DEFAULT
+
+
+def _candidate_chart_review_caveat() -> str:
+    return "Informational pattern read only, not a recommendation or automated approval."
+
+
+def _alpaca_daily_bars_for_review(ticker: str):
+    try:
+        raw = AlpacaMarketDataProvider().download([ticker], period="1y", interval="1d", auto_adjust=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=f"Alpaca price data unavailable: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Alpaca price data request failed: {exc.__class__.__name__}")
+    if raw is None or getattr(raw, "empty", True):
+        raise HTTPException(status_code=422, detail=f"No Alpaca daily candles available for {ticker}")
+    try:
+        df = _flatten_columns(raw.copy()).dropna().astype(float)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Alpaca daily candles for {ticker} are not usable: {exc.__class__.__name__}")
+    if len(df) < 60:
+        raise HTTPException(status_code=422, detail=f"Not enough Alpaca daily candles for {ticker}")
+    return df
+
+
+def _compact_chart_bars(df, limit: int = 90) -> list[dict]:
+    bars = []
+    for index, row in df.tail(limit).iterrows():
+        bars.append({
+            "date": str(getattr(index, "date", lambda: index)()),
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
+            "close": round(float(row["Close"]), 4),
+            "volume": int(float(row["Volume"])) if "Volume" in row else None,
+        })
+    return bars
+
+
+def _chart_review_prompt(candidate: sqlite3.Row, bars: list[dict]) -> str:
+    payload = {
+        "ticker": str(candidate["ticker"]).upper(),
+        "signal": str(candidate["signal"]).lower(),
+        "entry_price": candidate["entry_price"],
+        "daily_regime": candidate["daily_regime"],
+        "confidence": candidate["confidence"],
+        "sma50_daily": candidate["sma50_daily"],
+        "sma200_daily": candidate["sma200_daily"],
+        "bars": bars,
+    }
+    return (
+        "You are giving Erica a second-opinion chart note for a Kairos scanner candidate. "
+        "This is pattern-reading on OHLCV data, not a recommendation, not a probability, and not approval/rejection. "
+        "Use the rubric from prior manual reviews: fresh clean structural break/retest is strongest; genuine orderly trend is good; "
+        "choppy range-bound action should be flagged; already-played-out gap/decline that has stabilized is lower quality; "
+        "persistent grinding continuation with no fresh event is lower priority. "
+        "Return strict JSON only with keys classification and rationale. "
+        "classification must be one of: fresh_clean_structural_break, genuine_trending_move, choppy_range_bound, "
+        "played_out_stabilized, grinding_no_fresh_event, mixed_unclear. "
+        "rationale must be 2-3 short sentences grounded in the provided bars. "
+        f"Candidate data: {json.dumps(payload, separators=(',', ':'))}"
+    )
+
+
+def _call_anthropic_chart_review(prompt: str) -> tuple[dict, str, str]:
+    api_key = _anthropic_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured on server")
+    model = _anthropic_model()
+    body = {
+        "model": model,
+        "max_tokens": 450,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    req = Request(
+        ANTHROPIC_MESSAGES_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": ANTHROPIC_VERSION,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=int(os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "45"))) as response:
+            raw_response = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8")[:500]
+        raise HTTPException(status_code=502, detail=f"Anthropic request failed with HTTP {exc.code}: {detail}")
+    except (URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail=f"Anthropic request failed: {exc.__class__.__name__}")
+
+    try:
+        payload = json.loads(raw_response)
+        text = "\n".join(
+            block.get("text", "")
+            for block in payload.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Anthropic response was not usable JSON: {exc.__class__.__name__}")
+    return parsed, raw_response, model
+
+
+def _compute_candidate_chart_review(candidate: sqlite3.Row) -> dict:
+    ticker = str(candidate["ticker"] or "").strip().upper()
+    signal = str(candidate["signal"] or "").strip().lower()
+    if signal not in {"long", "short"}:
+        raise HTTPException(status_code=422, detail=f"Unsupported candidate signal for {ticker}: {signal}")
+    df = _alpaca_daily_bars_for_review(ticker)
+    bars = _compact_chart_bars(df)
+    parsed, raw_response, model = _call_anthropic_chart_review(_chart_review_prompt(candidate, bars))
+    allowed = {
+        "fresh_clean_structural_break",
+        "genuine_trending_move",
+        "choppy_range_bound",
+        "played_out_stabilized",
+        "grinding_no_fresh_event",
+        "mixed_unclear",
+    }
+    classification = str(parsed.get("classification") or "").strip()
+    rationale = str(parsed.get("rationale") or "").strip()
+    if classification not in allowed:
+        raise HTTPException(status_code=502, detail=f"Anthropic returned unsupported classification: {classification}")
+    if not rationale:
+        raise HTTPException(status_code=502, detail="Anthropic returned empty rationale")
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+    return {
+        "ticker": ticker,
+        "source": str(candidate["source"]),
+        "signal": signal,
+        "classification": classification,
+        "rationale": rationale[:1200],
+        "caveat": _candidate_chart_review_caveat(),
+        "reviewed_at": reviewed_at,
+        "model": model,
+        "rubric_version": AI_CHART_REVIEW_RUBRIC_VERSION,
+        "data_source": "alpaca_adjusted_daily_ohlcv",
+        "bars_start": bars[0]["date"] if bars else None,
+        "bars_end": bars[-1]["date"] if bars else None,
+        "raw_response": raw_response,
+    }
+
+
+def _store_chart_review(conn, review: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO candidate_ai_chart_reviews
+            (ticker, source, signal, classification, rationale, caveat, reviewed_at,
+             model, rubric_version, data_source, bars_start, bars_end, raw_response)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, source) DO UPDATE SET
+            signal=excluded.signal,
+            classification=excluded.classification,
+            rationale=excluded.rationale,
+            caveat=excluded.caveat,
+            reviewed_at=excluded.reviewed_at,
+            model=excluded.model,
+            rubric_version=excluded.rubric_version,
+            data_source=excluded.data_source,
+            bars_start=excluded.bars_start,
+            bars_end=excluded.bars_end,
+            raw_response=excluded.raw_response
+        """,
+        (
+            review["ticker"],
+            review["source"],
+            review["signal"],
+            review["classification"],
+            review["rationale"],
+            review["caveat"],
+            review["reviewed_at"],
+            review["model"],
+            review["rubric_version"],
+            review["data_source"],
+            review["bars_start"],
+            review["bars_end"],
+            review["raw_response"],
+        ),
+    )
 
 
 def _nearest_structural_target(
@@ -526,6 +765,41 @@ def list_candidate_promotions(x_api_key: Optional[str] = Header(default=None)):
     try:
         rows = conn.execute("SELECT * FROM candidate_promotions ORDER BY promoted_at DESC").fetchall()
         return [_row_to_promotion(row) for row in rows]
+    finally:
+        conn.close()
+
+
+@router.get("/candidate-chart-reviews", response_model=list[CandidateChartReviewOut])
+def list_candidate_chart_reviews(x_api_key: Optional[str] = Header(default=None)):
+    _check_api_key(x_api_key)
+    conn = _get_db()
+    try:
+        rows = conn.execute("SELECT * FROM candidate_ai_chart_reviews ORDER BY reviewed_at DESC").fetchall()
+        return [_row_to_chart_review(row) for row in rows]
+    finally:
+        conn.close()
+
+
+@router.post("/candidates/{ticker}/ai-chart-review", response_model=CandidateChartReviewOut)
+def request_candidate_chart_review(
+    ticker: str,
+    source: str,
+    x_api_key: Optional[str] = Header(default=None),
+):
+    _check_api_key(x_api_key)
+    normalized_ticker = ticker.strip().upper()
+    conn = _get_db()
+    try:
+        candidate = conn.execute(
+            "SELECT * FROM candidates WHERE ticker=? AND source=?",
+            (normalized_ticker, source),
+        ).fetchone()
+        if not candidate:
+            raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {source}")
+        review = _compute_candidate_chart_review(candidate)
+        _store_chart_review(conn, review)
+        conn.commit()
+        return _row_to_chart_review(review)
     finally:
         conn.close()
 

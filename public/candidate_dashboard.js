@@ -6,6 +6,7 @@
     view: 'new',
     candidates: [],
     promotions: [],
+    chartReviews: [],
     error: null,
   };
 
@@ -67,6 +68,12 @@
     return map;
   }
 
+  function chartReviewsByKey() {
+    const map = new Map();
+    state.chartReviews.forEach(item => map.set(promotionKey(item), item));
+    return map;
+  }
+
   function setStatus(message, kind = '') {
     const el = document.getElementById('candidateStatus');
     if (!el) return;
@@ -104,14 +111,16 @@
     setStatus('Loading candidate inbox...');
     render();
     try {
-      const [candidates, promotions] = await Promise.all([
+      const [candidates, promotions, chartReviews] = await Promise.all([
         fetchJson('/api/v1/scanner/candidates'),
         fetchJson('/api/v1/scanner/candidate-promotions'),
+        fetchJson('/api/v1/scanner/candidate-chart-reviews'),
       ]);
       state.candidates = Array.isArray(candidates) ? candidates : [];
       state.promotions = Array.isArray(promotions) ? promotions : [];
+      state.chartReviews = Array.isArray(chartReviews) ? chartReviews : [];
       state.loaded = true;
-      setStatus(`Loaded ${state.candidates.length} candidates and ${state.promotions.length} active plans.`, 'ok');
+      setStatus(`Loaded ${state.candidates.length} candidates, ${state.promotions.length} active plans, and ${state.chartReviews.length} AI chart notes.`, 'ok');
     } catch (error) {
       state.error = error.message || String(error);
       setStatus(state.error, 'error');
@@ -183,10 +192,11 @@
       return;
     }
     const promoMap = promotionsByKey();
-    list.innerHTML = items.map(item => renderCandidateCard(item, promoMap.get(promotionKey(item)))).join('');
+    const reviewMap = chartReviewsByKey();
+    list.innerHTML = items.map(item => renderCandidateCard(item, promoMap.get(promotionKey(item)), reviewMap.get(promotionKey(item)))).join('');
   }
 
-  function renderCandidateCard(item, promotion) {
+  function renderCandidateCard(item, promotion, chartReview) {
     const status = String(item.status || 'new').toLowerCase();
     const direction = String(item.signal || '').toLowerCase();
     const confidence = String(item.confidence || 'unknown').toLowerCase();
@@ -213,6 +223,7 @@
           <div><span>SMA200 Daily</span><strong>${escapeHtml(fmtMoney(item.sma200_daily))}</strong></div>
         </div>
         ${promotion ? renderPromotion(promotion) : ''}
+        ${chartReview ? renderChartReview(chartReview) : ''}
         ${renderActions(item)}
       </article>
     `;
@@ -235,6 +246,24 @@
     `;
   }
 
+  function classificationLabel(value) {
+    return String(value || 'mixed_unclear').replace(/_/g, ' ');
+  }
+
+  function renderChartReview(review) {
+    return `
+      <div class="candidate-ai-note">
+        <div class="candidate-pill-row">
+          <span class="candidate-pill">AI Chart Note</span>
+          <span class="candidate-pill medium">${escapeHtml(classificationLabel(review.classification))}</span>
+        </div>
+        <div class="candidate-meta">${escapeHtml(review.caveat || 'Informational only, not a recommendation.')}</div>
+        <div class="candidate-ai-rationale">${escapeHtml(review.rationale)}</div>
+        <div class="candidate-meta">Reviewed ${escapeHtml(fmtTime(review.reviewed_at))} · ${escapeHtml(review.data_source || 'price data')}</div>
+      </div>
+    `;
+  }
+
   function renderActions(item) {
     const status = String(item.status || 'new').toLowerCase();
     const source = encodeURIComponent(item.source || '');
@@ -242,13 +271,14 @@
     const promote = status !== 'active'
       ? `<button onclick="updateCandidateStatus('${ticker}','${source}','active')">Promote</button>`
       : '';
+    const chartRead = `<button class="btn-ghost" onclick="requestChartReview('${ticker}','${source}')">Get AI Chart Read</button>`;
     const dismiss = status !== 'dismissed'
       ? `<button class="btn-secondary" onclick="updateCandidateStatus('${ticker}','${source}','dismissed')">Dismiss</button>`
       : '';
     const restore = status !== 'new'
       ? `<button class="btn-ghost" onclick="updateCandidateStatus('${ticker}','${source}','new')">Back to Inbox</button>`
       : '';
-    return `<div class="candidate-actions">${promote}${dismiss}${restore}</div>`;
+    return `<div class="candidate-actions">${promote}${chartRead}${dismiss}${restore}</div>`;
   }
 
   async function updateCandidateStatus(ticker, source, status) {
@@ -267,8 +297,24 @@
     }
   }
 
+  async function requestChartReview(ticker, source) {
+    const decodedTicker = decodeURIComponent(ticker);
+    const decodedSource = decodeURIComponent(source);
+    setStatus(`Requesting informational AI chart note for ${decodedTicker}...`);
+    try {
+      await fetchJson(`/api/v1/scanner/candidates/${encodeURIComponent(decodedTicker)}/ai-chart-review?source=${encodeURIComponent(decodedSource)}`, {
+        method: 'POST',
+      });
+      state.loaded = false;
+      await loadCandidateDashboard(true);
+    } catch (error) {
+      setStatus(error.message || String(error), 'error');
+    }
+  }
+
   window.saveCandidateApiKey = saveCandidateApiKey;
   window.loadCandidateDashboard = loadCandidateDashboard;
   window.setCandidateView = setCandidateView;
   window.updateCandidateStatus = updateCandidateStatus;
+  window.requestChartReview = requestChartReview;
 })();
