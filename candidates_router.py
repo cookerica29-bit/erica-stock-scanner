@@ -374,7 +374,8 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     raw_contract = output.pop("option_contract_json", None)
     if raw_contract:
         try:
-            output["option_contract"] = json.loads(raw_contract)
+            parsed_contract = json.loads(raw_contract)
+            output["option_contract"] = _normalize_preview_option_contract(parsed_contract) if isinstance(parsed_contract, dict) else parsed_contract
         except json.JSONDecodeError:
             output["option_contract"] = {"available": False, "reason": "Stored option contract JSON is not usable"}
     else:
