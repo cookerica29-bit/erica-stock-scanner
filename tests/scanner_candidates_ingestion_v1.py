@@ -270,6 +270,28 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert len(review_rows) == 1
             assert review_rows[0]["ticker"] == "NVDA"
             assert review_rows[0]["classification"] == "choppy_range_bound"
+
+            previews_after_review = client.get("/api/v1/scanner/candidate-plan-previews", headers=headers)
+            assert previews_after_review.status_code == 200
+
+            conn = sqlite3.connect(db_path)
+            try:
+                status_after_read_only_calls = conn.execute(
+                    "SELECT status FROM candidates WHERE ticker='NVDA' AND source='ma_pipeline'"
+                ).fetchone()[0]
+                status_history_after_read_only_calls = conn.execute(
+                    """
+                    SELECT ticker, source, previous_status, new_status, trigger
+                    FROM candidate_status_history
+                    ORDER BY id
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+            assert status_after_read_only_calls == "active"
+            assert status_history_after_read_only_calls == [
+                ("NVDA", "ma_pipeline", "new", "active", "api_status_update")
+            ]
         finally:
             candidates_router._batch_download = previous_download
             candidates_router._alpaca_daily_bars_for_review = previous_alpaca_bars
