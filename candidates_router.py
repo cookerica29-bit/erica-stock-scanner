@@ -332,6 +332,25 @@ def _candidate_chart_review_caveat() -> str:
     return "Informational pattern read only, not a recommendation or automated approval."
 
 
+def _parse_chart_review_text(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(cleaned[start : end + 1])
+
+
 def _alpaca_daily_bars_for_review(ticker: str):
     try:
         raw = AlpacaMarketDataProvider().download([ticker], period="1y", interval="1d", auto_adjust=True)
@@ -426,7 +445,7 @@ def _call_anthropic_chart_review(prompt: str) -> tuple[dict, str, str]:
             for block in payload.get("content", [])
             if isinstance(block, dict) and block.get("type") == "text"
         ).strip()
-        parsed = json.loads(text)
+        parsed = _parse_chart_review_text(text)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Anthropic response was not usable JSON: {exc.__class__.__name__}")
     return parsed, raw_response, model

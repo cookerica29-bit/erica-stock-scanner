@@ -238,6 +238,19 @@ def test_scanner_candidate_ingestion_lifecycle():
             candidates_router._call_anthropic_chart_review = previous_call_anthropic
 
 
+def test_chart_review_parser_accepts_fenced_json():
+    import candidates_router
+
+    parsed = candidates_router._parse_chart_review_text(
+        '```json\n{"classification":"choppy_range_bound","rationale":"Range-bound and overlapping."}\n```'
+    )
+    assert parsed == {
+        "classification": "choppy_range_bound",
+        "rationale": "Range-bound and overlapping.",
+    }
+
+
 if __name__ == "__main__":
     test_scanner_candidate_ingestion_lifecycle()
+    test_chart_review_parser_accepts_fenced_json()
     print("scanner_candidates_ingestion_v1 passed")
