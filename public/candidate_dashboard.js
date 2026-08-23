@@ -429,6 +429,14 @@
     } catch (_) {}
   }
 
+  function sendCandidateTestNotification() {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    new Notification('Kairos Stock Alerts On', {
+      body: 'You will be notified when new inbox candidates appear.',
+      tag: 'kairos-stock-alerts-enabled',
+    });
+  }
+
   function updateCandidateAlertToggle() {
     const btn = document.getElementById('candidateAlertToggle');
     if (!btn) return;
@@ -465,7 +473,10 @@
 
     candidateAlertsEnabled = !candidateAlertsEnabled;
     localStorage.setItem(ALERT_KEY, candidateAlertsEnabled ? 'on' : 'off');
-    if (candidateAlertsEnabled) playCandidateAlertTone();
+    if (candidateAlertsEnabled) {
+      playCandidateAlertTone();
+      sendCandidateTestNotification();
+    }
     updateCandidateAlertToggle();
   }
 
