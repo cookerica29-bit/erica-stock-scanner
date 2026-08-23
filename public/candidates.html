@@ -51,10 +51,16 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 18px;
       position: sticky;
       top: 0;
       z-index: 10;
+    }
+
+    .header-copy {
+      flex: 1 1 420px;
+      min-width: 0;
     }
 
     h1 {
@@ -72,9 +78,11 @@
     .header-actions {
       display: flex;
       align-items: center;
+      flex: 0 1 auto;
       gap: 10px;
       flex-wrap: wrap;
       justify-content: flex-end;
+      min-width: min(100%, 320px);
     }
 
     a, button {
@@ -436,6 +444,10 @@
         width: 100%;
       }
 
+      .header-copy {
+        flex-basis: auto;
+      }
+
       main {
         padding: 14px;
       }
@@ -450,12 +462,28 @@
         grid-template-columns: 1fr;
       }
     }
+
+    @media (max-width: 1180px) {
+      header {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .header-actions {
+        justify-content: flex-start;
+        width: 100%;
+      }
+
+      .header-actions > * {
+        flex: 1 1 180px;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="page-shell">
     <header>
-      <div>
+      <div class="header-copy">
         <h1>Kairos Candidate Command Center</h1>
         <div class="subtitle">Review pushed scanner candidates, promote plans, and keep legacy scan behavior isolated.</div>
       </div>
