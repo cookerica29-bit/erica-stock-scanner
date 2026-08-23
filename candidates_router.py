@@ -10,13 +10,14 @@ from __future__ import annotations
 import os
 import json
 import sqlite3
+import hmac
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from market_data import AlpacaMarketDataProvider
@@ -32,6 +33,7 @@ ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-4-5"
 AI_CHART_REVIEW_RUBRIC_VERSION = "kairos-chart-note-v1"
 CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
+SCANNER_SESSION_COOKIE = "kairos_scanner_session"
 
 
 def default_candidates_db_path() -> str:
@@ -356,11 +358,19 @@ class StatusUpdate(BaseModel):
     status: CandidateStatus
 
 
-def _check_api_key(x_api_key: Optional[str]) -> None:
+class ScannerSessionIn(BaseModel):
+    api_key: str = Field(min_length=1)
+
+
+def _check_api_key(
+    x_api_key: Optional[str],
+    scanner_session: Optional[str] = None,
+) -> None:
     api_key = _get_api_key()
     if not api_key:
         raise HTTPException(status_code=500, detail="KAIROS_SCANNER_API_KEY not configured on server")
-    if x_api_key != api_key:
+    supplied = x_api_key or scanner_session
+    if not supplied or not hmac.compare_digest(supplied, api_key):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -952,6 +962,27 @@ def ingest_candidates(payload: ShortlistIn, x_api_key: Optional[str] = Header(de
     return upsert_candidate_shortlist(payload)
 
 
+@router.post("/session")
+def create_scanner_session(payload: ScannerSessionIn, response: Response):
+    _check_api_key(payload.api_key)
+    response.set_cookie(
+        key=SCANNER_SESSION_COOKIE,
+        value=payload.api_key,
+        max_age=60 * 60 * 24 * 365,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    return {"authenticated": True}
+
+
+@router.delete("/session")
+def clear_scanner_session(response: Response):
+    response.delete_cookie(key=SCANNER_SESSION_COOKIE, path="/")
+    return {"authenticated": False}
+
+
 def upsert_candidate_shortlist(payload: ShortlistIn) -> IngestResponse:
     conn = _get_db()
     created, updated = 0, 0
@@ -1045,8 +1076,9 @@ def upsert_candidate_shortlist(payload: ShortlistIn) -> IngestResponse:
 def list_candidates(
     status: Optional[CandidateStatus] = Query(default=None),
     x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
-    _check_api_key(x_api_key)
+    _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
     try:
         if status:
@@ -1062,8 +1094,11 @@ def list_candidates(
 
 
 @router.get("/candidate-promotions", response_model=list[CandidatePromotionOut])
-def list_candidate_promotions(x_api_key: Optional[str] = Header(default=None)):
-    _check_api_key(x_api_key)
+def list_candidate_promotions(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
     try:
         rows = conn.execute("SELECT * FROM candidate_promotions ORDER BY promoted_at DESC").fetchall()
@@ -1073,8 +1108,11 @@ def list_candidate_promotions(x_api_key: Optional[str] = Header(default=None)):
 
 
 @router.get("/candidate-plan-previews", response_model=list[CandidatePlanPreviewOut])
-def list_candidate_plan_previews(x_api_key: Optional[str] = Header(default=None)):
-    _check_api_key(x_api_key)
+def list_candidate_plan_previews(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
     try:
         candidates = conn.execute("SELECT * FROM candidates ORDER BY updated_at DESC").fetchall()
@@ -1113,8 +1151,11 @@ def list_candidate_plan_previews(x_api_key: Optional[str] = Header(default=None)
 
 
 @router.get("/candidate-chart-reviews", response_model=list[CandidateChartReviewOut])
-def list_candidate_chart_reviews(x_api_key: Optional[str] = Header(default=None)):
-    _check_api_key(x_api_key)
+def list_candidate_chart_reviews(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
     try:
         rows = conn.execute("SELECT * FROM candidate_ai_chart_reviews ORDER BY reviewed_at DESC").fetchall()
@@ -1128,8 +1169,9 @@ def request_candidate_chart_review(
     ticker: str,
     source: str,
     x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
-    _check_api_key(x_api_key)
+    _check_api_key(x_api_key, scanner_session)
     normalized_ticker = ticker.strip().upper()
     conn = _get_db()
     try:
@@ -1153,9 +1195,10 @@ def update_candidate_status(
     source: str,
     update: StatusUpdate,
     x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
     """Change review status only; this does not open or manage a live trade."""
-    _check_api_key(x_api_key)
+    _check_api_key(x_api_key, scanner_session)
     normalized_ticker = ticker.strip().upper()
     conn = _get_db()
     try:

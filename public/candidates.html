@@ -501,8 +501,8 @@
           <input id="candidateApiKeyInput" type="password" autocomplete="off" placeholder="Paste X-API-Key for candidate endpoints" />
         </div>
         <div class="api-key-saved">
-          <strong>Scanner API key saved on this device.</strong>
-          The key is stored locally in this browser. Use Change Key only if mobile gets disconnected.
+          <strong>Scanner session saved on this device.</strong>
+          Use Change Key only if mobile gets disconnected.
         </div>
         <div class="header-actions control-actions">
           <button type="button" class="save-key-button" onclick="saveCandidateApiKey()">Save Key</button>
@@ -531,7 +531,7 @@
     </main>
   </div>
 
-  <script src="/static/candidate_dashboard.js?v=20260823-candidate-alerts"></script>
+  <script src="/static/candidate_dashboard.js?v=20260823-session-auth"></script>
   <script>
     loadCandidateDashboard(false);
   </script>

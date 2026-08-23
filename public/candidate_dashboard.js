@@ -18,6 +18,7 @@
   let candidateAlertsInitialized = false;
   let apiKeyPanelExpanded = false;
   let cachedApiKey = '';
+  let candidateSessionAuthenticated = false;
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -138,11 +139,19 @@
   }
 
   function headers() {
-    return { 'Content-Type': 'application/json', 'X-API-Key': apiKey() };
+    const key = apiKey();
+    return {
+      'Content-Type': 'application/json',
+      ...(key ? { 'X-API-Key': key } : {}),
+    };
   }
 
   async function fetchJson(url, options = {}) {
-    const response = await fetch(url, { ...options, headers: { ...headers(), ...(options.headers || {}) } });
+    const response = await fetch(url, {
+      ...options,
+      credentials: 'same-origin',
+      headers: { ...headers(), ...(options.headers || {}) },
+    });
     const text = await response.text();
     let payload = null;
     try { payload = text ? JSON.parse(text) : null; } catch { payload = { detail: text }; }
@@ -185,13 +194,23 @@
   async function saveCandidateApiKey() {
     const input = document.getElementById('candidateApiKeyInput');
     const value = String(input?.value || '').trim();
-    if (value) persistApiKey(value);
-    else clearApiKey();
+    if (value) {
+      persistApiKey(value);
+      await fetchJson('/api/v1/scanner/session', {
+        method: 'POST',
+        body: JSON.stringify({ api_key: value }),
+      });
+      candidateSessionAuthenticated = true;
+    } else {
+      clearApiKey();
+      await fetchJson('/api/v1/scanner/session', { method: 'DELETE' }).catch(() => null);
+      candidateSessionAuthenticated = false;
+    }
     await writeApiKeyToDb(value);
     state.loaded = false;
     apiKeyPanelExpanded = !value;
     updateApiKeyPanel();
-    setStatus(value ? 'Scanner API key saved on this device.' : 'Scanner API key cleared.', value ? 'ok' : '');
+    setStatus(value ? 'Scanner session saved on this device.' : 'Scanner API key cleared.', value ? 'ok' : '');
   }
 
   function syncInput() {
@@ -204,7 +223,7 @@
     const band = document.getElementById('candidateApiBand');
     const toggle = document.getElementById('candidateApiToggle');
     if (!band) return;
-    const hasKey = Boolean(apiKey());
+    const hasKey = Boolean(apiKey()) || candidateSessionAuthenticated;
     const collapsed = hasKey && !apiKeyPanelExpanded;
     band.classList.toggle('collapsed', collapsed);
     if (toggle) toggle.textContent = collapsed ? 'Change Key' : hasKey ? 'Hide Key' : 'Change Key';
@@ -218,11 +237,6 @@
   async function loadCandidateDashboard(force = false) {
     await hydrateApiKey();
     syncInput();
-    if (!apiKey()) {
-      render();
-      setStatus('Enter the scanner API key, then refresh.');
-      return;
-    }
     if (state.loading || (state.loaded && !force)) {
       render();
       return;
@@ -244,6 +258,8 @@
       state.planPreviews = Array.isArray(planPreviewsResult) ? planPreviewsResult : [];
       state.chartReviews = Array.isArray(chartReviews) ? chartReviews : [];
       state.loaded = true;
+      candidateSessionAuthenticated = true;
+      updateApiKeyPanel();
       notifyForNewCandidates(state.candidates);
       const previewStatus = previewError
         ? ` Plan previews unavailable temporarily: ${previewError}`
@@ -303,7 +319,7 @@
     renderStats();
     const list = document.getElementById('candidateList');
     if (!list) return;
-    if (!apiKey()) {
+    if (!apiKey() && !candidateSessionAuthenticated && !state.loaded && !state.error) {
       list.innerHTML = '<div class="candidate-empty">Paste the scanner API key to review candidates pushed by the local scanner.</div>';
       return;
     }
