@@ -1,5 +1,6 @@
 (function () {
   const KEY = 'kairos_scanner_api_key';
+  const ALERT_KEY = 'kairos_candidate_alerts';
   const state = {
     loaded: false,
     loading: false,
@@ -10,6 +11,10 @@
     chartReviews: [],
     error: null,
   };
+  let knownCandidateIds = new Set();
+  let candidateAlertsEnabled = localStorage.getItem(ALERT_KEY) === 'on';
+  let candidateAlertsInitialized = false;
+  let apiKeyPanelExpanded = false;
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -94,12 +99,30 @@
     if (value) localStorage.setItem(KEY, value);
     else localStorage.removeItem(KEY);
     state.loaded = false;
+    apiKeyPanelExpanded = !value;
+    updateApiKeyPanel();
     setStatus(value ? 'Scanner API key saved in this browser.' : 'Scanner API key cleared.', value ? 'ok' : '');
   }
 
   function syncInput() {
     const input = document.getElementById('candidateApiKeyInput');
     if (input && !input.value) input.value = apiKey();
+    updateApiKeyPanel();
+  }
+
+  function updateApiKeyPanel() {
+    const band = document.getElementById('candidateApiBand');
+    const toggle = document.getElementById('candidateApiToggle');
+    if (!band) return;
+    const hasKey = Boolean(apiKey());
+    const collapsed = hasKey && !apiKeyPanelExpanded;
+    band.classList.toggle('collapsed', collapsed);
+    if (toggle) toggle.textContent = collapsed ? 'Change Key' : hasKey ? 'Hide Key' : 'Change Key';
+  }
+
+  function toggleCandidateApiKeyPanel() {
+    apiKeyPanelExpanded = !apiKeyPanelExpanded;
+    updateApiKeyPanel();
   }
 
   async function loadCandidateDashboard(force = false) {
@@ -130,6 +153,7 @@
       state.planPreviews = Array.isArray(planPreviewsResult) ? planPreviewsResult : [];
       state.chartReviews = Array.isArray(chartReviews) ? chartReviews : [];
       state.loaded = true;
+      notifyForNewCandidates(state.candidates);
       const previewStatus = previewError
         ? ` Plan previews unavailable temporarily: ${previewError}`
         : '';
@@ -184,6 +208,7 @@
   }
 
   function render() {
+    updateCandidateAlertToggle();
     renderStats();
     const list = document.getElementById('candidateList');
     if (!list) return;
@@ -365,7 +390,110 @@
     }
   }
 
+  function candidateAlertId(item) {
+    return [
+      String(item.ticker || '').toUpperCase(),
+      item.source || '',
+      item.signal || '',
+      item.entry_price ?? '',
+      item.scanned_at || item.updated_at || '',
+    ].join('|');
+  }
+
+  function candidateNotificationTitle(item) {
+    const direction = String(item.signal || '').toUpperCase();
+    return `${String(item.ticker || 'Ticker').toUpperCase()} ${direction || 'Candidate'}`;
+  }
+
+  function candidateNotificationBody(item) {
+    const confidence = item.confidence ? `${String(item.confidence).toUpperCase()} confidence` : 'New dashboard candidate';
+    return `${confidence} · Entry ${fmtMoney(item.entry_price)} · scanned ${fmtTime(item.scanned_at)}`;
+  }
+
+  function playCandidateAlertTone() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 820;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.45);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+    } catch (_) {}
+  }
+
+  function updateCandidateAlertToggle() {
+    const btn = document.getElementById('candidateAlertToggle');
+    if (!btn) return;
+    const blocked = 'Notification' in window && Notification.permission === 'denied';
+    btn.className = 'alert-toggle' + (blocked ? ' blocked' : candidateAlertsEnabled ? ' on' : '');
+    btn.textContent = blocked ? 'Alerts Blocked' : candidateAlertsEnabled ? 'Alerts On' : 'Alerts Off';
+  }
+
+  async function toggleCandidateAlerts() {
+    if (!('Notification' in window)) {
+      candidateAlertsEnabled = !candidateAlertsEnabled;
+      localStorage.setItem(ALERT_KEY, candidateAlertsEnabled ? 'on' : 'off');
+      updateCandidateAlertToggle();
+      if (candidateAlertsEnabled) playCandidateAlertTone();
+      return;
+    }
+
+    if (!candidateAlertsEnabled && Notification.permission === 'default') {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        candidateAlertsEnabled = false;
+        localStorage.setItem(ALERT_KEY, 'off');
+        updateCandidateAlertToggle();
+        return;
+      }
+    }
+
+    if (Notification.permission === 'denied') {
+      candidateAlertsEnabled = false;
+      localStorage.setItem(ALERT_KEY, 'off');
+      updateCandidateAlertToggle();
+      return;
+    }
+
+    candidateAlertsEnabled = !candidateAlertsEnabled;
+    localStorage.setItem(ALERT_KEY, candidateAlertsEnabled ? 'on' : 'off');
+    if (candidateAlertsEnabled) playCandidateAlertTone();
+    updateCandidateAlertToggle();
+  }
+
+  function notifyForNewCandidates(candidates) {
+    const inbox = candidates.filter(item => String(item.status || 'new').toLowerCase() === 'new');
+    const nextIds = new Set(inbox.map(candidateAlertId));
+    const newItems = inbox.filter(item => !knownCandidateIds.has(candidateAlertId(item)));
+
+    if (candidateAlertsInitialized && candidateAlertsEnabled && newItems.length) {
+      playCandidateAlertTone();
+      document.title = `(${newItems.length}) New Kairos Candidate`;
+      if ('Notification' in window && Notification.permission === 'granted') {
+        newItems.slice(0, 3).forEach(item => {
+          new Notification(candidateNotificationTitle(item), {
+            body: candidateNotificationBody(item),
+            tag: candidateAlertId(item),
+          });
+        });
+      }
+    }
+
+    knownCandidateIds = nextIds;
+    candidateAlertsInitialized = true;
+  }
+
   window.saveCandidateApiKey = saveCandidateApiKey;
+  window.toggleCandidateApiKeyPanel = toggleCandidateApiKeyPanel;
+  window.toggleCandidateAlerts = toggleCandidateAlerts;
   window.loadCandidateDashboard = loadCandidateDashboard;
   window.setCandidateView = setCandidateView;
   window.updateCandidateStatus = updateCandidateStatus;
