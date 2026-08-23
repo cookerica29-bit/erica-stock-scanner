@@ -1,6 +1,8 @@
 (function () {
   const KEY = 'kairos_scanner_api_key';
   const ALERT_KEY = 'kairos_candidate_alerts';
+  const API_KEY_DB = 'kairos_candidate_dashboard';
+  const API_KEY_STORE = 'settings';
   const state = {
     loaded: false,
     loading: false,
@@ -12,9 +14,10 @@
     error: null,
   };
   let knownCandidateIds = new Set();
-  let candidateAlertsEnabled = localStorage.getItem(ALERT_KEY) === 'on';
+  let candidateAlertsEnabled = storageGet(localStorage, ALERT_KEY) === 'on';
   let candidateAlertsInitialized = false;
   let apiKeyPanelExpanded = false;
+  let cachedApiKey = '';
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -44,8 +47,94 @@
     return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   }
 
+  function storageGet(storage, key) {
+    try {
+      return storage.getItem(key) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function storageSet(storage, key, value) {
+    try {
+      storage.setItem(key, value);
+    } catch {}
+  }
+
+  function storageRemove(storage, key) {
+    try {
+      storage.removeItem(key);
+    } catch {}
+  }
+
+  function openApiKeyDb() {
+    if (!('indexedDB' in window)) return Promise.resolve(null);
+    return new Promise(resolve => {
+      const request = indexedDB.open(API_KEY_DB, 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore(API_KEY_STORE);
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    });
+  }
+
+  async function readApiKeyFromDb() {
+    const db = await openApiKeyDb();
+    if (!db) return '';
+    return new Promise(resolve => {
+      const tx = db.transaction(API_KEY_STORE, 'readonly');
+      const request = tx.objectStore(API_KEY_STORE).get(KEY);
+      request.onsuccess = () => resolve(String(request.result || ''));
+      request.onerror = () => resolve('');
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => db.close();
+    });
+  }
+
+  async function writeApiKeyToDb(value) {
+    const db = await openApiKeyDb();
+    if (!db) return;
+    await new Promise(resolve => {
+      const tx = db.transaction(API_KEY_STORE, 'readwrite');
+      const store = tx.objectStore(API_KEY_STORE);
+      if (value) store.put(value, KEY);
+      else store.delete(KEY);
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        resolve();
+      };
+    });
+  }
+
+  function persistApiKey(value) {
+    cachedApiKey = value;
+    storageSet(localStorage, KEY, value);
+    storageSet(sessionStorage, KEY, value);
+  }
+
+  async function hydrateApiKey() {
+    const existing = apiKey();
+    if (existing) return existing;
+    const stored = await readApiKeyFromDb();
+    if (stored) persistApiKey(stored);
+    return stored;
+  }
+
+  function clearApiKey() {
+    cachedApiKey = '';
+    storageRemove(localStorage, KEY);
+    storageRemove(sessionStorage, KEY);
+  }
+
   function apiKey() {
-    return localStorage.getItem(KEY) || '';
+    cachedApiKey = cachedApiKey || storageGet(localStorage, KEY) || storageGet(sessionStorage, KEY);
+    return cachedApiKey;
   }
 
   function headers() {
@@ -93,15 +182,16 @@
     el.style.color = kind === 'error' ? 'var(--fail)' : kind === 'ok' ? 'var(--pass)' : 'var(--muted)';
   }
 
-  function saveCandidateApiKey() {
+  async function saveCandidateApiKey() {
     const input = document.getElementById('candidateApiKeyInput');
     const value = String(input?.value || '').trim();
-    if (value) localStorage.setItem(KEY, value);
-    else localStorage.removeItem(KEY);
+    if (value) persistApiKey(value);
+    else clearApiKey();
+    await writeApiKeyToDb(value);
     state.loaded = false;
     apiKeyPanelExpanded = !value;
     updateApiKeyPanel();
-    setStatus(value ? 'Scanner API key saved in this browser.' : 'Scanner API key cleared.', value ? 'ok' : '');
+    setStatus(value ? 'Scanner API key saved on this device.' : 'Scanner API key cleared.', value ? 'ok' : '');
   }
 
   function syncInput() {
@@ -126,6 +216,7 @@
   }
 
   async function loadCandidateDashboard(force = false) {
+    await hydrateApiKey();
     syncInput();
     if (!apiKey()) {
       render();
