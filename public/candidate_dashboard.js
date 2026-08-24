@@ -490,6 +490,13 @@
     if (preview.rr_warning) warnings.push('<span class="candidate-pill warn">R:R warning</span>');
     if (preview.no_valid_target) warnings.push('<span class="candidate-pill bad">No valid target</span>');
     if (!preview.entry_proximity_ok) warnings.push(`<span class="candidate-pill bad">${escapeHtml(preview.entry_proximity_reason || 'Price not near entry')}</span>`);
+    if (preview.execution_shadow_checked) {
+      warnings.push(
+        preview.execution_shadow_ok
+          ? '<span class="candidate-pill high">Execution reaction ok</span>'
+          : '<span class="candidate-pill warn">Execution reaction weak</span>',
+      );
+    }
     const contract = preview.option_contract || {};
     const contractAvailable = Boolean(contract.available);
     const contractLabel = contractAvailable
@@ -514,6 +521,7 @@
         <div><span>Expiry</span><strong>${escapeHtml(contractMeta)}</strong></div>
       </div>
       <div class="candidate-meta">Preview computed ${escapeHtml(fmtTime(preview.computed_at))} · target source ${escapeHtml(preview.target_source || '—')}</div>
+      ${preview.execution_shadow_checked ? `<div class="candidate-meta">Execution shadow: ${escapeHtml(preview.execution_shadow_reason || '—')}</div>` : ''}
     `;
   }
 

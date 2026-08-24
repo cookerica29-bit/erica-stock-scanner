@@ -54,6 +54,7 @@ def test_scanner_candidate_ingestion_lifecycle():
         previous_best_contract = candidates_router._best_contract
         previous_latest_quote = candidates_router._latest_quote_for_ticker
         previous_latest_quotes = candidates_router._latest_quotes_for_previews
+        previous_execution_bars = candidates_router._recent_4h_bars_for_execution_shadow
         candidates_router._batch_download = lambda tickers, period, interval: {
             str(tickers[0]).upper(): _promotion_daily_frame()
         }
@@ -83,6 +84,12 @@ def test_scanner_candidate_ingestion_lifecycle():
             }
             for preview in previews
         }
+        candidates_router._recent_4h_bars_for_execution_shadow = lambda ticker: [
+            {"time": "2026-08-20T02:00:00Z", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0},
+            {"time": "2026-08-20T06:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},
+            {"time": "2026-08-20T10:00:00Z", "open": 100.5, "high": 102.0, "low": 99.2, "close": 101.0},
+            {"time": "2026-08-20T14:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.2},
+        ]
         candidates_router._call_anthropic_chart_review = lambda prompt: (
             {
                 "classification": "fresh_clean_structural_break",
@@ -318,6 +325,7 @@ def test_scanner_candidate_ingestion_lifecycle():
             candidates_router._best_contract = previous_best_contract
             candidates_router._latest_quote_for_ticker = previous_latest_quote
             candidates_router._latest_quotes_for_previews = previous_latest_quotes
+            candidates_router._recent_4h_bars_for_execution_shadow = previous_execution_bars
 
 
 def test_chart_review_parser_accepts_fenced_json():

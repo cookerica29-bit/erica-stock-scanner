@@ -11,6 +11,7 @@ import os
 import json
 import sqlite3
 import hmac
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -355,6 +356,11 @@ class CandidatePlanPreviewOut(BaseModel):
     entry_proximity_reason: Optional[str] = None
     entry_proximity_threshold_pct: float = ENTRY_PROXIMITY_MAX_PCT_DEFAULT
     entry_proximity_threshold_atr: float = ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT
+    execution_shadow_checked: bool = False
+    execution_shadow_ok: Optional[bool] = None
+    execution_shadow_reason: Optional[str] = None
+    execution_shadow_version: Optional[str] = None
+    execution_shadow_candle_time: Optional[str] = None
     preview_error: Optional[str]
     computed_at: str
     candidate_updated_at: Optional[str]
@@ -593,6 +599,149 @@ def _latest_quotes_for_previews(previews: list[dict]) -> dict[str, dict[str, Any
     except Exception:
         return {}
     return quotes if isinstance(quotes, dict) else {}
+
+
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _bar_time_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return str(value)
+
+
+def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
+    try:
+        raw = AlpacaMarketDataProvider().download([ticker], period="30d", interval="4h", auto_adjust=True)
+    except Exception:
+        return []
+    if raw is None or raw.empty:
+        return []
+    try:
+        df = _flatten_columns(raw.copy()).dropna().astype(float)
+    except Exception:
+        return []
+    required = {"Open", "High", "Low", "Close"}
+    if df.empty or not required.issubset(set(df.columns)):
+        return []
+    rows: list[dict[str, Any]] = []
+    for index, row in df.tail(5).iterrows():
+        rows.append(
+            {
+                "time": _bar_time_iso(index),
+                "open": _as_float(row.get("Open")),
+                "high": _as_float(row.get("High")),
+                "low": _as_float(row.get("Low")),
+                "close": _as_float(row.get("Close")),
+            }
+        )
+    return rows
+
+
+def _execution_shadow_from_bars(
+    candidate: sqlite3.Row | dict,
+    preview: dict,
+    bars: list[dict[str, Any]],
+) -> dict[str, Any]:
+    version = "4h-live-reaction-shadow-v1"
+    base = {
+        "execution_shadow_checked": True,
+        "execution_shadow_ok": False,
+        "execution_shadow_reason": "Recent 4H bars unavailable",
+        "execution_shadow_version": version,
+        "execution_shadow_candle_time": None,
+    }
+    if len(bars) < 4:
+        return base
+
+    latest = bars[-1]
+    prior = bars[-2]
+    prior_lows = [_as_float(bar.get("low")) for bar in bars[-4:-1]]
+    prior_lows = [low for low in prior_lows if low is not None]
+
+    open_price = _as_float(latest.get("open"))
+    high = _as_float(latest.get("high"))
+    low = _as_float(latest.get("low"))
+    close = _as_float(latest.get("close"))
+    prior_close = _as_float(prior.get("close"))
+    entry = _as_float(preview.get("entry_price"))
+    atr = _as_float(preview.get("atr14"))
+    ema21 = _as_float(candidate["ema21_4h"] if "ema21_4h" in candidate.keys() else None)
+
+    base["execution_shadow_candle_time"] = latest.get("time")
+    if None in (open_price, high, low, close, prior_close, entry, atr) or not prior_lows:
+        base["execution_shadow_reason"] = "4H execution inputs unavailable"
+        return base
+    if atr is None or atr <= 0:
+        base["execution_shadow_reason"] = "ATR unavailable for execution check"
+        return base
+
+    bullish_reaction = close > open_price or close > prior_close
+    strong_close = close > ((high + low) / 2)
+    hold_floor = entry - (0.5 * atr)
+    if ema21 is not None:
+        hold_floor = max(hold_floor, ema21 - (0.5 * atr))
+    holds_zone = low >= hold_floor
+    no_fresh_lower_low = low >= min(prior_lows)
+
+    failures = []
+    if not bullish_reaction:
+        failures.append("no bullish reaction")
+    if not strong_close:
+        failures.append("close not upper half")
+    if not holds_zone:
+        failures.append(f"sliced zone low {low:.2f} < floor {hold_floor:.2f}")
+    if not no_fresh_lower_low:
+        failures.append("fresh lower low vs prior 3 bars")
+
+    ok = not failures
+    return {
+        **base,
+        "execution_shadow_ok": ok,
+        "execution_shadow_reason": "Latest 4H snapshot confirms reaction" if ok else "; ".join(failures),
+    }
+
+
+def _preview_base_enter_now_ready(candidate: sqlite3.Row | dict, preview: dict) -> bool:
+    direction = str(preview.get("signal") or candidate["signal"]).strip().lower()
+    if direction != "long":
+        return False
+    if not _candidate_regime_aligned(candidate, direction):
+        return False
+    if preview.get("preview_error"):
+        return False
+    if preview.get("no_valid_target") or preview.get("target") is None or preview.get("risk_reward") is None:
+        return False
+    if preview.get("rr_warning") or float(preview.get("risk_reward") or 0) < RR_WARNING_THRESHOLD:
+        return False
+    if _contract_block_reason(preview.get("option_contract")):
+        return False
+    return bool(preview.get("entry_proximity_ok"))
+
+
+def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> dict:
+    if not _preview_base_enter_now_ready(candidate, preview):
+        return {
+            **preview,
+            "execution_shadow_checked": False,
+            "execution_shadow_ok": None,
+            "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
+            "execution_shadow_version": "4h-live-reaction-shadow-v1",
+            "execution_shadow_candle_time": None,
+        }
+    bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))
+    return {**preview, **_execution_shadow_from_bars(candidate, preview, bars)}
 
 
 def _entry_proximity_block_reason(entry_price: Optional[float], atr14: Optional[float], ticker: str) -> Optional[str]:
@@ -1325,10 +1474,23 @@ def list_candidate_plan_previews(
             if "database is locked" not in str(exc).lower():
                 raise
         quotes = _latest_quotes_for_previews(previews)
-        return [
-            _attach_entry_proximity(preview, quotes.get(str(preview.get("ticker") or "").upper()))
-            for preview in previews
-        ]
+        candidates_by_key = {
+            (str(candidate["ticker"]).upper(), str(candidate["source"])): candidate
+            for candidate in candidates
+        }
+        enriched = []
+        for preview in previews:
+            with_proximity = _attach_entry_proximity(
+                preview,
+                quotes.get(str(preview.get("ticker") or "").upper()),
+            )
+            candidate = candidates_by_key.get(
+                (str(preview.get("ticker") or "").upper(), str(preview.get("source") or ""))
+            )
+            enriched.append(
+                _attach_execution_shadow(candidate, with_proximity) if candidate is not None else with_proximity
+            )
+        return enriched
     finally:
         conn.close()
 
