@@ -41,7 +41,8 @@ MIN_CLEAN_OPTION_PREMIUM_DEFAULT = 0.50
 MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT = 50.0
 EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
 EXECUTION_SHADOW_RECENT_RANGE_BARS = 15
-EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS = 10
+EXECUTION_SHADOW_CONFIRMATION_BARS = 5
+EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS = EXECUTION_SHADOW_RECENT_RANGE_BARS - EXECUTION_SHADOW_CONFIRMATION_BARS
 EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR = 0.75
 EXECUTION_SHADOW_MIN_VOLUME_RATIO = 0.60
 
@@ -704,7 +705,7 @@ def _execution_shadow_from_bars(
     preview: dict,
     bars: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    version = "4h-live-reaction-shadow-v4"
+    version = "4h-live-reaction-shadow-v5"
     base = {
         "execution_shadow_checked": True,
         "execution_shadow_ok": False,
@@ -723,19 +724,22 @@ def _execution_shadow_from_bars(
     prior_lows = [_as_float(bar.get("low")) for bar in bars[-4:-1]]
     prior_lows = [low for low in prior_lows if low is not None]
     range_bars = bars[-EXECUTION_SHADOW_RECENT_RANGE_BARS:]
-    early_range_closes = [_as_float(bar.get("close")) for bar in range_bars[:-5]]
-    recent_range_closes = [_as_float(bar.get("close")) for bar in range_bars[-5:]]
+    baseline_bars = range_bars[:EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS]
+    confirmation_bars = range_bars[EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS:]
+    early_range_closes = [_as_float(bar.get("close")) for bar in baseline_bars]
+    recent_range_closes = [_as_float(bar.get("close")) for bar in confirmation_bars]
     early_range_closes = [close_value for close_value in early_range_closes if close_value is not None]
     recent_range_closes = [close_value for close_value in recent_range_closes if close_value is not None]
-    prior_volumes = [_as_float(bar.get("volume")) for bar in bars[-(EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS + 1):-1]]
+    prior_volumes = [_as_float(bar.get("volume")) for bar in baseline_bars]
     prior_volumes = [volume for volume in prior_volumes if volume is not None and volume > 0]
+    confirmation_volumes = [_as_float(bar.get("volume")) for bar in confirmation_bars]
+    confirmation_volumes = [volume for volume in confirmation_volumes if volume is not None and volume > 0]
 
     open_price = _as_float(latest.get("open"))
     high = _as_float(latest.get("high"))
     low = _as_float(latest.get("low"))
     close = _as_float(latest.get("close"))
     prior_close = _as_float(prior.get("close"))
-    latest_volume = _as_float(latest.get("volume"))
     entry = _as_float(preview.get("entry_price"))
     atr = _as_float(preview.get("atr14"))
     ema21 = _as_float(candidate["ema21_4h"] if "ema21_4h" in candidate.keys() else None)
@@ -766,7 +770,7 @@ def _execution_shadow_from_bars(
     direction_expanded = directional_expansion_atr >= EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR
     volume_ratio = None
     volume_confirmed = True
-    if latest_volume is not None and latest_volume > 0 and prior_volumes:
+    if confirmation_volumes and prior_volumes:
         sorted_prior_volumes = sorted(prior_volumes)
         mid = len(sorted_prior_volumes) // 2
         median_prior_volume = (
@@ -775,7 +779,7 @@ def _execution_shadow_from_bars(
             else (sorted_prior_volumes[mid - 1] + sorted_prior_volumes[mid]) / 2
         )
         if median_prior_volume > 0:
-            volume_ratio = latest_volume / median_prior_volume
+            volume_ratio = max(confirmation_volumes) / median_prior_volume
             volume_confirmed = volume_ratio >= EXECUTION_SHADOW_MIN_VOLUME_RATIO
 
     failures = []
@@ -792,7 +796,7 @@ def _execution_shadow_from_bars(
     if not direction_expanded:
         failures.append(f"directional expansion only {directional_expansion_atr:.2f} ATR")
     if not volume_confirmed and volume_ratio is not None:
-        failures.append(f"thin live volume {volume_ratio:.2f}x prior median")
+        failures.append(f"thin confirmation volume {volume_ratio:.2f}x prior median")
 
     ok = not failures
     return {
@@ -826,7 +830,7 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
             "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
-            "execution_shadow_version": "4h-live-reaction-shadow-v4",
+            "execution_shadow_version": "4h-live-reaction-shadow-v5",
             "execution_shadow_candle_time": None,
         }
     bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))

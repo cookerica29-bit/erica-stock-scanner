@@ -73,10 +73,10 @@ def test_execution_shadow_fails_low_conviction_positive_reaction():
     candidate = {"ticker": "SLBISH", "signal": "long", "ema21_4h": 53.0}
     preview = {"entry_price": 53.39, "atr14": 2.0}
     bars = _leading_bars(10, base=52.8, volume=300000) + [
-        {"time": "2026-08-24T00:00:00Z", "open": 53.0, "high": 53.5, "low": 52.7, "close": 53.2, "volume": 300000},
-        {"time": "2026-08-24T04:00:00Z", "open": 53.2, "high": 53.6, "low": 52.8, "close": 53.1, "volume": 280000},
-        {"time": "2026-08-24T08:00:00Z", "open": 53.1, "high": 53.7, "low": 52.9, "close": 53.3, "volume": 260000},
-        {"time": "2026-08-24T12:00:00Z", "open": 53.3, "high": 53.8, "low": 52.9, "close": 53.4, "volume": 240000},
+        {"time": "2026-08-24T00:00:00Z", "open": 53.0, "high": 53.5, "low": 52.7, "close": 53.2, "volume": 76000},
+        {"time": "2026-08-24T04:00:00Z", "open": 53.2, "high": 53.6, "low": 52.8, "close": 53.1, "volume": 76000},
+        {"time": "2026-08-24T08:00:00Z", "open": 53.1, "high": 53.7, "low": 52.9, "close": 53.3, "volume": 76000},
+        {"time": "2026-08-24T12:00:00Z", "open": 53.3, "high": 53.8, "low": 52.9, "close": 53.4, "volume": 76000},
         {"time": "2026-08-24T16:00:00Z", "open": 53.35, "high": 53.55, "low": 53.0, "close": 53.48, "volume": 76000},
     ]
 
@@ -85,7 +85,24 @@ def test_execution_shadow_fails_low_conviction_positive_reaction():
     assert result["execution_shadow_ok"] is False
     assert "reaction only" in result["execution_shadow_reason"]
     assert "directional expansion only" in result["execution_shadow_reason"]
-    assert "thin live volume" in result["execution_shadow_reason"]
+    assert "thin confirmation volume" in result["execution_shadow_reason"]
+
+
+def test_execution_shadow_passes_quiet_consolidation_after_volume_push():
+    candidate = {"ticker": "DASHLIKE", "signal": "long", "ema21_4h": 100.0}
+    preview = {"entry_price": 100.0, "atr14": 2.0}
+    bars = _leading_bars(10, base=97.0, volume=140000) + [
+        {"time": "2026-08-24T00:00:00Z", "open": 98.0, "high": 100.0, "low": 97.8, "close": 99.7, "volume": 160000},
+        {"time": "2026-08-24T04:00:00Z", "open": 99.7, "high": 102.0, "low": 99.4, "close": 101.4, "volume": 220000},
+        {"time": "2026-08-24T08:00:00Z", "open": 101.4, "high": 102.6, "low": 100.9, "close": 102.1, "volume": 180000},
+        {"time": "2026-08-24T12:00:00Z", "open": 102.1, "high": 102.8, "low": 101.6, "close": 102.4, "volume": 60000},
+        {"time": "2026-08-24T16:00:00Z", "open": 102.2, "high": 102.7, "low": 101.8, "close": 102.5, "volume": 24000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is True
+    assert result["execution_shadow_reason"] == "Latest 4H snapshot confirms reaction"
 
 
 def test_execution_shadow_fails_flat_range_positive_reaction():
