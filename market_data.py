@@ -428,18 +428,8 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         reverse_symbol_map = {self.normalize_symbol(symbol): symbol for symbol in requested_symbols}
         chunk_size = _parse_positive_int_env("ALPACA_QUOTE_CHUNK_SIZE", DEFAULT_ALPACA_QUOTE_CHUNK_SIZE)
         results: dict[str, dict[str, Any]] = {}
-        for chunk in _chunks(requested_symbols, chunk_size):
-            params = {"symbols": ",".join(self.normalize_symbol(symbol) for symbol in chunk)}
-            try:
-                payload = self._request_latest_quotes(params)
-            except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
-                logger.warning(
-                    "[alpaca] latest quote request failed symbols=%s error=%s",
-                    len(chunk),
-                    _classify_error(exc),
-                )
-                continue
 
+        def ingest_payload(payload: dict[str, Any]) -> None:
             quotes = payload.get("quotes") or {}
             for provider_symbol, quote in quotes.items():
                 original_symbol = reverse_symbol_map.get(str(provider_symbol or "").strip().upper())
@@ -456,6 +446,32 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                     "timestamp": quote.get("t"),
                     "source": "alpaca_latest_quote",
                 }
+
+        for chunk in _chunks(requested_symbols, chunk_size):
+            params = {"symbols": ",".join(self.normalize_symbol(symbol) for symbol in chunk)}
+            try:
+                payload = self._request_latest_quotes(params)
+            except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
+                logger.warning(
+                    "[alpaca] latest quote request failed symbols=%s error=%s",
+                    len(chunk),
+                    _classify_error(exc),
+                )
+                if len(chunk) <= 1:
+                    continue
+                for symbol in chunk:
+                    single_params = {"symbols": self.normalize_symbol(symbol)}
+                    try:
+                        ingest_payload(self._request_latest_quotes(single_params))
+                    except (HTTPError, URLError, TimeoutError, RuntimeError) as single_exc:
+                        logger.warning(
+                            "[alpaca] latest quote single-symbol fallback failed symbol=%s error=%s",
+                            self.normalize_symbol(symbol),
+                            _classify_error(single_exc),
+                        )
+                continue
+
+            ingest_payload(payload)
 
         logger.info(
             "[alpaca] latest quotes completed symbols=%s quotes=%s chunks=%s",

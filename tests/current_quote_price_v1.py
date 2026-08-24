@@ -110,6 +110,30 @@ def test_latest_quotes_failure_returns_available_quotes_only():
     }
 
 
+def test_latest_quotes_batch_failure_retries_individual_symbols():
+    provider, calls = provider_with_quote_pages([
+        URLError("bad symbol poisoned batch"),
+        {"quotes": {"AAPL": {"bp": 100.0, "ap": 101.0}}},
+        URLError("bad symbol"),
+        {"quotes": {"MSFT": {"bp": 400.0, "ap": 402.0}}},
+    ])
+
+    old_env = os.environ.get("ALPACA_QUOTE_CHUNK_SIZE")
+    os.environ["ALPACA_QUOTE_CHUNK_SIZE"] = "3"
+    try:
+        quotes = provider.latest_quotes(["AAPL", "BAD", "MSFT"])
+    finally:
+        if old_env is None:
+            os.environ.pop("ALPACA_QUOTE_CHUNK_SIZE", None)
+        else:
+            os.environ["ALPACA_QUOTE_CHUNK_SIZE"] = old_env
+
+    assert [call["symbols"] for call in calls] == ["AAPL,BAD,MSFT", "AAPL", "BAD", "MSFT"]
+    assert quotes["AAPL"]["price"] == 100.5
+    assert quotes["MSFT"]["price"] == 401.0
+    assert "BAD" not in quotes
+
+
 def test_attach_current_quotes_is_display_only():
     rows = [
         {"ticker": "AAPL", "price": 100.0},
@@ -170,6 +194,7 @@ def main() -> int:
     test_latest_quotes_uses_midpoint_then_ask_then_bid()
     test_latest_quotes_chunks_requests()
     test_latest_quotes_failure_returns_available_quotes_only()
+    test_latest_quotes_batch_failure_retries_individual_symbols()
     test_attach_current_quotes_is_display_only()
     test_attach_current_quotes_failure_leaves_rows_unchanged()
     print("Current quote price v1 tests passed")
