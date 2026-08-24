@@ -37,6 +37,8 @@ CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
 SCANNER_SESSION_COOKIE = "kairos_scanner_session"
 ENTRY_PROXIMITY_MAX_PCT_DEFAULT = 1.5
 ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
+MIN_CLEAN_OPTION_PREMIUM_DEFAULT = 0.50
+MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT = 50.0
 EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
 EXECUTION_SHADOW_MIN_RECENT_RANGE_ATR = 0.75
 EXECUTION_SHADOW_MIN_VOLUME_RATIO = 0.60
@@ -79,6 +81,14 @@ def _entry_proximity_max_pct() -> float:
 
 def _entry_proximity_max_atr_multiple() -> float:
     return _float_env("ENTER_NOW_ENTRY_PROXIMITY_MAX_ATR_MULTIPLE", ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT)
+
+
+def _min_clean_option_premium() -> float:
+    return _float_env("ENTER_NOW_MIN_OPTION_PREMIUM", MIN_CLEAN_OPTION_PREMIUM_DEFAULT)
+
+
+def _min_clean_option_contract_cost() -> float:
+    return _float_env("ENTER_NOW_MIN_OPTION_CONTRACT_COST", MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT)
 
 
 def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
@@ -495,6 +505,30 @@ def _normalize_preview_option_contract(contract: dict) -> dict:
     return normalized
 
 
+def _safe_float_value(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _option_contract_cost(contract: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    cost = _safe_float_value(contract.get("estimated_contract_cost"))
+    premium = cost / 100 if cost is not None and cost > 0 else None
+    if premium is not None:
+        return cost, premium
+
+    for key in ("ask", "mark", "mid", "last", "last_price"):
+        candidate_premium = _safe_float_value(contract.get(key))
+        if candidate_premium is not None and candidate_premium > 0:
+            return round(candidate_premium * 100, 2), candidate_premium
+    return None, None
+
+
 def _contract_block_reason(contract: Optional[dict[str, Any]]) -> Optional[str]:
     if not contract or not contract.get("available"):
         if contract:
@@ -502,6 +536,16 @@ def _contract_block_reason(contract: Optional[dict[str, Any]]) -> Optional[str]:
         return "No clean options contract."
     execution = str(contract.get("execution") or "").strip().lower()
     if any(grade in execution for grade in ("excellent", "good", "fair")):
+        cost, premium = _option_contract_cost(contract)
+        min_cost = _min_clean_option_contract_cost()
+        min_premium = _min_clean_option_premium()
+        if cost is None or premium is None:
+            return "Option premium is unavailable for clean dashboard."
+        if cost < min_cost or premium < min_premium:
+            return (
+                f"Option premium is too thin for clean dashboard "
+                f"(${premium:.2f} / ${cost:.2f} contract cost; minimum ${min_premium:.2f} / ${min_cost:.2f})."
+            )
         return None
     return f"Option contract quality is {contract.get('execution') or 'unknown'}."
 

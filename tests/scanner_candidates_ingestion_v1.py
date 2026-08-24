@@ -68,6 +68,11 @@ def test_scanner_candidate_ingestion_lifecycle():
             "dte": 29,
             "symbol": "MOCK",
             "source": "option_chain",
+            "bid": 1.10,
+            "ask": 1.20,
+            "mid": 1.15,
+            "mark": 1.15,
+            "estimated_contract_cost": 120.0,
         }
         candidates_router._latest_quote_for_ticker = lambda ticker: {
             "price": 100.0,
@@ -376,6 +381,40 @@ def test_entry_proximity_uses_percent_or_atr_threshold():
     assert "away from entry" in far["entry_proximity_reason"]
 
 
+def test_contract_gate_blocks_tiny_option_premium():
+    import candidates_router
+
+    reason = candidates_router._contract_block_reason({
+        "available": True,
+        "execution": "Excellent",
+        "type": "CALL",
+        "strike": 10.0,
+        "expiry": "2026-09-18",
+        "ask": 0.16,
+        "mid": 0.15,
+        "estimated_contract_cost": 16.0,
+    })
+    assert reason is not None
+    assert "too thin" in reason
+    assert "$0.16" in reason
+
+
+def test_contract_gate_allows_clean_option_premium():
+    import candidates_router
+
+    reason = candidates_router._contract_block_reason({
+        "available": True,
+        "execution": "Good",
+        "type": "CALL",
+        "strike": 100.0,
+        "expiry": "2026-09-18",
+        "ask": 0.65,
+        "mid": 0.60,
+        "estimated_contract_cost": 65.0,
+    })
+    assert reason is None
+
+
 def test_promotion_blocks_when_price_is_not_near_entry():
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "candidates.db")
@@ -399,6 +438,11 @@ def test_promotion_blocks_when_price_is_not_near_entry():
             "dte": 25,
             "symbol": "MOCK",
             "source": "option_chain",
+            "bid": 1.10,
+            "ask": 1.20,
+            "mid": 1.15,
+            "mark": 1.15,
+            "estimated_contract_cost": 120.0,
         }
         candidates_router._latest_quote_for_ticker = lambda ticker: {
             "price": 110.0,
@@ -502,6 +546,8 @@ if __name__ == "__main__":
     test_chart_review_parser_accepts_fenced_json()
     test_preview_contract_normalizes_expiration_data_unavailable()
     test_entry_proximity_uses_percent_or_atr_threshold()
+    test_contract_gate_blocks_tiny_option_premium()
+    test_contract_gate_allows_clean_option_premium()
     test_promotion_blocks_when_price_is_not_near_entry()
     test_short_candidate_cannot_promote_to_clean_dashboard()
     print("scanner_candidates_ingestion_v1 passed")
