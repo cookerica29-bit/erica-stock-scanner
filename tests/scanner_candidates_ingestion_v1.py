@@ -90,10 +90,20 @@ def test_scanner_candidate_ingestion_lifecycle():
             for preview in previews
         }
         candidates_router._recent_4h_bars_for_execution_shadow = lambda ticker: [
-            {"time": "2026-08-20T02:00:00Z", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0},
-            {"time": "2026-08-20T06:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},
-            {"time": "2026-08-20T10:00:00Z", "open": 100.5, "high": 102.0, "low": 99.2, "close": 101.0},
-            {"time": "2026-08-20T14:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.2},
+            {
+                "time": f"2026-08-19T{hour:02d}:00:00Z",
+                "open": 99.0 + (idx * 0.05),
+                "high": 101.0 + (idx * 0.05),
+                "low": 98.0 + (idx * 0.05),
+                "close": 100.0 + (idx * 0.05),
+                "volume": 1000,
+            }
+            for idx, hour in enumerate(range(11))
+        ] + [
+            {"time": "2026-08-20T02:00:00Z", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 1000},
+            {"time": "2026-08-20T06:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1100},
+            {"time": "2026-08-20T10:00:00Z", "open": 100.5, "high": 102.0, "low": 99.2, "close": 101.0, "volume": 1200},
+            {"time": "2026-08-20T14:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.2, "volume": 1000},
         ]
         candidates_router._call_anthropic_chart_review = lambda prompt: (
             {

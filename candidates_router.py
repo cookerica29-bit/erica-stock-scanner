@@ -40,6 +40,8 @@ ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
 MIN_CLEAN_OPTION_PREMIUM_DEFAULT = 0.50
 MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT = 50.0
 EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
+EXECUTION_SHADOW_RECENT_RANGE_BARS = 15
+EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS = 10
 EXECUTION_SHADOW_MIN_RECENT_RANGE_ATR = 0.75
 EXECUTION_SHADOW_MIN_VOLUME_RATIO = 0.60
 
@@ -683,7 +685,7 @@ def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
     if df.empty or not required.issubset(set(df.columns)):
         return []
     rows: list[dict[str, Any]] = []
-    for index, row in df.tail(5).iterrows():
+    for index, row in df.tail(EXECUTION_SHADOW_RECENT_RANGE_BARS).iterrows():
         rows.append(
             {
                 "time": _bar_time_iso(index),
@@ -702,7 +704,7 @@ def _execution_shadow_from_bars(
     preview: dict,
     bars: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    version = "4h-live-reaction-shadow-v2"
+    version = "4h-live-reaction-shadow-v3"
     base = {
         "execution_shadow_checked": True,
         "execution_shadow_ok": False,
@@ -710,18 +712,22 @@ def _execution_shadow_from_bars(
         "execution_shadow_version": version,
         "execution_shadow_candle_time": None,
     }
-    if len(bars) < 4:
+    if len(bars) < EXECUTION_SHADOW_RECENT_RANGE_BARS:
+        base["execution_shadow_reason"] = (
+            f"Need {EXECUTION_SHADOW_RECENT_RANGE_BARS} recent 4H bars for execution check"
+        )
         return base
 
     latest = bars[-1]
     prior = bars[-2]
     prior_lows = [_as_float(bar.get("low")) for bar in bars[-4:-1]]
     prior_lows = [low for low in prior_lows if low is not None]
-    recent_highs = [_as_float(bar.get("high")) for bar in bars[-5:]]
-    recent_lows = [_as_float(bar.get("low")) for bar in bars[-5:]]
+    range_bars = bars[-EXECUTION_SHADOW_RECENT_RANGE_BARS:]
+    recent_highs = [_as_float(bar.get("high")) for bar in range_bars]
+    recent_lows = [_as_float(bar.get("low")) for bar in range_bars]
     recent_highs = [high for high in recent_highs if high is not None]
     recent_lows = [low for low in recent_lows if low is not None]
-    prior_volumes = [_as_float(bar.get("volume")) for bar in bars[-5:-1]]
+    prior_volumes = [_as_float(bar.get("volume")) for bar in bars[-(EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS + 1):-1]]
     prior_volumes = [volume for volume in prior_volumes if volume is not None and volume > 0]
 
     open_price = _as_float(latest.get("open"))
@@ -815,7 +821,7 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
             "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
-            "execution_shadow_version": "4h-live-reaction-shadow-v2",
+            "execution_shadow_version": "4h-live-reaction-shadow-v3",
             "execution_shadow_candle_time": None,
         }
     bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))
