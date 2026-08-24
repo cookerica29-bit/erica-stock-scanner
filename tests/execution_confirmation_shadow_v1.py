@@ -27,7 +27,7 @@ def test_execution_shadow_passes_clean_bullish_reaction():
         {"time": "2026-08-24T04:00:00Z", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 1000},
         {"time": "2026-08-24T08:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1100},
         {"time": "2026-08-24T12:00:00Z", "open": 100.5, "high": 102.0, "low": 99.2, "close": 101.0, "volume": 1200},
-        {"time": "2026-08-24T16:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.2, "volume": 1000},
+        {"time": "2026-08-24T16:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.6, "volume": 1000},
     ]
 
     result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
@@ -84,6 +84,7 @@ def test_execution_shadow_fails_low_conviction_positive_reaction():
 
     assert result["execution_shadow_ok"] is False
     assert "reaction only" in result["execution_shadow_reason"]
+    assert "directional expansion only" in result["execution_shadow_reason"]
     assert "thin live volume" in result["execution_shadow_reason"]
 
 
@@ -112,7 +113,7 @@ def test_execution_shadow_fails_flat_range_positive_reaction():
 
     assert result["execution_shadow_ok"] is False
     assert "reaction only" in result["execution_shadow_reason"]
-    assert "recent range only" in result["execution_shadow_reason"]
+    assert "directional expansion only" in result["execution_shadow_reason"]
 
 
 def test_execution_shadow_requires_full_range_window():

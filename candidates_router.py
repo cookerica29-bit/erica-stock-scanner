@@ -42,7 +42,7 @@ MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT = 50.0
 EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
 EXECUTION_SHADOW_RECENT_RANGE_BARS = 15
 EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS = 10
-EXECUTION_SHADOW_MIN_RECENT_RANGE_ATR = 0.75
+EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR = 0.75
 EXECUTION_SHADOW_MIN_VOLUME_RATIO = 0.60
 
 
@@ -704,7 +704,7 @@ def _execution_shadow_from_bars(
     preview: dict,
     bars: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    version = "4h-live-reaction-shadow-v3"
+    version = "4h-live-reaction-shadow-v4"
     base = {
         "execution_shadow_checked": True,
         "execution_shadow_ok": False,
@@ -723,10 +723,10 @@ def _execution_shadow_from_bars(
     prior_lows = [_as_float(bar.get("low")) for bar in bars[-4:-1]]
     prior_lows = [low for low in prior_lows if low is not None]
     range_bars = bars[-EXECUTION_SHADOW_RECENT_RANGE_BARS:]
-    recent_highs = [_as_float(bar.get("high")) for bar in range_bars]
-    recent_lows = [_as_float(bar.get("low")) for bar in range_bars]
-    recent_highs = [high for high in recent_highs if high is not None]
-    recent_lows = [low for low in recent_lows if low is not None]
+    early_range_closes = [_as_float(bar.get("close")) for bar in range_bars[:-5]]
+    recent_range_closes = [_as_float(bar.get("close")) for bar in range_bars[-5:]]
+    early_range_closes = [close_value for close_value in early_range_closes if close_value is not None]
+    recent_range_closes = [close_value for close_value in recent_range_closes if close_value is not None]
     prior_volumes = [_as_float(bar.get("volume")) for bar in bars[-(EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS + 1):-1]]
     prior_volumes = [volume for volume in prior_volumes if volume is not None and volume > 0]
 
@@ -741,7 +741,12 @@ def _execution_shadow_from_bars(
     ema21 = _as_float(candidate["ema21_4h"] if "ema21_4h" in candidate.keys() else None)
 
     base["execution_shadow_candle_time"] = latest.get("time")
-    if None in (open_price, high, low, close, prior_close, entry, atr) or not prior_lows or not recent_highs or not recent_lows:
+    if (
+        None in (open_price, high, low, close, prior_close, entry, atr)
+        or not prior_lows
+        or not early_range_closes
+        or not recent_range_closes
+    ):
         base["execution_shadow_reason"] = "4H execution inputs unavailable"
         return base
     if atr is None or atr <= 0:
@@ -757,8 +762,8 @@ def _execution_shadow_from_bars(
     no_fresh_lower_low = low >= min(prior_lows)
     reaction_move_atr = max(close - open_price, close - prior_close) / atr
     meaningful_reaction = reaction_move_atr >= EXECUTION_SHADOW_MIN_REACTION_ATR
-    recent_range_atr = (max(recent_highs) - min(recent_lows)) / atr
-    range_expanded = recent_range_atr >= EXECUTION_SHADOW_MIN_RECENT_RANGE_ATR
+    directional_expansion_atr = (max(recent_range_closes) - min(early_range_closes)) / atr
+    direction_expanded = directional_expansion_atr >= EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR
     volume_ratio = None
     volume_confirmed = True
     if latest_volume is not None and latest_volume > 0 and prior_volumes:
@@ -784,8 +789,8 @@ def _execution_shadow_from_bars(
         failures.append("fresh lower low vs prior 3 bars")
     if not meaningful_reaction:
         failures.append(f"reaction only {reaction_move_atr:.2f} ATR")
-    if not range_expanded:
-        failures.append(f"recent range only {recent_range_atr:.2f} ATR")
+    if not direction_expanded:
+        failures.append(f"directional expansion only {directional_expansion_atr:.2f} ATR")
     if not volume_confirmed and volume_ratio is not None:
         failures.append(f"thin live volume {volume_ratio:.2f}x prior median")
 
@@ -821,7 +826,7 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
             "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
-            "execution_shadow_version": "4h-live-reaction-shadow-v3",
+            "execution_shadow_version": "4h-live-reaction-shadow-v4",
             "execution_shadow_candle_time": None,
         }
     bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))
