@@ -85,7 +85,7 @@ def test_execution_shadow_fails_low_conviction_positive_reaction():
     assert result["execution_shadow_ok"] is False
     assert "reaction only" in result["execution_shadow_reason"]
     assert "directional expansion only" in result["execution_shadow_reason"]
-    assert "thin confirmation volume" in result["execution_shadow_reason"]
+    assert "thin bullish confirmation volume" in result["execution_shadow_reason"]
 
 
 def test_execution_shadow_passes_quiet_consolidation_after_volume_push():
@@ -103,6 +103,23 @@ def test_execution_shadow_passes_quiet_consolidation_after_volume_push():
 
     assert result["execution_shadow_ok"] is True
     assert result["execution_shadow_reason"] == "Latest 4H snapshot confirms reaction"
+
+
+def test_execution_shadow_ignores_high_volume_red_candle_for_longs():
+    candidate = {"ticker": "SLBREGRESS", "signal": "long", "ema21_4h": 52.0}
+    preview = {"entry_price": 53.0, "atr14": 1.0}
+    bars = _leading_bars(10, base=52.0, volume=250000) + [
+        {"time": "2026-08-24T00:00:00Z", "open": 53.85, "high": 54.0, "low": 52.52, "close": 53.49, "volume": 481794},
+        {"time": "2026-08-24T04:00:00Z", "open": 53.49, "high": 53.8, "low": 53.1, "close": 53.7, "volume": 76000},
+        {"time": "2026-08-24T08:00:00Z", "open": 53.7, "high": 53.75, "low": 53.3, "close": 53.55, "volume": 80000},
+        {"time": "2026-08-24T12:00:00Z", "open": 53.55, "high": 53.9, "low": 53.4, "close": 53.75, "volume": 90000},
+        {"time": "2026-08-24T16:00:00Z", "open": 53.7, "high": 54.0, "low": 53.5, "close": 53.9, "volume": 76000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is False
+    assert "thin bullish confirmation volume" in result["execution_shadow_reason"]
 
 
 def test_execution_shadow_fails_flat_range_positive_reaction():
