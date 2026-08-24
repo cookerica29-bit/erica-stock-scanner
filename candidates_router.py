@@ -465,6 +465,17 @@ def _normalize_preview_option_contract(contract: dict) -> dict:
     return normalized
 
 
+def _contract_block_reason(contract: Optional[dict[str, Any]]) -> Optional[str]:
+    if not contract or not contract.get("available"):
+        if contract:
+            return str(contract.get("reason") or contract.get("execution") or "No clean options contract")
+        return "No clean options contract."
+    execution = str(contract.get("execution") or "").strip().lower()
+    if any(grade in execution for grade in ("excellent", "good", "fair")):
+        return None
+    return f"Option contract quality is {contract.get('execution') or 'unknown'}."
+
+
 def _preview_has_transient_option_unavailable(row: sqlite3.Row) -> bool:
     raw_contract = row["option_contract_json"] if "option_contract_json" in row.keys() else None
     if not raw_contract:
@@ -806,14 +817,30 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     }
 
 
-def _promotion_block_reason(promotion: dict) -> Optional[str]:
+def _candidate_regime_aligned(candidate: sqlite3.Row, direction: str) -> bool:
+    regime = str(candidate["daily_regime"] if "daily_regime" in candidate.keys() else "").strip().lower()
+    if direction == "long":
+        return "long" in regime or "bull" in regime
+    if direction == "short":
+        return "short" in regime or "bear" in regime
+    return False
+
+
+def _promotion_block_reason(candidate: sqlite3.Row, promotion: dict, option_contract: Optional[dict[str, Any]] = None) -> Optional[str]:
     direction = str(promotion.get("direction") or "").strip().lower()
     if direction == "short":
         return "Short candidates are research-only and cannot be promoted to the clean dashboard."
     if direction != "long":
         return "Unsupported candidate direction."
+    if not _candidate_regime_aligned(candidate, direction):
+        return "Candidate regime is not aligned, so it is not ENTER_NOW dashboard-ready."
     if promotion.get("no_valid_target") or promotion.get("target") is None or promotion.get("risk_reward") is None:
         return "Candidate has no valid target, so it is not ENTER_NOW dashboard-ready."
+    if promotion.get("rr_warning") or float(promotion.get("risk_reward") or 0) < RR_WARNING_THRESHOLD:
+        return f"Candidate R:R is below {RR_WARNING_THRESHOLD}:1, so it is not ENTER_NOW dashboard-ready."
+    contract_reason = _contract_block_reason(option_contract)
+    if contract_reason:
+        return f"Candidate option contract is not ENTER_NOW-ready: {contract_reason}"
     return None
 
 
@@ -1221,9 +1248,16 @@ def update_candidate_status(
             raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {source}")
 
         promotion = None
+        option_contract = None
         if update.status == "active":
             promotion = _compute_candidate_promotion(candidate)
-            block_reason = _promotion_block_reason(promotion)
+            if str(promotion.get("direction") or "").strip().lower() == "long":
+                option_contract = _safe_option_contract_for_candidate(
+                    promotion["ticker"],
+                    promotion["direction"],
+                    promotion["entry_price"],
+                )
+            block_reason = _promotion_block_reason(candidate, promotion, option_contract)
             if block_reason:
                 raise HTTPException(status_code=422, detail=block_reason)
             _store_promotion(conn, promotion)
@@ -1255,6 +1289,8 @@ def update_candidate_status(
         response = {"ticker": normalized_ticker, "source": source, "status": update.status}
         if promotion:
             response["promotion"] = promotion
+        if option_contract:
+            response["option_contract"] = option_contract
         return response
     finally:
         conn.close()

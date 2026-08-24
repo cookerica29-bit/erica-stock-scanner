@@ -3,6 +3,9 @@
   const ALERT_KEY = 'kairos_candidate_alerts';
   const API_KEY_DB = 'kairos_candidate_dashboard';
   const API_KEY_STORE = 'settings';
+  const ENTER_NOW_MIN_RR = 1.5;
+  const ENTER_NOW_MAX_SCAN_AGE_MS = 5 * 60 * 60 * 1000;
+  const ACCEPTABLE_CONTRACT_GRADES = ['excellent', 'good', 'fair'];
   const state = {
     loaded: false,
     loading: false,
@@ -186,16 +189,58 @@
 
   function effectivePlanForCandidate(item, promoMap, previewMap) {
     const key = promotionKey(item);
-    return promoMap.get(key) || previewMap.get(key) || null;
+    const promotion = promoMap.get(key);
+    const preview = previewMap.get(key);
+    if (promotion) {
+      return {
+        ...preview,
+        ...promotion,
+        option_contract: preview?.option_contract || promotion.option_contract || null,
+      };
+    }
+    return preview || null;
+  }
+
+  function isRegimeAligned(item) {
+    const direction = String(item.signal || '').toLowerCase();
+    const regime = String(item.daily_regime || '').toLowerCase();
+    if (direction === 'long') return regime.includes('long') || regime.includes('bull');
+    if (direction === 'short') return regime.includes('short') || regime.includes('bear');
+    return false;
+  }
+
+  function contractBlockReason(plan) {
+    const contract = plan?.option_contract || {};
+    if (!contract.available) return contract.reason || contract.execution || 'No clean options contract';
+    const execution = String(contract.execution || '').toLowerCase();
+    const acceptable = ACCEPTABLE_CONTRACT_GRADES.some(grade => execution.includes(grade));
+    return acceptable ? '' : `Contract quality is ${contract.execution || 'unknown'}`;
+  }
+
+  function scanFreshnessBlockReason(item) {
+    const rawTime = item?.scanned_at || item?.updated_at;
+    if (!rawTime) return 'Scan time unavailable';
+    const scannedAt = new Date(rawTime);
+    if (Number.isNaN(scannedAt.getTime())) return 'Scan time unavailable';
+    if (Date.now() - scannedAt.getTime() > ENTER_NOW_MAX_SCAN_AGE_MS) {
+      return 'Scan is stale; refresh before entry';
+    }
+    return '';
   }
 
   function routeBlockReason(item, plan) {
     const direction = String(item.signal || '').toLowerCase();
     if (direction === 'short') return 'Shorts are research-only';
     if (direction !== 'long') return 'Unsupported direction';
+    if (!isRegimeAligned(item)) return 'Regime is not aligned';
     if (!plan) return 'Plan math pending';
     if (plan.preview_error) return plan.preview_error;
     if (plan.no_valid_target || plan.target == null || plan.risk_reward == null) return 'No valid target';
+    if (plan.rr_warning || Number(plan.risk_reward) < ENTER_NOW_MIN_RR) return `R:R is below ${ENTER_NOW_MIN_RR}:1`;
+    const contractReason = contractBlockReason(plan);
+    if (contractReason) return contractReason;
+    const freshnessReason = scanFreshnessBlockReason(item);
+    if (freshnessReason) return freshnessReason;
     return '';
   }
 
