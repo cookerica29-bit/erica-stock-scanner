@@ -705,7 +705,7 @@ def _execution_shadow_from_bars(
     preview: dict,
     bars: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    version = "4h-live-reaction-shadow-v7"
+    version = "4h-live-reaction-shadow-v8"
     base = {
         "execution_shadow_checked": True,
         "execution_shadow_ok": False,
@@ -785,7 +785,7 @@ def _execution_shadow_from_bars(
     no_fresh_lower_low = low >= min(prior_lows)
     reaction_move_atr = max(close - open_price, close - prior_close) / atr
     meaningful_reaction = reaction_move_atr >= EXECUTION_SHADOW_MIN_REACTION_ATR
-    directional_expansion_atr = (max(recent_range_closes) - min(early_range_closes)) / atr
+    directional_expansion_atr = (close - early_range_closes[0]) / atr
     direction_expanded = directional_expansion_atr >= EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR
     volume_ratio = None
     volume_confirmed = True
@@ -850,7 +850,7 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
             "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
-            "execution_shadow_version": "4h-live-reaction-shadow-v7",
+            "execution_shadow_version": "4h-live-reaction-shadow-v8",
             "execution_shadow_candle_time": None,
         }
     bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))

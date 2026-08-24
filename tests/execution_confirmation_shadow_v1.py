@@ -167,6 +167,33 @@ def test_execution_shadow_fails_flat_range_positive_reaction():
     assert "directional expansion only" in result["execution_shadow_reason"]
 
 
+def test_execution_shadow_rejects_decline_with_dead_cat_bounce():
+    candidate = {"ticker": "TWLOLIKE", "signal": "long", "ema21_4h": 224.0}
+    preview = {"entry_price": 223.0, "atr14": 7.0}
+    bars = [
+        {"time": "2026-08-21T00:00:00Z", "open": 250.5, "high": 252.0, "low": 248.0, "close": 249.52, "volume": 300000},
+        {"time": "2026-08-21T04:00:00Z", "open": 249.4, "high": 250.0, "low": 238.5, "close": 239.94, "volume": 310000},
+        {"time": "2026-08-21T08:00:00Z", "open": 239.8, "high": 241.0, "low": 233.5, "close": 234.29, "volume": 295000},
+        {"time": "2026-08-21T12:00:00Z", "open": 234.1, "high": 235.0, "low": 228.2, "close": 228.70, "volume": 305000},
+        {"time": "2026-08-21T16:00:00Z", "open": 228.5, "high": 229.5, "low": 223.5, "close": 224.10, "volume": 315000},
+        {"time": "2026-08-22T00:00:00Z", "open": 224.0, "high": 226.0, "low": 220.5, "close": 221.20, "volume": 290000},
+        {"time": "2026-08-22T04:00:00Z", "open": 221.1, "high": 223.2, "low": 218.0, "close": 219.40, "volume": 300000},
+        {"time": "2026-08-22T08:00:00Z", "open": 219.3, "high": 221.0, "low": 216.2, "close": 217.10, "volume": 305000},
+        {"time": "2026-08-22T12:00:00Z", "open": 217.0, "high": 219.5, "low": 215.0, "close": 216.40, "volume": 310000},
+        {"time": "2026-08-22T16:00:00Z", "open": 216.2, "high": 218.0, "low": 213.5, "close": 214.50, "volume": 300000},
+        {"time": "2026-08-24T00:00:00Z", "open": 214.4, "high": 217.0, "low": 213.0, "close": 216.20, "volume": 320000},
+        {"time": "2026-08-24T04:00:00Z", "open": 216.0, "high": 219.5, "low": 215.0, "close": 218.80, "volume": 410000},
+        {"time": "2026-08-24T08:00:00Z", "open": 218.7, "high": 221.0, "low": 217.5, "close": 220.40, "volume": 390000},
+        {"time": "2026-08-24T12:00:00Z", "open": 220.2, "high": 223.0, "low": 219.0, "close": 222.10, "volume": 380000},
+        {"time": "2026-08-24T16:00:00Z", "open": 222.0, "high": 224.5, "low": 221.0, "close": 223.08, "volume": 360000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is False
+    assert "directional expansion only" in result["execution_shadow_reason"]
+
+
 def test_execution_shadow_requires_full_range_window():
     candidate = {"ticker": "SHORTDATA", "signal": "long", "ema21_4h": 100.0}
     preview = {"entry_price": 100.0, "atr14": 4.0}
