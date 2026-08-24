@@ -68,8 +68,8 @@ def test_scanner_candidate_ingestion_lifecycle():
         }
         candidates_router._call_anthropic_chart_review = lambda prompt: (
             {
-                "classification": "choppy_range_bound",
-                "rationale": "Price is oscillating around the same area instead of trending cleanly. Treat this as an informational second opinion only.",
+                "classification": "fresh_clean_structural_break",
+                "rationale": "Price has broken structure cleanly and is holding above the reclaimed level. Treat this as an informational second opinion only.",
             },
             '{"content":[{"type":"text","text":"mock"}]}',
             "mock-claude",
@@ -186,6 +186,28 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert preview["option_contract"]["type"] == "CALL"
             assert preview["option_contract"]["strike"] == 100.0
 
+            blocked_before_review = client.patch(
+                "/api/v1/scanner/candidates/NVDA?source=ma_pipeline",
+                headers=headers,
+                json={"status": "active"},
+            )
+            assert blocked_before_review.status_code == 422
+            assert "Second-pass AI chart read" in blocked_before_review.json()["detail"]
+
+            chart_review = client.post(
+                "/api/v1/scanner/candidates/NVDA/ai-chart-review?source=ma_pipeline",
+                headers=headers,
+            )
+            assert chart_review.status_code == 200
+            review_payload = chart_review.json()
+            assert review_payload["ticker"] == "NVDA"
+            assert review_payload["source"] == "ma_pipeline"
+            assert review_payload["signal"] == "long"
+            assert review_payload["classification"] == "fresh_clean_structural_break"
+            assert "informational" in review_payload["caveat"].lower()
+            assert review_payload["data_source"] == "alpaca_adjusted_daily_ohlcv"
+            assert review_payload["model"] == "mock-claude"
+
             promoted = client.patch(
                 "/api/v1/scanner/candidates/NVDA?source=ma_pipeline",
                 headers=headers,
@@ -250,26 +272,12 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert len(after_restart_promotions) == 1
             assert after_restart_promotions[0]["ticker"] == "NVDA"
 
-            chart_review = client.post(
-                "/api/v1/scanner/candidates/NVDA/ai-chart-review?source=ma_pipeline",
-                headers=headers,
-            )
-            assert chart_review.status_code == 200
-            review_payload = chart_review.json()
-            assert review_payload["ticker"] == "NVDA"
-            assert review_payload["source"] == "ma_pipeline"
-            assert review_payload["signal"] == "long"
-            assert review_payload["classification"] == "choppy_range_bound"
-            assert "informational" in review_payload["caveat"].lower()
-            assert review_payload["data_source"] == "alpaca_adjusted_daily_ohlcv"
-            assert review_payload["model"] == "mock-claude"
-
             chart_reviews = client.get("/api/v1/scanner/candidate-chart-reviews", headers=headers)
             assert chart_reviews.status_code == 200
             review_rows = chart_reviews.json()
             assert len(review_rows) == 1
             assert review_rows[0]["ticker"] == "NVDA"
-            assert review_rows[0]["classification"] == "choppy_range_bound"
+            assert review_rows[0]["classification"] == "fresh_clean_structural_break"
 
             previews_after_review = client.get("/api/v1/scanner/candidate-plan-previews", headers=headers)
             assert previews_after_review.status_code == 200

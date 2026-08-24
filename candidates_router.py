@@ -32,6 +32,10 @@ ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-4-5"
 AI_CHART_REVIEW_RUBRIC_VERSION = "kairos-chart-note-v1"
+ENTER_NOW_CHART_REVIEW_CLASSES = {
+    "fresh_clean_structural_break",
+    "genuine_trending_move",
+}
 CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
 SCANNER_SESSION_COOKIE = "kairos_scanner_session"
 
@@ -476,6 +480,16 @@ def _contract_block_reason(contract: Optional[dict[str, Any]]) -> Optional[str]:
     return f"Option contract quality is {contract.get('execution') or 'unknown'}."
 
 
+def _chart_review_block_reason(review: Optional[sqlite3.Row | dict[str, Any]]) -> Optional[str]:
+    if not review:
+        return "Second-pass AI chart read is required before clean-dashboard promotion."
+    classification = str(dict(review).get("classification") or "").strip()
+    if classification in ENTER_NOW_CHART_REVIEW_CLASSES:
+        return None
+    label = classification.replace("_", " ") if classification else "missing"
+    return f"Second-pass AI chart read is {label}, so it is not ENTER_NOW dashboard-ready."
+
+
 def _preview_has_transient_option_unavailable(row: sqlite3.Row) -> bool:
     raw_contract = row["option_contract_json"] if "option_contract_json" in row.keys() else None
     if not raw_contract:
@@ -826,7 +840,12 @@ def _candidate_regime_aligned(candidate: sqlite3.Row, direction: str) -> bool:
     return False
 
 
-def _promotion_block_reason(candidate: sqlite3.Row, promotion: dict, option_contract: Optional[dict[str, Any]] = None) -> Optional[str]:
+def _promotion_block_reason(
+    candidate: sqlite3.Row,
+    promotion: dict,
+    option_contract: Optional[dict[str, Any]] = None,
+    chart_review: Optional[sqlite3.Row | dict[str, Any]] = None,
+) -> Optional[str]:
     direction = str(promotion.get("direction") or "").strip().lower()
     if direction == "short":
         return "Short candidates are research-only and cannot be promoted to the clean dashboard."
@@ -841,6 +860,9 @@ def _promotion_block_reason(candidate: sqlite3.Row, promotion: dict, option_cont
     contract_reason = _contract_block_reason(option_contract)
     if contract_reason:
         return f"Candidate option contract is not ENTER_NOW-ready: {contract_reason}"
+    chart_reason = _chart_review_block_reason(chart_review)
+    if chart_reason:
+        return chart_reason
     return None
 
 
@@ -1257,7 +1279,11 @@ def update_candidate_status(
                     promotion["direction"],
                     promotion["entry_price"],
                 )
-            block_reason = _promotion_block_reason(candidate, promotion, option_contract)
+            chart_review = conn.execute(
+                "SELECT * FROM candidate_ai_chart_reviews WHERE ticker=? AND source=?",
+                (normalized_ticker, source),
+            ).fetchone()
+            block_reason = _promotion_block_reason(candidate, promotion, option_contract, chart_review)
             if block_reason:
                 raise HTTPException(status_code=422, detail=block_reason)
             _store_promotion(conn, promotion)

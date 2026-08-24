@@ -6,6 +6,7 @@
   const ENTER_NOW_MIN_RR = 1.5;
   const ENTER_NOW_MAX_SCAN_AGE_MS = 5 * 60 * 60 * 1000;
   const ACCEPTABLE_CONTRACT_GRADES = ['excellent', 'good', 'fair'];
+  const ENTER_NOW_CHART_CLASSES = ['fresh_clean_structural_break', 'genuine_trending_move'];
   const state = {
     loaded: false,
     loading: false,
@@ -228,7 +229,14 @@
     return '';
   }
 
-  function routeBlockReason(item, plan) {
+  function chartReviewBlockReason(review) {
+    if (!review) return 'Second-pass chart read pending';
+    const classification = String(review.classification || '').trim();
+    if (ENTER_NOW_CHART_CLASSES.includes(classification)) return '';
+    return `Second-pass chart read is ${classificationLabel(classification)}`;
+  }
+
+  function routeBlockReason(item, plan, chartReview = null) {
     const direction = String(item.signal || '').toLowerCase();
     if (direction === 'short') return 'Shorts are research-only';
     if (direction !== 'long') return 'Unsupported direction';
@@ -241,11 +249,17 @@
     if (contractReason) return contractReason;
     const freshnessReason = scanFreshnessBlockReason(item);
     if (freshnessReason) return freshnessReason;
+    const chartReason = chartReviewBlockReason(chartReview);
+    if (chartReason) return chartReason;
     return '';
   }
 
   function isEnterNowCandidate(item, promoMap, previewMap) {
-    return !routeBlockReason(item, effectivePlanForCandidate(item, promoMap, previewMap));
+    return !routeBlockReason(
+      item,
+      effectivePlanForCandidate(item, promoMap, previewMap),
+      chartReviewsByKey().get(promotionKey(item)),
+    );
   }
 
   function enterNowCandidates() {
@@ -520,7 +534,12 @@
     const ticker = encodeURIComponent(item.ticker || '');
     const promoMap = promotionsByKey();
     const previewMap = planPreviewsByKey();
-    const blockReason = routeBlockReason(item, effectivePlanForCandidate(item, promoMap, previewMap));
+    const reviewMap = chartReviewsByKey();
+    const blockReason = routeBlockReason(
+      item,
+      effectivePlanForCandidate(item, promoMap, previewMap),
+      reviewMap.get(promotionKey(item)),
+    );
     const promote = status !== 'active' && !blockReason
       ? `<button onclick="updateCandidateStatus('${ticker}','${source}','active','${status}')">Promote</button>`
       : '';
