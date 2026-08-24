@@ -52,6 +52,8 @@ def test_scanner_candidate_ingestion_lifecycle():
         previous_alpaca_bars = candidates_router._alpaca_daily_bars_for_review
         previous_call_anthropic = candidates_router._call_anthropic_chart_review
         previous_best_contract = candidates_router._best_contract
+        previous_latest_quote = candidates_router._latest_quote_for_ticker
+        previous_latest_quotes = candidates_router._latest_quotes_for_previews
         candidates_router._batch_download = lambda tickers, period, interval: {
             str(tickers[0]).upper(): _promotion_daily_frame()
         }
@@ -65,6 +67,21 @@ def test_scanner_candidate_ingestion_lifecycle():
             "dte": 29,
             "symbol": "MOCK",
             "source": "option_chain",
+        }
+        candidates_router._latest_quote_for_ticker = lambda ticker: {
+            "price": 100.0,
+            "timestamp": "2026-08-20T18:30:00Z",
+            "source": "mock_latest_quote",
+            "price_branch": "mid",
+        }
+        candidates_router._latest_quotes_for_previews = lambda previews: {
+            str(preview.get("ticker") or "").upper(): {
+                "price": 100.0,
+                "timestamp": "2026-08-20T18:30:00Z",
+                "source": "mock_latest_quote",
+                "price_branch": "mid",
+            }
+            for preview in previews
         }
         candidates_router._call_anthropic_chart_review = lambda prompt: (
             {
@@ -185,28 +202,8 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert preview["no_valid_target"] is False
             assert preview["option_contract"]["type"] == "CALL"
             assert preview["option_contract"]["strike"] == 100.0
-
-            blocked_before_review = client.patch(
-                "/api/v1/scanner/candidates/NVDA?source=ma_pipeline",
-                headers=headers,
-                json={"status": "active"},
-            )
-            assert blocked_before_review.status_code == 422
-            assert "Second-pass AI chart read" in blocked_before_review.json()["detail"]
-
-            chart_review = client.post(
-                "/api/v1/scanner/candidates/NVDA/ai-chart-review?source=ma_pipeline",
-                headers=headers,
-            )
-            assert chart_review.status_code == 200
-            review_payload = chart_review.json()
-            assert review_payload["ticker"] == "NVDA"
-            assert review_payload["source"] == "ma_pipeline"
-            assert review_payload["signal"] == "long"
-            assert review_payload["classification"] == "fresh_clean_structural_break"
-            assert "informational" in review_payload["caveat"].lower()
-            assert review_payload["data_source"] == "alpaca_adjusted_daily_ohlcv"
-            assert review_payload["model"] == "mock-claude"
+            assert preview["current_price"] == 100.0
+            assert preview["entry_proximity_ok"] is True
 
             promoted = client.patch(
                 "/api/v1/scanner/candidates/NVDA?source=ma_pipeline",
@@ -231,6 +228,20 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert promotion["stop"] == preview["stop"]
             assert promotion["target"] == preview["target"]
             assert promotion["risk_reward"] == preview["risk_reward"]
+
+            chart_review = client.post(
+                "/api/v1/scanner/candidates/NVDA/ai-chart-review?source=ma_pipeline",
+                headers=headers,
+            )
+            assert chart_review.status_code == 200
+            review_payload = chart_review.json()
+            assert review_payload["ticker"] == "NVDA"
+            assert review_payload["source"] == "ma_pipeline"
+            assert review_payload["signal"] == "long"
+            assert review_payload["classification"] == "fresh_clean_structural_break"
+            assert "informational" in review_payload["caveat"].lower()
+            assert review_payload["data_source"] == "alpaca_adjusted_daily_ohlcv"
+            assert review_payload["model"] == "mock-claude"
 
             conn = sqlite3.connect(db_path)
             try:
@@ -305,6 +316,8 @@ def test_scanner_candidate_ingestion_lifecycle():
             candidates_router._alpaca_daily_bars_for_review = previous_alpaca_bars
             candidates_router._call_anthropic_chart_review = previous_call_anthropic
             candidates_router._best_contract = previous_best_contract
+            candidates_router._latest_quote_for_ticker = previous_latest_quote
+            candidates_router._latest_quotes_for_previews = previous_latest_quotes
 
 
 def test_chart_review_parser_accepts_fenced_json():
@@ -332,6 +345,96 @@ def test_preview_contract_normalizes_expiration_data_unavailable():
     assert "retry later" in normalized["reason"]
     assert normalized["source"] == "data_unavailable"
     assert normalized["transient_unavailable"] is True
+
+
+def test_entry_proximity_uses_percent_or_atr_threshold():
+    import candidates_router
+
+    near = candidates_router._entry_proximity(
+        entry_price=100.0,
+        atr14=2.0,
+        quote={"price": 101.0},
+    )
+    assert near["entry_proximity_ok"] is True
+    assert near["entry_distance_pct"] == 1.0
+    assert near["entry_distance_atr"] == 0.5
+
+    far = candidates_router._entry_proximity(
+        entry_price=100.0,
+        atr14=2.0,
+        quote={"price": 104.0},
+    )
+    assert far["entry_proximity_ok"] is False
+    assert "away from entry" in far["entry_proximity_reason"]
+
+
+def test_promotion_blocks_when_price_is_not_near_entry():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "candidates.db")
+        os.environ["KAIROS_CANDIDATES_DB"] = db_path
+        os.environ["KAIROS_SCANNER_API_KEY"] = "test-scanner-key"
+
+        import candidates_router
+
+        previous_download = candidates_router._batch_download
+        previous_best_contract = candidates_router._best_contract
+        previous_latest_quote = candidates_router._latest_quote_for_ticker
+        candidates_router._batch_download = lambda tickers, period, interval: {
+            str(tickers[0]).upper(): _promotion_daily_frame()
+        }
+        candidates_router._best_contract = lambda ticker, direction, entry, **kwargs: {
+            "available": True,
+            "execution": "Good",
+            "type": "CALL",
+            "strike": 100.0,
+            "expiry": "2026-09-18",
+            "dte": 25,
+            "symbol": "MOCK",
+            "source": "option_chain",
+        }
+        candidates_router._latest_quote_for_ticker = lambda ticker: {
+            "price": 110.0,
+            "timestamp": "2026-08-24T14:30:00Z",
+            "source": "mock_latest_quote",
+            "price_branch": "mid",
+        }
+
+        try:
+            client = _client()
+            headers = {"X-API-Key": "test-scanner-key"}
+            created = client.post(
+                "/api/v1/scanner/candidates",
+                headers=headers,
+                json={
+                    "source": "ma_pipeline",
+                    "scanned_at": "2026-08-24T13:57:00Z",
+                    "candidates": [
+                        {
+                            "ticker": "AAPL",
+                            "signal": "long",
+                            "entry_price": 100.0,
+                            "ema21_4h": 99.0,
+                            "daily_regime": "bullish",
+                            "confidence": "high",
+                            "sma50_daily": 90.0,
+                            "sma200_daily": 80.0,
+                        }
+                    ],
+                },
+            )
+            assert created.status_code == 200
+
+            promoted = client.patch(
+                "/api/v1/scanner/candidates/AAPL?source=ma_pipeline",
+                headers=headers,
+                json={"status": "active"},
+            )
+            assert promoted.status_code == 422
+            assert "away from entry" in promoted.json()["detail"]
+        finally:
+            candidates_router._batch_download = previous_download
+            candidates_router._best_contract = previous_best_contract
+            candidates_router._latest_quote_for_ticker = previous_latest_quote
 
 
 def test_short_candidate_cannot_promote_to_clean_dashboard():
@@ -390,5 +493,7 @@ if __name__ == "__main__":
     test_scanner_candidate_ingestion_lifecycle()
     test_chart_review_parser_accepts_fenced_json()
     test_preview_contract_normalizes_expiration_data_unavailable()
+    test_entry_proximity_uses_percent_or_atr_threshold()
+    test_promotion_blocks_when_price_is_not_near_entry()
     test_short_candidate_cannot_promote_to_clean_dashboard()
     print("scanner_candidates_ingestion_v1 passed")

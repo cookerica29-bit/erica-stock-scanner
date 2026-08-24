@@ -32,12 +32,10 @@ ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-4-5"
 AI_CHART_REVIEW_RUBRIC_VERSION = "kairos-chart-note-v1"
-ENTER_NOW_CHART_REVIEW_CLASSES = {
-    "fresh_clean_structural_break",
-    "genuine_trending_move",
-}
 CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
 SCANNER_SESSION_COOKIE = "kairos_scanner_session"
+ENTRY_PROXIMITY_MAX_PCT_DEFAULT = 1.5
+ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
 
 
 def default_candidates_db_path() -> str:
@@ -69,6 +67,14 @@ def _float_env(name: str, default: float) -> float:
 
 def _min_target_atr_multiple() -> float:
     return _float_env("MIN_TARGET_ATR_MULTIPLE", MIN_TARGET_ATR_MULTIPLE_DEFAULT)
+
+
+def _entry_proximity_max_pct() -> float:
+    return _float_env("ENTER_NOW_ENTRY_PROXIMITY_MAX_PCT", ENTRY_PROXIMITY_MAX_PCT_DEFAULT)
+
+
+def _entry_proximity_max_atr_multiple() -> float:
+    return _float_env("ENTER_NOW_ENTRY_PROXIMITY_MAX_ATR_MULTIPLE", ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT)
 
 
 def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
@@ -338,6 +344,17 @@ class CandidatePlanPreviewOut(BaseModel):
     min_target_atr_multiple: float
     target_source: Optional[str]
     option_contract: Optional[dict[str, Any]]
+    current_price: Optional[float] = None
+    current_quote_timestamp: Optional[str] = None
+    current_quote_source: Optional[str] = None
+    current_quote_price_branch: Optional[str] = None
+    entry_distance: Optional[float] = None
+    entry_distance_pct: Optional[float] = None
+    entry_distance_atr: Optional[float] = None
+    entry_proximity_ok: bool = False
+    entry_proximity_reason: Optional[str] = None
+    entry_proximity_threshold_pct: float = ENTRY_PROXIMITY_MAX_PCT_DEFAULT
+    entry_proximity_threshold_atr: float = ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT
     preview_error: Optional[str]
     computed_at: str
     candidate_updated_at: Optional[str]
@@ -480,14 +497,113 @@ def _contract_block_reason(contract: Optional[dict[str, Any]]) -> Optional[str]:
     return f"Option contract quality is {contract.get('execution') or 'unknown'}."
 
 
-def _chart_review_block_reason(review: Optional[sqlite3.Row | dict[str, Any]]) -> Optional[str]:
-    if not review:
-        return "Second-pass AI chart read is required before clean-dashboard promotion."
-    classification = str(dict(review).get("classification") or "").strip()
-    if classification in ENTER_NOW_CHART_REVIEW_CLASSES:
+def _latest_quote_for_ticker(ticker: str) -> Optional[dict[str, Any]]:
+    try:
+        quotes = AlpacaMarketDataProvider().latest_quotes([ticker])
+    except Exception:
         return None
-    label = classification.replace("_", " ") if classification else "missing"
-    return f"Second-pass AI chart read is {label}, so it is not ENTER_NOW dashboard-ready."
+    quote = quotes.get(str(ticker).upper()) if isinstance(quotes, dict) else None
+    return quote if isinstance(quote, dict) else None
+
+
+def _entry_proximity(
+    *,
+    entry_price: Optional[float],
+    atr14: Optional[float],
+    quote: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    max_pct = _entry_proximity_max_pct()
+    max_atr = _entry_proximity_max_atr_multiple()
+    base = {
+        "current_price": None,
+        "current_quote_timestamp": None,
+        "current_quote_source": None,
+        "current_quote_price_branch": None,
+        "entry_distance": None,
+        "entry_distance_pct": None,
+        "entry_distance_atr": None,
+        "entry_proximity_ok": False,
+        "entry_proximity_reason": "Current quote unavailable",
+        "entry_proximity_threshold_pct": max_pct,
+        "entry_proximity_threshold_atr": max_atr,
+    }
+    try:
+        entry = float(entry_price)
+    except (TypeError, ValueError):
+        base["entry_proximity_reason"] = "Entry price unavailable"
+        return base
+    if entry <= 0:
+        base["entry_proximity_reason"] = "Entry price unavailable"
+        return base
+    if not quote:
+        return base
+    try:
+        current_price = float(quote.get("price"))
+    except (TypeError, ValueError):
+        return base
+    if current_price <= 0:
+        return base
+
+    atr = float(atr14 or 0)
+    distance = abs(current_price - entry)
+    pct_distance = (distance / entry) * 100
+    atr_distance = (distance / atr) if atr > 0 else None
+    pct_threshold = entry * (max_pct / 100)
+    atr_threshold = atr * max_atr if atr > 0 else 0
+    allowed_distance = max(pct_threshold, atr_threshold)
+    ok = distance <= allowed_distance
+    reason = None
+    if not ok:
+        if atr_distance is not None:
+            reason = f"Price moved {pct_distance:.2f}% / {atr_distance:.2f} ATR away from entry"
+        else:
+            reason = f"Price moved {pct_distance:.2f}% away from entry"
+
+    return {
+        **base,
+        "current_price": round(current_price, 4),
+        "current_quote_timestamp": str(quote.get("timestamp")) if quote.get("timestamp") is not None else None,
+        "current_quote_source": quote.get("source"),
+        "current_quote_price_branch": quote.get("price_branch"),
+        "entry_distance": round(distance, 4),
+        "entry_distance_pct": round(pct_distance, 2),
+        "entry_distance_atr": round(atr_distance, 2) if atr_distance is not None else None,
+        "entry_proximity_ok": ok,
+        "entry_proximity_reason": reason,
+    }
+
+
+def _attach_entry_proximity(preview: dict, quote: Optional[dict[str, Any]]) -> dict:
+    return {
+        **preview,
+        **_entry_proximity(
+            entry_price=preview.get("entry_price"),
+            atr14=preview.get("atr14"),
+            quote=quote,
+        ),
+    }
+
+
+def _latest_quotes_for_previews(previews: list[dict]) -> dict[str, dict[str, Any]]:
+    tickers = sorted({str(preview.get("ticker") or "").upper() for preview in previews if preview.get("ticker")})
+    if not tickers:
+        return {}
+    try:
+        quotes = AlpacaMarketDataProvider().latest_quotes(tickers)
+    except Exception:
+        return {}
+    return quotes if isinstance(quotes, dict) else {}
+
+
+def _entry_proximity_block_reason(entry_price: Optional[float], atr14: Optional[float], ticker: str) -> Optional[str]:
+    proximity = _entry_proximity(
+        entry_price=entry_price,
+        atr14=atr14,
+        quote=_latest_quote_for_ticker(ticker),
+    )
+    if proximity.get("entry_proximity_ok"):
+        return None
+    return str(proximity.get("entry_proximity_reason") or "Price is not near entry")
 
 
 def _preview_has_transient_option_unavailable(row: sqlite3.Row) -> bool:
@@ -844,7 +960,6 @@ def _promotion_block_reason(
     candidate: sqlite3.Row,
     promotion: dict,
     option_contract: Optional[dict[str, Any]] = None,
-    chart_review: Optional[sqlite3.Row | dict[str, Any]] = None,
 ) -> Optional[str]:
     direction = str(promotion.get("direction") or "").strip().lower()
     if direction == "short":
@@ -860,9 +975,13 @@ def _promotion_block_reason(
     contract_reason = _contract_block_reason(option_contract)
     if contract_reason:
         return f"Candidate option contract is not ENTER_NOW-ready: {contract_reason}"
-    chart_reason = _chart_review_block_reason(chart_review)
-    if chart_reason:
-        return chart_reason
+    proximity_reason = _entry_proximity_block_reason(
+        promotion.get("entry_price"),
+        promotion.get("atr14"),
+        str(promotion.get("ticker") or candidate["ticker"]),
+    )
+    if proximity_reason:
+        return f"Candidate is not ENTER_NOW-ready: {proximity_reason}."
     return None
 
 
@@ -1205,7 +1324,11 @@ def list_candidate_plan_previews(
         except sqlite3.OperationalError as exc:
             if "database is locked" not in str(exc).lower():
                 raise
-        return previews
+        quotes = _latest_quotes_for_previews(previews)
+        return [
+            _attach_entry_proximity(preview, quotes.get(str(preview.get("ticker") or "").upper()))
+            for preview in previews
+        ]
     finally:
         conn.close()
 
@@ -1279,11 +1402,7 @@ def update_candidate_status(
                     promotion["direction"],
                     promotion["entry_price"],
                 )
-            chart_review = conn.execute(
-                "SELECT * FROM candidate_ai_chart_reviews WHERE ticker=? AND source=?",
-                (normalized_ticker, source),
-            ).fetchone()
-            block_reason = _promotion_block_reason(candidate, promotion, option_contract, chart_review)
+            block_reason = _promotion_block_reason(candidate, promotion, option_contract)
             if block_reason:
                 raise HTTPException(status_code=422, detail=block_reason)
             _store_promotion(conn, promotion)

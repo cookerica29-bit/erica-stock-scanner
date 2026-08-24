@@ -6,7 +6,6 @@
   const ENTER_NOW_MIN_RR = 1.5;
   const ENTER_NOW_MAX_SCAN_AGE_MS = 5 * 60 * 60 * 1000;
   const ACCEPTABLE_CONTRACT_GRADES = ['excellent', 'good', 'fair'];
-  const ENTER_NOW_CHART_CLASSES = ['fresh_clean_structural_break', 'genuine_trending_move'];
   const state = {
     loaded: false,
     loading: false,
@@ -50,6 +49,13 @@
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return String(value);
     return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
+  function entryDistanceLabel(preview) {
+    if (preview?.entry_distance_pct == null) return '—';
+    const pct = fmtNumber(preview.entry_distance_pct, 2);
+    const atr = preview.entry_distance_atr == null ? '' : ` · ${fmtNumber(preview.entry_distance_atr, 2)} ATR`;
+    return `${pct}%${atr}`;
   }
 
   function storageGet(storage, key) {
@@ -229,14 +235,13 @@
     return '';
   }
 
-  function chartReviewBlockReason(review) {
-    if (!review) return 'Second-pass chart read pending';
-    const classification = String(review.classification || '').trim();
-    if (ENTER_NOW_CHART_CLASSES.includes(classification)) return '';
-    return `Second-pass chart read is ${classificationLabel(classification)}`;
+  function entryProximityBlockReason(plan) {
+    if (!plan) return 'Plan math pending';
+    if (plan.entry_proximity_ok) return '';
+    return plan.entry_proximity_reason || 'Price is not near entry';
   }
 
-  function routeBlockReason(item, plan, chartReview = null) {
+  function routeBlockReason(item, plan) {
     const direction = String(item.signal || '').toLowerCase();
     if (direction === 'short') return 'Shorts are research-only';
     if (direction !== 'long') return 'Unsupported direction';
@@ -247,10 +252,10 @@
     if (plan.rr_warning || Number(plan.risk_reward) < ENTER_NOW_MIN_RR) return `R:R is below ${ENTER_NOW_MIN_RR}:1`;
     const contractReason = contractBlockReason(plan);
     if (contractReason) return contractReason;
+    const proximityReason = entryProximityBlockReason(plan);
+    if (proximityReason) return proximityReason;
     const freshnessReason = scanFreshnessBlockReason(item);
     if (freshnessReason) return freshnessReason;
-    const chartReason = chartReviewBlockReason(chartReview);
-    if (chartReason) return chartReason;
     return '';
   }
 
@@ -258,7 +263,6 @@
     return !routeBlockReason(
       item,
       effectivePlanForCandidate(item, promoMap, previewMap),
-      chartReviewsByKey().get(promotionKey(item)),
     );
   }
 
@@ -485,6 +489,7 @@
     if (preview.preview_error) warnings.push(`<span class="candidate-pill bad">${escapeHtml(preview.preview_error)}</span>`);
     if (preview.rr_warning) warnings.push('<span class="candidate-pill warn">R:R warning</span>');
     if (preview.no_valid_target) warnings.push('<span class="candidate-pill bad">No valid target</span>');
+    if (!preview.entry_proximity_ok) warnings.push(`<span class="candidate-pill bad">${escapeHtml(preview.entry_proximity_reason || 'Price not near entry')}</span>`);
     const contract = preview.option_contract || {};
     const contractAvailable = Boolean(contract.available);
     const contractLabel = contractAvailable
@@ -503,6 +508,8 @@
         <div><span>Target</span><strong>${escapeHtml(fmtMoney(preview.target))}</strong></div>
         <div><span>R:R</span><strong>${escapeHtml(preview.risk_reward == null ? '—' : fmtNumber(preview.risk_reward, 2))}</strong></div>
         <div><span>ATR14</span><strong>${escapeHtml(fmtNumber(preview.atr14, 2))}</strong></div>
+        <div><span>Current</span><strong>${escapeHtml(fmtMoney(preview.current_price))}</strong></div>
+        <div><span>Entry Distance</span><strong>${escapeHtml(entryDistanceLabel(preview))}</strong></div>
         <div><span>Contract</span><strong>${escapeHtml(contractLabel)}</strong></div>
         <div><span>Expiry</span><strong>${escapeHtml(contractMeta)}</strong></div>
       </div>
@@ -534,11 +541,9 @@
     const ticker = encodeURIComponent(item.ticker || '');
     const promoMap = promotionsByKey();
     const previewMap = planPreviewsByKey();
-    const reviewMap = chartReviewsByKey();
     const blockReason = routeBlockReason(
       item,
       effectivePlanForCandidate(item, promoMap, previewMap),
-      reviewMap.get(promotionKey(item)),
     );
     const promote = status !== 'active' && !blockReason
       ? `<button onclick="updateCandidateStatus('${ticker}','${source}','active','${status}')">Promote</button>`
