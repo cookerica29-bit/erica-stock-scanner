@@ -699,6 +699,39 @@ def test_kairos_intake_cap_preserves_legacy_env_compatibility():
             os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = previous_old
 
 
+def test_ma_pipeline_max_symbols_follows_discovery_intake_cap_by_default():
+    previous_ma = os.environ.get("MA_PIPELINE_MAX_SYMBOLS")
+    previous_new = os.environ.get("KAIROS_INTAKE_CAP")
+    previous_old = os.environ.get("DISCOVERY_UNIVERSE_MAX_SYMBOLS")
+    try:
+        os.environ.pop("MA_PIPELINE_MAX_SYMBOLS", None)
+        os.environ["KAIROS_INTAKE_CAP"] = "1000"
+        os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
+        assert main._ma_pipeline_max_symbols() == 1000
+
+        os.environ["MA_PIPELINE_MAX_SYMBOLS"] = "750"
+        assert main._ma_pipeline_max_symbols() == 750
+
+        os.environ["MA_PIPELINE_MAX_SYMBOLS"] = "invalid"
+        assert main._ma_pipeline_max_symbols() == 1000
+
+        os.environ["MA_PIPELINE_MAX_SYMBOLS"] = "0"
+        assert main._ma_pipeline_max_symbols() is None
+    finally:
+        if previous_ma is None:
+            os.environ.pop("MA_PIPELINE_MAX_SYMBOLS", None)
+        else:
+            os.environ["MA_PIPELINE_MAX_SYMBOLS"] = previous_ma
+        if previous_new is None:
+            os.environ.pop("KAIROS_INTAKE_CAP", None)
+        else:
+            os.environ["KAIROS_INTAKE_CAP"] = previous_new
+        if previous_old is None:
+            os.environ.pop("DISCOVERY_UNIVERSE_MAX_SYMBOLS", None)
+        else:
+            os.environ["DISCOVERY_UNIVERSE_MAX_SYMBOLS"] = previous_old
+
+
 def test_scan_discovered_universe_returns_warming_when_cache_missing():
     reset_discovery_cache()
     client = TestClient(main.app)
@@ -1462,6 +1495,7 @@ def main_test() -> int:
     test_intake_cap_only_truncates_when_eligible_candidates_exceed_cap()
     test_discovery_selected_symbols_unchanged_for_identical_inputs()
     test_kairos_intake_cap_preserves_legacy_env_compatibility()
+    test_ma_pipeline_max_symbols_follows_discovery_intake_cap_by_default()
     test_scan_discovered_universe_returns_warming_when_cache_missing()
     test_scan_discovered_universe_uses_cached_symbols_without_touching_default_or_finviz()
     test_scan_discovered_universe_passes_full_cached_symbol_list_without_truncation()
