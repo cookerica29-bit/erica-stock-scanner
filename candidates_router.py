@@ -806,6 +806,17 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     }
 
 
+def _promotion_block_reason(promotion: dict) -> Optional[str]:
+    direction = str(promotion.get("direction") or "").strip().lower()
+    if direction == "short":
+        return "Short candidates are research-only and cannot be promoted to the clean dashboard."
+    if direction != "long":
+        return "Unsupported candidate direction."
+    if promotion.get("no_valid_target") or promotion.get("target") is None or promotion.get("risk_reward") is None:
+        return "Candidate has no valid target, so it is not ENTER_NOW dashboard-ready."
+    return None
+
+
 def _store_promotion(conn, promotion: dict) -> None:
     conn.execute(
         """
@@ -1212,6 +1223,9 @@ def update_candidate_status(
         promotion = None
         if update.status == "active":
             promotion = _compute_candidate_promotion(candidate)
+            block_reason = _promotion_block_reason(promotion)
+            if block_reason:
+                raise HTTPException(status_code=422, detail=block_reason)
             _store_promotion(conn, promotion)
 
         changed_at = datetime.now(timezone.utc).isoformat()

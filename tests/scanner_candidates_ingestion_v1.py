@@ -138,10 +138,10 @@ def test_scanner_candidate_ingestion_lifecycle():
                 "candidates": [
                     {
                         "ticker": "NVDA",
-                        "signal": "short",
+                        "signal": "long",
                         "entry_price": 100.0,
-                        "ema21_4h": 101.0,
-                        "daily_regime": "bearish",
+                        "ema21_4h": 99.0,
+                        "daily_regime": "bullish",
                         "confidence": "medium",
                         "sma50_daily": 106.0,
                         "sma200_daily": 104.0,
@@ -155,9 +155,9 @@ def test_scanner_candidate_ingestion_lifecycle():
             after_update = client.get("/api/v1/scanner/candidates", headers=headers).json()
             assert len(after_update) == 1
             assert after_update[0]["ticker"] == "NVDA"
-            assert after_update[0]["signal"] == "short"
+            assert after_update[0]["signal"] == "long"
             assert after_update[0]["entry_price"] == 100.0
-            assert after_update[0]["daily_regime"] == "bearish"
+            assert after_update[0]["daily_regime"] == "bullish"
 
             import sqlite3
 
@@ -177,13 +177,13 @@ def test_scanner_candidate_ingestion_lifecycle():
             preview = preview_rows[0]
             assert preview["ticker"] == "NVDA"
             assert preview["source"] == "ma_pipeline"
-            assert preview["signal"] == "short"
-            assert preview["target"] == 90.0
-            assert preview["stop"] > 100.0
+            assert preview["signal"] == "long"
+            assert preview["target"] == 110.0
+            assert preview["stop"] < 100.0
             assert preview["risk_reward"] > 0
             assert preview["rr_warning"] is False
             assert preview["no_valid_target"] is False
-            assert preview["option_contract"]["type"] == "PUT"
+            assert preview["option_contract"]["type"] == "CALL"
             assert preview["option_contract"]["strike"] == 100.0
 
             promoted = client.patch(
@@ -197,10 +197,10 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert promoted_payload["source"] == "ma_pipeline"
             assert promoted_payload["status"] == "active"
             promotion = promoted_payload["promotion"]
-            assert promotion["direction"] == "short"
+            assert promotion["direction"] == "long"
             assert promotion["entry_price"] == 100.0
-            assert promotion["target"] == 90.0
-            assert promotion["stop"] > 100.0
+            assert promotion["target"] == 110.0
+            assert promotion["stop"] < 100.0
             assert promotion["risk_reward"] > 0
             assert promotion["rr_warning"] is False
             assert promotion["no_valid_target"] is False
@@ -235,7 +235,7 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert len(promotion_rows) == 1
             assert promotion_rows[0]["ticker"] == "NVDA"
             assert promotion_rows[0]["source"] == "ma_pipeline"
-            assert promotion_rows[0]["direction"] == "short"
+            assert promotion_rows[0]["direction"] == "long"
             assert promotion_rows[0]["rr_warning"] is False
             assert promotion_rows[0]["no_valid_target"] is False
             assert promotion_rows[0]["position_size"] is None
@@ -258,7 +258,7 @@ def test_scanner_candidate_ingestion_lifecycle():
             review_payload = chart_review.json()
             assert review_payload["ticker"] == "NVDA"
             assert review_payload["source"] == "ma_pipeline"
-            assert review_payload["signal"] == "short"
+            assert review_payload["signal"] == "long"
             assert review_payload["classification"] == "choppy_range_bound"
             assert "informational" in review_payload["caveat"].lower()
             assert review_payload["data_source"] == "alpaca_adjusted_daily_ohlcv"
@@ -326,8 +326,61 @@ def test_preview_contract_normalizes_expiration_data_unavailable():
     assert normalized["transient_unavailable"] is True
 
 
+def test_short_candidate_cannot_promote_to_clean_dashboard():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "candidates.db")
+        os.environ["KAIROS_CANDIDATES_DB"] = db_path
+        os.environ["KAIROS_SCANNER_API_KEY"] = "test-scanner-key"
+
+        import candidates_router
+
+        previous_download = candidates_router._batch_download
+        candidates_router._batch_download = lambda tickers, period, interval: {
+            str(tickers[0]).upper(): _promotion_daily_frame()
+        }
+
+        try:
+            client = _client()
+            headers = {"X-API-Key": "test-scanner-key"}
+            created = client.post(
+                "/api/v1/scanner/candidates",
+                headers=headers,
+                json={
+                    "source": "ma_pipeline",
+                    "scanned_at": "2026-08-24T13:57:00Z",
+                    "candidates": [
+                        {
+                            "ticker": "ORCL",
+                            "signal": "short",
+                            "entry_price": 100.0,
+                            "ema21_4h": 101.0,
+                            "daily_regime": "bearish",
+                            "confidence": "high",
+                            "sma50_daily": 98.0,
+                            "sma200_daily": 120.0,
+                        }
+                    ],
+                },
+            )
+            assert created.status_code == 200
+
+            promoted = client.patch(
+                "/api/v1/scanner/candidates/ORCL?source=ma_pipeline",
+                headers=headers,
+                json={"status": "active"},
+            )
+            assert promoted.status_code == 422
+            assert "research-only" in promoted.json()["detail"]
+
+            listed = client.get("/api/v1/scanner/candidates", headers=headers).json()
+            assert listed[0]["status"] == "new"
+        finally:
+            candidates_router._batch_download = previous_download
+
+
 if __name__ == "__main__":
     test_scanner_candidate_ingestion_lifecycle()
     test_chart_review_parser_accepts_fenced_json()
     test_preview_contract_normalizes_expiration_data_unavailable()
+    test_short_candidate_cannot_promote_to_clean_dashboard()
     print("scanner_candidates_ingestion_v1 passed")

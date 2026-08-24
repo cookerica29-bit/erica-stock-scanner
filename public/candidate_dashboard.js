@@ -184,6 +184,31 @@
     return map;
   }
 
+  function effectivePlanForCandidate(item, promoMap, previewMap) {
+    const key = promotionKey(item);
+    return promoMap.get(key) || previewMap.get(key) || null;
+  }
+
+  function routeBlockReason(item, plan) {
+    const direction = String(item.signal || '').toLowerCase();
+    if (direction === 'short') return 'Shorts are research-only';
+    if (direction !== 'long') return 'Unsupported direction';
+    if (!plan) return 'Plan math pending';
+    if (plan.preview_error) return plan.preview_error;
+    if (plan.no_valid_target || plan.target == null || plan.risk_reward == null) return 'No valid target';
+    return '';
+  }
+
+  function isEnterNowCandidate(item, promoMap, previewMap) {
+    return !routeBlockReason(item, effectivePlanForCandidate(item, promoMap, previewMap));
+  }
+
+  function enterNowCandidates() {
+    const promoMap = promotionsByKey();
+    const previewMap = planPreviewsByKey();
+    return state.candidates.filter(item => isEnterNowCandidate(item, promoMap, previewMap));
+  }
+
   function setStatus(message, kind = '') {
     const el = document.getElementById('candidateStatus');
     if (!el) return;
@@ -264,7 +289,8 @@
       const previewStatus = previewError
         ? ` Plan previews unavailable temporarily: ${previewError}`
         : '';
-      setStatus(`Loaded ${state.candidates.length} candidates, ${state.promotions.length} active plans, ${state.planPreviews.length} plan previews, and ${state.chartReviews.length} AI chart notes.${previewStatus}`, previewError ? 'error' : 'ok');
+      const cleanCount = enterNowCandidates().length;
+      setStatus(`Loaded ${cleanCount} ENTER_NOW cards from ${state.candidates.length} scanned candidates. Raw Medium/High candidates stay in audit/legacy.${previewStatus}`, previewError ? 'error' : 'ok');
     } catch (error) {
       state.error = error.message || String(error);
       setStatus(state.error, 'error');
@@ -283,14 +309,16 @@
   }
 
   function candidatesForView() {
-    if (state.view === 'all') return state.candidates;
-    return state.candidates.filter(item => String(item.status || 'new').toLowerCase() === state.view);
+    const clean = enterNowCandidates();
+    if (state.view === 'all') return clean;
+    return clean.filter(item => String(item.status || 'new').toLowerCase() === state.view);
   }
 
   function renderStats() {
     const el = document.getElementById('candidateStats');
     if (!el) return;
-    const counts = state.candidates.reduce((acc, item) => {
+    const clean = enterNowCandidates();
+    const counts = clean.reduce((acc, item) => {
       const status = String(item.status || 'new').toLowerCase();
       acc[status] = (acc[status] || 0) + 1;
       return acc;
@@ -445,7 +473,10 @@
     const status = String(item.status || 'new').toLowerCase();
     const source = encodeURIComponent(item.source || '');
     const ticker = encodeURIComponent(item.ticker || '');
-    const promote = status !== 'active'
+    const promoMap = promotionsByKey();
+    const previewMap = planPreviewsByKey();
+    const blockReason = routeBlockReason(item, effectivePlanForCandidate(item, promoMap, previewMap));
+    const promote = status !== 'active' && !blockReason
       ? `<button onclick="updateCandidateStatus('${ticker}','${source}','active','${status}')">Promote</button>`
       : '';
     const chartRead = `<button class="btn-ghost" onclick="requestChartReview('${ticker}','${source}')">Get AI Chart Read</button>`;
@@ -455,7 +486,10 @@
     const restore = status !== 'new'
       ? `<button class="btn-ghost" onclick="updateCandidateStatus('${ticker}','${source}','new','${status}')">Back to Inbox</button>`
       : '';
-    return `<div class="candidate-actions">${promote}${chartRead}${dismiss}${restore}</div>`;
+    const blocked = blockReason
+      ? `<span class="candidate-pill bad" title="${escapeHtml(blockReason)}">Not dashboard-ready</span>`
+      : '';
+    return `<div class="candidate-actions">${promote}${chartRead}${dismiss}${restore}${blocked}</div>`;
   }
 
   async function updateCandidateStatus(ticker, source, status, currentStatus = '') {
@@ -588,7 +622,12 @@
   }
 
   function notifyForNewCandidates(candidates) {
-    const inbox = candidates.filter(item => String(item.status || 'new').toLowerCase() === 'new');
+    const promoMap = promotionsByKey();
+    const previewMap = planPreviewsByKey();
+    const inbox = candidates.filter(item => (
+      String(item.status || 'new').toLowerCase() === 'new'
+      && isEnterNowCandidate(item, promoMap, previewMap)
+    ));
     const nextIds = new Set(inbox.map(candidateAlertId));
     const newItems = inbox.filter(item => !knownCandidateIds.has(candidateAlertId(item)));
 
