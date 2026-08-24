@@ -705,7 +705,7 @@ def _execution_shadow_from_bars(
     preview: dict,
     bars: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    version = "4h-live-reaction-shadow-v6"
+    version = "4h-live-reaction-shadow-v7"
     base = {
         "execution_shadow_checked": True,
         "execution_shadow_ok": False,
@@ -735,17 +735,22 @@ def _execution_shadow_from_bars(
     bullish_confirmation_volumes = []
     for idx, bar in enumerate(confirmation_bars):
         bar_open = _as_float(bar.get("open"))
+        bar_high = _as_float(bar.get("high"))
+        bar_low = _as_float(bar.get("low"))
         bar_close = _as_float(bar.get("close"))
         bar_volume = _as_float(bar.get("volume"))
         previous_bar = range_bars[EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS + idx - 1] if idx > 0 else baseline_bars[-1]
         previous_close = _as_float(previous_bar.get("close")) if previous_bar else None
         if (
             bar_open is not None
+            and bar_high is not None
+            and bar_low is not None
             and bar_close is not None
             and previous_close is not None
             and bar_volume is not None
             and bar_volume > 0
             and (bar_close > bar_open or bar_close > previous_close)
+            and bar_close > ((bar_high + bar_low) / 2)
         ):
             bullish_confirmation_volumes.append(bar_volume)
 
@@ -845,7 +850,7 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
             "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
-            "execution_shadow_version": "4h-live-reaction-shadow-v6",
+            "execution_shadow_version": "4h-live-reaction-shadow-v7",
             "execution_shadow_candle_time": None,
         }
     bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))

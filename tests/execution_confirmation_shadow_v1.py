@@ -122,6 +122,23 @@ def test_execution_shadow_ignores_high_volume_red_candle_for_longs():
     assert "thin bullish confirmation volume" in result["execution_shadow_reason"]
 
 
+def test_execution_shadow_ignores_high_volume_weak_close_candle_for_longs():
+    candidate = {"ticker": "SLBWEAK", "signal": "long", "ema21_4h": 52.0}
+    preview = {"entry_price": 53.0, "atr14": 1.0}
+    bars = _leading_bars(10, base=52.0, volume=250000) + [
+        {"time": "2026-08-24T00:00:00Z", "open": 53.40, "high": 53.75, "low": 53.10, "close": 53.57, "volume": 90000},
+        {"time": "2026-08-24T04:00:00Z", "open": 54.01, "high": 54.12, "low": 53.20, "close": 53.60, "volume": 425987},
+        {"time": "2026-08-24T08:00:00Z", "open": 53.70, "high": 53.75, "low": 53.30, "close": 53.55, "volume": 80000},
+        {"time": "2026-08-24T12:00:00Z", "open": 53.55, "high": 53.90, "low": 53.40, "close": 53.75, "volume": 90000},
+        {"time": "2026-08-24T16:00:00Z", "open": 53.70, "high": 54.00, "low": 53.50, "close": 53.90, "volume": 76000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is False
+    assert "thin bullish confirmation volume" in result["execution_shadow_reason"]
+
+
 def test_execution_shadow_fails_flat_range_positive_reaction():
     candidate = {"ticker": "AGNCISH", "signal": "long", "ema21_4h": 10.9}
     preview = {"entry_price": 10.895, "atr14": 0.24}
