@@ -10,10 +10,10 @@ def test_execution_shadow_passes_clean_bullish_reaction():
     candidate = {"ticker": "GOOD", "signal": "long", "ema21_4h": 100.0}
     preview = {"entry_price": 100.0, "atr14": 4.0}
     bars = [
-        {"time": "2026-08-24T04:00:00Z", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0},
-        {"time": "2026-08-24T08:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},
-        {"time": "2026-08-24T12:00:00Z", "open": 100.5, "high": 102.0, "low": 99.2, "close": 101.0},
-        {"time": "2026-08-24T16:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.2},
+        {"time": "2026-08-24T04:00:00Z", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 1000},
+        {"time": "2026-08-24T08:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1100},
+        {"time": "2026-08-24T12:00:00Z", "open": 100.5, "high": 102.0, "low": 99.2, "close": 101.0, "volume": 1200},
+        {"time": "2026-08-24T16:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.2, "volume": 1000},
     ]
 
     result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
@@ -53,3 +53,39 @@ def test_execution_shadow_fails_without_bullish_reaction():
 
     assert result["execution_shadow_ok"] is False
     assert "no bullish reaction" in result["execution_shadow_reason"]
+
+
+def test_execution_shadow_fails_low_conviction_positive_reaction():
+    candidate = {"ticker": "SLBISH", "signal": "long", "ema21_4h": 53.0}
+    preview = {"entry_price": 53.39, "atr14": 2.0}
+    bars = [
+        {"time": "2026-08-24T00:00:00Z", "open": 53.0, "high": 53.5, "low": 52.7, "close": 53.2, "volume": 300000},
+        {"time": "2026-08-24T04:00:00Z", "open": 53.2, "high": 53.6, "low": 52.8, "close": 53.1, "volume": 280000},
+        {"time": "2026-08-24T08:00:00Z", "open": 53.1, "high": 53.7, "low": 52.9, "close": 53.3, "volume": 260000},
+        {"time": "2026-08-24T12:00:00Z", "open": 53.3, "high": 53.8, "low": 52.9, "close": 53.4, "volume": 240000},
+        {"time": "2026-08-24T16:00:00Z", "open": 53.35, "high": 53.55, "low": 53.0, "close": 53.48, "volume": 76000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is False
+    assert "reaction only" in result["execution_shadow_reason"]
+    assert "thin live volume" in result["execution_shadow_reason"]
+
+
+def test_execution_shadow_fails_flat_range_positive_reaction():
+    candidate = {"ticker": "AGNCISH", "signal": "long", "ema21_4h": 10.9}
+    preview = {"entry_price": 10.895, "atr14": 0.24}
+    bars = [
+        {"time": "2026-08-24T00:00:00Z", "open": 10.90, "high": 10.96, "low": 10.88, "close": 10.92, "volume": 100000},
+        {"time": "2026-08-24T04:00:00Z", "open": 10.92, "high": 10.97, "low": 10.89, "close": 10.93, "volume": 110000},
+        {"time": "2026-08-24T08:00:00Z", "open": 10.93, "high": 10.96, "low": 10.90, "close": 10.92, "volume": 105000},
+        {"time": "2026-08-24T12:00:00Z", "open": 10.92, "high": 10.95, "low": 10.88, "close": 10.91, "volume": 98000},
+        {"time": "2026-08-24T16:00:00Z", "open": 10.91, "high": 10.94, "low": 10.89, "close": 10.93, "volume": 99000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is False
+    assert "reaction only" in result["execution_shadow_reason"]
+    assert "recent range only" in result["execution_shadow_reason"]

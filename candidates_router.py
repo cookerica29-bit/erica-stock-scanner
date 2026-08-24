@@ -37,6 +37,9 @@ CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
 SCANNER_SESSION_COOKIE = "kairos_scanner_session"
 ENTRY_PROXIMITY_MAX_PCT_DEFAULT = 1.5
 ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
+EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
+EXECUTION_SHADOW_MIN_RECENT_RANGE_ATR = 0.75
+EXECUTION_SHADOW_MIN_VOLUME_RATIO = 0.60
 
 
 def default_candidates_db_path() -> str:
@@ -644,6 +647,7 @@ def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
                 "high": _as_float(row.get("High")),
                 "low": _as_float(row.get("Low")),
                 "close": _as_float(row.get("Close")),
+                "volume": _as_float(row.get("Volume")) if "Volume" in row else None,
             }
         )
     return rows
@@ -654,7 +658,7 @@ def _execution_shadow_from_bars(
     preview: dict,
     bars: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    version = "4h-live-reaction-shadow-v1"
+    version = "4h-live-reaction-shadow-v2"
     base = {
         "execution_shadow_checked": True,
         "execution_shadow_ok": False,
@@ -669,18 +673,25 @@ def _execution_shadow_from_bars(
     prior = bars[-2]
     prior_lows = [_as_float(bar.get("low")) for bar in bars[-4:-1]]
     prior_lows = [low for low in prior_lows if low is not None]
+    recent_highs = [_as_float(bar.get("high")) for bar in bars[-5:]]
+    recent_lows = [_as_float(bar.get("low")) for bar in bars[-5:]]
+    recent_highs = [high for high in recent_highs if high is not None]
+    recent_lows = [low for low in recent_lows if low is not None]
+    prior_volumes = [_as_float(bar.get("volume")) for bar in bars[-5:-1]]
+    prior_volumes = [volume for volume in prior_volumes if volume is not None and volume > 0]
 
     open_price = _as_float(latest.get("open"))
     high = _as_float(latest.get("high"))
     low = _as_float(latest.get("low"))
     close = _as_float(latest.get("close"))
     prior_close = _as_float(prior.get("close"))
+    latest_volume = _as_float(latest.get("volume"))
     entry = _as_float(preview.get("entry_price"))
     atr = _as_float(preview.get("atr14"))
     ema21 = _as_float(candidate["ema21_4h"] if "ema21_4h" in candidate.keys() else None)
 
     base["execution_shadow_candle_time"] = latest.get("time")
-    if None in (open_price, high, low, close, prior_close, entry, atr) or not prior_lows:
+    if None in (open_price, high, low, close, prior_close, entry, atr) or not prior_lows or not recent_highs or not recent_lows:
         base["execution_shadow_reason"] = "4H execution inputs unavailable"
         return base
     if atr is None or atr <= 0:
@@ -694,6 +705,23 @@ def _execution_shadow_from_bars(
         hold_floor = max(hold_floor, ema21 - (0.5 * atr))
     holds_zone = low >= hold_floor
     no_fresh_lower_low = low >= min(prior_lows)
+    reaction_move_atr = max(close - open_price, close - prior_close) / atr
+    meaningful_reaction = reaction_move_atr >= EXECUTION_SHADOW_MIN_REACTION_ATR
+    recent_range_atr = (max(recent_highs) - min(recent_lows)) / atr
+    range_expanded = recent_range_atr >= EXECUTION_SHADOW_MIN_RECENT_RANGE_ATR
+    volume_ratio = None
+    volume_confirmed = True
+    if latest_volume is not None and latest_volume > 0 and prior_volumes:
+        sorted_prior_volumes = sorted(prior_volumes)
+        mid = len(sorted_prior_volumes) // 2
+        median_prior_volume = (
+            sorted_prior_volumes[mid]
+            if len(sorted_prior_volumes) % 2
+            else (sorted_prior_volumes[mid - 1] + sorted_prior_volumes[mid]) / 2
+        )
+        if median_prior_volume > 0:
+            volume_ratio = latest_volume / median_prior_volume
+            volume_confirmed = volume_ratio >= EXECUTION_SHADOW_MIN_VOLUME_RATIO
 
     failures = []
     if not bullish_reaction:
@@ -704,6 +732,12 @@ def _execution_shadow_from_bars(
         failures.append(f"sliced zone low {low:.2f} < floor {hold_floor:.2f}")
     if not no_fresh_lower_low:
         failures.append("fresh lower low vs prior 3 bars")
+    if not meaningful_reaction:
+        failures.append(f"reaction only {reaction_move_atr:.2f} ATR")
+    if not range_expanded:
+        failures.append(f"recent range only {recent_range_atr:.2f} ATR")
+    if not volume_confirmed and volume_ratio is not None:
+        failures.append(f"thin live volume {volume_ratio:.2f}x prior median")
 
     ok = not failures
     return {
@@ -737,7 +771,7 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
             "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
-            "execution_shadow_version": "4h-live-reaction-shadow-v1",
+            "execution_shadow_version": "4h-live-reaction-shadow-v2",
             "execution_shadow_candle_time": None,
         }
     bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))
