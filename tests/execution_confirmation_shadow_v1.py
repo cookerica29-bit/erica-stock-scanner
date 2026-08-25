@@ -34,10 +34,10 @@ def test_execution_shadow_passes_clean_bullish_reaction():
 
     assert result["execution_shadow_checked"] is True
     assert result["execution_shadow_ok"] is True
-    assert result["execution_shadow_reason"] == "Latest 4H snapshot confirms reaction"
+    assert result["execution_shadow_reason"] == "Recent 4H confirmation remains structurally intact"
 
 
-def test_execution_shadow_fails_when_latest_bar_slices_hold_zone():
+def test_execution_shadow_fails_when_latest_close_loses_hold_zone():
     candidate = {"ticker": "BKR", "signal": "long", "ema21_4h": 63.2556}
     preview = {"entry_price": 61.58, "atr14": 1.5844}
     bars = _leading_bars(11, base=61.0, volume=200000) + [
@@ -50,23 +50,24 @@ def test_execution_shadow_fails_when_latest_bar_slices_hold_zone():
     result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
 
     assert result["execution_shadow_ok"] is False
-    assert "sliced zone" in result["execution_shadow_reason"]
+    assert "lost hold zone" in result["execution_shadow_reason"]
 
 
-def test_execution_shadow_fails_without_bullish_reaction():
+def test_execution_shadow_fails_without_recent_bullish_confirmation():
     candidate = {"ticker": "BAC", "signal": "long", "ema21_4h": 62.7178}
     preview = {"entry_price": 62.145, "atr14": 1.1181}
-    bars = _leading_bars(11, base=61.0, volume=900000) + [
-        {"time": "2026-08-24T04:00:00Z", "open": 61.0, "high": 61.8, "low": 61.52, "close": 61.9},
-        {"time": "2026-08-24T08:00:00Z", "open": 61.9, "high": 62.6, "low": 61.8, "close": 62.2},
-        {"time": "2026-08-24T12:00:00Z", "open": 62.2, "high": 62.8, "low": 62.1, "close": 62.385},
-        {"time": "2026-08-24T16:00:00Z", "open": 62.385, "high": 62.41, "low": 62.0, "close": 62.245},
+    bars = _leading_bars(10, base=61.0, volume=900000) + [
+        {"time": "2026-08-24T00:00:00Z", "open": 62.15, "high": 62.35, "low": 61.95, "close": 62.02, "volume": 850000},
+        {"time": "2026-08-24T04:00:00Z", "open": 62.02, "high": 62.25, "low": 61.85, "close": 61.95, "volume": 870000},
+        {"time": "2026-08-24T08:00:00Z", "open": 61.95, "high": 62.20, "low": 61.80, "close": 62.00, "volume": 860000},
+        {"time": "2026-08-24T12:00:00Z", "open": 62.00, "high": 62.18, "low": 61.78, "close": 61.92, "volume": 880000},
+        {"time": "2026-08-24T16:00:00Z", "open": 61.92, "high": 62.15, "low": 61.76, "close": 61.98, "volume": 890000},
     ]
 
     result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
 
     assert result["execution_shadow_ok"] is False
-    assert "no bullish reaction" in result["execution_shadow_reason"]
+    assert "no recent bullish confirmation" in result["execution_shadow_reason"]
 
 
 def test_execution_shadow_fails_low_conviction_positive_reaction():
@@ -83,7 +84,7 @@ def test_execution_shadow_fails_low_conviction_positive_reaction():
     result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
 
     assert result["execution_shadow_ok"] is False
-    assert "reaction only" in result["execution_shadow_reason"]
+    assert "no recent bullish confirmation" in result["execution_shadow_reason"]
     assert "directional expansion only" in result["execution_shadow_reason"]
     assert "thin bullish confirmation volume" in result["execution_shadow_reason"]
 
@@ -102,7 +103,7 @@ def test_execution_shadow_passes_quiet_consolidation_after_volume_push():
     result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
 
     assert result["execution_shadow_ok"] is True
-    assert result["execution_shadow_reason"] == "Latest 4H snapshot confirms reaction"
+    assert result["execution_shadow_reason"] == "Recent 4H confirmation remains structurally intact"
 
 
 def test_execution_shadow_ignores_high_volume_red_candle_for_longs():
@@ -163,7 +164,7 @@ def test_execution_shadow_fails_flat_range_positive_reaction():
     result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
 
     assert result["execution_shadow_ok"] is False
-    assert "reaction only" in result["execution_shadow_reason"]
+    assert "no recent bullish confirmation" in result["execution_shadow_reason"]
     assert "directional expansion only" in result["execution_shadow_reason"]
 
 
@@ -203,3 +204,136 @@ def test_execution_shadow_requires_full_range_window():
 
     assert result["execution_shadow_ok"] is False
     assert "Need 15 recent 4H bars" in result["execution_shadow_reason"]
+
+
+def test_execution_shadow_low_vol_requires_one_percent_net_move():
+    candidate = {"ticker": "VNQLIKE", "signal": "long", "ema21_4h": 98.8}
+    preview = {"entry_price": 99.0, "atr14": 1.0}
+    bars = [
+        {
+            "time": f"2026-08-23T{hour:02d}:00:00Z",
+            "open": 98.45,
+            "high": 98.80,
+            "low": 98.20,
+            "close": 98.50,
+            "volume": 100000,
+        }
+        for hour in range(10)
+    ] + [
+        {"time": "2026-08-24T00:00:00Z", "open": 98.60, "high": 99.45, "low": 98.55, "close": 99.30, "volume": 140000},
+        {"time": "2026-08-24T04:00:00Z", "open": 99.30, "high": 99.38, "low": 99.00, "close": 99.25, "volume": 80000},
+        {"time": "2026-08-24T08:00:00Z", "open": 99.25, "high": 99.35, "low": 99.05, "close": 99.28, "volume": 90000},
+        {"time": "2026-08-24T12:00:00Z", "open": 99.28, "high": 99.36, "low": 99.10, "close": 99.26, "volume": 85000},
+        {"time": "2026-08-24T16:00:00Z", "open": 99.26, "high": 99.40, "low": 99.12, "close": 99.30, "volume": 90000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is False
+    assert "low-vol net move only" in result["execution_shadow_reason"]
+
+
+def test_execution_shadow_low_vol_passes_with_one_percent_net_move():
+    candidate = {"ticker": "LOWVOLMOVE", "signal": "long", "ema21_4h": 98.8}
+    preview = {"entry_price": 99.0, "atr14": 1.0}
+    bars = [
+        {
+            "time": f"2026-08-23T{hour:02d}:00:00Z",
+            "open": 98.45,
+            "high": 98.80,
+            "low": 98.20,
+            "close": 98.50,
+            "volume": 100000,
+        }
+        for hour in range(10)
+    ] + [
+        {"time": "2026-08-24T00:00:00Z", "open": 98.60, "high": 99.70, "low": 98.55, "close": 99.55, "volume": 140000},
+        {"time": "2026-08-24T04:00:00Z", "open": 99.55, "high": 99.65, "low": 99.25, "close": 99.50, "volume": 80000},
+        {"time": "2026-08-24T08:00:00Z", "open": 99.50, "high": 99.60, "low": 99.30, "close": 99.52, "volume": 90000},
+        {"time": "2026-08-24T12:00:00Z", "open": 99.52, "high": 99.62, "low": 99.35, "close": 99.50, "volume": 85000},
+        {"time": "2026-08-24T16:00:00Z", "open": 99.50, "high": 99.66, "low": 99.40, "close": 99.55, "volume": 90000},
+    ]
+
+    result = candidates_router._execution_shadow_from_bars(candidate, preview, bars)
+
+    assert result["execution_shadow_ok"] is True
+    assert result["execution_shadow_reason"] == "Recent 4H confirmation remains structurally intact"
+
+
+def _promotion_gate_candidate():
+    return {
+        "ticker": "GOOD",
+        "source": "ma_pipeline",
+        "signal": "long",
+        "daily_regime": "bullish",
+    }
+
+
+def _promotion_gate_plan(**overrides):
+    plan = {
+        "ticker": "GOOD",
+        "source": "ma_pipeline",
+        "direction": "long",
+        "entry_price": 100.0,
+        "stop": 95.0,
+        "target": 110.0,
+        "risk_reward": 2.0,
+        "rr_warning": False,
+        "no_valid_target": False,
+        "atr14": 2.0,
+        "entry_proximity_ok": True,
+        "entry_proximity_reason": None,
+        "execution_shadow_checked": True,
+        "execution_shadow_ok": True,
+        "execution_shadow_reason": "Recent 4H confirmation remains structurally intact",
+    }
+    plan.update(overrides)
+    return plan
+
+
+def _good_contract():
+    return {
+        "available": True,
+        "execution": "Excellent",
+        "estimated_contract_cost": 250.0,
+    }
+
+
+def test_promotion_gate_blocks_when_execution_confirmation_not_ready():
+    reason = candidates_router._promotion_block_reason(
+        _promotion_gate_candidate(),
+        _promotion_gate_plan(
+            execution_shadow_ok=False,
+            execution_shadow_reason="directional expansion only 0.12 ATR",
+        ),
+        _good_contract(),
+    )
+
+    assert reason is not None
+    assert "execution confirmation" in reason
+    assert "directional expansion only" in reason
+
+
+def test_promotion_gate_blocks_when_execution_confirmation_not_checked():
+    reason = candidates_router._promotion_block_reason(
+        _promotion_gate_candidate(),
+        _promotion_gate_plan(
+            execution_shadow_checked=False,
+            execution_shadow_ok=None,
+            execution_shadow_reason="Not checked until base ENTER_NOW gate passes",
+        ),
+        _good_contract(),
+    )
+
+    assert reason is not None
+    assert "Not checked until base" in reason
+
+
+def test_promotion_gate_allows_when_execution_confirmation_ready():
+    reason = candidates_router._promotion_block_reason(
+        _promotion_gate_candidate(),
+        _promotion_gate_plan(),
+        _good_contract(),
+    )
+
+    assert reason is None

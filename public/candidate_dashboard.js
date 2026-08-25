@@ -245,6 +245,12 @@
     return plan.entry_proximity_reason || 'Price is not near entry';
   }
 
+  function executionConfirmationBlockReason(plan) {
+    if (!plan) return 'Plan math pending';
+    if (plan.execution_shadow_ok === true) return '';
+    return plan.execution_shadow_reason || 'Execution confirmation is not ready';
+  }
+
   function routeBlockReason(item, plan) {
     const direction = String(item.signal || '').toLowerCase();
     if (direction === 'short') return 'Shorts are research-only';
@@ -262,6 +268,8 @@
     // candidates_router.py.
     const proximityReason = entryProximityBlockReason(plan);
     if (proximityReason) return proximityReason;
+    const executionReason = executionConfirmationBlockReason(plan);
+    if (executionReason) return executionReason;
     const freshnessReason = scanFreshnessBlockReason(item);
     if (freshnessReason) return freshnessReason;
     return '';
@@ -581,9 +589,9 @@
     }
     if (preview.execution_shadow_checked) {
       if (preview.execution_shadow_ok) {
-        warnings.push('<span class="candidate-pill high">Execution reaction ok</span>');
+        warnings.push('<span class="candidate-pill high">Execution confirmed</span>');
       } else if (blockReason !== executionReasonText) {
-        warnings.push('<span class="candidate-pill warn secondary">Also: execution reaction weak</span>');
+        warnings.push('<span class="candidate-pill warn secondary">Also: execution not ready</span>');
       }
     }
     const contract = preview.option_contract || {};
@@ -616,7 +624,7 @@
         <div><span>Expiry</span><strong>${escapeHtml(contractMeta)}</strong></div>
       </div>
       <div class="candidate-meta">Preview computed ${escapeHtml(fmtTime(preview.computed_at))} · target source ${escapeHtml(preview.target_source || '—')}</div>
-      ${preview.execution_shadow_checked ? `<div class="candidate-meta">Execution shadow: ${escapeHtml(preview.execution_shadow_reason || '—')}</div>` : ''}
+      ${preview.execution_shadow_checked ? `<div class="candidate-meta">Execution gate: ${escapeHtml(preview.execution_shadow_reason || '—')}</div>` : ''}
     `;
   }
 

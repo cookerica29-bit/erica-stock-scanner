@@ -45,6 +45,8 @@ EXECUTION_SHADOW_CONFIRMATION_BARS = 5
 EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS = EXECUTION_SHADOW_RECENT_RANGE_BARS - EXECUTION_SHADOW_CONFIRMATION_BARS
 EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR = 0.75
 EXECUTION_SHADOW_MIN_VOLUME_RATIO = 0.60
+EXECUTION_SHADOW_LOW_VOL_ATR_PCT_MAX = 0.015
+EXECUTION_SHADOW_LOW_VOL_MIN_NET_MOVE_PCT = 0.01
 
 
 def default_candidates_db_path() -> str:
@@ -703,7 +705,7 @@ def _execution_shadow_from_bars(
     preview: dict,
     bars: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    version = "4h-live-reaction-shadow-v8"
+    version = "4h-confirmed-recently-still-intact-shadow-v10"
     base = {
         "execution_shadow_checked": True,
         "execution_shadow_ok": False,
@@ -730,27 +732,8 @@ def _execution_shadow_from_bars(
     recent_range_closes = [close_value for close_value in recent_range_closes if close_value is not None]
     prior_volumes = [_as_float(bar.get("volume")) for bar in baseline_bars]
     prior_volumes = [volume for volume in prior_volumes if volume is not None and volume > 0]
-    bullish_confirmation_volumes = []
-    for idx, bar in enumerate(confirmation_bars):
-        bar_open = _as_float(bar.get("open"))
-        bar_high = _as_float(bar.get("high"))
-        bar_low = _as_float(bar.get("low"))
-        bar_close = _as_float(bar.get("close"))
-        bar_volume = _as_float(bar.get("volume"))
-        previous_bar = range_bars[EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS + idx - 1] if idx > 0 else baseline_bars[-1]
-        previous_close = _as_float(previous_bar.get("close")) if previous_bar else None
-        if (
-            bar_open is not None
-            and bar_high is not None
-            and bar_low is not None
-            and bar_close is not None
-            and previous_close is not None
-            and bar_volume is not None
-            and bar_volume > 0
-            and (bar_close > bar_open or bar_close > previous_close)
-            and bar_close > ((bar_high + bar_low) / 2)
-        ):
-            bullish_confirmation_volumes.append(bar_volume)
+    qualifying_confirmation_volumes = []
+    recent_confirmations = []
 
     open_price = _as_float(latest.get("open"))
     high = _as_float(latest.get("high"))
@@ -774,17 +757,54 @@ def _execution_shadow_from_bars(
         base["execution_shadow_reason"] = "ATR unavailable for execution check"
         return base
 
-    bullish_reaction = close > open_price or close > prior_close
-    strong_close = close > ((high + low) / 2)
     hold_floor = entry - (0.5 * atr)
     if ema21 is not None:
         hold_floor = max(hold_floor, ema21 - (0.5 * atr))
-    holds_zone = low >= hold_floor
+    holds_zone = close >= hold_floor
     no_fresh_lower_low = low >= min(prior_lows)
-    reaction_move_atr = max(close - open_price, close - prior_close) / atr
-    meaningful_reaction = reaction_move_atr >= EXECUTION_SHADOW_MIN_REACTION_ATR
-    directional_expansion_atr = (close - early_range_closes[0]) / atr
+    range_start_close = early_range_closes[0]
+    directional_expansion_atr = (close - range_start_close) / atr
     direction_expanded = directional_expansion_atr >= EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR
+    atr_pct_of_entry = atr / entry if entry > 0 else None
+    net_move_pct = (close - range_start_close) / range_start_close if range_start_close > 0 else None
+    low_vol_bucket = atr_pct_of_entry is not None and atr_pct_of_entry <= EXECUTION_SHADOW_LOW_VOL_ATR_PCT_MAX
+    low_vol_net_move_ok = (
+        not low_vol_bucket
+        or (
+            net_move_pct is not None
+            and net_move_pct >= EXECUTION_SHADOW_LOW_VOL_MIN_NET_MOVE_PCT
+        )
+    )
+    confirmation_reaction_atr = 0.0
+    confirmation_directional_atr = 0.0
+    for idx, bar in enumerate(confirmation_bars):
+        bar_open = _as_float(bar.get("open"))
+        bar_high = _as_float(bar.get("high"))
+        bar_low = _as_float(bar.get("low"))
+        bar_close = _as_float(bar.get("close"))
+        bar_volume = _as_float(bar.get("volume"))
+        previous_bar = range_bars[EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS + idx - 1] if idx > 0 else baseline_bars[-1]
+        previous_close = _as_float(previous_bar.get("close")) if previous_bar else None
+        if None in (bar_open, bar_high, bar_low, bar_close, previous_close):
+            continue
+        strong_confirmation = (
+            bar_close > bar_open
+            and bar_close > ((bar_high + bar_low) / 2)
+        )
+        if not strong_confirmation:
+            continue
+        bar_reaction_atr = max(bar_close - bar_open, bar_close - previous_close) / atr
+        bar_directional_atr = (bar_close - early_range_closes[0]) / atr
+        confirmation_reaction_atr = max(confirmation_reaction_atr, bar_reaction_atr)
+        confirmation_directional_atr = max(confirmation_directional_atr, bar_directional_atr)
+        if (
+            bar_reaction_atr >= EXECUTION_SHADOW_MIN_REACTION_ATR
+            and bar_directional_atr >= EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR
+        ):
+            recent_confirmations.append(bar)
+            if bar_volume is not None and bar_volume > 0:
+                qualifying_confirmation_volumes.append(bar_volume)
+    has_recent_confirmation = bool(recent_confirmations)
     volume_ratio = None
     volume_confirmed = True
     if prior_volumes:
@@ -796,23 +816,30 @@ def _execution_shadow_from_bars(
             else (sorted_prior_volumes[mid - 1] + sorted_prior_volumes[mid]) / 2
         )
         if median_prior_volume > 0:
-            confirmation_volume = max(bullish_confirmation_volumes) if bullish_confirmation_volumes else 0.0
+            confirmation_volume = max(qualifying_confirmation_volumes) if qualifying_confirmation_volumes else 0.0
             volume_ratio = confirmation_volume / median_prior_volume
             volume_confirmed = volume_ratio >= EXECUTION_SHADOW_MIN_VOLUME_RATIO
 
     failures = []
-    if not bullish_reaction:
-        failures.append("no bullish reaction")
-    if not strong_close:
-        failures.append("close not upper half")
+    if not has_recent_confirmation:
+        failures.append(
+            f"no recent bullish confirmation "
+            f"(reaction {confirmation_reaction_atr:.2f} ATR, expansion {confirmation_directional_atr:.2f} ATR)"
+        )
     if not holds_zone:
-        failures.append(f"sliced zone low {low:.2f} < floor {hold_floor:.2f}")
+        failures.append(f"lost hold zone close {close:.2f} < floor {hold_floor:.2f}")
     if not no_fresh_lower_low:
         failures.append("fresh lower low vs prior 3 bars")
-    if not meaningful_reaction:
-        failures.append(f"reaction only {reaction_move_atr:.2f} ATR")
     if not direction_expanded:
         failures.append(f"directional expansion only {directional_expansion_atr:.2f} ATR")
+    if not low_vol_net_move_ok:
+        if net_move_pct is None:
+            failures.append("low-vol net move unavailable")
+        else:
+            failures.append(
+                f"low-vol net move only {net_move_pct * 100:.2f}% "
+                f"< {EXECUTION_SHADOW_LOW_VOL_MIN_NET_MOVE_PCT * 100:.2f}%"
+            )
     if not volume_confirmed and volume_ratio is not None:
         failures.append(f"thin bullish confirmation volume {volume_ratio:.2f}x prior median")
 
@@ -820,7 +847,7 @@ def _execution_shadow_from_bars(
     return {
         **base,
         "execution_shadow_ok": ok,
-        "execution_shadow_reason": "Latest 4H snapshot confirms reaction" if ok else "; ".join(failures),
+        "execution_shadow_reason": "Recent 4H confirmation remains structurally intact" if ok else "; ".join(failures),
     }
 
 
@@ -852,7 +879,7 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
             "execution_shadow_reason": "Not checked until base ENTER_NOW gate passes",
-            "execution_shadow_version": "4h-live-reaction-shadow-v8",
+            "execution_shadow_version": "4h-confirmed-recently-still-intact-shadow-v10",
             "execution_shadow_candle_time": None,
         }
     bars = _recent_4h_bars_for_execution_shadow(str(preview.get("ticker") or candidate["ticker"]))
@@ -868,6 +895,22 @@ def _entry_proximity_block_reason(entry_price: Optional[float], atr14: Optional[
     if proximity.get("entry_proximity_ok"):
         return None
     return str(proximity.get("entry_proximity_reason") or "Price is not near entry")
+
+
+def _promotion_with_live_gate_context(
+    candidate: sqlite3.Row | dict[str, Any],
+    promotion: dict[str, Any],
+    option_contract: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    ticker = str(promotion.get("ticker") or candidate["ticker"]).strip().upper()
+    enriched = {
+        **promotion,
+        "ticker": ticker,
+        "signal": promotion.get("direction") or candidate["signal"],
+        "option_contract": option_contract,
+    }
+    enriched = _attach_entry_proximity(enriched, _latest_quote_for_ticker(ticker))
+    return _attach_execution_shadow(candidate, enriched)
 
 
 def _preview_has_transient_option_unavailable(row: sqlite3.Row) -> bool:
@@ -1221,7 +1264,7 @@ def _candidate_regime_aligned(candidate: sqlite3.Row, direction: str) -> bool:
 
 
 def _promotion_block_reason(
-    candidate: sqlite3.Row,
+    candidate: sqlite3.Row | dict[str, Any],
     promotion: dict,
     option_contract: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
@@ -1238,13 +1281,21 @@ def _promotion_block_reason(
         return f"Candidate R:R is below {RR_WARNING_THRESHOLD}:1, so it is not ENTER_NOW dashboard-ready."
     # Contract quality is informational only, not an ENTER_NOW/promotion gate
     # -- see _preview_base_enter_now_ready for the matching change.
-    proximity_reason = _entry_proximity_block_reason(
-        promotion.get("entry_price"),
-        promotion.get("atr14"),
-        str(promotion.get("ticker") or candidate["ticker"]),
-    )
+    if "entry_proximity_ok" in promotion:
+        proximity_reason = None if promotion.get("entry_proximity_ok") else str(
+            promotion.get("entry_proximity_reason") or "Price is not near entry"
+        )
+    else:
+        proximity_reason = _entry_proximity_block_reason(
+            promotion.get("entry_price"),
+            promotion.get("atr14"),
+            str(promotion.get("ticker") or candidate["ticker"]),
+        )
     if proximity_reason:
         return f"Candidate is not ENTER_NOW-ready: {proximity_reason}."
+    if promotion.get("execution_shadow_ok") is not True:
+        execution_reason = str(promotion.get("execution_shadow_reason") or "Recent 4H confirmation is not ready")
+        return f"Candidate execution confirmation is not ENTER_NOW-ready: {execution_reason}."
     return None
 
 
@@ -1678,6 +1729,7 @@ def update_candidate_status(
                     promotion["direction"],
                     promotion["entry_price"],
                 )
+            promotion = _promotion_with_live_gate_context(candidate, promotion, option_contract)
             block_reason = _promotion_block_reason(candidate, promotion, option_contract)
             if block_reason:
                 raise HTTPException(status_code=422, detail=block_reason)
