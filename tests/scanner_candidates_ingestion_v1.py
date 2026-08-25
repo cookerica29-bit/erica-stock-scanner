@@ -355,19 +355,40 @@ def test_chart_review_parser_accepts_fenced_json():
     }
 
 
-def test_preview_contract_normalizes_expiration_data_unavailable():
+def test_preview_contract_normalizes_no_options_chain():
     import candidates_router
 
     normalized = candidates_router._normalize_preview_option_contract({
         "available": False,
+        "chain_available": False,
         "execution": "No Clean Contract",
-        "reason": "No option expirations available",
+        "reason": "No options chain available",
         "source": "unavailable",
     })
-    assert normalized["execution"] == "Contract Data Unavailable"
-    assert "retry later" in normalized["reason"]
-    assert normalized["source"] == "data_unavailable"
-    assert normalized["transient_unavailable"] is True
+    assert normalized["execution"] == "No Options Chain"
+    assert normalized["reason"] == "No options chain available"
+    assert normalized["source"] == "unavailable"
+    assert normalized.get("transient_unavailable") is None
+
+
+def test_preview_contract_keeps_suggested_strike_when_chain_available():
+    import candidates_router
+
+    normalized = candidates_router._normalize_preview_option_contract({
+        "available": True,
+        "chain_available": True,
+        "clean": False,
+        "execution": "Suggested",
+        "reason": "Best contract spread is too wide or unavailable",
+        "source": "option_chain",
+        "strike": 106.0,
+        "type": "CALL",
+        "expiry": "2026-09-18",
+        "dte": 25,
+    })
+    assert normalized["execution"] == "Suggested"
+    assert normalized["strike"] == 106.0
+    assert normalized["available"] is True
 
 
 def test_entry_proximity_uses_percent_or_atr_threshold():
@@ -423,6 +444,133 @@ def test_contract_gate_allows_clean_option_premium():
         "estimated_contract_cost": 65.0,
     })
     assert reason is None
+
+
+def test_promotion_and_preview_ignore_contract_quality():
+    """Contract quality (spread/liquidity/DTE/delta) is informational only --
+    a low-confidence "Suggested" contract must not block ENTER_NOW preview
+    status or promotion, as long as the other gates pass. This is the
+    dual-enforcement check for the contract-quality-to-informational change:
+    the same low-quality mock must not block the preview OR the PATCH."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "candidates.db")
+        os.environ["KAIROS_CANDIDATES_DB"] = db_path
+        os.environ["KAIROS_SCANNER_API_KEY"] = "test-scanner-key"
+
+        import candidates_router
+
+        previous_download = candidates_router._batch_download
+        previous_best_contract = candidates_router._best_contract
+        previous_latest_quote = candidates_router._latest_quote_for_ticker
+        previous_latest_quotes = candidates_router._latest_quotes_for_previews
+        previous_execution_bars = candidates_router._recent_4h_bars_for_execution_shadow
+        candidates_router._batch_download = lambda tickers, period, interval: {
+            str(tickers[0]).upper(): _promotion_daily_frame()
+        }
+        # Deliberately a low-confidence, not-"clean" contract -- this is what
+        # _best_contract now returns for a real chain that failed spread/
+        # liquidity/DTE/score thresholds, instead of hiding the strike.
+        candidates_router._best_contract = lambda ticker, direction, entry, **kwargs: {
+            "available": True,
+            "chain_available": True,
+            "clean": False,
+            "execution": "Suggested",
+            "reason": "Best contract spread is too wide or unavailable",
+            "type": "CALL",
+            "strike": 100.0,
+            "expiry": "2026-09-18",
+            "dte": 25,
+            "symbol": "MOCK",
+            "source": "option_chain",
+            "bid": None,
+            "ask": None,
+            "mid": None,
+            "mark": None,
+            "estimated_contract_cost": None,
+        }
+        candidates_router._latest_quote_for_ticker = lambda ticker: {
+            "price": 100.0,
+            "timestamp": "2026-08-24T14:30:00Z",
+            "source": "mock_latest_quote",
+            "price_branch": "mid",
+        }
+        candidates_router._latest_quotes_for_previews = lambda previews: {
+            str(preview.get("ticker") or "").upper(): {
+                "price": 100.0,
+                "timestamp": "2026-08-24T14:30:00Z",
+                "source": "mock_latest_quote",
+                "price_branch": "mid",
+            }
+            for preview in previews
+        }
+        candidates_router._recent_4h_bars_for_execution_shadow = lambda ticker: [
+            {
+                "time": f"2026-08-19T{hour:02d}:00:00Z",
+                "open": 99.0 + (idx * 0.05),
+                "high": 101.0 + (idx * 0.05),
+                "low": 98.0 + (idx * 0.05),
+                "close": 100.0 + (idx * 0.05),
+                "volume": 1000,
+            }
+            for idx, hour in enumerate(range(11))
+        ] + [
+            {"time": "2026-08-20T02:00:00Z", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 1000},
+            {"time": "2026-08-20T06:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1100},
+            {"time": "2026-08-20T10:00:00Z", "open": 100.5, "high": 102.0, "low": 99.2, "close": 101.0, "volume": 1200},
+            {"time": "2026-08-20T14:00:00Z", "open": 100.8, "high": 103.0, "low": 99.5, "close": 102.2, "volume": 1000},
+        ]
+
+        try:
+            client = _client()
+            headers = {"X-API-Key": "test-scanner-key"}
+            created = client.post(
+                "/api/v1/scanner/candidates",
+                headers=headers,
+                json={
+                    "source": "ma_pipeline",
+                    "scanned_at": "2026-08-20T14:30:00Z",
+                    "candidates": [
+                        {
+                            "ticker": "LQD",
+                            "signal": "long",
+                            "entry_price": 100.0,
+                            "ema21_4h": 99.0,
+                            "daily_regime": "bullish",
+                            "confidence": "high",
+                            "sma50_daily": 90.0,
+                            "sma200_daily": 80.0,
+                        }
+                    ],
+                },
+            )
+            assert created.status_code == 200
+
+            previews = client.get("/api/v1/scanner/candidate-plan-previews", headers=headers)
+            assert previews.status_code == 200
+            preview = previews.json()[0]
+            # The low-quality contract must not block entry proximity / the
+            # base ENTER_NOW-readiness the execution shadow check depends on.
+            assert preview["entry_proximity_ok"] is True
+            assert preview["execution_shadow_checked"] is True
+            assert preview["option_contract"]["available"] is True
+            assert preview["option_contract"]["execution"] == "Suggested"
+            assert preview["option_contract"]["strike"] == 100.0
+            assert preview["option_contract"]["clean"] is False
+
+            promoted = client.patch(
+                "/api/v1/scanner/candidates/LQD?source=ma_pipeline",
+                headers=headers,
+                json={"status": "active"},
+            )
+            assert promoted.status_code == 200, promoted.text
+            assert promoted.json()["status"] == "active"
+            assert promoted.json()["option_contract"]["execution"] == "Suggested"
+        finally:
+            candidates_router._batch_download = previous_download
+            candidates_router._best_contract = previous_best_contract
+            candidates_router._latest_quote_for_ticker = previous_latest_quote
+            candidates_router._latest_quotes_for_previews = previous_latest_quotes
+            candidates_router._recent_4h_bars_for_execution_shadow = previous_execution_bars
 
 
 def test_promotion_blocks_when_price_is_not_near_entry():

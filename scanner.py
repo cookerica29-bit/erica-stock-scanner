@@ -4469,13 +4469,33 @@ def _best_contract_cache_key(ticker: str, direction: str, entry: float) -> tuple
     return (str(ticker or "").upper(), str(direction or "").upper(), _price_region(entry))
 
 
-def _unclean_contract(reason: str, source: str = "not_evaluated") -> dict:
+def _unclean_contract(reason: str, source: str = "not_evaluated", *, chain_available: bool = True) -> dict:
     return {
         "available": False,
+        "chain_available": chain_available,
         "execution": "No Clean Contract",
         "reason": reason,
         "source": source,
     }
+
+
+def _suggested_contract(best: dict, reason: str) -> dict:
+    """A best-effort strike/expiry from a real options chain that didn't clear
+    the spread/liquidity/DTE/delta quality bar. Contract quality is informational
+    only now (not an ENTER_NOW gate) -- callers show this as a suggestion to
+    verify in the broker, not an assertion of tradeable quality."""
+    result = dict(best)
+    result.pop("diagnostics", None)
+    result.update({
+        "available": True,
+        "chain_available": True,
+        "clean": False,
+        "execution": "Suggested",
+        "reason": reason,
+        "source": "option_chain",
+        "diagnostics": best.get("diagnostics", {}),
+    })
+    return result
 
 
 def _loading_contract(reason: str = "Options data is refreshing") -> dict:
@@ -4789,7 +4809,10 @@ def _best_contract(
 
     expirations = _parsed_expirations(_option_expirations_for_ticker(ticker))
     if not expirations:
-        result = _unclean_contract("No option expirations available", "unavailable")
+        # Genuine optionability floor: this ticker has no listed options chain
+        # at all. This is the only case that should ever say "no options
+        # chain available" -- every other failure below found a real chain.
+        result = _unclean_contract("No options chain available", "unavailable", chain_available=False)
         return _store_best_contract(cache_key, result, now)
 
     candidates = []
@@ -4821,7 +4844,9 @@ def _best_contract(
             })
 
     if not candidates:
-        result = _unclean_contract("No contracts returned near the ideal strike", "unavailable")
+        # Chain exists (expirations were found) but nothing was returned near
+        # entry price -- distinct from "no options chain available" above.
+        result = _unclean_contract("No contracts returned near the ideal strike", "unavailable", chain_available=True)
         return _store_best_contract(cache_key, result, now)
 
     best = max(candidates, key=lambda item: item["score"])
@@ -4829,27 +4854,28 @@ def _best_contract(
     diagnostics = best.get("diagnostics", {})
     spread_pct = diagnostics.get("spread_pct")
     distance_pct = diagnostics.get("distance_pct")
+    # None of these are ENTER_NOW gates anymore -- contract quality is
+    # informational. Each branch still returns the best-effort strike/expiry
+    # so the UI can show a "Suggested" contract to verify in the broker,
+    # instead of hiding the strike behind "No Clean Contract".
     if distance_pct is not None and distance_pct > 10:
         result = {
-            **_unclean_contract("Closest contract strike is too far from the ideal strike", "option_chain"),
+            **_suggested_contract(best, "Closest contract strike is too far from the ideal strike"),
             "best_score": best["score"],
-            "diagnostics": diagnostics,
             "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
     if spread_pct is None or spread_pct > 35:
         result = {
-            **_unclean_contract("Best contract spread is too wide or unavailable", "option_chain"),
+            **_suggested_contract(best, "Best contract spread is too wide or unavailable"),
             "best_score": best["score"],
-            "diagnostics": diagnostics,
             "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
     if (best.get("open_interest") or 0) < 25 and (best.get("volume") or 0) < 1:
         result = {
-            **_unclean_contract("Best contract liquidity is too thin", "option_chain"),
+            **_suggested_contract(best, "Best contract liquidity is too thin"),
             "best_score": best["score"],
-            "diagnostics": diagnostics,
             "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
@@ -4857,16 +4883,16 @@ def _best_contract(
     execution = "Excellent" if best["score"] >= 75 else "Fair" if best["score"] >= 55 else "No Clean Contract"
     if execution == "No Clean Contract":
         result = {
-            **_unclean_contract("Spread, liquidity, DTE, or strike distance did not meet minimum quality", "option_chain"),
-            "reason": "Spread, liquidity, DTE, or strike distance did not meet minimum quality",
+            **_suggested_contract(best, "Spread, liquidity, DTE, or strike distance did not meet minimum quality"),
             "best_score": best["score"],
-            "diagnostics": best.get("diagnostics", {}),
             "candidate_audit": candidate_audit,
         }
         return _store_best_contract(cache_key, result, now)
 
     best.update({
         "available": True,
+        "chain_available": True,
+        "clean": True,
         "execution": execution,
         "source": "option_chain",
         "cache": "miss",

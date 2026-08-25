@@ -494,17 +494,15 @@ def _safe_option_contract_for_candidate(ticker: str, direction: str, entry_price
 
 def _normalize_preview_option_contract(contract: dict) -> dict:
     normalized = dict(contract)
-    reason = str(normalized.get("reason") or "").strip().lower()
-    source = str(normalized.get("source") or "").strip().lower()
-    if not normalized.get("available") and (
-        "no option expirations available" in reason
-        or "no option expirations returned" in reason
-        or source == "unavailable"
-    ):
-        normalized["execution"] = "Contract Data Unavailable"
-        normalized["reason"] = "Option expiration data unavailable from the legacy option-chain provider; retry later."
-        normalized["source"] = "data_unavailable"
-        normalized["transient_unavailable"] = True
+    # Optionability floor: chain_available=False is the ONLY genuine
+    # "this ticker has no listed options chain" case (see _best_contract in
+    # scanner.py). Every other unavailable/low-quality result means a real
+    # chain was found -- display it plainly, not as a transient data error.
+    if normalized.get("chain_available") is False:
+        normalized["execution"] = "No Options Chain"
+        normalized["reason"] = "No options chain available"
+        normalized["source"] = "unavailable"
+        normalized.pop("transient_unavailable", None)
     return normalized
 
 
@@ -838,8 +836,12 @@ def _preview_base_enter_now_ready(candidate: sqlite3.Row | dict, preview: dict) 
         return False
     if preview.get("rr_warning") or float(preview.get("risk_reward") or 0) < RR_WARNING_THRESHOLD:
         return False
-    if _contract_block_reason(preview.get("option_contract")):
-        return False
+    # Contract quality (spread/liquidity/DTE/delta) is informational only --
+    # demoted from a hard gate, same pattern as the AI chart-read demotion.
+    # The user verifies the real chain in her broker; Kairos just needs to
+    # show a suggested strike, not validate one. See _contract_block_reason
+    # for the (now unused-for-gating) quality assessment, still exposed via
+    # option_contract fields for display.
     return bool(preview.get("entry_proximity_ok"))
 
 
@@ -1234,9 +1236,8 @@ def _promotion_block_reason(
         return "Candidate has no valid target, so it is not ENTER_NOW dashboard-ready."
     if promotion.get("rr_warning") or float(promotion.get("risk_reward") or 0) < RR_WARNING_THRESHOLD:
         return f"Candidate R:R is below {RR_WARNING_THRESHOLD}:1, so it is not ENTER_NOW dashboard-ready."
-    contract_reason = _contract_block_reason(option_contract)
-    if contract_reason:
-        return f"Candidate option contract is not ENTER_NOW-ready: {contract_reason}"
+    # Contract quality is informational only, not an ENTER_NOW/promotion gate
+    # -- see _preview_base_enter_now_ready for the matching change.
     proximity_reason = _entry_proximity_block_reason(
         promotion.get("entry_price"),
         promotion.get("atr14"),

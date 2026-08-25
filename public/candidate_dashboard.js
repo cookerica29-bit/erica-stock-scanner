@@ -254,8 +254,12 @@
     if (plan.preview_error) return plan.preview_error;
     if (plan.no_valid_target || plan.target == null || plan.risk_reward == null) return 'No valid target';
     if (plan.rr_warning || Number(plan.risk_reward) < ENTER_NOW_MIN_RR) return `R:R is below ${ENTER_NOW_MIN_RR}:1`;
-    const contractReason = contractBlockReason(plan);
-    if (contractReason) return contractReason;
+    // Contract quality (spread/liquidity/DTE/delta) is informational only --
+    // demoted from a hard gate, same pattern as the AI chart-read demotion.
+    // contractBlockReason() is intentionally unused here now; the contract
+    // fields in renderPlanPreview() show a best-effort suggested strike
+    // instead. See the backend twin, _preview_base_enter_now_ready in
+    // candidates_router.py.
     const proximityReason = entryProximityBlockReason(plan);
     if (proximityReason) return proximityReason;
     const freshnessReason = scanFreshnessBlockReason(item);
@@ -548,13 +552,19 @@
       );
     }
     const contract = preview.option_contract || {};
-    const contractAvailable = Boolean(contract.available);
-    const contractLabel = contractAvailable
+    // Optionability floor, not a quality gate: chain_available === false is
+    // the ONLY genuine "not optionable" case. Everything else with a strike
+    // is a best-effort suggestion to verify in the broker, not an assertion
+    // of tradeable quality -- contract quality no longer hides the strike.
+    const hasStrike = Boolean(contract.available && contract.strike != null);
+    const noChain = contract.chain_available === false;
+    const isClean = contract.clean === true;
+    const contractLabel = hasStrike
       ? `${fmtMoney(contract.strike)} ${String(contract.type || '').toUpperCase()}`
-      : (contract.execution || 'No Clean Contract');
-    const contractMeta = contractAvailable
-      ? `${contract.expiry || contract.expiration || '—'} · ${contract.dte ?? '—'} DTE · ${contract.execution || '—'}`
-      : (contract.reason || 'Contract unavailable');
+      : (noChain ? 'No options chain available' : (contract.reason || contract.execution || 'No contract found near entry'));
+    const contractMeta = hasStrike
+      ? `${contract.expiry || contract.expiration || '—'} · ${contract.dte ?? '—'} DTE · ${isClean ? (contract.execution || '—') : 'Suggested strike (verify spread/liquidity in broker)'}`
+      : '';
     return `
       <div class="candidate-pill-row">
         <span class="candidate-pill">${hasPromotion ? 'Current Plan Math' : 'Plan Preview'}</span>
