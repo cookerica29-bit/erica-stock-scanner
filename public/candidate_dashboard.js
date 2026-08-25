@@ -44,6 +44,14 @@
   }
 
   function fmtMoney(value) {
+    // Number(null) === 0 and Number('') === 0 -- both finite, so without
+    // this guard a genuinely-missing price (e.g. current_price: null when
+    // no reliable quote exists) silently renders as "$0.00" instead of
+    // "—". That's exactly the kind of fabricated-looking number this
+    // dashboard has been fixing all week (see the entry-proximity
+    // one-sided-quote fix) -- guard it here too since it's shared by every
+    // card, not just the near-miss view that surfaced it.
+    if (value === null || value === undefined || value === '') return '—';
     const n = Number(value);
     if (!Number.isFinite(n)) return '—';
     return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
