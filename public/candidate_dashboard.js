@@ -493,6 +493,18 @@
     const confidence = String(item.confidence || 'unknown').toLowerCase();
     const regime = String(item.daily_regime || 'unknown').toLowerCase();
     const aligned = regime && direction && regime.includes(direction);
+    // Single source of truth for "why isn't this ENTER_NOW-ready", computed
+    // once from the SAME effective plan (preview merged under promotion)
+    // routeBlockReason() itself uses, then threaded into every place a
+    // reason gets displayed (primary badge, plan-preview pills, promotion
+    // pills, and the actions row) so they can never disagree with each other.
+    const effectivePlan = promotion
+      ? { ...planPreview, ...promotion, option_contract: planPreview?.option_contract || promotion.option_contract || null }
+      : planPreview;
+    const blockReason = routeBlockReason(item, effectivePlan);
+    const reasonBadge = blockReason
+      ? `<span class="candidate-pill reason-primary" title="${escapeHtml(blockReason)}">${escapeHtml(blockReason)}</span>`
+      : '<span class="candidate-pill high">ENTER_NOW ready</span>';
     return `
       <article class="candidate-card ${status === 'active' ? 'active-plan' : ''} ${status === 'dismissed' ? 'dismissed' : ''}">
         <div class="candidate-card-head">
@@ -503,6 +515,7 @@
           <span class="candidate-pill ${escapeHtml(direction)}">${escapeHtml(direction || '—')}</span>
         </div>
         <div class="candidate-pill-row">
+          ${reasonBadge}
           <span class="candidate-pill ${escapeHtml(confidence)}">${escapeHtml(confidence)}</span>
           <span class="candidate-pill ${aligned ? 'high' : 'medium'}">${aligned ? 'regime aligned' : `regime ${regime || 'unknown'}`}</span>
           <span class="candidate-pill">${escapeHtml(status)}</span>
@@ -513,18 +526,26 @@
           <div><span>SMA50 Daily</span><strong>${escapeHtml(fmtMoney(item.sma50_daily))}</strong></div>
           <div><span>SMA200 Daily</span><strong>${escapeHtml(fmtMoney(item.sma200_daily))}</strong></div>
         </div>
-        ${planPreview ? renderPlanPreview(planPreview, Boolean(promotion)) : ''}
-        ${promotion ? renderPromotion(promotion) : ''}
+        ${planPreview ? renderPlanPreview(planPreview, Boolean(promotion), blockReason) : ''}
+        ${promotion ? renderPromotion(promotion, blockReason) : ''}
         ${chartReview ? renderChartReview(chartReview) : ''}
-        ${renderActions(item)}
+        ${renderActions(item, blockReason)}
       </article>
     `;
   }
 
-  function renderPromotion(promotion) {
+  function renderPromotion(promotion, blockReason) {
     const warnings = [];
-    if (promotion.rr_warning) warnings.push('<span class="candidate-pill warn">R:R warning</span>');
-    if (promotion.no_valid_target) warnings.push('<span class="candidate-pill bad">No valid target</span>');
+    const rrReasonText = `R:R is below ${ENTER_NOW_MIN_RR}:1`;
+    // "Also:" pills show real secondary data without implying it's the
+    // reason the card is excluded -- suppressed only when it IS the reason
+    // (then the primary reason-primary badge above already covers it).
+    if (promotion.rr_warning && blockReason !== rrReasonText) {
+      warnings.push('<span class="candidate-pill warn secondary">Also: R:R warning</span>');
+    }
+    if (promotion.no_valid_target && blockReason !== 'No valid target') {
+      warnings.push('<span class="candidate-pill bad secondary">Also: No valid target</span>');
+    }
     if (promotion.position_size == null) warnings.push('<span class="candidate-pill">Options sizing pending</span>');
     return `
       <div class="candidate-pill-row">${warnings.join('')}</div>
@@ -538,18 +559,32 @@
     `;
   }
 
-  function renderPlanPreview(preview, hasPromotion) {
+  function renderPlanPreview(preview, hasPromotion, blockReason) {
     const warnings = [];
-    if (preview.preview_error) warnings.push(`<span class="candidate-pill bad">${escapeHtml(preview.preview_error)}</span>`);
-    if (preview.rr_warning) warnings.push('<span class="candidate-pill warn">R:R warning</span>');
-    if (preview.no_valid_target) warnings.push('<span class="candidate-pill bad">No valid target</span>');
-    if (!preview.entry_proximity_ok) warnings.push(`<span class="candidate-pill bad">${escapeHtml(preview.entry_proximity_reason || 'Price not near entry')}</span>`);
+    // Same "Also:" demotion as renderPromotion() above -- these are real
+    // data points, kept visible for context, but never allowed to look like
+    // THE reason unless they actually are the operative gate (blockReason).
+    const rrReasonText = `R:R is below ${ENTER_NOW_MIN_RR}:1`;
+    const proximityReasonText = preview.entry_proximity_reason || 'Price is not near entry';
+    const executionReasonText = preview.execution_shadow_reason || 'Execution confirmation is not ready';
+    if (preview.preview_error && blockReason !== preview.preview_error) {
+      warnings.push(`<span class="candidate-pill bad secondary">Also: ${escapeHtml(preview.preview_error)}</span>`);
+    }
+    if (preview.rr_warning && blockReason !== rrReasonText) {
+      warnings.push('<span class="candidate-pill warn secondary">Also: R:R warning</span>');
+    }
+    if (preview.no_valid_target && blockReason !== 'No valid target') {
+      warnings.push('<span class="candidate-pill bad secondary">Also: No valid target</span>');
+    }
+    if (!preview.entry_proximity_ok && blockReason !== proximityReasonText) {
+      warnings.push(`<span class="candidate-pill bad secondary">Also: ${escapeHtml(proximityReasonText)}</span>`);
+    }
     if (preview.execution_shadow_checked) {
-      warnings.push(
-        preview.execution_shadow_ok
-          ? '<span class="candidate-pill high">Execution reaction ok</span>'
-          : '<span class="candidate-pill warn">Execution reaction weak</span>',
-      );
+      if (preview.execution_shadow_ok) {
+        warnings.push('<span class="candidate-pill high">Execution reaction ok</span>');
+      } else if (blockReason !== executionReasonText) {
+        warnings.push('<span class="candidate-pill warn secondary">Also: execution reaction weak</span>');
+      }
     }
     const contract = preview.option_contract || {};
     // Optionability floor, not a quality gate: chain_available === false is
@@ -603,16 +638,10 @@
     `;
   }
 
-  function renderActions(item) {
+  function renderActions(item, blockReason) {
     const status = String(item.status || 'new').toLowerCase();
     const source = encodeURIComponent(item.source || '');
     const ticker = encodeURIComponent(item.ticker || '');
-    const promoMap = promotionsByKey();
-    const previewMap = planPreviewsByKey();
-    const blockReason = routeBlockReason(
-      item,
-      effectivePlanForCandidate(item, promoMap, previewMap),
-    );
     const promote = status !== 'active' && !blockReason
       ? `<button onclick="updateCandidateStatus('${ticker}','${source}','active','${status}')">Promote</button>`
       : '';
