@@ -506,6 +506,18 @@
       background: rgba(142, 160, 181, 0.06);
     }
 
+    /* A brief contextual note above the near-miss cards, not a true empty
+       state -- lighter weight than .candidate-empty's big centered box. */
+    .candidate-empty.near-miss-fallback-note {
+      border-style: solid;
+      border-color: rgba(56, 189, 248, 0.35);
+      background: rgba(56, 189, 248, 0.08);
+      color: #bae6fd;
+      text-align: left;
+      padding: 12px 16px;
+      font-size: 0.88rem;
+    }
+
     .guardrail {
       color: var(--muted);
       font-size: 0.86rem;
@@ -630,7 +642,7 @@
     </main>
   </div>
 
-  <script src="/static/candidate_dashboard.js?v=20260825-near-miss-autoload-on-refresh"></script>
+  <script src="/static/candidate_dashboard.js?v=20260825-inbox-ready-only-default"></script>
   <script>
     loadCandidateDashboard(false);
   </script>

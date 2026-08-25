@@ -1,7 +1,14 @@
 (function () {
   const KEY = 'kairos_scanner_api_key';
   const ALERT_KEY = 'kairos_candidate_alerts';
-  const ACTIONABLE_ONLY_KEY = 'kairos_candidate_actionable_only';
+  // Active Plans keeps the exact old key/semantics (default OFF) -- this is
+  // the specific, deliberate fix for RYN/LPX/CVNA disappearing from Active
+  // Plans when they didn't pass the strict gate; it must not regress.
+  const ACTIVE_ACTIONABLE_ONLY_KEY = 'kairos_candidate_actionable_only';
+  // Inbox gets its OWN key with the opposite default (ON) -- these are two
+  // independent toggle states, not one shared boolean, precisely so
+  // changing Inbox's default can never affect Active Plans.
+  const INBOX_READY_ONLY_KEY = 'kairos_candidate_inbox_ready_only';
   const NEAR_MISS_KEY = 'kairos_candidate_near_miss_only';
   const API_KEY_DB = 'kairos_candidate_dashboard';
   const API_KEY_STORE = 'settings';
@@ -24,10 +31,16 @@
   };
   let knownCandidateIds = new Set();
   let candidateAlertsEnabled = storageGet(localStorage, ALERT_KEY) === 'on';
-  // Defaults OFF for every new device/session. Only ever flips on via explicit
-  // user click in toggleActionableOnly() -- never set this true anywhere else.
-  let actionableOnlyEnabled = storageGet(localStorage, ACTIONABLE_ONLY_KEY) === 'on';
-  // Same default-OFF discipline as actionableOnlyEnabled above.
+  // Active Plans: defaults OFF for every new device/session, unchanged from
+  // before. Only ever flips on via explicit user click in
+  // toggleActionableOnly() while viewing Active Plans.
+  let activeActionableOnlyEnabled = storageGet(localStorage, ACTIVE_ACTIONABLE_ONLY_KEY) === 'on';
+  // Inbox: defaults ON for every new device/session (ready-only by
+  // default, matching the dashboard's own "stay in audit/legacy" intent) --
+  // the inverse default of Active Plans. Only flips off via explicit user
+  // click in toggleActionableOnly() while viewing Inbox.
+  let inboxReadyOnlyEnabled = storageGet(localStorage, INBOX_READY_ONLY_KEY) !== 'off';
+  // Same default-OFF discipline as before.
   let nearMissEnabled = storageGet(localStorage, NEAR_MISS_KEY) === 'on';
   let candidateAlertsInitialized = false;
   let apiKeyPanelExpanded = false;
@@ -416,6 +429,15 @@
     return state.view === 'new' || state.view === 'active';
   }
 
+  // Two fully independent states, not one shared boolean -- Inbox and
+  // Active Plans intentionally have different defaults (see the constants
+  // above), and toggling one must never move the other.
+  function currentActionableOnlyEnabled() {
+    if (state.view === 'new') return inboxReadyOnlyEnabled;
+    if (state.view === 'active') return activeActionableOnlyEnabled;
+    return false;
+  }
+
   function statusScopedCandidates() {
     if (state.view === 'all') return state.candidates;
     return state.candidates.filter(item => String(item.status || 'new').toLowerCase() === state.view);
@@ -423,16 +445,21 @@
 
   function candidatesForView() {
     const scoped = statusScopedCandidates();
-    if (!actionableOnlyEnabled || !actionableOnlyApplicable()) return scoped;
+    if (!actionableOnlyApplicable() || !currentActionableOnlyEnabled()) return scoped;
     const promoMap = promotionsByKey();
     const previewMap = planPreviewsByKey();
     return scoped.filter(item => isEnterNowCandidate(item, promoMap, previewMap));
   }
 
   function toggleActionableOnly() {
-    actionableOnlyEnabled = !actionableOnlyEnabled;
-    storageSet(localStorage, ACTIONABLE_ONLY_KEY, actionableOnlyEnabled ? 'on' : 'off');
-    if (actionableOnlyEnabled && nearMissEnabled) {
+    if (state.view === 'new') {
+      inboxReadyOnlyEnabled = !inboxReadyOnlyEnabled;
+      storageSet(localStorage, INBOX_READY_ONLY_KEY, inboxReadyOnlyEnabled ? 'on' : 'off');
+    } else if (state.view === 'active') {
+      activeActionableOnlyEnabled = !activeActionableOnlyEnabled;
+      storageSet(localStorage, ACTIVE_ACTIONABLE_ONLY_KEY, activeActionableOnlyEnabled ? 'on' : 'off');
+    }
+    if (currentActionableOnlyEnabled() && nearMissEnabled) {
       // Mutually exclusive views of the same list -- "actionable only" (0
       // gaps) and "near misses" (1-2 gaps) show disjoint candidates by
       // definition, so showing both toggles "on" would be contradictory.
@@ -454,9 +481,11 @@
   async function toggleNearMiss() {
     nearMissEnabled = !nearMissEnabled;
     storageSet(localStorage, NEAR_MISS_KEY, nearMissEnabled ? 'on' : 'off');
-    if (nearMissEnabled && actionableOnlyEnabled) {
-      actionableOnlyEnabled = false;
-      storageSet(localStorage, ACTIONABLE_ONLY_KEY, 'off');
+    if (nearMissEnabled && inboxReadyOnlyEnabled) {
+      // Near misses is Inbox-only, so the only actionable-only state it
+      // could conflict with is Inbox's own.
+      inboxReadyOnlyEnabled = false;
+      storageSet(localStorage, INBOX_READY_ONLY_KEY, 'off');
     }
     if (nearMissEnabled && !state.nearMissLoaded && !state.nearMissLoading) {
       await loadNearMisses();
@@ -511,22 +540,28 @@
     info.classList.add('near-miss-active');
   }
 
-  function renderNearMissList() {
+  function renderNearMissList(isAutoFallback) {
     const list = document.getElementById('candidateList');
     if (!list) return;
+    // Only shown when this near-miss list is standing in for an empty
+    // Inbox ready-only view the user never explicitly asked to leave --
+    // makes clear this is a fallback, not a silent content swap.
+    const fallbackNote = isAutoFallback
+      ? '<div class="candidate-empty near-miss-fallback-note">No ready candidates right now (Inbox defaults to ready-only). Showing the closest near-misses instead:</div>'
+      : '';
     if (state.nearMissLoading) {
-      list.innerHTML = '<div class="candidate-empty">Ranking near misses...</div>';
+      list.innerHTML = fallbackNote + '<div class="candidate-empty">Ranking near misses...</div>';
       return;
     }
     if (state.nearMissError) {
-      list.innerHTML = `<div class="candidate-empty">${escapeHtml(state.nearMissError)}</div>`;
+      list.innerHTML = fallbackNote + `<div class="candidate-empty">${escapeHtml(state.nearMissError)}</div>`;
       return;
     }
     if (!state.nearMisses.length) {
-      list.innerHTML = '<div class="candidate-empty">No candidates are within 1-2 gates of ENTER_NOW right now.</div>';
+      list.innerHTML = fallbackNote + '<div class="candidate-empty">No candidates are within 1-2 gates of ENTER_NOW right now.</div>';
       return;
     }
-    list.innerHTML = state.nearMisses.map(item => `
+    list.innerHTML = fallbackNote + state.nearMisses.map(item => `
       <article class="candidate-card">
         <div class="candidate-card-head">
           <div>
@@ -553,10 +588,11 @@
     const info = document.getElementById('candidateFilterInfo');
     if (!toggle || !info) return;
     const applicable = actionableOnlyApplicable();
+    const enabled = currentActionableOnlyEnabled();
     toggle.style.display = applicable ? '' : 'none';
-    toggle.classList.toggle('on', actionableOnlyEnabled);
-    toggle.setAttribute('aria-pressed', String(actionableOnlyEnabled));
-    toggle.textContent = actionableOnlyEnabled ? '✓ Actionable only' : 'Show actionable only';
+    toggle.classList.toggle('on', enabled);
+    toggle.setAttribute('aria-pressed', String(enabled));
+    toggle.textContent = enabled ? '✓ Actionable only' : 'Show actionable only';
 
     if (!applicable) {
       info.textContent = '';
@@ -564,7 +600,7 @@
       return;
     }
     const total = statusScopedCandidates().length;
-    if (actionableOnlyEnabled) {
+    if (enabled) {
       const shown = candidatesForView().length;
       info.textContent = `Showing ${shown} of ${total} (actionable only)`;
       info.classList.add('active-filter');
@@ -620,11 +656,24 @@
       list.innerHTML = `<div class="candidate-empty">${escapeHtml(state.error)}</div>`;
       return;
     }
-    if (nearMissEnabled && nearMissApplicable()) {
-      renderNearMissList();
+    const items = candidatesForView();
+    const userWantsNearMiss = nearMissEnabled && nearMissApplicable();
+    // Inbox defaults to ready-only; when that leaves nothing to show (a
+    // real, expected possibility on quiet days) fall back to the ranked
+    // near-miss view automatically instead of a blank "no candidates"
+    // state -- but never override an explicit user choice: only kicks in
+    // while ready-only is actually active and the user hasn't already
+    // opted into (or out of) near misses themselves.
+    const autoNearMissFallback = !userWantsNearMiss && state.view === 'new' && inboxReadyOnlyEnabled && items.length === 0;
+    if (userWantsNearMiss || autoNearMissFallback) {
+      if (!state.nearMissLoaded && !state.nearMissLoading) {
+        // Defer so this render() pass finishes first; loadNearMisses()
+        // triggers its own render() calls as it progresses.
+        setTimeout(loadNearMisses, 0);
+      }
+      renderNearMissList(autoNearMissFallback);
       return;
     }
-    const items = candidatesForView();
     if (!items.length) {
       list.innerHTML = '<div class="candidate-empty">No candidates in this view.</div>';
       return;
