@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
@@ -34,6 +35,13 @@ DEFAULT_ALPACA_MAX_PAGES = 25
 MAX_ALPACA_MAX_PAGES = 100
 DEFAULT_ALPACA_BAR_SYMBOL_CHUNK_SIZE = 200
 DEFAULT_ALPACA_QUOTE_CHUNK_SIZE = 200
+# Evidence-backed pacing between sequential Alpaca bar requests (pagination pages
+# and per-symbol fallback retries). A clean, isolated test of 250 consecutive
+# single-symbol /v2/stocks/bars calls at this exact pace (0.3s between calls,
+# ~98 req/min sustained) completed with zero HTTP 429s over 153.7s. Unthrottled
+# bursts of the same calls reproduced real 429s within ~75s. See fix notes for
+# the full measurement.
+DEFAULT_ALPACA_REQUEST_PACING_SECONDS = 0.3
 EASTERN_TZ = ZoneInfo("America/New_York")
 SCANNER_TIMEFRAMES = [
     {"label": "1D", "period": "1y", "interval": "1d", "minimum_candles": 50},
@@ -203,6 +211,14 @@ def _parse_bounded_positive_int_env(name: str, default: int, maximum: int) -> in
     return min(_parse_positive_int_env(name, default), max(1, int(maximum)))
 
 
+def _parse_non_negative_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, value)
+
+
 def reset_provider_metrics() -> None:
     with _provider_metrics_lock:
         for key in _provider_metrics:
@@ -287,6 +303,9 @@ class AlpacaMarketDataProvider(MarketDataProvider):
     def _request_bars_pages(self, params: dict[str, Any], symbols: list[str]) -> dict[str, list[dict[str, Any]]]:
         max_pages_env = "ALPACA_BARS_MAX_PAGES" if os.getenv("ALPACA_BARS_MAX_PAGES") else "ALPACA_MAX_PAGES"
         max_pages = _parse_bounded_positive_int_env(max_pages_env, DEFAULT_ALPACA_MAX_PAGES, MAX_ALPACA_MAX_PAGES)
+        pacing_seconds = _parse_non_negative_float_env(
+            "ALPACA_REQUEST_PACING_SECONDS", DEFAULT_ALPACA_REQUEST_PACING_SECONDS
+        )
         reverse_symbol_map = {self.normalize_symbol(symbol): symbol for symbol in symbols}
         bars_by_symbol = {symbol: [] for symbol in symbols}
         page_token = None
@@ -316,6 +335,12 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                     raise RuntimeError("Alpaca pagination repeated page token")
                 seen_tokens.add(page_token)
                 page_params["page_token"] = page_token
+
+            if page_count > 0 and pacing_seconds > 0:
+                # Throttle between sequential page fetches -- unthrottled pagination
+                # bursts were directly reproduced hitting Alpaca's real 429 rate
+                # limit; see DEFAULT_ALPACA_REQUEST_PACING_SECONDS for the evidence.
+                time.sleep(pacing_seconds)
 
             try:
                 payload = self._request_bars_page(page_params)

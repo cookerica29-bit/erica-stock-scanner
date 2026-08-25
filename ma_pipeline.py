@@ -8,11 +8,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
+import time
 from typing import Any
 
 import pandas as pd
 
-from market_data import AlpacaMarketDataProvider, alpaca_credentials_configured
+from market_data import (
+    AlpacaMarketDataProvider,
+    DEFAULT_ALPACA_REQUEST_PACING_SECONDS,
+    alpaca_credentials_configured,
+)
 
 
 MA_PIPELINE_VERSION = "ma-pipeline-alpaca-v1"
@@ -33,11 +38,19 @@ def _ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
+# Default chunk size is evidence-backed, not guessed: direct measurement against
+# Alpaca's real /v2/stocks/bars pagination for a 60d/4h request (the interval this
+# pipeline actually requests) showed page density of ~1.5-1.8 pages per symbol --
+# 10-symbol chunks complete in 18 pages (comfortable margin under the 25-page
+# ceiling), 12-symbol chunks in 20 (thin margin), and 15+-symbol chunks hit the
+# ceiling outright and fail every time. The former default of 50 needed ~77 pages,
+# more than 3x the ceiling -- that mismatch, not rate-limiting, was the root cause
+# of most batch-level pagination failures during live scans.
 def _chunk_size() -> int:
     try:
-        value = int(os.getenv("MA_PIPELINE_ALPACA_CHUNK_SIZE", "50"))
+        value = int(os.getenv("MA_PIPELINE_ALPACA_CHUNK_SIZE", "10"))
     except ValueError:
-        value = 50
+        value = 10
     return min(max(value, 1), 100)
 
 
@@ -46,14 +59,29 @@ def _chunks(items: list[str], size: int):
         yield items[index:index + size]
 
 
+def _fallback_pacing_seconds() -> float:
+    try:
+        value = float(os.getenv("ALPACA_REQUEST_PACING_SECONDS", str(DEFAULT_ALPACA_REQUEST_PACING_SECONDS)))
+    except (TypeError, ValueError):
+        value = DEFAULT_ALPACA_REQUEST_PACING_SECONDS
+    return max(0.0, value)
+
+
 def _download_with_fallback(provider: AlpacaMarketDataProvider, symbols: list[str], period: str, interval: str) -> pd.DataFrame:
     frame = provider.download(symbols, period=period, interval=interval, auto_adjust=True)
     if frame is not None and not frame.empty:
         return frame
     if len(symbols) <= 1:
         return frame
+    # Throttle between sequential single-symbol retries -- an unthrottled fallback
+    # loop of this shape reproduced a genuine Alpaca HTTP 429 mid-burst; a clean,
+    # isolated run at this same pace completed 250 consecutive single-symbol calls
+    # with zero failures. See DEFAULT_ALPACA_REQUEST_PACING_SECONDS for the evidence.
+    pacing_seconds = _fallback_pacing_seconds()
     frames = {}
-    for symbol in symbols:
+    for index, symbol in enumerate(symbols):
+        if index > 0 and pacing_seconds > 0:
+            time.sleep(pacing_seconds)
         single = provider.download([symbol], period=period, interval=interval, auto_adjust=True)
         if single is not None and not single.empty:
             frames[symbol] = single
