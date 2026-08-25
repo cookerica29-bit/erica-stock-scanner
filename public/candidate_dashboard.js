@@ -372,16 +372,14 @@
   }
 
   function candidatesForView() {
-    const clean = enterNowCandidates();
-    if (state.view === 'all') return clean;
-    return clean.filter(item => String(item.status || 'new').toLowerCase() === state.view);
+    if (state.view === 'all') return state.candidates;
+    return state.candidates.filter(item => String(item.status || 'new').toLowerCase() === state.view);
   }
 
   function renderStats() {
     const el = document.getElementById('candidateStats');
     if (!el) return;
-    const clean = enterNowCandidates();
-    const counts = clean.reduce((acc, item) => {
+    const counts = state.candidates.reduce((acc, item) => {
       const status = String(item.status || 'new').toLowerCase();
       acc[status] = (acc[status] || 0) + 1;
       return acc;
