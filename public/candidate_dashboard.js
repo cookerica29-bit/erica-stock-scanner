@@ -392,6 +392,13 @@
       state.loading = false;
       render();
     }
+    // If "near misses" was left on from a previous session (localStorage),
+    // a fresh page load never calls toggleNearMiss() -- without this, the
+    // toggle shows on but the list stays empty until the user clicks it
+    // off and back on.
+    if (nearMissEnabled && !state.nearMissLoaded && !state.nearMissLoading) {
+      await loadNearMisses();
+    }
   }
 
   function setCandidateView(view) {
