@@ -2,6 +2,7 @@
   const KEY = 'kairos_scanner_api_key';
   const ALERT_KEY = 'kairos_candidate_alerts';
   const ACTIONABLE_ONLY_KEY = 'kairos_candidate_actionable_only';
+  const NEAR_MISS_KEY = 'kairos_candidate_near_miss_only';
   const API_KEY_DB = 'kairos_candidate_dashboard';
   const API_KEY_STORE = 'settings';
   const ENTER_NOW_MIN_RR = 1.5;
@@ -16,12 +17,18 @@
     planPreviews: [],
     chartReviews: [],
     error: null,
+    nearMisses: [],
+    nearMissLoading: false,
+    nearMissLoaded: false,
+    nearMissError: null,
   };
   let knownCandidateIds = new Set();
   let candidateAlertsEnabled = storageGet(localStorage, ALERT_KEY) === 'on';
   // Defaults OFF for every new device/session. Only ever flips on via explicit
   // user click in toggleActionableOnly() -- never set this true anywhere else.
   let actionableOnlyEnabled = storageGet(localStorage, ACTIONABLE_ONLY_KEY) === 'on';
+  // Same default-OFF discipline as actionableOnlyEnabled above.
+  let nearMissEnabled = storageGet(localStorage, NEAR_MISS_KEY) === 'on';
   let candidateAlertsInitialized = false;
   let apiKeyPanelExpanded = false;
   let cachedApiKey = '';
@@ -410,7 +417,120 @@
   function toggleActionableOnly() {
     actionableOnlyEnabled = !actionableOnlyEnabled;
     storageSet(localStorage, ACTIONABLE_ONLY_KEY, actionableOnlyEnabled ? 'on' : 'off');
+    if (actionableOnlyEnabled && nearMissEnabled) {
+      // Mutually exclusive views of the same list -- "actionable only" (0
+      // gaps) and "near misses" (1-2 gaps) show disjoint candidates by
+      // definition, so showing both toggles "on" would be contradictory.
+      nearMissEnabled = false;
+      storageSet(localStorage, NEAR_MISS_KEY, 'off');
+    }
     render();
+  }
+
+  // Inbox-only, same as the strict gate this sits alongside. Ranks
+  // candidates by how CLOSE they are to passing every gate (1 or 2 failing
+  // conditions) instead of an all-or-nothing pass/fail -- see
+  // GET /candidate-near-misses (candidates_router._gate_gap_report). Does
+  // not change what "Actionable only" computes; purely additive.
+  function nearMissApplicable() {
+    return state.view === 'new';
+  }
+
+  async function toggleNearMiss() {
+    nearMissEnabled = !nearMissEnabled;
+    storageSet(localStorage, NEAR_MISS_KEY, nearMissEnabled ? 'on' : 'off');
+    if (nearMissEnabled && actionableOnlyEnabled) {
+      actionableOnlyEnabled = false;
+      storageSet(localStorage, ACTIONABLE_ONLY_KEY, 'off');
+    }
+    if (nearMissEnabled && !state.nearMissLoaded && !state.nearMissLoading) {
+      await loadNearMisses();
+    }
+    render();
+  }
+
+  async function loadNearMisses() {
+    state.nearMissLoading = true;
+    state.nearMissError = null;
+    render();
+    try {
+      const rows = await fetchJson('/api/v1/scanner/candidate-near-misses?status=new&limit=10');
+      state.nearMisses = Array.isArray(rows) ? rows : [];
+      state.nearMissLoaded = true;
+    } catch (error) {
+      state.nearMissError = error.message || String(error);
+    } finally {
+      state.nearMissLoading = false;
+      render();
+    }
+  }
+
+  function renderNearMissFilterBand() {
+    const toggle = document.getElementById('candidateNearMissToggle');
+    const info = document.getElementById('candidateNearMissInfo');
+    if (!toggle || !info) return;
+    const applicable = nearMissApplicable();
+    toggle.style.display = applicable ? '' : 'none';
+    toggle.classList.toggle('on', nearMissEnabled);
+    toggle.setAttribute('aria-pressed', String(nearMissEnabled));
+    toggle.textContent = nearMissEnabled ? '✓ Near misses' : 'Show near misses';
+
+    if (!applicable || !nearMissEnabled) {
+      info.textContent = '';
+      info.classList.remove('near-miss-active');
+      return;
+    }
+    if (state.nearMissLoading) {
+      info.textContent = 'Ranking near misses...';
+      info.classList.add('near-miss-active');
+      return;
+    }
+    if (state.nearMissError) {
+      info.textContent = state.nearMissError;
+      info.classList.add('near-miss-active');
+      return;
+    }
+    const tier1 = state.nearMisses.filter(item => item.tier === 1).length;
+    const tier2 = state.nearMisses.filter(item => item.tier === 2).length;
+    info.textContent = `Showing ${state.nearMisses.length} near-miss${state.nearMisses.length === 1 ? '' : 'es'} (Tier 1: ${tier1}, Tier 2: ${tier2})`;
+    info.classList.add('near-miss-active');
+  }
+
+  function renderNearMissList() {
+    const list = document.getElementById('candidateList');
+    if (!list) return;
+    if (state.nearMissLoading) {
+      list.innerHTML = '<div class="candidate-empty">Ranking near misses...</div>';
+      return;
+    }
+    if (state.nearMissError) {
+      list.innerHTML = `<div class="candidate-empty">${escapeHtml(state.nearMissError)}</div>`;
+      return;
+    }
+    if (!state.nearMisses.length) {
+      list.innerHTML = '<div class="candidate-empty">No candidates are within 1-2 gates of ENTER_NOW right now.</div>';
+      return;
+    }
+    list.innerHTML = state.nearMisses.map(item => `
+      <article class="candidate-card">
+        <div class="candidate-card-head">
+          <div>
+            <div class="candidate-ticker">${escapeHtml(item.ticker)}</div>
+            <div class="candidate-meta">${escapeHtml(item.source || 'source unknown')} · scanned ${escapeHtml(fmtTime(item.scanned_at))}</div>
+          </div>
+          <span class="candidate-near-miss-tier tier-${item.tier}">Tier ${item.tier} · ${item.failing_count} gate${item.failing_count === 1 ? '' : 's'} away</span>
+        </div>
+        <div class="candidate-kv">
+          <div><span>Entry</span><strong>${escapeHtml(fmtMoney(item.entry_price))}</strong></div>
+          <div><span>Current</span><strong>${escapeHtml(fmtMoney(item.current_price))}</strong></div>
+          <div><span>R:R</span><strong>${escapeHtml(item.risk_reward == null ? '—' : fmtNumber(item.risk_reward, 2))}</strong></div>
+          <div><span>Signal</span><strong>${escapeHtml(item.signal || '—')}</strong></div>
+        </div>
+        <div class="candidate-near-miss-gaps">
+          ${(item.gaps || []).map(gap => `<div class="candidate-near-miss-gap">${escapeHtml(gap.detail)}</div>`).join('')}
+        </div>
+      </article>
+    `).join('');
   }
 
   function renderActionableFilterBand() {
@@ -470,6 +590,7 @@
     updateCandidateAlertToggle();
     renderStats();
     renderActionableFilterBand();
+    renderNearMissFilterBand();
     const list = document.getElementById('candidateList');
     if (!list) return;
     if (!apiKey() && !candidateSessionAuthenticated && !state.loaded && !state.error) {
@@ -482,6 +603,10 @@
     }
     if (state.error) {
       list.innerHTML = `<div class="candidate-empty">${escapeHtml(state.error)}</div>`;
+      return;
+    }
+    if (nearMissEnabled && nearMissApplicable()) {
+      renderNearMissList();
       return;
     }
     const items = candidatesForView();
@@ -828,6 +953,7 @@
   window.loadCandidateDashboard = loadCandidateDashboard;
   window.setCandidateView = setCandidateView;
   window.toggleActionableOnly = toggleActionableOnly;
+  window.toggleNearMiss = toggleNearMiss;
   window.updateCandidateStatus = updateCandidateStatus;
   window.requestChartReview = requestChartReview;
 })();

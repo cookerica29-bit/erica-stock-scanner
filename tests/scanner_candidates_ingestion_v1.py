@@ -443,6 +443,110 @@ def test_entry_proximity_distrusts_one_sided_quotes():
     assert clean["current_price"] == 101.0
 
 
+def _near_miss_candidate(**overrides):
+    row = {"ticker": "NEAR", "source": "ma_pipeline", "signal": "long", "daily_regime": "bullish"}
+    row.update(overrides)
+    return row
+
+
+def test_gate_gap_report_excludes_categorical_short():
+    import candidates_router
+
+    report = candidates_router._gate_gap_report(
+        _near_miss_candidate(signal="short", daily_regime="bearish"),
+        {"signal": "short", "no_valid_target": False, "target": 90.0, "risk_reward": 3.0,
+         "rr_warning": False, "entry_proximity_ok": True},
+    )
+    assert report["categorical_blocked"] is True
+    assert report["categorical_reason"] == "Shorts are research-only"
+    assert report["failing_count"] is None
+    assert report["gaps"] == []
+
+
+def test_gate_gap_report_tier1_rr_only():
+    import candidates_router
+
+    preview = {
+        "signal": "long",
+        "no_valid_target": False,
+        "target": 110.0,
+        "risk_reward": 1.47,
+        "rr_warning": True,
+        "entry_proximity_ok": True,
+        "entry_proximity_threshold_pct": 1.5,
+        "entry_proximity_threshold_atr": 0.5,
+        "execution_shadow_checked": False,
+        "execution_shadow_ok": None,
+    }
+    report = candidates_router._gate_gap_report(_near_miss_candidate(), preview)
+    assert report["categorical_blocked"] is False
+    assert report["failing_count"] == 1
+    assert report["gaps"] == [{
+        "condition": "risk_reward",
+        "detail": "R:R 1.47 -- needs 1.50 (off by 0.03)",
+    }]
+
+
+def test_gate_gap_report_tier2_rr_and_proximity():
+    import candidates_router
+
+    preview = {
+        "signal": "long",
+        "no_valid_target": False,
+        "target": 110.0,
+        "risk_reward": 1.40,
+        "rr_warning": True,
+        "entry_proximity_ok": False,
+        "entry_distance_pct": 1.2,
+        "entry_distance_atr": 0.8,
+        "entry_proximity_threshold_pct": 1.5,
+        "entry_proximity_threshold_atr": 0.5,
+        "execution_shadow_checked": False,
+        "execution_shadow_ok": None,
+    }
+    report = candidates_router._gate_gap_report(_near_miss_candidate(), preview)
+    assert report["failing_count"] == 2
+    conditions = {gap["condition"] for gap in report["gaps"]}
+    assert conditions == {"risk_reward", "entry_proximity"}
+    proximity_gap = next(g for g in report["gaps"] if g["condition"] == "entry_proximity")
+    assert proximity_gap["detail"] == (
+        "Entry moved 1.20% / 0.80 ATR from scan -- outside proximity tolerance (max 1.5% / 0.50 ATR)"
+    )
+
+
+def test_gate_gap_report_execution_shadow_directional_expansion():
+    import candidates_router
+
+    preview = {
+        "signal": "long",
+        "no_valid_target": False,
+        "target": 110.0,
+        "risk_reward": 2.0,
+        "rr_warning": False,
+        "entry_proximity_ok": True,
+        "execution_shadow_checked": True,
+        "execution_shadow_ok": False,
+        "execution_shadow_reason": "directional expansion only -0.22 ATR",
+        "execution_shadow_diagnostics": {
+            "has_recent_confirmation": True,
+            "direction_expanded": False,
+            "directional_expansion_atr": -0.22,
+            "directional_expansion_required_atr": 0.75,
+            "volume_confirmed": True,
+            "holds_zone": True,
+            "no_fresh_lower_low": True,
+            "low_vol_bucket": False,
+            "low_vol_net_move_ok": True,
+        },
+    }
+    report = candidates_router._gate_gap_report(_near_miss_candidate(), preview)
+    assert report["failing_count"] == 1
+    assert report["gaps"] == [{
+        "condition": "directional_expansion",
+        "detail": "Execution: directional expansion -0.22 ATR -- needs +0.75 ATR (off by 0.97)",
+    }]
+
+
 def test_contract_gate_blocks_tiny_option_premium():
     import candidates_router
 
@@ -596,6 +700,121 @@ def test_promotion_and_preview_ignore_contract_quality():
             assert promoted.status_code == 200, promoted.text
             assert promoted.json()["status"] == "active"
             assert promoted.json()["option_contract"]["execution"] == "Suggested"
+        finally:
+            candidates_router._batch_download = previous_download
+            candidates_router._best_contract = previous_best_contract
+            candidates_router._latest_quote_for_ticker = previous_latest_quote
+            candidates_router._latest_quotes_for_previews = previous_latest_quotes
+            candidates_router._recent_4h_bars_for_execution_shadow = previous_execution_bars
+
+
+def test_near_miss_endpoint_ranks_by_tier_and_excludes_categorical():
+    """End-to-end check of GET /candidate-near-misses: a long candidate
+    failing exactly 2 execution-shadow sub-conditions shows up as tier 2
+    with both real gaps, a short candidate (categorically blocked, not
+    gradable) never appears at all, and the strict "Actionable only"
+    concept (0 gaps) is untouched -- this is an additive ranking, not a
+    replacement of the existing gate."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "candidates.db")
+        os.environ["KAIROS_CANDIDATES_DB"] = db_path
+        os.environ["KAIROS_SCANNER_API_KEY"] = "test-scanner-key"
+
+        import candidates_router
+
+        previous_download = candidates_router._batch_download
+        previous_best_contract = candidates_router._best_contract
+        previous_latest_quote = candidates_router._latest_quote_for_ticker
+        previous_latest_quotes = candidates_router._latest_quotes_for_previews
+        previous_execution_bars = candidates_router._recent_4h_bars_for_execution_shadow
+        candidates_router._batch_download = lambda tickers, period, interval: {
+            str(tickers[0]).upper(): _promotion_daily_frame()
+        }
+        candidates_router._best_contract = lambda ticker, direction, entry, **kwargs: {
+            "available": False, "chain_available": False, "execution": "No Options Chain",
+            "reason": "No options chain available", "source": "unavailable",
+        }
+        candidates_router._latest_quote_for_ticker = lambda ticker: {
+            "price": 100.0, "timestamp": "2026-08-24T14:30:00Z",
+            "source": "mock_latest_quote", "price_branch": "midpoint",
+        }
+        candidates_router._latest_quotes_for_previews = lambda previews: {
+            str(preview.get("ticker") or "").upper(): {
+                "price": 100.0, "timestamp": "2026-08-24T14:30:00Z",
+                "source": "mock_latest_quote", "price_branch": "midpoint",
+            }
+            for preview in previews
+        }
+        # One clean qualifying confirmation bar (strong reaction + expansion
+        # + volume), then a pullback: fails exactly "fresh lower low" and
+        # "directional expansion" (verified directly against
+        # _execution_shadow_from_bars before baking into this test) -- 2
+        # gaps -> tier 2.
+        baseline = [
+            {
+                "time": f"2026-08-23T{hour:02d}:00:00Z",
+                "open": 99.9, "high": 100.1, "low": 99.8, "close": 100.0, "volume": 100000,
+            }
+            for hour in range(10)
+        ]
+        confirmation = [
+            {"time": "2026-08-24T00:00:00Z", "open": 100.0, "high": 102.3, "low": 99.9, "close": 102.2, "volume": 250000},
+            {"time": "2026-08-24T04:00:00Z", "open": 102.2, "high": 102.4, "low": 101.8, "close": 102.0, "volume": 120000},
+            {"time": "2026-08-24T08:00:00Z", "open": 102.0, "high": 102.1, "low": 101.0, "close": 101.2, "volume": 110000},
+            {"time": "2026-08-24T12:00:00Z", "open": 101.2, "high": 101.3, "low": 100.3, "close": 100.5, "volume": 105000},
+            {"time": "2026-08-24T16:00:00Z", "open": 100.5, "high": 100.6, "low": 99.9, "close": 100.1, "volume": 90000},
+        ]
+        near_miss_bars = baseline + confirmation
+        candidates_router._recent_4h_bars_for_execution_shadow = lambda ticker: near_miss_bars
+
+        try:
+            client = _client()
+            headers = {"X-API-Key": "test-scanner-key"}
+            created = client.post(
+                "/api/v1/scanner/candidates",
+                headers=headers,
+                json={
+                    "source": "ma_pipeline",
+                    "scanned_at": "2026-08-20T14:30:00Z",
+                    "candidates": [
+                        {
+                            "ticker": "NEARMISS",
+                            "signal": "long",
+                            "entry_price": 100.0,
+                            "ema21_4h": 99.0,
+                            "daily_regime": "bullish",
+                            "confidence": "high",
+                            "sma50_daily": 90.0,
+                            "sma200_daily": 80.0,
+                        },
+                        {
+                            "ticker": "SHORTONE",
+                            "signal": "short",
+                            "entry_price": 100.0,
+                            "ema21_4h": 101.0,
+                            "daily_regime": "bearish",
+                            "confidence": "high",
+                            "sma50_daily": 110.0,
+                            "sma200_daily": 120.0,
+                        },
+                    ],
+                },
+            )
+            assert created.status_code == 200
+
+            resp = client.get("/api/v1/scanner/candidate-near-misses", headers=headers)
+            assert resp.status_code == 200, resp.text
+            rows = resp.json()
+            tickers_shown = {row["ticker"] for row in rows}
+            assert "SHORTONE" not in tickers_shown, "categorically blocked (short) candidate must never appear"
+            near_miss = next((row for row in rows if row["ticker"] == "NEARMISS"), None)
+            assert near_miss is not None
+            assert near_miss["tier"] == 2
+            assert near_miss["failing_count"] == 2
+            conditions = {gap["condition"] for gap in near_miss["gaps"]}
+            assert conditions == {"fresh_lower_low", "directional_expansion"}
+            for gap in near_miss["gaps"]:
+                assert gap["detail"], "every gap must state a real reason, not just a badge name"
         finally:
             candidates_router._batch_download = previous_download
             candidates_router._best_contract = previous_best_contract

@@ -731,6 +731,8 @@ def _execution_shadow_from_bars(
         "execution_shadow_reason": "Recent 4H bars unavailable",
         "execution_shadow_version": version,
         "execution_shadow_candle_time": None,
+        "execution_shadow_failures": [],
+        "execution_shadow_diagnostics": {},
     }
     if len(bars) < EXECUTION_SHADOW_RECENT_RANGE_BARS:
         base["execution_shadow_reason"] = (
@@ -867,6 +869,30 @@ def _execution_shadow_from_bars(
         **base,
         "execution_shadow_ok": ok,
         "execution_shadow_reason": "Recent 4H confirmation remains structurally intact" if ok else "; ".join(failures),
+        # Structured, additive -- surfaces the same numeric values already
+        # computed above (not re-derived) as real data instead of only a
+        # joined string, so callers like the near-miss ranking view can
+        # read and rank on the actual gap sizes without parsing prose.
+        "execution_shadow_failures": failures,
+        "execution_shadow_diagnostics": {
+            "has_recent_confirmation": has_recent_confirmation,
+            "confirmation_reaction_atr": round(confirmation_reaction_atr, 4),
+            "confirmation_directional_atr": round(confirmation_directional_atr, 4),
+            "holds_zone": holds_zone,
+            "hold_floor": round(hold_floor, 4),
+            "close": round(close, 4),
+            "no_fresh_lower_low": no_fresh_lower_low,
+            "direction_expanded": direction_expanded,
+            "directional_expansion_atr": round(directional_expansion_atr, 4),
+            "directional_expansion_required_atr": EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR,
+            "low_vol_bucket": low_vol_bucket,
+            "low_vol_net_move_ok": low_vol_net_move_ok,
+            "net_move_pct": round(net_move_pct, 4) if net_move_pct is not None else None,
+            "low_vol_min_net_move_pct": EXECUTION_SHADOW_LOW_VOL_MIN_NET_MOVE_PCT,
+            "volume_confirmed": volume_confirmed,
+            "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
+            "volume_ratio_required": EXECUTION_SHADOW_MIN_VOLUME_RATIO,
+        },
     }
 
 
@@ -889,6 +915,116 @@ def _preview_base_enter_now_ready(candidate: sqlite3.Row | dict, preview: dict) 
     # for the (now unused-for-gating) quality assessment, still exposed via
     # option_contract fields for display.
     return bool(preview.get("entry_proximity_ok"))
+
+
+def _gate_gap_report(candidate: sqlite3.Row | dict, preview: dict) -> dict:
+    """Evaluate every GRADABLE ENTER_NOW gate condition independently (no
+    short-circuiting) and return the real, already-computed numeric gap for
+    each one -- for the near-miss ranking view. This reuses the exact
+    values the real gates compute (routeBlockReason's backend twin
+    _preview_base_enter_now_ready, _entry_proximity, and
+    _execution_shadow_from_bars' new structured diagnostics); it does not
+    re-derive any threshold comparison itself.
+
+    Direction (long-only) and regime alignment are categorical, not
+    gradable -- a short candidate is never "close" to being long no matter
+    how good its other numbers are, so those two disqualify a candidate
+    from the near-miss list entirely rather than counting as one gap among
+    several.
+    """
+    direction = str(preview.get("signal") or candidate["signal"] or "").strip().lower()
+    regime_aligned = _candidate_regime_aligned(candidate, direction)
+    if direction == "short":
+        return {"categorical_blocked": True, "categorical_reason": "Shorts are research-only", "failing_count": None, "gaps": []}
+    if direction != "long":
+        return {"categorical_blocked": True, "categorical_reason": "Unsupported direction", "failing_count": None, "gaps": []}
+    if not regime_aligned:
+        return {"categorical_blocked": True, "categorical_reason": "Regime is not aligned", "failing_count": None, "gaps": []}
+
+    gaps: list[dict[str, str]] = []
+    no_target = bool(preview.get("no_valid_target")) or preview.get("target") is None
+    if no_target:
+        gaps.append({"condition": "valid_target", "detail": "No valid structural target found"})
+
+    rr = preview.get("risk_reward")
+    if not no_target:
+        if rr is None:
+            gaps.append({"condition": "risk_reward", "detail": "R:R unavailable"})
+        elif preview.get("rr_warning") or float(rr) < RR_WARNING_THRESHOLD:
+            gaps.append({
+                "condition": "risk_reward",
+                "detail": f"R:R {float(rr):.2f} -- needs {RR_WARNING_THRESHOLD:.2f} (off by {RR_WARNING_THRESHOLD - float(rr):.2f})",
+            })
+
+    if not preview.get("entry_proximity_ok"):
+        pct = preview.get("entry_distance_pct")
+        atr_d = preview.get("entry_distance_atr")
+        max_pct = preview.get("entry_proximity_threshold_pct", ENTRY_PROXIMITY_MAX_PCT_DEFAULT)
+        max_atr = preview.get("entry_proximity_threshold_atr", ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT)
+        if pct is not None:
+            atr_txt = f" / {atr_d:.2f} ATR" if atr_d is not None else ""
+            gaps.append({
+                "condition": "entry_proximity",
+                "detail": f"Entry moved {pct:.2f}%{atr_txt} from scan -- outside proximity tolerance (max {max_pct:.1f}% / {max_atr:.2f} ATR)",
+            })
+        else:
+            gaps.append({
+                "condition": "entry_proximity",
+                "detail": preview.get("entry_proximity_reason") or "Entry proximity unavailable",
+            })
+
+    # Execution-shadow sub-conditions only get evaluated once the real
+    # system would actually reach them -- reuse the real gate function
+    # rather than re-checking target/RR/proximity a second time here.
+    if _preview_base_enter_now_ready(candidate, preview) and preview.get("execution_shadow_checked") and preview.get("execution_shadow_ok") is not True:
+        diagnostics = preview.get("execution_shadow_diagnostics") or {}
+        if diagnostics.get("has_recent_confirmation") is False:
+            gaps.append({
+                "condition": "execution_confirmation",
+                "detail": (
+                    f"Execution: no recent bullish confirmation "
+                    f"(best reaction {diagnostics.get('confirmation_reaction_atr', 0):.2f} ATR, "
+                    f"expansion {diagnostics.get('confirmation_directional_atr', 0):.2f} ATR)"
+                ),
+            })
+        if diagnostics.get("direction_expanded") is False:
+            atr_val = diagnostics.get("directional_expansion_atr")
+            req = diagnostics.get("directional_expansion_required_atr", EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR)
+            if atr_val is not None:
+                gaps.append({
+                    "condition": "directional_expansion",
+                    "detail": f"Execution: directional expansion {atr_val:+.2f} ATR -- needs +{req:.2f} ATR (off by {req - atr_val:.2f})",
+                })
+        if diagnostics.get("volume_confirmed") is False:
+            ratio = diagnostics.get("volume_ratio")
+            req = diagnostics.get("volume_ratio_required", EXECUTION_SHADOW_MIN_VOLUME_RATIO)
+            if ratio is not None:
+                gaps.append({
+                    "condition": "bullish_volume",
+                    "detail": f"Execution: bullish-window volume {ratio:.2f}x prior median -- needs {req:.2f}x (off by {req - ratio:.2f})",
+                })
+        if diagnostics.get("holds_zone") is False:
+            gaps.append({
+                "condition": "hold_zone",
+                "detail": f"Execution: close {diagnostics.get('close')} lost hold zone (floor {diagnostics.get('hold_floor')})",
+            })
+        if diagnostics.get("no_fresh_lower_low") is False:
+            gaps.append({"condition": "fresh_lower_low", "detail": "Execution: fresh lower low vs prior 3 bars"})
+        if diagnostics.get("low_vol_bucket") and diagnostics.get("low_vol_net_move_ok") is False:
+            net = diagnostics.get("net_move_pct")
+            req = diagnostics.get("low_vol_min_net_move_pct", EXECUTION_SHADOW_LOW_VOL_MIN_NET_MOVE_PCT)
+            if net is not None:
+                gaps.append({
+                    "condition": "low_vol_guard",
+                    "detail": f"Execution: low-vol net move {net * 100:.2f}% -- needs {req * 100:.2f}% (off by {(req - net) * 100:.2f} pts)",
+                })
+        if not gaps and preview.get("execution_shadow_reason"):
+            # Fallback: execution failed but none of the structured diagnostics
+            # matched (shouldn't normally happen) -- surface the real reason text
+            # rather than silently reporting zero gaps for a failing candidate.
+            gaps.append({"condition": "execution_confirmation", "detail": f"Execution: {preview['execution_shadow_reason']}"})
+
+    return {"categorical_blocked": False, "categorical_reason": None, "failing_count": len(gaps), "gaps": gaps}
 
 
 def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> dict:
@@ -1619,6 +1755,60 @@ def list_candidate_promotions(
         conn.close()
 
 
+def _enriched_previews_for_candidates(conn, candidates: list) -> tuple[list[dict], list]:
+    """Shared by /candidate-plan-previews and /candidate-near-misses: computes
+    (or reuses cached) plan previews for the given candidate rows, then
+    attaches live entry-proximity and execution-shadow the same way for
+    both -- so the two views can never compute gate state differently."""
+    previews: list[dict] = []
+    for candidate in candidates:
+        existing = conn.execute(
+            "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
+            (candidate["ticker"], candidate["source"]),
+        ).fetchone()
+        if (
+            existing
+            and existing["candidate_updated_at"] == candidate["updated_at"]
+            and not _preview_transient_refresh_due(existing)
+        ):
+            previews.append(_row_to_plan_preview(existing))
+            continue
+        preview = _compute_candidate_plan_preview(candidate)
+        try:
+            _store_plan_preview(conn, preview)
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            preview["preview_error"] = (
+                preview.get("preview_error")
+                or "Plan preview cache is temporarily busy; showing uncached computed preview."
+            )
+        previews.append(preview)
+    try:
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "database is locked" not in str(exc).lower():
+            raise
+    quotes = _latest_quotes_for_previews(previews)
+    candidates_by_key = {
+        (str(candidate["ticker"]).upper(), str(candidate["source"])): candidate
+        for candidate in candidates
+    }
+    enriched = []
+    for preview in previews:
+        with_proximity = _attach_entry_proximity(
+            preview,
+            quotes.get(str(preview.get("ticker") or "").upper()),
+        )
+        candidate = candidates_by_key.get(
+            (str(preview.get("ticker") or "").upper(), str(preview.get("source") or ""))
+        )
+        enriched.append(
+            _attach_execution_shadow(candidate, with_proximity) if candidate is not None else with_proximity
+        )
+    return enriched, candidates
+
+
 @router.get("/candidate-plan-previews", response_model=list[CandidatePlanPreviewOut])
 def list_candidate_plan_previews(
     x_api_key: Optional[str] = Header(default=None),
@@ -1628,53 +1818,82 @@ def list_candidate_plan_previews(
     conn = _get_db()
     try:
         candidates = conn.execute("SELECT * FROM candidates ORDER BY updated_at DESC").fetchall()
-        previews: list[dict] = []
-        for candidate in candidates:
-            existing = conn.execute(
-                "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
-                (candidate["ticker"], candidate["source"]),
-            ).fetchone()
-            if (
-                existing
-                and existing["candidate_updated_at"] == candidate["updated_at"]
-                and not _preview_transient_refresh_due(existing)
-            ):
-                previews.append(_row_to_plan_preview(existing))
-                continue
-            preview = _compute_candidate_plan_preview(candidate)
-            try:
-                _store_plan_preview(conn, preview)
-            except sqlite3.OperationalError as exc:
-                if "database is locked" not in str(exc).lower():
-                    raise
-                preview["preview_error"] = (
-                    preview.get("preview_error")
-                    or "Plan preview cache is temporarily busy; showing uncached computed preview."
-                )
-            previews.append(preview)
-        try:
-            conn.commit()
-        except sqlite3.OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-        quotes = _latest_quotes_for_previews(previews)
-        candidates_by_key = {
-            (str(candidate["ticker"]).upper(), str(candidate["source"])): candidate
-            for candidate in candidates
-        }
-        enriched = []
-        for preview in previews:
-            with_proximity = _attach_entry_proximity(
-                preview,
-                quotes.get(str(preview.get("ticker") or "").upper()),
-            )
-            candidate = candidates_by_key.get(
-                (str(preview.get("ticker") or "").upper(), str(preview.get("source") or ""))
-            )
-            enriched.append(
-                _attach_execution_shadow(candidate, with_proximity) if candidate is not None else with_proximity
-            )
+        enriched, _ = _enriched_previews_for_candidates(conn, candidates)
         return enriched
+    finally:
+        conn.close()
+
+
+class CandidateNearMissOut(BaseModel):
+    ticker: str
+    source: str
+    signal: str
+    tier: int
+    failing_count: int
+    gaps: list[dict[str, str]]
+    entry_price: Optional[float]
+    risk_reward: Optional[float]
+    current_price: Optional[float]
+    scanned_at: Optional[str]
+
+
+@router.get("/candidate-near-misses", response_model=list[CandidateNearMissOut])
+def list_candidate_near_misses(
+    status: CandidateStatus = Query(default="new"),
+    limit: int = Query(default=10, ge=1, le=50),
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Ranked near-miss view: candidates failing exactly 1 (tier 1) or 2
+    (tier 2) GRADABLE gate conditions, tier 1 first, capped at `limit`.
+    Reuses the same enriched preview pipeline and the same gate functions
+    as /candidate-plan-previews and the ENTER_NOW gate itself
+    (_preview_base_enter_now_ready, _entry_proximity,
+    _execution_shadow_from_bars) via _gate_gap_report() -- it does not
+    recompute or approximate any gate condition, only re-labels the real,
+    already-computed pass/fail + numeric gap as a rank instead of a binary
+    filter. This is additive: it does not change what "Actionable only"
+    (the strict all-gates-pass toggle) does.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        candidates = conn.execute(
+            "SELECT * FROM candidates WHERE status=? ORDER BY updated_at DESC",
+            (status,),
+        ).fetchall()
+        enriched, candidate_rows = _enriched_previews_for_candidates(conn, candidates)
+        candidates_by_key = {
+            (str(row["ticker"]).upper(), str(row["source"])): row for row in candidate_rows
+        }
+        ranked: list[dict[str, Any]] = []
+        for preview in enriched:
+            key = (str(preview.get("ticker") or "").upper(), str(preview.get("source") or ""))
+            candidate = candidates_by_key.get(key)
+            if candidate is None:
+                continue
+            report = _gate_gap_report(candidate, preview)
+            if report["categorical_blocked"]:
+                continue
+            count = report["failing_count"]
+            if not count or count > 2:
+                continue
+            ranked.append({
+                "ticker": str(preview.get("ticker") or "").upper(),
+                "source": str(preview.get("source") or ""),
+                "signal": str(preview.get("signal") or ""),
+                "tier": count,
+                "failing_count": count,
+                "gaps": report["gaps"],
+                "entry_price": preview.get("entry_price"),
+                "risk_reward": preview.get("risk_reward"),
+                "current_price": preview.get("current_price"),
+                "scanned_at": candidate["scanned_at"] if "scanned_at" in candidate.keys() else None,
+            })
+        ranked.sort(key=lambda item: (item["tier"], item["ticker"]))
+        tier1 = [item for item in ranked if item["tier"] == 1]
+        tier2 = [item for item in ranked if item["tier"] == 2]
+        return (tier1 + tier2)[:limit]
     finally:
         conn.close()
 

@@ -159,6 +159,55 @@
       font-weight: 700;
     }
 
+    .filter-toggle.near-miss.on {
+      color: #bae6fd;
+      border-color: rgba(56, 189, 248, 0.65);
+      background: rgba(56, 189, 248, 0.16);
+      font-weight: 700;
+    }
+
+    .candidate-filter-info.near-miss-active {
+      color: #bae6fd;
+      font-weight: 700;
+    }
+
+    .candidate-near-miss-tier {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .candidate-near-miss-tier.tier-1 {
+      color: #bbf7d0;
+      background: rgba(34, 197, 94, 0.16);
+      border: 1px solid rgba(34, 197, 94, 0.4);
+    }
+
+    .candidate-near-miss-tier.tier-2 {
+      color: #fde68a;
+      background: rgba(245, 158, 11, 0.14);
+      border: 1px solid rgba(245, 158, 11, 0.38);
+    }
+
+    .candidate-near-miss-gaps {
+      display: grid;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .candidate-near-miss-gap {
+      font-size: 0.85rem;
+      color: var(--text);
+      background: rgba(142, 160, 181, 0.08);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+    }
+
     main {
       width: min(1500px, 100%);
       margin: 0 auto;
@@ -571,6 +620,8 @@
           <div class="candidate-filter">
             <button type="button" class="filter-toggle" id="candidateActionableToggle" onclick="toggleActionableOnly()" aria-pressed="false">Show actionable only</button>
             <span id="candidateFilterInfo" class="candidate-filter-info"></span>
+            <button type="button" class="filter-toggle near-miss" id="candidateNearMissToggle" onclick="toggleNearMiss()" aria-pressed="false">Show near misses</button>
+            <span id="candidateNearMissInfo" class="candidate-filter-info"></span>
           </div>
         </div>
         <div id="candidateStats"></div>
@@ -579,7 +630,7 @@
     </main>
   </div>
 
-  <script src="/static/candidate_dashboard.js?v=20260824-execution-confirmation-v10"></script>
+  <script src="/static/candidate_dashboard.js?v=20260825-near-miss-ranking"></script>
   <script>
     loadCandidateDashboard(false);
   </script>
