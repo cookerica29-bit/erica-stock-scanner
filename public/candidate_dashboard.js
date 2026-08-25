@@ -699,9 +699,15 @@
       ? { ...planPreview, ...promotion, option_contract: planPreview?.option_contract || promotion.option_contract || null }
       : planPreview;
     const blockReason = routeBlockReason(item, effectivePlan);
+    // The positive counterpart to the red reason-primary badge: same
+    // "single source of truth" guarantee (routeBlockReason() is the exact
+    // function isEnterNowCandidate()/enterNowCandidates() call too -- the
+    // same check behind the "Loaded X ENTER_NOW cards" count and the
+    // default ready-only Inbox filter), just rendered as an affirmative
+    // green badge instead of silence when there's nothing to warn about.
     const reasonBadge = blockReason
       ? `<span class="candidate-pill reason-primary" title="${escapeHtml(blockReason)}">${escapeHtml(blockReason)}</span>`
-      : '<span class="candidate-pill high">ENTER_NOW ready</span>';
+      : '<span class="candidate-pill ready-primary" title="Passes every ENTER_NOW gate: regime, target, R:R, entry proximity, execution confirmation.">✓ Ready — ENTER_NOW eligible</span>';
     return `
       <article class="candidate-card ${status === 'active' ? 'active-plan' : ''} ${status === 'dismissed' ? 'dismissed' : ''}">
         <div class="candidate-card-head">

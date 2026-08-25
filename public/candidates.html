@@ -437,6 +437,19 @@
       font-weight: 800;
     }
 
+    /* The positive counterpart to reason-primary -- same visual weight,
+       green instead of red, shown only when routeBlockReason() returns
+       nothing (the exact same function that gates ENTER_NOW eligibility
+       everywhere else). Deliberately its own class, not .high/.long, so it
+       never looks identical to an unrelated "high confidence" pill on the
+       same card. */
+    .candidate-pill.ready-primary {
+      color: #ecfdf5;
+      background: rgba(34, 197, 94, 0.34);
+      border-color: rgba(34, 197, 94, 0.7);
+      font-weight: 800;
+    }
+
     /* Real data that is NOT the operative blocking reason -- kept visible
        for context but visually quieter than reason-primary, and worded
        "Also:" so it never reads as causal. */
@@ -642,7 +655,7 @@
     </main>
   </div>
 
-  <script src="/static/candidate_dashboard.js?v=20260825-inbox-ready-only-default"></script>
+  <script src="/static/candidate_dashboard.js?v=20260825-ready-badge"></script>
   <script>
     loadCandidateDashboard(false);
   </script>
