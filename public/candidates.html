@@ -135,6 +135,30 @@
       background: rgba(251, 113, 133, 0.1);
     }
 
+    .candidate-filter {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .filter-toggle.on {
+      color: #fde68a;
+      border-color: rgba(251, 191, 36, 0.65);
+      background: rgba(251, 191, 36, 0.16);
+      font-weight: 700;
+    }
+
+    .candidate-filter-info {
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .candidate-filter-info.active-filter {
+      color: #fde68a;
+      font-weight: 700;
+    }
+
     main {
       width: min(1500px, 100%);
       margin: 0 auto;
@@ -524,6 +548,10 @@
             <button type="button" class="candidate-tab" data-candidate-view="dismissed" onclick="setCandidateView('dismissed')">Dismissed</button>
             <button type="button" class="candidate-tab" data-candidate-view="all" onclick="setCandidateView('all')">All</button>
           </div>
+          <div class="candidate-filter">
+            <button type="button" class="filter-toggle" id="candidateActionableToggle" onclick="toggleActionableOnly()" aria-pressed="false">Show actionable only</button>
+            <span id="candidateFilterInfo" class="candidate-filter-info"></span>
+          </div>
         </div>
         <div id="candidateStats"></div>
         <div id="candidateList"></div>
@@ -531,7 +559,7 @@
     </main>
   </div>
 
-  <script src="/static/candidate_dashboard.js?v=20260824-execution-shadow-v1"></script>
+  <script src="/static/candidate_dashboard.js?v=20260824-actionable-only-toggle"></script>
   <script>
     loadCandidateDashboard(false);
   </script>

@@ -1,6 +1,7 @@
 (function () {
   const KEY = 'kairos_scanner_api_key';
   const ALERT_KEY = 'kairos_candidate_alerts';
+  const ACTIONABLE_ONLY_KEY = 'kairos_candidate_actionable_only';
   const API_KEY_DB = 'kairos_candidate_dashboard';
   const API_KEY_STORE = 'settings';
   const ENTER_NOW_MIN_RR = 1.5;
@@ -18,6 +19,9 @@
   };
   let knownCandidateIds = new Set();
   let candidateAlertsEnabled = storageGet(localStorage, ALERT_KEY) === 'on';
+  // Defaults OFF for every new device/session. Only ever flips on via explicit
+  // user click in toggleActionableOnly() -- never set this true anywhere else.
+  let actionableOnlyEnabled = storageGet(localStorage, ACTIONABLE_ONLY_KEY) === 'on';
   let candidateAlertsInitialized = false;
   let apiKeyPanelExpanded = false;
   let cachedApiKey = '';
@@ -371,9 +375,56 @@
     render();
   }
 
-  function candidatesForView() {
+  // "Actionable only" applies to Inbox and Active Plans -- the two views
+  // where narrowing to ENTER_NOW-eligible candidates is meaningful. It does
+  // NOT apply to Dismissed or All, and it never touches renderStats() counts.
+  function actionableOnlyApplicable() {
+    return state.view === 'new' || state.view === 'active';
+  }
+
+  function statusScopedCandidates() {
     if (state.view === 'all') return state.candidates;
     return state.candidates.filter(item => String(item.status || 'new').toLowerCase() === state.view);
+  }
+
+  function candidatesForView() {
+    const scoped = statusScopedCandidates();
+    if (!actionableOnlyEnabled || !actionableOnlyApplicable()) return scoped;
+    const promoMap = promotionsByKey();
+    const previewMap = planPreviewsByKey();
+    return scoped.filter(item => isEnterNowCandidate(item, promoMap, previewMap));
+  }
+
+  function toggleActionableOnly() {
+    actionableOnlyEnabled = !actionableOnlyEnabled;
+    storageSet(localStorage, ACTIONABLE_ONLY_KEY, actionableOnlyEnabled ? 'on' : 'off');
+    render();
+  }
+
+  function renderActionableFilterBand() {
+    const toggle = document.getElementById('candidateActionableToggle');
+    const info = document.getElementById('candidateFilterInfo');
+    if (!toggle || !info) return;
+    const applicable = actionableOnlyApplicable();
+    toggle.style.display = applicable ? '' : 'none';
+    toggle.classList.toggle('on', actionableOnlyEnabled);
+    toggle.setAttribute('aria-pressed', String(actionableOnlyEnabled));
+    toggle.textContent = actionableOnlyEnabled ? '✓ Actionable only' : 'Show actionable only';
+
+    if (!applicable) {
+      info.textContent = '';
+      info.classList.remove('active-filter');
+      return;
+    }
+    const total = statusScopedCandidates().length;
+    if (actionableOnlyEnabled) {
+      const shown = candidatesForView().length;
+      info.textContent = `Showing ${shown} of ${total} (actionable only)`;
+      info.classList.add('active-filter');
+    } else {
+      info.textContent = `Showing all ${total}`;
+      info.classList.remove('active-filter');
+    }
   }
 
   function renderStats() {
@@ -406,6 +457,7 @@
   function render() {
     updateCandidateAlertToggle();
     renderStats();
+    renderActionableFilterBand();
     const list = document.getElementById('candidateList');
     if (!list) return;
     if (!apiKey() && !candidateSessionAuthenticated && !state.loaded && !state.error) {
@@ -728,6 +780,7 @@
   window.toggleCandidateAlerts = toggleCandidateAlerts;
   window.loadCandidateDashboard = loadCandidateDashboard;
   window.setCandidateView = setCandidateView;
+  window.toggleActionableOnly = toggleActionableOnly;
   window.updateCandidateStatus = updateCandidateStatus;
   window.requestChartReview = requestChartReview;
 })();
