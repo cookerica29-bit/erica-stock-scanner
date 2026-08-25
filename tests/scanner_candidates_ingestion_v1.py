@@ -412,6 +412,37 @@ def test_entry_proximity_uses_percent_or_atr_threshold():
     assert "away from entry" in far["entry_proximity_reason"]
 
 
+def test_entry_proximity_distrusts_one_sided_quotes():
+    """A bid_only/ask_only quote is real for display (see
+    tests/current_quote_price_v1.py) but not reliable enough to gate a
+    pass/fail decision on -- confirmed live via BRK.B showing a bogus
+    5.81%/3.94 ATR "away from entry" off a bid_only quote of 473.31 while
+    the real price was ~0.35% from entry. _entry_proximity() must refuse to
+    compute a distance from either one-sided branch, same as no quote at all."""
+    import candidates_router
+
+    for branch in ("bid_only", "ask_only"):
+        result = candidates_router._entry_proximity(
+            entry_price=502.495,
+            atr14=7.4005,
+            quote={"price": 473.31, "price_branch": branch, "source": "alpaca_latest_quote"},
+        )
+        assert result["entry_proximity_ok"] is False
+        assert result["current_price"] is None
+        assert result["entry_distance_pct"] is None
+        assert result["entry_distance_atr"] is None
+        assert "one-sided" in result["entry_proximity_reason"]
+
+    # A proper two-sided (midpoint) quote must still be trusted normally.
+    clean = candidates_router._entry_proximity(
+        entry_price=100.0,
+        atr14=2.0,
+        quote={"price": 101.0, "price_branch": "midpoint"},
+    )
+    assert clean["entry_proximity_ok"] is True
+    assert clean["current_price"] == 101.0
+
+
 def test_contract_gate_blocks_tiny_option_premium():
     import candidates_router
 

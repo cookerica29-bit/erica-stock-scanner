@@ -447,8 +447,20 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                     "source": "alpaca_latest_quote",
                 }
 
+        # Opt-in only: not defaulted to "sip" because SIP entitlement on this
+        # account is unconfirmed, and a wrong default would break quotes
+        # entirely rather than just degrade some of them. Without a `feed`
+        # param, Alpaca defaults to IEX, which carries a small slice of
+        # total market volume -- a meaningful fraction of symbols can have
+        # no recent two-sided IEX print at any given instant, producing a
+        # stale one-sided quote far from the real NBBO (see the bid_only
+        # guard in candidates_router._entry_proximity for a confirmed live
+        # case). Set ALPACA_QUOTE_FEED=sip once SIP entitlement is verified.
+        quote_feed = os.getenv("ALPACA_QUOTE_FEED", "").strip().lower()
         for chunk in _chunks(requested_symbols, chunk_size):
             params = {"symbols": ",".join(self.normalize_symbol(symbol) for symbol in chunk)}
+            if quote_feed:
+                params["feed"] = quote_feed
             try:
                 payload = self._request_latest_quotes(params)
             except (HTTPError, URLError, TimeoutError, RuntimeError) as exc:
@@ -461,6 +473,8 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                     continue
                 for symbol in chunk:
                     single_params = {"symbols": self.normalize_symbol(symbol)}
+                    if quote_feed:
+                        single_params["feed"] = quote_feed
                     try:
                         ingest_payload(self._request_latest_quotes(single_params))
                     except (HTTPError, URLError, TimeoutError, RuntimeError) as single_exc:

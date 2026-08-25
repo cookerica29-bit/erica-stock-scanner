@@ -593,6 +593,25 @@ def _entry_proximity(
         return base
     if not quote:
         return base
+    price_branch = quote.get("price_branch")
+    if price_branch in ("bid_only", "ask_only"):
+        # A one-sided quote is a real, legitimate value for DISPLAY purposes
+        # elsewhere in the app (see AlpacaMarketDataProvider._quote_price,
+        # exercised by tests/current_quote_price_v1.py) -- but it is not
+        # reliable enough to gate a live pass/fail decision on. Root cause:
+        # Alpaca's quotes endpoint defaults to the IEX feed (no `feed=sip`
+        # param is sent anywhere in this codebase), and IEX alone carries a
+        # small fraction of total market volume, so at any given instant a
+        # meaningful share of names have no recent two-sided IEX print --
+        # the stale/resting single side that's left can be far from the real
+        # NBBO (confirmed live: BRK.B showed "5.81% / 3.94 ATR away from
+        # entry" off a bid_only quote of 473.31, while independently checked
+        # real price was ~0.35% from entry -- a bogus $29 gap). Treat it the
+        # same as no quote at all rather than asserting a distance that
+        # might be wrong, especially now that this number is surfaced
+        # prominently in the near-miss ranking view.
+        base["entry_proximity_reason"] = "Current quote is one-sided (no reliable two-sided price); not used for gating"
+        return base
     try:
         current_price = float(quote.get("price"))
     except (TypeError, ValueError):
