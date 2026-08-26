@@ -119,6 +119,9 @@ DISCOVERY_POOL_RANKING_VERSION = "alpaca-liquidity-ranking-v1"
 DISCOVERY_POOL_PATH_ENV = "KAIROS_DISCOVERY_POOL_PATH"
 DISCOVERY_REJECTION_EVIDENCE_PATH_ENV = "KAIROS_DISCOVERY_REJECTION_EVIDENCE_PATH"
 SCHEDULED_SCAN_STATE_PATH_ENV = "KAIROS_SCHEDULED_SCAN_STATE_PATH"
+DISCOVERY_POOL_FILENAME = "kairos_weekly_discovery_pool_v1.json"
+DISCOVERY_REJECTION_EVIDENCE_FILENAME = "kairos_weekly_discovery_rejection_evidence_v1.json"
+SCHEDULED_SCAN_STATE_FILENAME = "kairos_scheduled_discovered_scan_v1.json"
 DISCOVERY_REFRESH_WATCHDOG_SECONDS = 60 * 60
 DISCOVERED_SCAN_SCHEDULE_HOUR_ET = 10
 DISCOVERED_SCAN_SCHEDULE_MINUTE_ET = 0
@@ -413,12 +416,31 @@ def _next_discovery_refresh_at(now: Optional[datetime] = None) -> datetime:
     )
 
 
+def _persistent_data_dir() -> Path:
+    mount_path = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    if mount_path:
+        return Path(mount_path)
+    if (
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RAILWAY_SERVICE_ID")
+    ):
+        return Path("/data")
+    return Path(__file__).resolve().parent / "data"
+
+
 def _discovery_pool_path() -> Path:
-    return Path(os.getenv(DISCOVERY_POOL_PATH_ENV) or "/data/kairos_weekly_discovery_pool_v1.json")
+    configured = os.getenv(DISCOVERY_POOL_PATH_ENV)
+    if configured:
+        return Path(configured)
+    return _persistent_data_dir() / DISCOVERY_POOL_FILENAME
 
 
 def _scheduled_scan_state_path() -> Path:
-    return Path(os.getenv(SCHEDULED_SCAN_STATE_PATH_ENV) or "/data/kairos_scheduled_discovered_scan_v1.json")
+    configured = os.getenv(SCHEDULED_SCAN_STATE_PATH_ENV)
+    if configured:
+        return Path(configured)
+    return _persistent_data_dir() / SCHEDULED_SCAN_STATE_FILENAME
 
 
 def _discovery_rejection_evidence_path() -> Path:
@@ -427,8 +449,8 @@ def _discovery_rejection_evidence_path() -> Path:
         return Path(configured)
     configured_pool = os.getenv(DISCOVERY_POOL_PATH_ENV)
     if configured_pool:
-        return Path(configured_pool).with_name("kairos_weekly_discovery_rejection_evidence_v1.json")
-    return Path("/data/kairos_weekly_discovery_rejection_evidence_v1.json")
+        return Path(configured_pool).with_name(DISCOVERY_REJECTION_EVIDENCE_FILENAME)
+    return _persistent_data_dir() / DISCOVERY_REJECTION_EVIDENCE_FILENAME
 
 
 def _discovery_cache_defaults() -> dict:

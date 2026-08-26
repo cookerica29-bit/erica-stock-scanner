@@ -61,7 +61,13 @@ def default_candidates_db_path() -> str:
     journal_path = os.environ.get("JOURNAL_DB_PATH") or os.environ.get("KAIROS_JOURNAL_DB_PATH")
     if journal_path:
         return str(Path(journal_path).parent / "kairos_candidates.sqlite3")
-    return "/data/kairos_candidates.sqlite3"
+    if (
+        os.environ.get("RAILWAY_ENVIRONMENT")
+        or os.environ.get("RAILWAY_PROJECT_ID")
+        or os.environ.get("RAILWAY_SERVICE_ID")
+    ):
+        return "/data/kairos_candidates.sqlite3"
+    return str(Path(__file__).resolve().parent / "data" / "kairos_candidates.sqlite3")
 
 
 def _get_api_key() -> Optional[str]:
