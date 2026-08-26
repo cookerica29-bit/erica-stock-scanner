@@ -737,6 +737,24 @@
     `;
   }
 
+  // Shared by renderPromotion() and renderPlanPreview() -- both carry the same
+  // stop_source/raw_stop fields from the backend (structural_resistance.
+  // resolve_stop, via candidates_router._compute_candidate_promotion).
+  // Only one state needs a note here (unlike the target-clamp note below,
+  // which has three): stop_source is "order_block" when a clean order block
+  // was found and used, or "atr_multiple" when it fell back to the flat
+  // entry +/- 1.5*ATR stop -- which is the normal, expected case and gets no
+  // note at all, same as a target with no nearby structure.
+  function renderStopSourceNote(obj) {
+    if (!obj || obj.stop_source !== 'order_block') return '';
+    const rawStop = obj.raw_stop == null ? null : fmtMoney(obj.raw_stop);
+    return `
+      <div class="candidate-target-clamp stop-order-block">
+        <span class="candidate-pill stop-order-block">🧱 Stop set at order block</span>
+        ${rawStop ? `<span class="candidate-target-clamp-raw">Flat ATR stop would have been ${escapeHtml(rawStop)}</span>` : ''}
+      </div>`;
+  }
+
   // Shared by renderPromotion() and renderPlanPreview() -- both promotion and
   // preview objects carry the same target_clamp_* fields from the backend
   // (candidates_router._compute_candidate_promotion). Two states look
@@ -791,6 +809,7 @@
         <div><span>R:R</span><strong>${escapeHtml(promotion.risk_reward == null ? '—' : fmtNumber(promotion.risk_reward, 2))}</strong></div>
         <div><span>ATR14</span><strong>${escapeHtml(fmtNumber(promotion.atr14, 2))}</strong></div>
       </div>
+      ${renderStopSourceNote(promotion)}
       ${renderTargetClampNote(promotion)}
       <div class="candidate-meta">Promoted ${escapeHtml(fmtTime(promotion.promoted_at))} · target source ${escapeHtml(promotion.target_source || '—')}</div>
     `;
@@ -852,6 +871,7 @@
         <div><span>Contract</span><strong>${escapeHtml(contractLabel)}</strong></div>
         <div><span>Expiry</span><strong>${escapeHtml(contractMeta)}</strong></div>
       </div>
+      ${renderStopSourceNote(preview)}
       ${renderTargetClampNote(preview)}
       <div class="candidate-meta">Preview computed ${escapeHtml(fmtTime(preview.computed_at))} · target source ${escapeHtml(preview.target_source || '—')}</div>
       ${preview.execution_shadow_checked ? `<div class="candidate-meta">Execution gate: ${escapeHtml(preview.execution_shadow_reason || '—')}</div>` : ''}
