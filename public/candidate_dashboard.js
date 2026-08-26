@@ -890,11 +890,25 @@
     const decodedSource = decodeURIComponent(source);
     setStatus(`Requesting informational AI chart note for ${decodedTicker}...`);
     try {
-      await fetchJson(`/api/v1/scanner/candidates/${encodeURIComponent(decodedTicker)}/ai-chart-review?source=${encodeURIComponent(decodedSource)}`, {
+      const review = await fetchJson(`/api/v1/scanner/candidates/${encodeURIComponent(decodedTicker)}/ai-chart-review?source=${encodeURIComponent(decodedSource)}`, {
         method: 'POST',
       });
-      state.loaded = false;
-      await loadCandidateDashboard(true);
+      // The POST response already carries the full review row -- splice it into
+      // local state and re-render instead of reloading the whole dashboard
+      // (candidates + promotions + plan-previews + chart-reviews). That refetch
+      // was a full-list reload just to update one card's AI badge: it reset
+      // scroll position for every open card and re-ran the plan-preview
+      // computation (live option-chain lookups) for all candidates, not just
+      // this one.
+      const key = promotionKey(review);
+      const existingIndex = state.chartReviews.findIndex(item => promotionKey(item) === key);
+      if (existingIndex >= 0) {
+        state.chartReviews[existingIndex] = review;
+      } else {
+        state.chartReviews.push(review);
+      }
+      setStatus(`AI chart note ready for ${decodedTicker}.`, 'ok');
+      render();
     } catch (error) {
       setStatus(error.message || String(error), 'error');
     }
