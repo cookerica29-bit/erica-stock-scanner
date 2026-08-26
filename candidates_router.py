@@ -12,6 +12,7 @@ import json
 import sqlite3
 import hmac
 import math
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -151,6 +152,19 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         )
 
 
+# Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
+# on every single call to _get_db() -- i.e. on every API request. Each of those
+# statements needs a write-capable lock even when it's a no-op, so every request
+# (including simple reads like /candidates) was contending for a write lock on
+# every call. Guarded here to run once per process instead. WAL mode is enabled
+# so that even the rare real writer (plan-preview cache refresh) never blocks
+# concurrent readers -- see _enriched_previews_for_candidates for the other half
+# of this fix (that loop used to hold one uncommitted write transaction open
+# across an unbounded, network-call-heavy loop; see incident notes there).
+_schema_ready_db_paths: set[str] = set()
+_schema_ready_lock = threading.Lock()
+
+
 def _get_db():
     db_path = Path(default_candidates_db_path())
     if db_path.parent and str(db_path.parent) not in {"", "."}:
@@ -158,6 +172,19 @@ def _get_db():
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    db_key = str(db_path)
+    if db_key in _schema_ready_db_paths:
+        return conn
+    with _schema_ready_lock:
+        if db_key in _schema_ready_db_paths:
+            return conn
+        _initialize_candidates_schema(conn)
+        _schema_ready_db_paths.add(db_key)
+    return conn
+
+
+def _initialize_candidates_schema(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candidates (
@@ -278,7 +305,6 @@ def _get_db():
     )
     _ensure_candidate_promotions_schema(conn)
     conn.commit()
-    return conn
 
 
 class CandidateIn(BaseModel):
@@ -1773,9 +1799,19 @@ def _enriched_previews_for_candidates(conn, candidates: list) -> tuple[list[dict
         ):
             previews.append(_row_to_plan_preview(existing))
             continue
+        # _compute_candidate_plan_preview() makes real network calls (regime bars,
+        # option chain lookups) per candidate. Committing right after each row's
+        # write -- instead of deferring one commit to the end of this loop -- keeps
+        # the write lock held for one upsert's duration instead of across every
+        # remaining candidate's network round-trip. With hundreds of candidates
+        # needing a refresh right after a scan (their cache keys off
+        # candidate_updated_at, and a scan can touch hundreds of rows at once),
+        # a single end-of-loop commit held the lock open long enough to exceed the
+        # busy_timeout for every other endpoint reading this database concurrently.
         preview = _compute_candidate_plan_preview(candidate)
         try:
             _store_plan_preview(conn, preview)
+            conn.commit()
         except sqlite3.OperationalError as exc:
             if "database is locked" not in str(exc).lower():
                 raise
@@ -1784,11 +1820,6 @@ def _enriched_previews_for_candidates(conn, candidates: list) -> tuple[list[dict
                 or "Plan preview cache is temporarily busy; showing uncached computed preview."
             )
         previews.append(preview)
-    try:
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        if "database is locked" not in str(exc).lower():
-            raise
     quotes = _latest_quotes_for_previews(previews)
     candidates_by_key = {
         (str(candidate["ticker"]).upper(), str(candidate["source"])): candidate
