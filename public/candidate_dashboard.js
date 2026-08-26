@@ -737,6 +737,39 @@
     `;
   }
 
+  // Shared by renderPromotion() and renderPlanPreview() -- both promotion and
+  // preview objects carry the same target_clamp_* fields from the backend
+  // (candidates_router._compute_candidate_promotion). Two states look
+  // deliberately different, not just different text, because they mean
+  // different things for the number the trader is looking at:
+  //   - target_clamped true: the displayed Target/R:R above ARE the adjusted
+  //     values -- this note explains why, and keeps the original raw target
+  //     visible (never silently overwritten).
+  //   - target_clamped false but a badge is present: real nearby resistance
+  //     was detected, but clamping it would have crossed entry or dropped
+  //     R:R below the floor, so it was refused -- the displayed Target/R:R
+  //     above are STILL the raw, unadjusted values. This is the case most at
+  //     risk of looking like "handled" when it isn't, so it gets the more
+  //     alarming (red, bold) treatment, not the calmer "adjusted" one.
+  function renderTargetClampNote(obj) {
+    if (!obj || !obj.target_clamp_badge) return '';
+    if (obj.target_clamped) {
+      const rawTarget = obj.raw_target == null ? null : fmtMoney(obj.raw_target);
+      const rawRr = obj.raw_risk_reward == null ? null : fmtNumber(obj.raw_risk_reward, 2);
+      return `
+        <div class="candidate-target-clamp applied">
+          <span class="candidate-pill clamp-applied">🎯 Target adjusted — ${escapeHtml(obj.target_clamp_badge)}</span>
+          ${rawTarget ? `<span class="candidate-target-clamp-raw">Raw target was <s>${escapeHtml(rawTarget)}</s>${rawRr ? ` · raw R:R was ${escapeHtml(rawRr)}` : ''}</span>` : ''}
+        </div>`;
+    }
+    const reasonSuffix = obj.target_clamp_reason ? ` (${escapeHtml(obj.target_clamp_reason)})` : '';
+    return `
+      <div class="candidate-target-clamp refused">
+        <span class="candidate-pill clamp-refused">⚠ Target may be unreachable — ${escapeHtml(obj.target_clamp_badge)}</span>
+        <span class="candidate-target-clamp-raw">Target/R:R above are unadjusted${reasonSuffix}</span>
+      </div>`;
+  }
+
   function renderPromotion(promotion, blockReason) {
     const warnings = [];
     const rrReasonText = `R:R is below ${ENTER_NOW_MIN_RR}:1`;
@@ -758,6 +791,7 @@
         <div><span>R:R</span><strong>${escapeHtml(promotion.risk_reward == null ? '—' : fmtNumber(promotion.risk_reward, 2))}</strong></div>
         <div><span>ATR14</span><strong>${escapeHtml(fmtNumber(promotion.atr14, 2))}</strong></div>
       </div>
+      ${renderTargetClampNote(promotion)}
       <div class="candidate-meta">Promoted ${escapeHtml(fmtTime(promotion.promoted_at))} · target source ${escapeHtml(promotion.target_source || '—')}</div>
     `;
   }
@@ -818,6 +852,7 @@
         <div><span>Contract</span><strong>${escapeHtml(contractLabel)}</strong></div>
         <div><span>Expiry</span><strong>${escapeHtml(contractMeta)}</strong></div>
       </div>
+      ${renderTargetClampNote(preview)}
       <div class="candidate-meta">Preview computed ${escapeHtml(fmtTime(preview.computed_at))} · target source ${escapeHtml(preview.target_source || '—')}</div>
       ${preview.execution_shadow_checked ? `<div class="candidate-meta">Execution gate: ${escapeHtml(preview.execution_shadow_reason || '—')}</div>` : ''}
     `;

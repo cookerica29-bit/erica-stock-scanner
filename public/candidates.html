@@ -460,6 +460,42 @@
       font-weight: 600;
     }
 
+    /* Structural target-clamp note (see renderTargetClampNote in
+       candidate_dashboard.js): sits directly under the Stop/Target/R:R grid
+       it qualifies, not in the top pill row with the gate "Also:" pills.
+       Two intentionally different treatments -- these are not the same
+       situation. */
+    .candidate-target-clamp {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .candidate-target-clamp-raw {
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    /* Applied: the Target/R:R shown above ARE the adjusted values already --
+       calmer, informational blue. The system already protected this number. */
+    .candidate-pill.clamp-applied {
+      color: #bfdbfe;
+      background: rgba(59, 130, 246, 0.16);
+      border-color: rgba(59, 130, 246, 0.4);
+    }
+
+    /* Refused: the Target/R:R shown above are STILL the raw, unadjusted
+       values, despite real nearby resistance being detected -- deliberately
+       as loud as .reason-primary (same weight, its own color) so an
+       unprotected number never reads as calmly as a handled one. */
+    .candidate-pill.clamp-refused {
+      color: #fff1f2;
+      background: rgba(251, 113, 133, 0.3);
+      border-color: rgba(251, 113, 133, 0.65);
+      font-weight: 800;
+    }
+
     .candidate-kv {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -655,7 +691,7 @@
     </main>
   </div>
 
-  <script src="/static/candidate_dashboard.js?v=20260825-ai-review-no-refetch"></script>
+  <script src="/static/candidate_dashboard.js?v=20260826-target-clamp-badge"></script>
   <script>
     loadCandidateDashboard(false);
   </script>
