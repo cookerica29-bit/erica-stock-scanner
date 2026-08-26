@@ -23,8 +23,8 @@ from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from market_data import AlpacaMarketDataProvider
-from scanner import _batch_download, _best_contract, _compute_atr, _find_swings, _flatten_columns
-from structural_resistance import clamp_target, levels_near_target
+from scanner import _batch_download, _best_contract, _compute_atr, _find_order_block, _find_swings, _flatten_columns
+from structural_resistance import clamp_target, levels_near_target, resolve_stop
 
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
@@ -164,6 +164,10 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN target_clamp_badge TEXT")
     if "target_clamp_reason" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN target_clamp_reason TEXT")
+    if "raw_stop" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN raw_stop REAL")
+    if "stop_source" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN stop_source TEXT")
 
 
 # CREATE TABLE IF NOT EXISTS is a no-op against an existing production table,
@@ -183,6 +187,10 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN target_clamp_badge TEXT")
     if "target_clamp_reason" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN target_clamp_reason TEXT")
+    if "raw_stop" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN raw_stop REAL")
+    if "stop_source" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN stop_source TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -279,6 +287,8 @@ def _initialize_candidates_schema(conn) -> None:
             target_clamped INTEGER NOT NULL DEFAULT 0,
             target_clamp_badge TEXT,
             target_clamp_reason TEXT,
+            raw_stop REAL,
+            stop_source TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -329,6 +339,8 @@ def _initialize_candidates_schema(conn) -> None:
             target_clamped INTEGER NOT NULL DEFAULT 0,
             target_clamp_badge TEXT,
             target_clamp_reason TEXT,
+            raw_stop REAL,
+            stop_source TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -405,6 +417,8 @@ class CandidatePromotionOut(BaseModel):
     target_clamped: bool = False
     target_clamp_badge: Optional[str] = None
     target_clamp_reason: Optional[str] = None
+    raw_stop: Optional[float] = None
+    stop_source: Optional[str] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -442,6 +456,8 @@ class CandidatePlanPreviewOut(BaseModel):
     target_clamped: bool = False
     target_clamp_badge: Optional[str] = None
     target_clamp_reason: Optional[str] = None
+    raw_stop: Optional[float] = None
+    stop_source: Optional[str] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -1449,10 +1465,21 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     if atr14 <= 0:
         raise HTTPException(status_code=422, detail=f"ATR14 is not usable for {ticker}")
 
-    if direction == "short":
-        stop = entry_price + (ATR_MULTIPLIER * atr14)
-    else:
-        stop = entry_price - (ATR_MULTIPLIER * atr14)
+    # swings computed once, up front -- shared by the order-block stop check
+    # below, the structural target lookup, and the target-resistance check
+    # further down.
+    swings = _find_swings(df)
+
+    # Order-block stop: replaces the flat entry +/- ATR_MULTIPLIER stop with
+    # the actual invalidation level of the most recent order block, when one
+    # exists on the correct side of entry. raw_stop (the flat ATR value) is
+    # always preserved for the audit trail regardless of which stop is live
+    # -- see resolve_stop's docstring for the "clean" fallback rule.
+    order_block = _find_order_block(df, direction.upper(), swings)
+    stop_resolution = resolve_stop(entry_price, direction, atr14, ATR_MULTIPLIER, order_block)
+    stop = stop_resolution["stop"]
+    raw_stop = stop_resolution["raw_stop"]
+    stop_source = stop_resolution["stop_source"]
 
     risk = abs(entry_price - stop)
     if risk <= 0:
@@ -1460,7 +1487,6 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
 
     min_target_atr_multiple = _min_target_atr_multiple()
     min_target_distance = min_target_atr_multiple * atr14
-    swings = _find_swings(df)
     target = _nearest_structural_target(entry_price, direction, swings, min_target_distance)
     no_valid_target = target is None
     risk_reward = None
@@ -1519,6 +1545,8 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "target_clamped": target_clamped,
         "target_clamp_badge": target_clamp_badge,
         "target_clamp_reason": target_clamp_reason,
+        "raw_stop": round(float(raw_stop), 4),
+        "stop_source": stop_source,
     }
 
 
@@ -1575,8 +1603,8 @@ def _store_promotion(conn, promotion: dict) -> None:
              rr_warning, no_valid_target, promoted_at, position_size, atr14,
              atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
              target_source, raw_target, raw_risk_reward, target_clamped,
-             target_clamp_badge, target_clamp_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             target_clamp_badge, target_clamp_reason, raw_stop, stop_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             direction=excluded.direction,
             entry_price=excluded.entry_price,
@@ -1596,7 +1624,9 @@ def _store_promotion(conn, promotion: dict) -> None:
             raw_risk_reward=excluded.raw_risk_reward,
             target_clamped=excluded.target_clamped,
             target_clamp_badge=excluded.target_clamp_badge,
-            target_clamp_reason=excluded.target_clamp_reason
+            target_clamp_reason=excluded.target_clamp_reason,
+            raw_stop=excluded.raw_stop,
+            stop_source=excluded.stop_source
         """,
         (
             promotion["ticker"],
@@ -1620,6 +1650,8 @@ def _store_promotion(conn, promotion: dict) -> None:
             1 if promotion.get("target_clamped") else 0,
             promotion.get("target_clamp_badge"),
             promotion.get("target_clamp_reason"),
+            promotion.get("raw_stop"),
+            promotion.get("stop_source"),
         ),
     )
 
@@ -1654,6 +1686,8 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "target_clamped": promotion_like.get("target_clamped", False),
             "target_clamp_badge": promotion_like.get("target_clamp_badge"),
             "target_clamp_reason": promotion_like.get("target_clamp_reason"),
+            "raw_stop": promotion_like.get("raw_stop"),
+            "stop_source": promotion_like.get("stop_source"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -1680,6 +1714,8 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "target_clamped": False,
             "target_clamp_badge": None,
             "target_clamp_reason": None,
+            "raw_stop": None,
+            "stop_source": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -1696,8 +1732,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
              rr_warning, no_valid_target, atr14, atr_multiplier, rr_warning_threshold,
              min_target_atr_multiple, target_source, option_contract_json, preview_error,
              computed_at, candidate_updated_at, raw_target, raw_risk_reward,
-             target_clamped, target_clamp_badge, target_clamp_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             target_clamped, target_clamp_badge, target_clamp_reason,
+             raw_stop, stop_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -1719,7 +1756,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             raw_risk_reward=excluded.raw_risk_reward,
             target_clamped=excluded.target_clamped,
             target_clamp_badge=excluded.target_clamp_badge,
-            target_clamp_reason=excluded.target_clamp_reason
+            target_clamp_reason=excluded.target_clamp_reason,
+            raw_stop=excluded.raw_stop,
+            stop_source=excluded.stop_source
         """,
         (
             preview["ticker"],
@@ -1745,6 +1784,8 @@ def _store_plan_preview(conn, preview: dict) -> None:
             1 if preview.get("target_clamped") else 0,
             preview.get("target_clamp_badge"),
             preview.get("target_clamp_reason"),
+            preview.get("raw_stop"),
+            preview.get("stop_source"),
         ),
     )
 

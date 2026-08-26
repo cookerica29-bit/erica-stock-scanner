@@ -33,6 +33,11 @@ DEFAULT_FOLLOW_THROUGH_BARS = 3
 DEFAULT_PROXIMITY_ATR = 0.3
 DEFAULT_RETEST_ATR_FRAC = 0.15
 DEFAULT_CLAMP_BUFFER_ATR = 0.1
+# Minimum distance an order-block-derived stop must sit from entry, in ATR
+# units, to be trusted as a real invalidation level rather than noise. See
+# resolve_stop()'s docstring for the real-data case (AMZN) that motivated
+# this. The cutoff is inclusive: exactly this distance away still passes.
+MIN_STOP_DISTANCE_ATR = 0.25
 
 _STRENGTH_RANK = {"strong": 3, "moderate": 2, "weak": 1}
 
@@ -287,3 +292,76 @@ def clamp_target(
         "nearest_finding": nearest,
         "clamp_refused_reason": None,
     }
+
+
+def resolve_stop(
+    entry: float,
+    direction: str,
+    atr: float,
+    atr_multiplier: float,
+    order_block: Optional[dict[str, Any]],
+    buffer_atr: float = DEFAULT_CLAMP_BUFFER_ATR,
+) -> dict[str, Any]:
+    """Place the stop at the actual order-block invalidation level when a
+    clean one exists, instead of always using the flat entry +/- atr_multiple
+    fallback.
+
+    `order_block` is scanner._find_order_block()'s return value directly
+    (None, or {"high", "low", "index"}) -- the most recent bearish candle
+    before the last swing low (longs) / bullish candle before the last swing
+    high (shorts), i.e. the zone whose opposite edge is this codebase's own
+    existing definition of the level that invalidates the setup (see the
+    near_ob check in scanner.py's MTV3 order-block-interaction feature,
+    which already uses "within 1 ATR of the order block edge" as its notion
+    of proximity -- there is no separate proximity gate here beyond that
+    established convention plus the sanity check below).
+
+    Invalidation level: the order block's low for longs (price closing below
+    it invalidates the bullish order block), its high for shorts. The stop is
+    placed `buffer_atr` (same constant as clamp_target's buffer, so the two
+    features read consistently) past that level, in the direction away from
+    entry.
+
+    "Clean" here means: a candle was actually found (order_block is not
+    None), the resulting stop is still on the correct side of entry -- below
+    entry for longs, above for shorts -- AND it's at least MIN_STOP_DISTANCE_ATR
+    away from entry. That floor exists because an order block can sit almost
+    exactly at entry (observed on real data: AMZN landed at 0.177 ATR before
+    this floor existed), which produces a stop distance tight enough to be
+    noise rather than a real invalidation level. The cutoff is inclusive of
+    the floor itself: exactly MIN_STOP_DISTANCE_ATR away passes ("closer than"
+    the floor is what's rejected, not "at or closer than"). If any of these
+    three checks fails, this falls back to the flat ATR-multiple stop rather
+    than ever emitting a stop that would make the trade un-computable (entry
+    already past its own invalidation level, coincident with entry, or too
+    tight to be a meaningful stop).
+
+    Returns {stop, raw_stop, stop_source: "order_block" | "atr_multiple"}.
+    raw_stop (the flat ATR-multiple value) is always populated, regardless of
+    which stop is actually live, for the audit trail.
+    """
+    if direction == "short":
+        raw_stop = entry + (atr_multiplier * atr)
+    else:
+        raw_stop = entry - (atr_multiplier * atr)
+
+    if order_block is None:
+        return {"stop": raw_stop, "raw_stop": raw_stop, "stop_source": "atr_multiple"}
+
+    buf = buffer_atr * atr
+    if direction == "long":
+        candidate_stop = order_block["low"] - buf
+        is_clean = candidate_stop < entry
+    else:
+        candidate_stop = order_block["high"] + buf
+        is_clean = candidate_stop > entry
+
+    if is_clean and atr > 0:
+        stop_distance_atr = abs(entry - candidate_stop) / atr
+        if stop_distance_atr < MIN_STOP_DISTANCE_ATR:
+            is_clean = False
+
+    if not is_clean:
+        return {"stop": raw_stop, "raw_stop": raw_stop, "stop_source": "atr_multiple"}
+
+    return {"stop": candidate_stop, "raw_stop": raw_stop, "stop_source": "order_block"}
