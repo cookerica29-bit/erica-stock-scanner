@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from market_data import AlpacaMarketDataProvider
 from scanner import _batch_download, _best_contract, _compute_atr, _find_swings, _flatten_columns
+from structural_resistance import clamp_target, levels_near_target
 
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
@@ -141,7 +142,10 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
             """
         )
         conn.execute("DROP TABLE candidate_promotions_old")
-        return
+        # Deliberately no early return here: fall through to the ALTER-based
+        # checks below so any columns added to this schema *after* the rebuild
+        # path was written (like the structural-target-clamp fields) still get
+        # added post-rebuild instead of silently missing until the next deploy.
 
     columns = {info["name"] for info in conn.execute("PRAGMA table_info(candidate_promotions)").fetchall()}
     if "no_valid_target" not in columns:
@@ -150,6 +154,35 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE candidate_promotions ADD COLUMN min_target_atr_multiple REAL NOT NULL DEFAULT 2.0"
         )
+    if "raw_target" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN raw_target REAL")
+    if "raw_risk_reward" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN raw_risk_reward REAL")
+    if "target_clamped" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN target_clamped INTEGER NOT NULL DEFAULT 0")
+    if "target_clamp_badge" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN target_clamp_badge TEXT")
+    if "target_clamp_reason" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN target_clamp_reason TEXT")
+
+
+# CREATE TABLE IF NOT EXISTS is a no-op against an existing production table,
+# even when its own column list has grown since the table was first created --
+# so new columns need an explicit ADD COLUMN migration here, or _store_plan_preview's
+# INSERT (which names every column) fails immediately with "no such column" on
+# an existing database.
+def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(candidate_plan_previews)").fetchall()}
+    if "raw_target" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN raw_target REAL")
+    if "raw_risk_reward" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN raw_risk_reward REAL")
+    if "target_clamped" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN target_clamped INTEGER NOT NULL DEFAULT 0")
+    if "target_clamp_badge" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN target_clamp_badge TEXT")
+    if "target_clamp_reason" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN target_clamp_reason TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -241,6 +274,11 @@ def _initialize_candidates_schema(conn) -> None:
             rr_warning_threshold REAL NOT NULL,
             min_target_atr_multiple REAL NOT NULL DEFAULT 2.0,
             target_source TEXT NOT NULL,
+            raw_target REAL,
+            raw_risk_reward REAL,
+            target_clamped INTEGER NOT NULL DEFAULT 0,
+            target_clamp_badge TEXT,
+            target_clamp_reason TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -286,10 +324,16 @@ def _initialize_candidates_schema(conn) -> None:
             preview_error TEXT,
             computed_at TEXT NOT NULL,
             candidate_updated_at TEXT,
+            raw_target REAL,
+            raw_risk_reward REAL,
+            target_clamped INTEGER NOT NULL DEFAULT 0,
+            target_clamp_badge TEXT,
+            target_clamp_reason TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
     )
+    _ensure_candidate_plan_previews_schema(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candidate_status_history (
@@ -356,6 +400,11 @@ class CandidatePromotionOut(BaseModel):
     rr_warning_threshold: float
     min_target_atr_multiple: float
     target_source: str
+    raw_target: Optional[float] = None
+    raw_risk_reward: Optional[float] = None
+    target_clamped: bool = False
+    target_clamp_badge: Optional[str] = None
+    target_clamp_reason: Optional[str] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -388,6 +437,11 @@ class CandidatePlanPreviewOut(BaseModel):
     rr_warning_threshold: float
     min_target_atr_multiple: float
     target_source: Optional[str]
+    raw_target: Optional[float] = None
+    raw_risk_reward: Optional[float] = None
+    target_clamped: bool = False
+    target_clamp_badge: Optional[str] = None
+    target_clamp_reason: Optional[str] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -453,6 +507,7 @@ def _row_to_promotion(row: sqlite3.Row) -> dict:
     output = dict(row)
     output["rr_warning"] = bool(output.get("rr_warning"))
     output["no_valid_target"] = bool(output.get("no_valid_target"))
+    output["target_clamped"] = bool(output.get("target_clamped"))
     return output
 
 
@@ -466,6 +521,7 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     output = dict(row)
     output["rr_warning"] = bool(output.get("rr_warning"))
     output["no_valid_target"] = bool(output.get("no_valid_target"))
+    output["target_clamped"] = bool(output.get("target_clamped"))
     raw_contract = output.pop("option_contract_json", None)
     if raw_contract:
         try:
@@ -1414,6 +1470,32 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         risk_reward = reward / risk
         rr_warning = risk_reward < RR_WARNING_THRESHOLD
 
+    # Structural resistance/support check: does the raw target land near a
+    # gap-day spike (unreliable) or a genuine swing pivot (real structure,
+    # possibly already rejected)? If so, clamp the target back to just this
+    # side of it and recompute R:R -- but always preserve the raw/unclamped
+    # values below for the audit trail, and never let the clamp itself
+    # produce a broken or degenerate plan (see clamp_target's floor guard).
+    raw_target = target
+    raw_risk_reward = risk_reward
+    target_clamped = False
+    target_clamp_badge = None
+    target_clamp_reason = None
+    if target is not None:
+        findings = levels_near_target(df, swings, target, atr14, direction)
+        if findings:
+            clamp = clamp_target(
+                entry_price, stop, target, atr14, findings,
+                direction=direction, min_viable_rr=RR_WARNING_THRESHOLD,
+            )
+            target_clamp_badge = clamp["badge"]
+            target_clamp_reason = clamp["clamp_refused_reason"]
+            if clamp["clamped"]:
+                target = clamp["adjusted_target"]
+                risk_reward = clamp["adjusted_rr"]
+                rr_warning = risk_reward < RR_WARNING_THRESHOLD
+                target_clamped = True
+
     promoted_at = datetime.now(timezone.utc).isoformat()
     return {
         "ticker": ticker,
@@ -1432,6 +1514,11 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "rr_warning_threshold": RR_WARNING_THRESHOLD,
         "min_target_atr_multiple": min_target_atr_multiple,
         "target_source": "daily_swing_structure",
+        "raw_target": round(float(raw_target), 4) if raw_target is not None else None,
+        "raw_risk_reward": round(raw_risk_reward, 2) if raw_risk_reward is not None else None,
+        "target_clamped": target_clamped,
+        "target_clamp_badge": target_clamp_badge,
+        "target_clamp_reason": target_clamp_reason,
     }
 
 
@@ -1487,8 +1574,9 @@ def _store_promotion(conn, promotion: dict) -> None:
             (ticker, source, direction, entry_price, stop, target, risk_reward,
              rr_warning, no_valid_target, promoted_at, position_size, atr14,
              atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
-             target_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             target_source, raw_target, raw_risk_reward, target_clamped,
+             target_clamp_badge, target_clamp_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             direction=excluded.direction,
             entry_price=excluded.entry_price,
@@ -1503,7 +1591,12 @@ def _store_promotion(conn, promotion: dict) -> None:
             atr_multiplier=excluded.atr_multiplier,
             rr_warning_threshold=excluded.rr_warning_threshold,
             min_target_atr_multiple=excluded.min_target_atr_multiple,
-            target_source=excluded.target_source
+            target_source=excluded.target_source,
+            raw_target=excluded.raw_target,
+            raw_risk_reward=excluded.raw_risk_reward,
+            target_clamped=excluded.target_clamped,
+            target_clamp_badge=excluded.target_clamp_badge,
+            target_clamp_reason=excluded.target_clamp_reason
         """,
         (
             promotion["ticker"],
@@ -1522,6 +1615,11 @@ def _store_promotion(conn, promotion: dict) -> None:
             promotion["rr_warning_threshold"],
             promotion["min_target_atr_multiple"],
             promotion["target_source"],
+            promotion.get("raw_target"),
+            promotion.get("raw_risk_reward"),
+            1 if promotion.get("target_clamped") else 0,
+            promotion.get("target_clamp_badge"),
+            promotion.get("target_clamp_reason"),
         ),
     )
 
@@ -1551,6 +1649,11 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "rr_warning_threshold": promotion_like["rr_warning_threshold"],
             "min_target_atr_multiple": promotion_like["min_target_atr_multiple"],
             "target_source": promotion_like["target_source"],
+            "raw_target": promotion_like.get("raw_target"),
+            "raw_risk_reward": promotion_like.get("raw_risk_reward"),
+            "target_clamped": promotion_like.get("target_clamped", False),
+            "target_clamp_badge": promotion_like.get("target_clamp_badge"),
+            "target_clamp_reason": promotion_like.get("target_clamp_reason"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -1572,6 +1675,11 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "rr_warning_threshold": RR_WARNING_THRESHOLD,
             "min_target_atr_multiple": _min_target_atr_multiple(),
             "target_source": "daily_swing_structure",
+            "raw_target": None,
+            "raw_risk_reward": None,
+            "target_clamped": False,
+            "target_clamp_badge": None,
+            "target_clamp_reason": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -1587,8 +1695,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             (ticker, source, signal, entry_price, stop, target, risk_reward,
              rr_warning, no_valid_target, atr14, atr_multiplier, rr_warning_threshold,
              min_target_atr_multiple, target_source, option_contract_json, preview_error,
-             computed_at, candidate_updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             computed_at, candidate_updated_at, raw_target, raw_risk_reward,
+             target_clamped, target_clamp_badge, target_clamp_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -1605,7 +1714,12 @@ def _store_plan_preview(conn, preview: dict) -> None:
             option_contract_json=excluded.option_contract_json,
             preview_error=excluded.preview_error,
             computed_at=excluded.computed_at,
-            candidate_updated_at=excluded.candidate_updated_at
+            candidate_updated_at=excluded.candidate_updated_at,
+            raw_target=excluded.raw_target,
+            raw_risk_reward=excluded.raw_risk_reward,
+            target_clamped=excluded.target_clamped,
+            target_clamp_badge=excluded.target_clamp_badge,
+            target_clamp_reason=excluded.target_clamp_reason
         """,
         (
             preview["ticker"],
@@ -1626,6 +1740,11 @@ def _store_plan_preview(conn, preview: dict) -> None:
             preview["preview_error"],
             preview["computed_at"],
             preview["candidate_updated_at"],
+            preview.get("raw_target"),
+            preview.get("raw_risk_reward"),
+            1 if preview.get("target_clamped") else 0,
+            preview.get("target_clamp_badge"),
+            preview.get("target_clamp_reason"),
         ),
     )
 

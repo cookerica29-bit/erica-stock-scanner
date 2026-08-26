@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -217,9 +218,18 @@ def test_scanner_candidate_ingestion_lifecycle():
             assert preview["ticker"] == "NVDA"
             assert preview["source"] == "ma_pipeline"
             assert preview["signal"] == "long"
-            assert preview["target"] == 110.0
+            # The raw structural target (110.0) sits exactly on _promotion_daily_frame's
+            # bar-20 gap-spike high (a ~10% gap up that gave back most of the move
+            # within 3 sessions) -- structural_resistance correctly flags that as an
+            # unreliable "gap_extreme" level and clamps the target just below it.
+            assert preview["raw_target"] == 110.0
+            assert preview["target"] < 110.0
+            assert preview["target"] == pytest.approx(109.7977, abs=1e-3)
+            assert preview["target_clamped"] is True
+            assert preview["target_clamp_badge"] == "TARGET NEAR GAP SPIKE"
             assert preview["stop"] < 100.0
             assert preview["risk_reward"] > 0
+            assert preview["raw_risk_reward"] > preview["risk_reward"]
             assert preview["rr_warning"] is False
             assert preview["no_valid_target"] is False
             assert preview["option_contract"]["type"] == "CALL"
@@ -240,7 +250,10 @@ def test_scanner_candidate_ingestion_lifecycle():
             promotion = promoted_payload["promotion"]
             assert promotion["direction"] == "long"
             assert promotion["entry_price"] == 100.0
-            assert promotion["target"] == 110.0
+            # Same gap-spike clamp as the plan-preview assertion above.
+            assert promotion["raw_target"] == 110.0
+            assert promotion["target"] == pytest.approx(109.7977, abs=1e-3)
+            assert promotion["target_clamped"] is True
             assert promotion["stop"] < 100.0
             assert promotion["risk_reward"] > 0
             assert promotion["rr_warning"] is False
