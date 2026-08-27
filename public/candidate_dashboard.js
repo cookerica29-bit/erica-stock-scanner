@@ -737,54 +737,89 @@
     `;
   }
 
-  // Shared by renderPromotion() and renderPlanPreview() -- both carry the same
-  // stop_source/raw_stop fields from the backend (structural_resistance.
-  // resolve_stop, via candidates_router._compute_candidate_promotion).
-  // Only one state needs a note here (unlike the target-clamp note below,
-  // which has three): stop_source is "order_block" when a clean order block
-  // was found and used, or "atr_multiple" when it fell back to the flat
-  // entry +/- 1.5*ATR stop -- which is the normal, expected case and gets no
-  // note at all, same as a target with no nearby structure.
-  function renderStopSourceNote(obj) {
-    if (!obj || obj.stop_source !== 'order_block') return '';
-    const rawStop = obj.raw_stop == null ? null : fmtMoney(obj.raw_stop);
+  function signalRow(label, main, detail = '', tone = 'info') {
     return `
-      <div class="candidate-target-clamp stop-order-block">
-        <span class="candidate-pill stop-order-block">🧱 Stop set at order block</span>
-        ${rawStop ? `<span class="candidate-target-clamp-raw">Flat ATR stop would have been ${escapeHtml(rawStop)}</span>` : ''}
+      <div class="candidate-plan-signal ${escapeHtml(tone)}">
+        <div class="candidate-plan-signal-label">${escapeHtml(label)}</div>
+        <div class="candidate-plan-signal-main">${main}</div>
+        <div class="candidate-plan-signal-detail">${detail}</div>
       </div>`;
   }
 
-  // Shared by renderPromotion() and renderPlanPreview() -- both promotion and
-  // preview objects carry the same target_clamp_* fields from the backend
-  // (candidates_router._compute_candidate_promotion). Two states look
-  // deliberately different, not just different text, because they mean
-  // different things for the number the trader is looking at:
-  //   - target_clamped true: the displayed Target/R:R above ARE the adjusted
-  //     values -- this note explains why, and keeps the original raw target
-  //     visible (never silently overwritten).
-  //   - target_clamped false but a badge is present: real nearby resistance
-  //     was detected, but clamping it would have crossed entry or dropped
-  //     R:R below the floor, so it was refused -- the displayed Target/R:R
-  //     above are STILL the raw, unadjusted values. This is the case most at
-  //     risk of looking like "handled" when it isn't, so it gets the more
-  //     alarming (red, bold) treatment, not the calmer "adjusted" one.
-  function renderTargetClampNote(obj) {
-    if (!obj || !obj.target_clamp_badge) return '';
+  function renderTargetClampSignal(obj) {
+    if (!obj || !obj.target_clamp_badge) return [];
     if (obj.target_clamped) {
       const rawTarget = obj.raw_target == null ? null : fmtMoney(obj.raw_target);
       const rawRr = obj.raw_risk_reward == null ? null : fmtNumber(obj.raw_risk_reward, 2);
-      return `
-        <div class="candidate-target-clamp applied">
-          <span class="candidate-pill clamp-applied">🎯 Target adjusted — ${escapeHtml(obj.target_clamp_badge)}</span>
-          ${rawTarget ? `<span class="candidate-target-clamp-raw">Raw target was <s>${escapeHtml(rawTarget)}</s>${rawRr ? ` · raw R:R was ${escapeHtml(rawRr)}` : ''}</span>` : ''}
-        </div>`;
+      const detail = rawTarget
+        ? `Raw target <s>${escapeHtml(rawTarget)}</s>${rawRr ? ` / raw R:R ${escapeHtml(rawRr)}` : ''}`
+        : '';
+      return [signalRow(
+        'Target',
+        `Adjusted - ${escapeHtml(obj.target_clamp_badge)}`,
+        detail,
+        'applied',
+      )];
     }
     const reasonSuffix = obj.target_clamp_reason ? ` (${escapeHtml(obj.target_clamp_reason)})` : '';
+    return [signalRow(
+      'Target',
+      `May be unreachable - ${escapeHtml(obj.target_clamp_badge)}`,
+      `Target/R:R above are unadjusted${reasonSuffix}`,
+      'warning',
+    )];
+  }
+
+  function renderStopSourceSignal(obj) {
+    if (!obj || obj.stop_source !== 'order_block') return [];
+    const rawStop = obj.raw_stop == null ? '' : `Flat ATR ${escapeHtml(fmtMoney(obj.raw_stop))}`;
+    return [signalRow('Stop', 'Order-block invalidation', rawStop, 'stop-order-block')];
+  }
+
+  function renderDisplacementSignal(obj) {
+    if (!obj || !obj.displacement_read) return [];
+    const read = String(obj.displacement_read || '').toLowerCase();
+    const label = obj.label ? String(obj.label).toUpperCase() : '';
+    const score = obj.score == null ? '' : fmtNumber(obj.score, 1);
+    const magnitude = obj.raw_magnitude_score == null
+      ? ''
+      : `Raw magnitude ${escapeHtml(fmtNumber(obj.raw_magnitude_score, 1))}`;
+    const mainParts = [
+      read ? read.charAt(0).toUpperCase() + read.slice(1) : 'Displacement',
+      label,
+      score,
+    ].filter(Boolean);
+    return [signalRow(
+      'Displacement',
+      escapeHtml(mainParts.join(' - ')),
+      magnitude,
+      read === 'adverse' ? 'warning' : 'info',
+    )];
+  }
+
+  function renderBosSignal(obj) {
+    if (!obj || !Object.prototype.hasOwnProperty.call(obj, 'bos_confirmed')) return [];
+    if (obj.bos_confirmed) {
+      const breakLevel = obj.bos_details?.break_level == null
+        ? ''
+        : `Break level ${escapeHtml(fmtMoney(obj.bos_details.break_level))}`;
+      return [signalRow('BOS', 'Confirmed', breakLevel, 'info')];
+    }
+    return [signalRow('BOS', 'Not yet confirmed', '', 'info')];
+  }
+
+  function renderPlanSignals(obj) {
+    const rows = [
+      ...renderTargetClampSignal(obj),
+      ...renderStopSourceSignal(obj),
+      ...renderDisplacementSignal(obj),
+      ...renderBosSignal(obj),
+    ];
+    if (!rows.length) return '';
     return `
-      <div class="candidate-target-clamp refused">
-        <span class="candidate-pill clamp-refused">⚠ Target may be unreachable — ${escapeHtml(obj.target_clamp_badge)}</span>
-        <span class="candidate-target-clamp-raw">Target/R:R above are unadjusted${reasonSuffix}</span>
+      <div class="candidate-plan-signals">
+        <div class="candidate-plan-signals-title">Plan Signals</div>
+        ${rows.join('')}
       </div>`;
   }
 
@@ -809,8 +844,7 @@
         <div><span>R:R</span><strong>${escapeHtml(promotion.risk_reward == null ? '—' : fmtNumber(promotion.risk_reward, 2))}</strong></div>
         <div><span>ATR14</span><strong>${escapeHtml(fmtNumber(promotion.atr14, 2))}</strong></div>
       </div>
-      ${renderStopSourceNote(promotion)}
-      ${renderTargetClampNote(promotion)}
+      ${renderPlanSignals(promotion)}
       <div class="candidate-meta">Promoted ${escapeHtml(fmtTime(promotion.promoted_at))} · target source ${escapeHtml(promotion.target_source || '—')}</div>
     `;
   }
@@ -871,8 +905,7 @@
         <div><span>Contract</span><strong>${escapeHtml(contractLabel)}</strong></div>
         <div><span>Expiry</span><strong>${escapeHtml(contractMeta)}</strong></div>
       </div>
-      ${renderStopSourceNote(preview)}
-      ${renderTargetClampNote(preview)}
+      ${renderPlanSignals(preview)}
       <div class="candidate-meta">Preview computed ${escapeHtml(fmtTime(preview.computed_at))} · target source ${escapeHtml(preview.target_source || '—')}</div>
       ${preview.execution_shadow_checked ? `<div class="candidate-meta">Execution gate: ${escapeHtml(preview.execution_shadow_reason || '—')}</div>` : ''}
     `;

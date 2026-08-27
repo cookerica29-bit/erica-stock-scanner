@@ -460,51 +460,89 @@
       font-weight: 600;
     }
 
-    /* Structural target-clamp note (see renderTargetClampNote in
-       candidate_dashboard.js): sits directly under the Stop/Target/R:R grid
-       it qualifies, not in the top pill row with the gate "Also:" pills.
-       Two intentionally different treatments -- these are not the same
-       situation. */
-    .candidate-target-clamp {
+    /* Plan signals sit directly under the Stop/Target/R:R grid they qualify.
+       These are common production fields, so the treatment is a compact
+       scan strip rather than a stack of badge rows. */
+    .candidate-plan-signals {
       margin-top: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
+      border: 1px solid rgba(142, 160, 181, 0.18);
+      background: rgba(142, 160, 181, 0.05);
+      border-radius: 8px;
+      overflow: hidden;
     }
 
-    .candidate-target-clamp-raw {
-      font-size: 0.72rem;
+    .candidate-plan-signals-title {
+      padding: 7px 10px;
       color: var(--muted);
-    }
-
-    /* Applied: the Target/R:R shown above ARE the adjusted values already --
-       calmer, informational blue. The system already protected this number. */
-    .candidate-pill.clamp-applied {
-      color: #bfdbfe;
-      background: rgba(59, 130, 246, 0.16);
-      border-color: rgba(59, 130, 246, 0.4);
-    }
-
-    /* Refused: the Target/R:R shown above are STILL the raw, unadjusted
-       values, despite real nearby resistance being detected -- deliberately
-       as loud as .reason-primary (same weight, its own color) so an
-       unprotected number never reads as calmly as a handled one. */
-    .candidate-pill.clamp-refused {
-      color: #fff1f2;
-      background: rgba(251, 113, 133, 0.3);
-      border-color: rgba(251, 113, 133, 0.65);
+      font-size: 0.68rem;
       font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border-bottom: 1px solid rgba(142, 160, 181, 0.12);
     }
 
-    /* Stop set at an order-block invalidation level instead of the flat
-       ATR stop -- calm informational teal, deliberately distinct from the
-       target-clamp blue so a card showing both notes at once (a clamped
-       target AND an order-block stop) doesn't read as one duplicated
-       message. */
-    .candidate-pill.stop-order-block {
+    .candidate-plan-signal {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      gap: 3px 8px;
+      align-items: baseline;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+      color: var(--text);
+    }
+
+    .candidate-plan-signal + .candidate-plan-signal {
+      border-top: 1px solid rgba(142, 160, 181, 0.1);
+    }
+
+    .candidate-plan-signal-label {
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .candidate-plan-signal-main {
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .candidate-plan-signal-detail {
+      grid-column: 2;
+      color: var(--muted);
+      font-size: 0.74rem;
+      overflow-wrap: anywhere;
+    }
+
+    .candidate-plan-signal.info {
+      background: rgba(142, 160, 181, 0.03);
+    }
+
+    .candidate-plan-signal.applied {
+      background: rgba(59, 130, 246, 0.09);
+    }
+
+    .candidate-plan-signal.applied .candidate-plan-signal-main {
+      color: #bfdbfe;
+    }
+
+    .candidate-plan-signal.stop-order-block {
+      background: rgba(20, 184, 166, 0.08);
+    }
+
+    .candidate-plan-signal.stop-order-block .candidate-plan-signal-main {
       color: #99f6e4;
-      background: rgba(20, 184, 166, 0.16);
-      border-color: rgba(20, 184, 166, 0.4);
+    }
+
+    .candidate-plan-signal.warning {
+      background: rgba(251, 113, 133, 0.16);
+      box-shadow: inset 3px 0 0 rgba(251, 113, 133, 0.75);
+    }
+
+    .candidate-plan-signal.warning .candidate-plan-signal-main {
+      color: #fff1f2;
+      font-weight: 800;
     }
 
     .candidate-kv {
@@ -621,6 +659,15 @@
       #candidateList,
       .candidate-kv {
         grid-template-columns: 1fr;
+      }
+
+      .candidate-plan-signal {
+        grid-template-columns: 1fr;
+        gap: 3px;
+      }
+
+      .candidate-plan-signal-detail {
+        grid-column: 1;
       }
 
       .control-band.collapsed {
