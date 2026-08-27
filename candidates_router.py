@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from market_data import AlpacaMarketDataProvider
 from scanner import _batch_download, _best_contract, _compute_atr, _find_order_block, _find_swings, _flatten_columns
 from structural_resistance import clamp_target, levels_near_target, resolve_stop
+from displacement_score import score_displacement
 
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
@@ -174,6 +175,12 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN raw_stop REAL")
     if "stop_source" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN stop_source TEXT")
+    if "displacement_score" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN displacement_score REAL")
+    if "displacement_label" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN displacement_label TEXT")
+    if "displacement_components_json" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN displacement_components_json TEXT")
 
 
 # CREATE TABLE IF NOT EXISTS is a no-op against an existing production table,
@@ -197,6 +204,12 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN raw_stop REAL")
     if "stop_source" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN stop_source TEXT")
+    if "displacement_score" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN displacement_score REAL")
+    if "displacement_label" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN displacement_label TEXT")
+    if "displacement_components_json" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN displacement_components_json TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -295,6 +308,9 @@ def _initialize_candidates_schema(conn) -> None:
             target_clamp_reason TEXT,
             raw_stop REAL,
             stop_source TEXT,
+            displacement_score REAL,
+            displacement_label TEXT,
+            displacement_components_json TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -347,6 +363,9 @@ def _initialize_candidates_schema(conn) -> None:
             target_clamp_reason TEXT,
             raw_stop REAL,
             stop_source TEXT,
+            displacement_score REAL,
+            displacement_label TEXT,
+            displacement_components_json TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -425,6 +444,9 @@ class CandidatePromotionOut(BaseModel):
     target_clamp_reason: Optional[str] = None
     raw_stop: Optional[float] = None
     stop_source: Optional[str] = None
+    displacement_score: Optional[float] = None
+    displacement_label: Optional[str] = None
+    displacement_components: Optional[dict[str, Any]] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -464,6 +486,9 @@ class CandidatePlanPreviewOut(BaseModel):
     target_clamp_reason: Optional[str] = None
     raw_stop: Optional[float] = None
     stop_source: Optional[str] = None
+    displacement_score: Optional[float] = None
+    displacement_label: Optional[str] = None
+    displacement_components: Optional[dict[str, Any]] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -525,11 +550,24 @@ def _valid_ticker(ticker: str) -> bool:
     return bool(ticker) and ticker.replace(".", "").replace("-", "").isalnum()
 
 
+def _parse_displacement_components_json(raw: Optional[str]) -> Optional[dict]:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _row_to_promotion(row: sqlite3.Row) -> dict:
     output = dict(row)
     output["rr_warning"] = bool(output.get("rr_warning"))
     output["no_valid_target"] = bool(output.get("no_valid_target"))
     output["target_clamped"] = bool(output.get("target_clamped"))
+    output["displacement_components"] = _parse_displacement_components_json(
+        output.pop("displacement_components_json", None)
+    )
     return output
 
 
@@ -544,6 +582,9 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     output["rr_warning"] = bool(output.get("rr_warning"))
     output["no_valid_target"] = bool(output.get("no_valid_target"))
     output["target_clamped"] = bool(output.get("target_clamped"))
+    output["displacement_components"] = _parse_displacement_components_json(
+        output.pop("displacement_components_json", None)
+    )
     raw_contract = output.pop("option_contract_json", None)
     if raw_contract:
         try:
@@ -1476,6 +1517,13 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     # further down.
     swings = _find_swings(df)
 
+    # Continuous displacement/conviction score for the most recent daily
+    # candle -- informational grading input only, never a gate (see
+    # displacement_score.score_displacement's docstring). Independent of the
+    # stop/target logic below; computed here purely for locality with the
+    # other df-derived signals.
+    displacement = score_displacement(df, direction)
+
     # Order-block stop: replaces the flat entry +/- ATR_MULTIPLIER stop with
     # the actual invalidation level of the most recent order block, when one
     # exists on the correct side of entry. raw_stop (the flat ATR value) is
@@ -1553,6 +1601,9 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "target_clamp_reason": target_clamp_reason,
         "raw_stop": round(float(raw_stop), 4),
         "stop_source": stop_source,
+        "displacement_score": displacement["score"],
+        "displacement_label": displacement["label"],
+        "displacement_components": displacement["components"],
     }
 
 
@@ -1609,8 +1660,9 @@ def _store_promotion(conn, promotion: dict) -> None:
              rr_warning, no_valid_target, promoted_at, position_size, atr14,
              atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
              target_source, raw_target, raw_risk_reward, target_clamped,
-             target_clamp_badge, target_clamp_reason, raw_stop, stop_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             target_clamp_badge, target_clamp_reason, raw_stop, stop_source,
+             displacement_score, displacement_label, displacement_components_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             direction=excluded.direction,
             entry_price=excluded.entry_price,
@@ -1632,7 +1684,10 @@ def _store_promotion(conn, promotion: dict) -> None:
             target_clamp_badge=excluded.target_clamp_badge,
             target_clamp_reason=excluded.target_clamp_reason,
             raw_stop=excluded.raw_stop,
-            stop_source=excluded.stop_source
+            stop_source=excluded.stop_source,
+            displacement_score=excluded.displacement_score,
+            displacement_label=excluded.displacement_label,
+            displacement_components_json=excluded.displacement_components_json
         """,
         (
             promotion["ticker"],
@@ -1658,6 +1713,9 @@ def _store_promotion(conn, promotion: dict) -> None:
             promotion.get("target_clamp_reason"),
             promotion.get("raw_stop"),
             promotion.get("stop_source"),
+            promotion.get("displacement_score"),
+            promotion.get("displacement_label"),
+            json.dumps(promotion["displacement_components"], separators=(",", ":")) if promotion.get("displacement_components") else None,
         ),
     )
 
@@ -1694,6 +1752,9 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "target_clamp_reason": promotion_like.get("target_clamp_reason"),
             "raw_stop": promotion_like.get("raw_stop"),
             "stop_source": promotion_like.get("stop_source"),
+            "displacement_score": promotion_like.get("displacement_score"),
+            "displacement_label": promotion_like.get("displacement_label"),
+            "displacement_components": promotion_like.get("displacement_components"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -1722,6 +1783,9 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "target_clamp_reason": None,
             "raw_stop": None,
             "stop_source": None,
+            "displacement_score": None,
+            "displacement_label": None,
+            "displacement_components": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -1739,8 +1803,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
              min_target_atr_multiple, target_source, option_contract_json, preview_error,
              computed_at, candidate_updated_at, raw_target, raw_risk_reward,
              target_clamped, target_clamp_badge, target_clamp_reason,
-             raw_stop, stop_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             raw_stop, stop_source, displacement_score, displacement_label,
+             displacement_components_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -1764,7 +1829,10 @@ def _store_plan_preview(conn, preview: dict) -> None:
             target_clamp_badge=excluded.target_clamp_badge,
             target_clamp_reason=excluded.target_clamp_reason,
             raw_stop=excluded.raw_stop,
-            stop_source=excluded.stop_source
+            stop_source=excluded.stop_source,
+            displacement_score=excluded.displacement_score,
+            displacement_label=excluded.displacement_label,
+            displacement_components_json=excluded.displacement_components_json
         """,
         (
             preview["ticker"],
@@ -1792,6 +1860,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             preview.get("target_clamp_reason"),
             preview.get("raw_stop"),
             preview.get("stop_source"),
+            preview.get("displacement_score"),
+            preview.get("displacement_label"),
+            json.dumps(preview["displacement_components"], separators=(",", ":")) if preview.get("displacement_components") else None,
         ),
     )
 
