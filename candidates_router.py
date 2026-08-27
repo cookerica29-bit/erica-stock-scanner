@@ -21,9 +21,21 @@ from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
+import pandas as pd
 
 from market_data import AlpacaMarketDataProvider
-from scanner import _batch_download, _best_contract, _compute_atr, _detect_bos, _detect_choch, _find_order_block, _find_swings, _flatten_columns, _macro_bias
+from scanner import (
+    _batch_download,
+    _best_contract,
+    _compute_atr,
+    _detect_bos,
+    _detect_choch,
+    _find_order_block,
+    _find_swings,
+    _flatten_columns,
+    _macro_bias,
+    detect_liquidity_sweep,
+)
 from structural_resistance import clamp_target, levels_near_target, resolve_stop
 from displacement_score import score_displacement
 
@@ -50,6 +62,92 @@ EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR = 0.75
 EXECUTION_SHADOW_MIN_VOLUME_RATIO = 0.60
 EXECUTION_SHADOW_LOW_VOL_ATR_PCT_MAX = 0.015
 EXECUTION_SHADOW_LOW_VOL_MIN_NET_MOVE_PCT = 0.01
+
+# Liquidity sweep + rejection thresholds. Placeholder, not validated -- same
+# category of decision as MIN_STOP_DISTANCE_ATR and the displacement
+# weights: a real call about how big a wick has to be to count as a genuine
+# rejection failure, not something to treat as settled just because it
+# shipped. Mirrors scanner.detect_rejection's exact thresholds (a lower/
+# upper wick counts as a rejection-failure wick when it's at least 1.25x
+# the candle's real body, OR at least 35% of the candle's full range) --
+# reimplemented in _evaluate_rejection below rather than calling
+# scanner.detect_rejection directly, because that function only returns a
+# bare bool with no way to recover which candle matched or by how much;
+# cross-checked against scanner.detect_rejection's real boolean output on
+# real tickers before shipping (see session notes) to catch any drift
+# between the two rather than trusting the reimplementation blind.
+REJECTION_WICK_BODY_MULTIPLE = 1.25
+REJECTION_WICK_RANGE_FRACTION = 0.35
+REJECTION_LOOKBACK_BARS = 5
+
+
+def _bar_timestamp_iso(ts) -> Optional[str]:
+    try:
+        stamp = pd.Timestamp(ts)
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        return stamp.tz_convert("UTC").isoformat()
+    except Exception:
+        return None
+
+
+def _evaluate_rejection(
+    df: pd.DataFrame,
+    direction: str,
+    sweep_level: Optional[float],
+    lookback: int = REJECTION_LOOKBACK_BARS,
+) -> Optional[dict]:
+    """Same shape of check as scanner.detect_rejection (direction uppercase
+    "LONG"/"SHORT", matching scanner's own convention): scans the most
+    recent `lookback` daily bars for one that either reclaims sweep_level
+    by close, or wicks through it by at least the threshold above with a
+    same-direction candle body. Returns details for the FIRST bar (oldest
+    to newest within the window) that qualifies, matching
+    scanner.detect_rejection's own early-exit order -- or None if nothing
+    in the window qualifies.
+    """
+    if direction not in ("LONG", "SHORT") or sweep_level is None or len(df) < 2:
+        return None
+
+    recent = df.tail(lookback)
+    for ts, candle in recent.iterrows():
+        high = float(candle["High"])
+        low = float(candle["Low"])
+        open_ = float(candle["Open"])
+        close = float(candle["Close"])
+        body = abs(close - open_)
+        candle_range = high - low
+        if candle_range <= 0:
+            continue
+
+        upper_wick = high - max(open_, close)
+        lower_wick = min(open_, close) - low
+        wick_threshold = max(body * REJECTION_WICK_BODY_MULTIPLE, candle_range * REJECTION_WICK_RANGE_FRACTION)
+
+        if direction == "LONG":
+            closed_back_above = low < sweep_level and close > sweep_level
+            wick_failure = low < sweep_level and lower_wick >= wick_threshold
+            if closed_back_above or (wick_failure and close > open_):
+                wick = lower_wick
+            else:
+                continue
+        else:
+            closed_back_below = high > sweep_level and close < sweep_level
+            wick_failure = high > sweep_level and upper_wick >= wick_threshold
+            if closed_back_below or (wick_failure and close < open_):
+                wick = upper_wick
+            else:
+                continue
+
+        reclaim = closed_back_above if direction == "LONG" else closed_back_below
+        return {
+            "condition": "reclaim" if reclaim else "wick_failure",
+            "wick_body_ratio": round(wick / body, 3) if body > 0 else None,
+            "wick_range_pct": round(wick / candle_range, 3),
+            "body_range_pct": round(body / candle_range, 3),
+            "time": _bar_timestamp_iso(ts),
+        }
+    return None
 
 
 def default_candidates_db_path() -> str:
@@ -218,6 +316,18 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN choch_conflict INTEGER NOT NULL DEFAULT 0")
     if "choch_details_json" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN choch_details_json TEXT")
+    # Liquidity sweep / rejection -- same overlay-only decision as macro/
+    # CHoCH above. See REJECTION_WICK_BODY_MULTIPLE/REJECTION_WICK_RANGE_FRACTION
+    # for the (unvalidated) thresholds. sweep_level is a flat column, not
+    # JSON -- sweep_details is a single scalar, same as bos_details/bos_level.
+    if "sweep_confirmed" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN sweep_confirmed INTEGER NOT NULL DEFAULT 0")
+    if "sweep_level" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN sweep_level REAL")
+    if "rejection_confirmed" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN rejection_confirmed INTEGER NOT NULL DEFAULT 0")
+    if "rejection_details_json" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN rejection_details_json TEXT")
 
 
 def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_schema: bool) -> None:
@@ -269,7 +379,11 @@ def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_
             macro_bias TEXT,
             macro_conflict INTEGER NOT NULL DEFAULT 0,
             choch_conflict INTEGER NOT NULL DEFAULT 0,
-            choch_details_json TEXT
+            choch_details_json TEXT,
+            sweep_confirmed INTEGER NOT NULL DEFAULT 0,
+            sweep_level REAL,
+            rejection_confirmed INTEGER NOT NULL DEFAULT 0,
+            rejection_details_json TEXT
         )
         """
     )
@@ -357,6 +471,14 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN choch_conflict INTEGER NOT NULL DEFAULT 0")
     if "choch_details_json" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN choch_details_json TEXT")
+    if "sweep_confirmed" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN sweep_confirmed INTEGER NOT NULL DEFAULT 0")
+    if "sweep_level" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN sweep_level REAL")
+    if "rejection_confirmed" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN rejection_confirmed INTEGER NOT NULL DEFAULT 0")
+    if "rejection_details_json" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN rejection_details_json TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -481,7 +603,11 @@ def _initialize_candidates_schema(conn) -> None:
             macro_bias TEXT,
             macro_conflict INTEGER NOT NULL DEFAULT 0,
             choch_conflict INTEGER NOT NULL DEFAULT 0,
-            choch_details_json TEXT
+            choch_details_json TEXT,
+            sweep_confirmed INTEGER NOT NULL DEFAULT 0,
+            sweep_level REAL,
+            rejection_confirmed INTEGER NOT NULL DEFAULT 0,
+            rejection_details_json TEXT
         )
         """
     )
@@ -544,6 +670,10 @@ def _initialize_candidates_schema(conn) -> None:
             macro_conflict INTEGER NOT NULL DEFAULT 0,
             choch_conflict INTEGER NOT NULL DEFAULT 0,
             choch_details_json TEXT,
+            sweep_confirmed INTEGER NOT NULL DEFAULT 0,
+            sweep_level REAL,
+            rejection_confirmed INTEGER NOT NULL DEFAULT 0,
+            rejection_details_json TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -665,6 +795,17 @@ class CandidatePromotionOut(BaseModel):
     macro_conflict: bool = False
     choch_conflict: bool = False
     choch_details: Optional[dict[str, Any]] = None
+    # Liquidity sweep / rejection -- same overlay-only decision as macro/
+    # CHoCH (legacy hard-gates its top "A+ READY" tier on both being true;
+    # never replicated here). sweep_details mirrors bos_details' shape (a
+    # single scalar level); rejection_details carries the raw computed
+    # numbers (wick_body_ratio, wick_range_pct, body_range_pct, which
+    # condition fired) rather than collapsing to a bare bool, per the
+    # explicit decision to enrich rather than build a full continuous score.
+    sweep_confirmed: bool = False
+    sweep_details: Optional[dict[str, Any]] = None
+    rejection_confirmed: bool = False
+    rejection_details: Optional[dict[str, Any]] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -715,6 +856,10 @@ class CandidatePlanPreviewOut(BaseModel):
     macro_conflict: bool = False
     choch_conflict: bool = False
     choch_details: Optional[dict[str, Any]] = None
+    sweep_confirmed: bool = False
+    sweep_details: Optional[dict[str, Any]] = None
+    rejection_confirmed: bool = False
+    rejection_details: Optional[dict[str, Any]] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -809,6 +954,13 @@ def _bos_level_for_storage(payload: dict) -> Optional[float]:
     return details.get("break_level")
 
 
+def _sweep_level_for_storage(payload: dict) -> Optional[float]:
+    details = payload.get("sweep_details")
+    if not details:
+        return None
+    return details.get("level")
+
+
 def _bos_details_from_row(output: dict) -> Optional[dict]:
     # bos_level is stored as its own flat column (not JSON) -- it's a single
     # number, unlike displacement_components' genuinely multi-valued payload --
@@ -819,6 +971,15 @@ def _bos_details_from_row(output: dict) -> Optional[dict]:
     if not output.get("bos_confirmed") or bos_level is None:
         return None
     return {"break_level": bos_level}
+
+
+def _sweep_details_from_row(output: dict) -> Optional[dict]:
+    # Same shape as _bos_details_from_row -- sweep_level is a flat column
+    # (a single scalar), reconstructed into a small dict at the API layer.
+    sweep_level = output.pop("sweep_level", None)
+    if not output.get("sweep_confirmed") or sweep_level is None:
+        return None
+    return {"level": sweep_level}
 
 
 def _row_to_promotion(row: sqlite3.Row) -> dict:
@@ -839,6 +1000,10 @@ def _row_to_promotion(row: sqlite3.Row) -> dict:
     # _parse_displacement_components_json is a generic JSON-dict-or-None
     # parser despite the name -- reused here rather than duplicated.
     output["choch_details"] = _parse_displacement_components_json(output.pop("choch_details_json", None))
+    output["sweep_confirmed"] = bool(output.get("sweep_confirmed"))
+    output["sweep_details"] = _sweep_details_from_row(output)
+    output["rejection_confirmed"] = bool(output.get("rejection_confirmed"))
+    output["rejection_details"] = _parse_displacement_components_json(output.pop("rejection_details_json", None))
     return output
 
 
@@ -861,6 +1026,10 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     output["macro_conflict"] = bool(output.get("macro_conflict"))
     output["choch_conflict"] = bool(output.get("choch_conflict"))
     output["choch_details"] = _parse_displacement_components_json(output.pop("choch_details_json", None))
+    output["sweep_confirmed"] = bool(output.get("sweep_confirmed"))
+    output["sweep_details"] = _sweep_details_from_row(output)
+    output["rejection_confirmed"] = bool(output.get("rejection_confirmed"))
+    output["rejection_details"] = _parse_displacement_components_json(output.pop("rejection_details_json", None))
     raw_contract = output.pop("option_contract_json", None)
     if raw_contract:
         try:
@@ -1847,6 +2016,25 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
             "reason": choch_reason,
         }
 
+    # Liquidity sweep + rejection -- pure informational overlay, explicitly
+    # NOT the legacy behavior. In scanner._build_trade_stage_eval, sweep_taken
+    # and rejection_confirmed are a mandatory AND-condition for the top
+    # "A+ READY" tier (impossible without both, regardless of anything else)
+    # and a soft either/or contributor to the looser "B+ TRADEABLE" tier --
+    # a harder gate than macro/CHoCH, flagged and confirmed before building
+    # this the same way. Never touches R:R, stop, target, or promotion
+    # eligibility here. sweep_confirmed reuses scanner.detect_liquidity_sweep
+    # directly (a clean binary structural fact, no magnitude involved);
+    # rejection_confirmed/rejection_details come from _evaluate_rejection
+    # above, which mirrors scanner.detect_rejection's exact thresholds --
+    # see that function's docstring for why it's reimplemented rather than
+    # called directly.
+    sweep_confirmed, sweep_level = detect_liquidity_sweep(df, swings, direction.upper())
+    sweep_details = {"level": round(float(sweep_level), 4)} if sweep_confirmed and sweep_level is not None else None
+
+    rejection_details = _evaluate_rejection(df, direction.upper(), sweep_level)
+    rejection_confirmed = rejection_details is not None
+
     # Continuous displacement/conviction score for the most recent daily
     # candle -- informational grading input only, never a gate (see
     # displacement_score.score_displacement's docstring). Independent of the
@@ -1942,6 +2130,10 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "macro_conflict": macro_conflict,
         "choch_conflict": choch_conflict,
         "choch_details": choch_details,
+        "sweep_confirmed": sweep_confirmed,
+        "sweep_details": sweep_details,
+        "rejection_confirmed": rejection_confirmed,
+        "rejection_details": rejection_details,
     }
 
 
@@ -2007,8 +2199,9 @@ def _store_promotion(conn, promotion: dict) -> int:
              target_clamp_badge, target_clamp_reason, raw_stop, stop_source,
              displacement_score, displacement_label, displacement_components_json,
              raw_magnitude_score, displacement_read, bos_confirmed, bos_level,
-             macro_bias, macro_conflict, choch_conflict, choch_details_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             macro_bias, macro_conflict, choch_conflict, choch_details_json,
+             sweep_confirmed, sweep_level, rejection_confirmed, rejection_details_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             promotion["ticker"],
@@ -2045,6 +2238,10 @@ def _store_promotion(conn, promotion: dict) -> int:
             1 if promotion.get("macro_conflict") else 0,
             1 if promotion.get("choch_conflict") else 0,
             json.dumps(promotion["choch_details"], separators=(",", ":")) if promotion.get("choch_details") else None,
+            1 if promotion.get("sweep_confirmed") else 0,
+            _sweep_level_for_storage(promotion),
+            1 if promotion.get("rejection_confirmed") else 0,
+            json.dumps(promotion["rejection_details"], separators=(",", ":")) if promotion.get("rejection_details") else None,
         ),
     )
     return cursor.lastrowid
@@ -2093,6 +2290,10 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "macro_conflict": promotion_like.get("macro_conflict", False),
             "choch_conflict": promotion_like.get("choch_conflict", False),
             "choch_details": promotion_like.get("choch_details"),
+            "sweep_confirmed": promotion_like.get("sweep_confirmed", False),
+            "sweep_details": promotion_like.get("sweep_details"),
+            "rejection_confirmed": promotion_like.get("rejection_confirmed", False),
+            "rejection_details": promotion_like.get("rejection_details"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -2132,6 +2333,10 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "macro_conflict": False,
             "choch_conflict": False,
             "choch_details": None,
+            "sweep_confirmed": False,
+            "sweep_details": None,
+            "rejection_confirmed": False,
+            "rejection_details": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -2152,8 +2357,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
              raw_stop, stop_source, displacement_score, displacement_label,
              displacement_components_json, raw_magnitude_score, displacement_read,
              bos_confirmed, bos_level, macro_bias, macro_conflict, choch_conflict,
-             choch_details_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             choch_details_json, sweep_confirmed, sweep_level, rejection_confirmed,
+             rejection_details_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -2188,7 +2394,11 @@ def _store_plan_preview(conn, preview: dict) -> None:
             macro_bias=excluded.macro_bias,
             macro_conflict=excluded.macro_conflict,
             choch_conflict=excluded.choch_conflict,
-            choch_details_json=excluded.choch_details_json
+            choch_details_json=excluded.choch_details_json,
+            sweep_confirmed=excluded.sweep_confirmed,
+            sweep_level=excluded.sweep_level,
+            rejection_confirmed=excluded.rejection_confirmed,
+            rejection_details_json=excluded.rejection_details_json
         """,
         (
             preview["ticker"],
@@ -2227,6 +2437,10 @@ def _store_plan_preview(conn, preview: dict) -> None:
             1 if preview.get("macro_conflict") else 0,
             1 if preview.get("choch_conflict") else 0,
             json.dumps(preview["choch_details"], separators=(",", ":")) if preview.get("choch_details") else None,
+            1 if preview.get("sweep_confirmed") else 0,
+            _sweep_level_for_storage(preview),
+            1 if preview.get("rejection_confirmed") else 0,
+            json.dumps(preview["rejection_details"], separators=(",", ":")) if preview.get("rejection_details") else None,
         ),
     )
 
