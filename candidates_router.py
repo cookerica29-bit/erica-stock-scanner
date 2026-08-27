@@ -23,7 +23,7 @@ from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from market_data import AlpacaMarketDataProvider
-from scanner import _batch_download, _best_contract, _compute_atr, _find_order_block, _find_swings, _flatten_columns
+from scanner import _batch_download, _best_contract, _compute_atr, _detect_bos, _find_order_block, _find_swings, _flatten_columns
 from structural_resistance import clamp_target, levels_near_target, resolve_stop
 from displacement_score import score_displacement
 
@@ -185,6 +185,10 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN raw_magnitude_score REAL")
     if "displacement_read" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN displacement_read TEXT")
+    if "bos_confirmed" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN bos_confirmed INTEGER NOT NULL DEFAULT 0")
+    if "bos_level" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN bos_level REAL")
 
 
 # CREATE TABLE IF NOT EXISTS is a no-op against an existing production table,
@@ -218,6 +222,10 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN raw_magnitude_score REAL")
     if "displacement_read" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN displacement_read TEXT")
+    if "bos_confirmed" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN bos_confirmed INTEGER NOT NULL DEFAULT 0")
+    if "bos_level" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN bos_level REAL")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -321,6 +329,8 @@ def _initialize_candidates_schema(conn) -> None:
             displacement_components_json TEXT,
             raw_magnitude_score REAL,
             displacement_read TEXT,
+            bos_confirmed INTEGER NOT NULL DEFAULT 0,
+            bos_level REAL,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -378,6 +388,8 @@ def _initialize_candidates_schema(conn) -> None:
             displacement_components_json TEXT,
             raw_magnitude_score REAL,
             displacement_read TEXT,
+            bos_confirmed INTEGER NOT NULL DEFAULT 0,
+            bos_level REAL,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -461,6 +473,8 @@ class CandidatePromotionOut(BaseModel):
     displacement_components: Optional[dict[str, Any]] = None
     raw_magnitude_score: Optional[float] = None
     displacement_read: Optional[str] = None
+    bos_confirmed: bool = False
+    bos_details: Optional[dict[str, Any]] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -505,6 +519,8 @@ class CandidatePlanPreviewOut(BaseModel):
     displacement_components: Optional[dict[str, Any]] = None
     raw_magnitude_score: Optional[float] = None
     displacement_read: Optional[str] = None
+    bos_confirmed: bool = False
+    bos_details: Optional[dict[str, Any]] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -576,6 +592,25 @@ def _parse_displacement_components_json(raw: Optional[str]) -> Optional[dict]:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _bos_level_for_storage(payload: dict) -> Optional[float]:
+    details = payload.get("bos_details")
+    if not details:
+        return None
+    return details.get("break_level")
+
+
+def _bos_details_from_row(output: dict) -> Optional[dict]:
+    # bos_level is stored as its own flat column (not JSON) -- it's a single
+    # number, unlike displacement_components' genuinely multi-valued payload --
+    # but exposed via the API as a small bos_details dict per the agreed field
+    # shape, so a future addition (e.g. bars-since-break) doesn't need another
+    # migration on top of a bare scalar field.
+    bos_level = output.pop("bos_level", None)
+    if not output.get("bos_confirmed") or bos_level is None:
+        return None
+    return {"break_level": bos_level}
+
+
 def _row_to_promotion(row: sqlite3.Row) -> dict:
     output = dict(row)
     output["rr_warning"] = bool(output.get("rr_warning"))
@@ -584,6 +619,8 @@ def _row_to_promotion(row: sqlite3.Row) -> dict:
     output["displacement_components"] = _parse_displacement_components_json(
         output.pop("displacement_components_json", None)
     )
+    output["bos_confirmed"] = bool(output.get("bos_confirmed"))
+    output["bos_details"] = _bos_details_from_row(output)
     return output
 
 
@@ -601,6 +638,8 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     output["displacement_components"] = _parse_displacement_components_json(
         output.pop("displacement_components_json", None)
     )
+    output["bos_confirmed"] = bool(output.get("bos_confirmed"))
+    output["bos_details"] = _bos_details_from_row(output)
     raw_contract = output.pop("option_contract_json", None)
     if raw_contract:
         try:
@@ -1529,9 +1568,24 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         raise HTTPException(status_code=422, detail=f"ATR14 is not usable for {ticker}")
 
     # swings computed once, up front -- shared by the order-block stop check
-    # below, the structural target lookup, and the target-resistance check
-    # further down.
+    # below, the structural target lookup, the target-resistance check
+    # further down, and the BOS confirmation check.
     swings = _find_swings(df)
+
+    # BOS (break-of-structure) confirmation -- additive overlay/flag ONLY.
+    # Explicitly does NOT gate ENTER_NOW eligibility or block promotion; that
+    # call stays with the human, same category as the R:R/stop-distance/
+    # displacement-weight decisions already flagged elsewhere in this file.
+    # Reuses scanner._detect_bos (its public alias scanner.detect_structure_break
+    # is confirmed to be a thin pass-through wrapper around this exact function --
+    # nothing different to reuse instead), which requires a close beyond the
+    # prior (second-most-recent) same-type swing WITH same-direction candle
+    # body confirmation -- a wick poke through the level alone doesn't count.
+    # direction.upper() here for the same reason as _find_order_block below:
+    # scanner.py's BOS/order-block functions use uppercase "LONG"/"SHORT",
+    # while this module and structural_resistance.py use lowercase.
+    bos_confirmed, bos_level = _detect_bos(df, swings, direction.upper())
+    bos_details = {"break_level": round(float(bos_level), 4)} if bos_confirmed else None
 
     # Continuous displacement/conviction score for the most recent daily
     # candle -- informational grading input only, never a gate (see
@@ -1622,6 +1676,8 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "displacement_components": displacement["components"],
         "raw_magnitude_score": displacement["raw_magnitude_score"],
         "displacement_read": displacement["displacement_read"],
+        "bos_confirmed": bos_confirmed,
+        "bos_details": bos_details,
     }
 
 
@@ -1680,8 +1736,8 @@ def _store_promotion(conn, promotion: dict) -> None:
              target_source, raw_target, raw_risk_reward, target_clamped,
              target_clamp_badge, target_clamp_reason, raw_stop, stop_source,
              displacement_score, displacement_label, displacement_components_json,
-             raw_magnitude_score, displacement_read)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             raw_magnitude_score, displacement_read, bos_confirmed, bos_level)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             direction=excluded.direction,
             entry_price=excluded.entry_price,
@@ -1708,7 +1764,9 @@ def _store_promotion(conn, promotion: dict) -> None:
             displacement_label=excluded.displacement_label,
             displacement_components_json=excluded.displacement_components_json,
             raw_magnitude_score=excluded.raw_magnitude_score,
-            displacement_read=excluded.displacement_read
+            displacement_read=excluded.displacement_read,
+            bos_confirmed=excluded.bos_confirmed,
+            bos_level=excluded.bos_level
         """,
         (
             promotion["ticker"],
@@ -1739,6 +1797,8 @@ def _store_promotion(conn, promotion: dict) -> None:
             json.dumps(promotion["displacement_components"], separators=(",", ":")) if promotion.get("displacement_components") else None,
             promotion.get("raw_magnitude_score"),
             promotion.get("displacement_read"),
+            1 if promotion.get("bos_confirmed") else 0,
+            _bos_level_for_storage(promotion),
         ),
     )
 
@@ -1780,6 +1840,8 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "displacement_components": promotion_like.get("displacement_components"),
             "raw_magnitude_score": promotion_like.get("raw_magnitude_score"),
             "displacement_read": promotion_like.get("displacement_read"),
+            "bos_confirmed": promotion_like.get("bos_confirmed", False),
+            "bos_details": promotion_like.get("bos_details"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -1813,6 +1875,8 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "displacement_components": None,
             "raw_magnitude_score": None,
             "displacement_read": None,
+            "bos_confirmed": False,
+            "bos_details": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -1831,8 +1895,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
              computed_at, candidate_updated_at, raw_target, raw_risk_reward,
              target_clamped, target_clamp_badge, target_clamp_reason,
              raw_stop, stop_source, displacement_score, displacement_label,
-             displacement_components_json, raw_magnitude_score, displacement_read)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             displacement_components_json, raw_magnitude_score, displacement_read,
+             bos_confirmed, bos_level)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -1861,7 +1926,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             displacement_label=excluded.displacement_label,
             displacement_components_json=excluded.displacement_components_json,
             raw_magnitude_score=excluded.raw_magnitude_score,
-            displacement_read=excluded.displacement_read
+            displacement_read=excluded.displacement_read,
+            bos_confirmed=excluded.bos_confirmed,
+            bos_level=excluded.bos_level
         """,
         (
             preview["ticker"],
@@ -1894,6 +1961,8 @@ def _store_plan_preview(conn, preview: dict) -> None:
             json.dumps(preview["displacement_components"], separators=(",", ":")) if preview.get("displacement_components") else None,
             preview.get("raw_magnitude_score"),
             preview.get("displacement_read"),
+            1 if preview.get("bos_confirmed") else 0,
+            _bos_level_for_storage(preview),
         ),
     )
 
