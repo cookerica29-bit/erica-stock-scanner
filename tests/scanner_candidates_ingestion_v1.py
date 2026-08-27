@@ -170,6 +170,7 @@ def test_scanner_candidate_ingestion_lifecycle():
                 "status": "new",
                 "scanned_at": "2026-08-20T14:30:00+00:00",
                 "updated_at": listed[0]["updated_at"],
+                "source_universe": None,
             }
 
             update_payload = {

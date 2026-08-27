@@ -133,7 +133,19 @@ def _candidate_from_frames(symbol: str, daily: pd.DataFrame, four_hour: pd.DataF
     }
 
 
-def scan_ma_pipeline_candidates(symbols: list[str], max_symbols: int | None = None) -> dict[str, Any]:
+def scan_ma_pipeline_candidates(
+    symbols: list[str],
+    max_symbols: int | None = None,
+    symbol_origins: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    # symbol_origins (symbol -> "broker_feed" | "curated_watchlist" | "both")
+    # is purely informational bookkeeping about where a symbol came from --
+    # see main._merge_curated_watchlist_into_universe. Absent (None) for
+    # callers that don't distinguish universes; every candidate then gets
+    # source_universe=None, same as before this field existed. It never
+    # affects which symbols get scanned or how a candidate is evaluated --
+    # only the list of symbols passed in (`symbols`) does that.
+    symbol_origins = symbol_origins or {}
     requested = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
     requested = list(dict.fromkeys(requested))
     if max_symbols is not None:
@@ -157,6 +169,7 @@ def scan_ma_pipeline_candidates(symbols: list[str], max_symbols: int | None = No
                 _frame_for_symbol(four_hour, symbol),
             )
             if candidate:
+                candidate["source_universe"] = symbol_origins.get(symbol)
                 candidates.append(candidate)
             else:
                 failures += 1

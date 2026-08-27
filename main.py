@@ -1362,6 +1362,53 @@ def _update_ma_pipeline_state(**updates) -> None:
         _ma_pipeline_scan_state.update({key: value for key, value in updates.items() if value is not None})
 
 
+def _merge_curated_watchlist_into_universe(discovered_symbols: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Merge the legacy scanner's curated WATCHLIST (scanner.py, 113 hardcoded
+    symbols) into the broker-fed discovery universe (~939 symbols from
+    AlpacaAssetDiscoveryClient, see discovery.build_ranked_discovery_universe)
+    for the twice-daily ma_pipeline scan.
+
+    Verified against production /api/discovery/status before writing this:
+    110 of WATCHLIST's 113 symbols already overlap the broker-fed universe --
+    only REGN/SQ/UNG are genuinely new. So this is mostly NOT about expanding
+    raw coverage; WATCHLIST was already being passed into
+    build_ranked_discovery_universe(static_watchlist=WATCHLIST) for overlap
+    *reporting* (see discovery.py's watchlist_overlap), but that was never
+    wired into what actually gets scanned -- this closes that gap, and (the
+    part that matters even for the 110 that already overlap) tags every
+    resulting candidate with where it came from, so "trusted curated
+    watchlist" doesn't silently blend into "broad broker-fed scan" with no
+    way to tell them apart afterward.
+
+    Curated-only additions are placed FIRST in the merged list, ahead of the
+    broker feed -- so if a future, tighter MA_PIPELINE_MAX_SYMBOLS/
+    DISCOVERY_UNIVERSE_MAX_SYMBOLS cap ever truncates the list,
+    it eats into the broker feed's tail, never silently drops the handful of
+    symbols the watchlist was curated for. Today's real numbers (939 + 3 new,
+    cap 1000) mean this ordering doesn't currently change anything -- it's a
+    defensive choice for when it might.
+
+    Returns (merged_symbol_list, {symbol: "broker_feed" | "curated_watchlist" | "both"}).
+    """
+    discovered_norm = [str(s or "").strip().upper() for s in discovered_symbols if str(s or "").strip()]
+    discovered_set = set(discovered_norm)
+    watchlist_norm = list(dict.fromkeys(str(s or "").strip().upper() for s in WATCHLIST if str(s or "").strip()))
+    watchlist_set = set(watchlist_norm)
+
+    curated_only = [symbol for symbol in watchlist_norm if symbol not in discovered_set]
+    merged = list(dict.fromkeys([*curated_only, *discovered_norm]))
+
+    origins: dict[str, str] = {}
+    for symbol in merged:
+        if symbol in discovered_set and symbol in watchlist_set:
+            origins[symbol] = "both"
+        elif symbol in watchlist_set:
+            origins[symbol] = "curated_watchlist"
+        else:
+            origins[symbol] = "broker_feed"
+    return merged, origins
+
+
 def _run_ma_pipeline_ingestion(reason: str = "manual") -> dict:
     started_at = _utc_now()
     ready, symbols, discovery_status = _discovery_symbols_ready(started_at)
@@ -1377,17 +1424,21 @@ def _run_ma_pipeline_ingestion(reason: str = "manual") -> dict:
         _update_ma_pipeline_state(status="waiting_for_discovery", last_error=message, last_result=message)
         return {"status": "waiting_for_discovery", "message": message, "discovery_status": discovery_status}
 
+    merged_symbols, symbol_origins = _merge_curated_watchlist_into_universe(symbols)
     max_symbols = _ma_pipeline_max_symbols()
-    scan = scan_ma_pipeline_candidates(symbols, max_symbols=max_symbols)
+    scan = scan_ma_pipeline_candidates(merged_symbols, max_symbols=max_symbols, symbol_origins=symbol_origins)
     candidates = [CandidateIn(**candidate) for candidate in scan.get("candidates") or []]
     payload = ShortlistIn(source=MA_PIPELINE_SOURCE, scanned_at=_utc_now(), candidates=candidates)
     ingest = upsert_candidate_shortlist(payload)
     completed_at = _utc_now()
+    curated_only_count = sum(1 for origin in symbol_origins.values() if origin == "curated_watchlist")
     result = {
         "status": "completed",
         "source": MA_PIPELINE_SOURCE,
         "reason": reason,
         "discovery_symbol_count": len(symbols),
+        "merged_symbol_count": len(merged_symbols),
+        "curated_only_symbol_count": curated_only_count,
         "scanned_symbol_count": (scan.get("meta") or {}).get("requested"),
         "candidate_count": len(candidates),
         "ingest": ingest.dict(),
@@ -1398,7 +1449,7 @@ def _run_ma_pipeline_ingestion(reason: str = "manual") -> dict:
         status="completed",
         last_completed_at=_format_timestamp(completed_at),
         last_result="completed",
-        last_symbol_count=len(symbols),
+        last_symbol_count=len(merged_symbols),
         last_candidate_count=len(candidates),
         last_ingest=ingest.dict(),
         last_meta=result["meta"],

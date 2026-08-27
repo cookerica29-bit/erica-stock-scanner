@@ -260,6 +260,12 @@ def _get_db():
     return conn
 
 
+def _ensure_candidates_schema(conn: sqlite3.Connection) -> None:
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(candidates)").fetchall()}
+    if "source_universe" not in columns:
+        conn.execute("ALTER TABLE candidates ADD COLUMN source_universe TEXT")
+
+
 def _initialize_candidates_schema(conn) -> None:
     conn.execute(
         """
@@ -277,10 +283,12 @@ def _initialize_candidates_schema(conn) -> None:
             scanned_at TEXT NOT NULL,
             expires_at TEXT,
             updated_at TEXT NOT NULL,
+            source_universe TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
     )
+    _ensure_candidates_schema(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candidate_history (
@@ -421,6 +429,11 @@ class CandidateIn(BaseModel):
     confidence: Optional[Literal["high", "medium", "low"]] = None
     sma50_daily: Optional[float] = None
     sma200_daily: Optional[float] = None
+    # Which symbol universe produced this candidate -- see
+    # main._merge_curated_watchlist_into_universe. None for sources that
+    # don't distinguish universes (e.g. smc_forex), same as before this
+    # field existed.
+    source_universe: Optional[Literal["broker_feed", "curated_watchlist", "both"]] = None
 
 
 class ShortlistIn(BaseModel):
@@ -442,6 +455,7 @@ class CandidateOut(BaseModel):
     status: str
     scanned_at: str
     updated_at: str
+    source_universe: Optional[str] = None
 
 
 class CandidatePromotionOut(BaseModel):
@@ -2017,8 +2031,9 @@ def upsert_candidate_shortlist(payload: ShortlistIn) -> IngestResponse:
                 """
                 INSERT INTO candidates
                     (ticker, source, signal, entry_price, ema21_4h, daily_regime,
-                     confidence, sma50_daily, sma200_daily, status, scanned_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
+                     confidence, sma50_daily, sma200_daily, status, scanned_at, updated_at,
+                     source_universe)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)
                 ON CONFLICT(ticker, source) DO UPDATE SET
                     signal=excluded.signal,
                     entry_price=excluded.entry_price,
@@ -2028,7 +2043,8 @@ def upsert_candidate_shortlist(payload: ShortlistIn) -> IngestResponse:
                     sma50_daily=excluded.sma50_daily,
                     sma200_daily=excluded.sma200_daily,
                     scanned_at=excluded.scanned_at,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    source_universe=excluded.source_universe
                 """,
                 (
                     ticker,
@@ -2042,6 +2058,7 @@ def upsert_candidate_shortlist(payload: ShortlistIn) -> IngestResponse:
                     candidate.sma200_daily,
                     scanned_at,
                     now,
+                    candidate.source_universe,
                 ),
             )
 
