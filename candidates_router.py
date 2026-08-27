@@ -183,6 +183,29 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN bos_confirmed INTEGER NOT NULL DEFAULT 0")
     if "bos_level" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN bos_level REAL")
+    # Step 2 (outcome tracking, Option C): taken is a nullable tri-state, not
+    # a plain boolean with a false default -- NULL means "not yet decided,"
+    # 0 means "explicitly marked as skipped." Collapsing NULL into False here
+    # would silently misreport an undecided promotion as a known-skipped one.
+    # Only taken=1 promotions are ever picked up by the outcome resolver (see
+    # main._watch_candidate_promotion_outcomes) -- this is what keeps
+    # phantom/hypothetical promotions (including all 7 that predate this
+    # column, which default to NULL) out of the real-outcome dataset without
+    # any special-casing.
+    if "taken" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN taken INTEGER")
+    if "taken_at" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN taken_at TEXT")
+    if "outcome" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN outcome TEXT")
+    if "outcome_resolved_at" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN outcome_resolved_at TEXT")
+    if "outcome_bar_source" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN outcome_bar_source TEXT")
+    if "outcome_hit_at" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN outcome_hit_at TEXT")
+    if "outcome_note" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN outcome_note TEXT")
 
 
 def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_schema: bool) -> None:
@@ -223,7 +246,14 @@ def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_
             raw_magnitude_score REAL,
             displacement_read TEXT,
             bos_confirmed INTEGER NOT NULL DEFAULT 0,
-            bos_level REAL
+            bos_level REAL,
+            taken INTEGER,
+            taken_at TEXT,
+            outcome TEXT,
+            outcome_resolved_at TEXT,
+            outcome_bar_source TEXT,
+            outcome_hit_at TEXT,
+            outcome_note TEXT
         )
         """
     )
@@ -416,7 +446,14 @@ def _initialize_candidates_schema(conn) -> None:
             raw_magnitude_score REAL,
             displacement_read TEXT,
             bos_confirmed INTEGER NOT NULL DEFAULT 0,
-            bos_level REAL
+            bos_level REAL,
+            taken INTEGER,
+            taken_at TEXT,
+            outcome TEXT,
+            outcome_resolved_at TEXT,
+            outcome_bar_source TEXT,
+            outcome_hit_at TEXT,
+            outcome_note TEXT
         )
         """
     )
@@ -571,6 +608,17 @@ class CandidatePromotionOut(BaseModel):
     displacement_read: Optional[str] = None
     bos_confirmed: bool = False
     bos_details: Optional[dict[str, Any]] = None
+    # Step 2 outcome tracking (Option C). taken is a genuine tri-state, not a
+    # bool with a False default -- None means "not yet decided," distinct
+    # from an explicit False ("marked as skipped"). Only taken=True
+    # promotions are ever picked up by the automatic bar-replay resolver.
+    taken: Optional[bool] = None
+    taken_at: Optional[str] = None
+    outcome: Optional[str] = None
+    outcome_resolved_at: Optional[str] = None
+    outcome_bar_source: Optional[str] = None
+    outcome_hit_at: Optional[str] = None
+    outcome_note: Optional[str] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -658,6 +706,13 @@ class StatusUpdate(BaseModel):
     status: CandidateStatus
 
 
+class TakenUpdate(BaseModel):
+    # Deliberately just this -- no fill price, no exit details. The whole
+    # point (per the Option C design) is a cheap enough step that it
+    # actually gets used, unlike the old journal's fuller manual entry.
+    taken: bool
+
+
 class ScannerSessionIn(BaseModel):
     api_key: str = Field(min_length=1)
 
@@ -717,6 +772,9 @@ def _row_to_promotion(row: sqlite3.Row) -> dict:
     )
     output["bos_confirmed"] = bool(output.get("bos_confirmed"))
     output["bos_details"] = _bos_details_from_row(output)
+    # taken is nullable tri-state -- bool(None) would be False, silently
+    # collapsing "not yet decided" into "marked as skipped." Preserve None.
+    output["taken"] = None if output.get("taken") is None else bool(output.get("taken"))
     return output
 
 
@@ -2211,6 +2269,38 @@ def list_candidate_promotions(
             """
         ).fetchall()
         return [_row_to_promotion(row) for row in rows]
+    finally:
+        conn.close()
+
+
+@router.patch("/candidate-promotions/{promotion_id}/taken", response_model=CandidatePromotionOut)
+def update_promotion_taken(
+    promotion_id: int,
+    update: TakenUpdate,
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Mark a specific promotion (by its own row id, not ticker/source --
+    this table is append-only now, so a ticker can have several promotion
+    rows) as actually taken or explicitly skipped. This is the ONLY thing
+    that makes a promotion eligible for the automatic outcome resolver (see
+    main._watch_candidate_promotion_outcomes) -- untaken and undecided
+    (taken IS NULL) promotions are never touched by it, which is what keeps
+    phantom/hypothetical promotions out of the real-outcome dataset.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT * FROM candidate_promotions WHERE id=?", (promotion_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"No promotion found with id {promotion_id}")
+        conn.execute(
+            "UPDATE candidate_promotions SET taken=?, taken_at=? WHERE id=?",
+            (1 if update.taken else 0, datetime.now(timezone.utc).isoformat(), promotion_id),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM candidate_promotions WHERE id=?", (promotion_id,)).fetchone()
+        return _row_to_promotion(updated)
     finally:
         conn.close()
 

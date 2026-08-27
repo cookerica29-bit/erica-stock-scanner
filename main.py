@@ -38,6 +38,7 @@ from scanner import (
     persist_stock_mtf_structure_shadow_v3_report,
     persist_stock_mtf_structure_shadow_v3_historical_outcome_report,
     _batch_download,
+    _flatten_columns,
     scan_cached,
     scan_ticker,
     debug_ticker,
@@ -1488,6 +1489,159 @@ def _submit_ma_pipeline_scan_if_due(now: Optional[datetime] = None) -> tuple[boo
     return True, run_key
 
 
+_promotion_outcome_lock = threading.Lock()
+_promotion_outcome_state = {
+    "last_started_at": None,
+    "last_completed_at": None,
+    "promotions_checked": 0,
+    "promotions_resolved": 0,
+    "fetch_failures": 0,
+    "last_error": None,
+    "running": False,
+}
+
+
+def _promotion_outcome_state_snapshot() -> dict:
+    with _promotion_outcome_lock:
+        return dict(_promotion_outcome_state)
+
+
+def _update_promotion_outcome_state(**updates) -> None:
+    with _promotion_outcome_lock:
+        _promotion_outcome_state.update(updates)
+
+
+def _watch_candidate_promotion_outcomes(reason: str = "periodic") -> dict:
+    """Step 2 of real outcome tracking (Option C): resolve real outcomes for
+    "taken" promotions from real bars. Structural precedent:
+    _momentum_short_lifecycle_watch_open_records (load open records, skip
+    terminal ones, fetch fresh data for what's still pending, update state) --
+    registered the same simple way as ma_pipeline_candidate_ingestion below,
+    not the momentum experiment's separate ThreadPoolExecutor/startup-gate
+    machinery, since this has no equivalent startup-ordering dependency.
+
+    Only taken=1 promotions with no outcome yet (or still "still_open") are
+    ever examined -- this is what keeps phantom/hypothetical promotions
+    (including all 7 that predate the taken column, defaulted to NULL) out
+    of the dataset, with no special-casing needed.
+
+    Uses 4h bars only (scanner._batch_download, period="60d") -- the
+    DEFAULT_MAX_TRACKING_DAYS window (45 days, see outcome_resolver.py) is
+    comfortably inside that 60-day fetch window, so 4h coverage is always
+    available for anything not yet expired; daily bars are never used here
+    since they're coarser, not better, for same-day stop/target ambiguity.
+    """
+    # _batch_download/_flatten_columns are module-level imports (top of this
+    # file) deliberately, not local ones -- a local `from scanner import
+    # _batch_download` here would create a fresh reference every call that
+    # bypasses monkeypatch.setattr(main, "_batch_download", ...) in tests
+    # entirely (this bit a first draft of this function's test coverage).
+    from candidates_router import _get_db
+    from outcome_resolver import resolve_outcome
+
+    started = _utc_now()
+    _update_promotion_outcome_state(running=True, last_started_at=_format_timestamp(started), last_error=None)
+    metrics = {"reason": reason, "promotions_checked": 0, "promotions_resolved": 0, "fetch_failures": 0}
+    try:
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM candidate_promotions WHERE taken = 1 AND (outcome IS NULL OR outcome = 'still_open')"
+            ).fetchall()
+            if not rows:
+                return metrics
+
+            by_ticker: dict[str, list] = {}
+            for row in rows:
+                by_ticker.setdefault(str(row["ticker"]).upper(), []).append(row)
+
+            # Chunked the same way ma_pipeline.py's own downloads are
+            # (default chunk size 10) -- see market_data.py/ma_pipeline.py
+            # comments on real measured Alpaca pagination density for why
+            # that number, not an arbitrary one.
+            tickers = list(by_ticker.keys())
+            chunk_size = 10
+            bars_by_ticker: dict[str, pd.DataFrame] = {}
+            for i in range(0, len(tickers), chunk_size):
+                chunk = tickers[i:i + chunk_size]
+                try:
+                    downloaded = _batch_download(chunk, period="60d", interval="4h")
+                except Exception:
+                    metrics["fetch_failures"] += len(chunk)
+                    continue
+                for ticker in chunk:
+                    frame = downloaded.get(ticker)
+                    if frame is None or getattr(frame, "empty", True):
+                        metrics["fetch_failures"] += 1
+                        continue
+                    try:
+                        bars_by_ticker[ticker] = _flatten_columns(frame.copy()).dropna().astype(float)
+                    except Exception:
+                        metrics["fetch_failures"] += 1
+
+            now = _utc_now()
+            for ticker, ticker_rows in by_ticker.items():
+                bars = bars_by_ticker.get(ticker)
+                if bars is None:
+                    # Fetch failed or came back empty this cycle -- leave
+                    # outcome untouched and retry next hour. Never guess.
+                    continue
+                bars_utc_index = pd.to_datetime(bars.index, utc=True)
+                for row in ticker_rows:
+                    metrics["promotions_checked"] += 1
+                    promoted_at = _coerce_utc_datetime(row["promoted_at"])
+                    if promoted_at is None:
+                        continue
+                    window = bars.loc[bars_utc_index > promoted_at]
+                    result = resolve_outcome(
+                        direction=row["direction"],
+                        stop=row["stop"],
+                        target=row["target"],
+                        bars=window,
+                        promoted_at=promoted_at,
+                        now=now,
+                    )
+                    if result["outcome"] is None:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE candidate_promotions
+                        SET outcome=?, outcome_resolved_at=?, outcome_bar_source=?,
+                            outcome_hit_at=?, outcome_note=?
+                        WHERE id=?
+                        """,
+                        (
+                            result["outcome"], _format_timestamp(now), result["bar_source"],
+                            result["hit_at"], result["note"], row["id"],
+                        ),
+                    )
+                    if result["outcome"] != "still_open":
+                        metrics["promotions_resolved"] += 1
+            conn.commit()
+        finally:
+            conn.close()
+        return metrics
+    except Exception as exc:
+        _update_promotion_outcome_state(last_error=str(exc))
+        raise
+    finally:
+        completed = _utc_now()
+        _update_promotion_outcome_state(
+            running=False,
+            last_completed_at=_format_timestamp(completed),
+            promotions_checked=metrics.get("promotions_checked", 0),
+            promotions_resolved=metrics.get("promotions_resolved", 0),
+            fetch_failures=metrics.get("fetch_failures", 0),
+        )
+
+
+def _safe_watch_candidate_promotion_outcomes(reason: str = "periodic") -> None:
+    try:
+        _watch_candidate_promotion_outcomes(reason)
+    except Exception as exc:
+        logger.warning("[promotion_outcome_watcher] failed reason=%s error=%s", reason, exc)
+
+
 def _register_discovery_background_refresh() -> None:
     register_background_periodic_task(
         "discovery_universe",
@@ -1518,6 +1672,11 @@ def _register_discovery_background_refresh() -> None:
         "momentum_pullback_short_lifecycle_watcher",
         60 * 60,
         lambda: _submit_momentum_short_lifecycle_watcher("periodic"),
+    )
+    register_background_periodic_task(
+        "candidate_promotion_outcome_watcher",
+        60 * 60,
+        lambda: _safe_watch_candidate_promotion_outcomes("periodic"),
     )
 
 app.add_middleware(
@@ -2508,6 +2667,21 @@ def api_ma_pipeline_run(x_kairos_admin_token: str = Header(default="")):
         return _run_ma_pipeline_ingestion("manual_api")
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/v1/scanner/promotion-outcomes/status")
+def api_promotion_outcome_watcher_status():
+    from outcome_resolver import DEFAULT_MAX_TRACKING_DAYS
+    return {
+        **_promotion_outcome_state_snapshot(),
+        "max_tracking_days": DEFAULT_MAX_TRACKING_DAYS,
+    }
+
+
+@app.post("/api/v1/scanner/promotion-outcomes/run")
+def api_promotion_outcome_watcher_run(x_kairos_admin_token: str = Header(default="")):
+    _require_discovery_admin_token(x_kairos_admin_token)
+    return _watch_candidate_promotion_outcomes("manual_api")
 
 
 @app.get("/api/coverage/baseline")
