@@ -779,8 +779,8 @@
   function renderDisplacementSignal(obj) {
     if (!obj || !obj.displacement_read) return [];
     const read = String(obj.displacement_read || '').toLowerCase();
-    const label = obj.label ? String(obj.label).toUpperCase() : '';
-    const score = obj.score == null ? '' : fmtNumber(obj.score, 1);
+    const label = obj.displacement_label ? String(obj.displacement_label).toUpperCase() : '';
+    const score = obj.displacement_score == null ? '' : fmtNumber(obj.displacement_score, 1);
     const magnitude = obj.raw_magnitude_score == null
       ? ''
       : `Raw magnitude ${escapeHtml(fmtNumber(obj.raw_magnitude_score, 1))}`;
