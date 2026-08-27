@@ -23,7 +23,7 @@ from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from market_data import AlpacaMarketDataProvider
-from scanner import _batch_download, _best_contract, _compute_atr, _detect_bos, _find_order_block, _find_swings, _flatten_columns
+from scanner import _batch_download, _best_contract, _compute_atr, _detect_bos, _detect_choch, _find_order_block, _find_swings, _flatten_columns, _macro_bias
 from structural_resistance import clamp_target, levels_near_target, resolve_stop
 from displacement_score import score_displacement
 
@@ -206,6 +206,18 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN outcome_hit_at TEXT")
     if "outcome_note" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN outcome_note TEXT")
+    # Macro bias / CHoCH conflict -- pure informational overlay (explicit
+    # decision, not the legacy hard grade-cap/trade-stage override -- see
+    # scanner._cap_quality_to_c / analyze_ticker's macro_block+choch_block).
+    # Never touches R:R, stop, target, or promotion eligibility here.
+    if "macro_bias" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN macro_bias TEXT")
+    if "macro_conflict" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN macro_conflict INTEGER NOT NULL DEFAULT 0")
+    if "choch_conflict" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN choch_conflict INTEGER NOT NULL DEFAULT 0")
+    if "choch_details_json" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN choch_details_json TEXT")
 
 
 def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_schema: bool) -> None:
@@ -253,7 +265,11 @@ def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_
             outcome_resolved_at TEXT,
             outcome_bar_source TEXT,
             outcome_hit_at TEXT,
-            outcome_note TEXT
+            outcome_note TEXT,
+            macro_bias TEXT,
+            macro_conflict INTEGER NOT NULL DEFAULT 0,
+            choch_conflict INTEGER NOT NULL DEFAULT 0,
+            choch_details_json TEXT
         )
         """
     )
@@ -333,6 +349,14 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN bos_confirmed INTEGER NOT NULL DEFAULT 0")
     if "bos_level" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN bos_level REAL")
+    if "macro_bias" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN macro_bias TEXT")
+    if "macro_conflict" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN macro_conflict INTEGER NOT NULL DEFAULT 0")
+    if "choch_conflict" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN choch_conflict INTEGER NOT NULL DEFAULT 0")
+    if "choch_details_json" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN choch_details_json TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -453,7 +477,11 @@ def _initialize_candidates_schema(conn) -> None:
             outcome_resolved_at TEXT,
             outcome_bar_source TEXT,
             outcome_hit_at TEXT,
-            outcome_note TEXT
+            outcome_note TEXT,
+            macro_bias TEXT,
+            macro_conflict INTEGER NOT NULL DEFAULT 0,
+            choch_conflict INTEGER NOT NULL DEFAULT 0,
+            choch_details_json TEXT
         )
         """
     )
@@ -512,6 +540,10 @@ def _initialize_candidates_schema(conn) -> None:
             displacement_read TEXT,
             bos_confirmed INTEGER NOT NULL DEFAULT 0,
             bos_level REAL,
+            macro_bias TEXT,
+            macro_conflict INTEGER NOT NULL DEFAULT 0,
+            choch_conflict INTEGER NOT NULL DEFAULT 0,
+            choch_details_json TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -619,6 +651,20 @@ class CandidatePromotionOut(BaseModel):
     outcome_bar_source: Optional[str] = None
     outcome_hit_at: Optional[str] = None
     outcome_note: Optional[str] = None
+    # Macro bias / CHoCH conflict -- pure informational overlay (explicit
+    # decision: legacy's version hard-caps grade to C and forces the setup
+    # out of the tradeable tiers; this never touches R:R, stop, target, or
+    # promotion eligibility). macro_bias is always populated (the raw label,
+    # useful context regardless of direction); macro_conflict mirrors
+    # legacy's exact rule (Bearish + long only). choch_details is populated
+    # whenever a conflicting-direction CHoCH exists at all (even one price
+    # has already recovered past), with choch_conflict narrowed to legacy's
+    # price-relative "still active" rule -- same shape as bos_confirmed/
+    # bos_details.
+    macro_bias: Optional[str] = None
+    macro_conflict: bool = False
+    choch_conflict: bool = False
+    choch_details: Optional[dict[str, Any]] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -665,6 +711,10 @@ class CandidatePlanPreviewOut(BaseModel):
     displacement_read: Optional[str] = None
     bos_confirmed: bool = False
     bos_details: Optional[dict[str, Any]] = None
+    macro_bias: Optional[str] = None
+    macro_conflict: bool = False
+    choch_conflict: bool = False
+    choch_details: Optional[dict[str, Any]] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -784,6 +834,11 @@ def _row_to_promotion(row: sqlite3.Row) -> dict:
     # taken is nullable tri-state -- bool(None) would be False, silently
     # collapsing "not yet decided" into "marked as skipped." Preserve None.
     output["taken"] = None if output.get("taken") is None else bool(output.get("taken"))
+    output["macro_conflict"] = bool(output.get("macro_conflict"))
+    output["choch_conflict"] = bool(output.get("choch_conflict"))
+    # _parse_displacement_components_json is a generic JSON-dict-or-None
+    # parser despite the name -- reused here rather than duplicated.
+    output["choch_details"] = _parse_displacement_components_json(output.pop("choch_details_json", None))
     return output
 
 
@@ -803,6 +858,9 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     )
     output["bos_confirmed"] = bool(output.get("bos_confirmed"))
     output["bos_details"] = _bos_details_from_row(output)
+    output["macro_conflict"] = bool(output.get("macro_conflict"))
+    output["choch_conflict"] = bool(output.get("choch_conflict"))
+    output["choch_details"] = _parse_displacement_components_json(output.pop("choch_details_json", None))
     raw_contract = output.pop("option_contract_json", None)
     if raw_contract:
         try:
@@ -1750,6 +1808,45 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     bos_confirmed, bos_level = _detect_bos(df, swings, direction.upper())
     bos_details = {"break_level": round(float(bos_level), 4)} if bos_confirmed else None
 
+    # Macro bias / CHoCH conflict -- pure informational overlay, explicitly
+    # NOT the legacy behavior. In scanner.analyze_ticker, either of these
+    # hard-caps the setup's score to <=58/grade "C" and forces
+    # a_plus_ready=False, b_plus_tradeable=False, trade_stage="RANGE / NO
+    # TRADE" (see scanner._cap_quality_to_c) -- a real gate in effect, not
+    # just a label, and explicitly flagged as such before building this.
+    # Decision made: never touch R:R, stop, target, or promotion eligibility
+    # here, same as every other port today. Reuses scanner._macro_bias/
+    # _detect_choch directly, same as _detect_bos/_find_order_block above.
+    macro_bias, _pct_from_52w, _wk52_high, _window_high = _macro_bias(entry_price, df)
+    # Matches analyze_ticker's exact rule: LONG-only, purely categorical (no
+    # price-level refinement) -- shorts are never flagged by macro bias,
+    # same as legacy ("short signals use local structure detection only").
+    macro_conflict = bool(macro_bias == "Macro Bearish" and direction == "long")
+
+    choch_suppress, choch_reason, bearish_choch_lvl, bullish_choch_lvl, _choch_bar_idx = _detect_choch(
+        swings, direction.upper()
+    )
+    choch_conflict = False
+    choch_details = None
+    if choch_suppress:
+        conflicting_level = bearish_choch_lvl if direction == "long" else bullish_choch_lvl
+        # Price-relative refinement, same as legacy's choch_block: a CHoCH
+        # only actively conflicts while price hasn't cleared the broken
+        # level yet -- once price reclaims it, the conflict is stale info,
+        # not a live one. choch_conflict reflects that; choch_details is
+        # still populated either way so the (now-inactive) conflict isn't
+        # silently dropped -- useful for later outcome-tracking analysis.
+        if direction == "long":
+            choch_conflict = conflicting_level is not None and entry_price <= conflicting_level
+        else:
+            choch_conflict = conflicting_level is not None and entry_price >= conflicting_level
+        choch_details = {
+            "direction": "bearish" if direction == "long" else "bullish",
+            "level": round(float(conflicting_level), 4) if conflicting_level is not None else None,
+            "active": choch_conflict,
+            "reason": choch_reason,
+        }
+
     # Continuous displacement/conviction score for the most recent daily
     # candle -- informational grading input only, never a gate (see
     # displacement_score.score_displacement's docstring). Independent of the
@@ -1841,6 +1938,10 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "displacement_read": displacement["displacement_read"],
         "bos_confirmed": bos_confirmed,
         "bos_details": bos_details,
+        "macro_bias": macro_bias,
+        "macro_conflict": macro_conflict,
+        "choch_conflict": choch_conflict,
+        "choch_details": choch_details,
     }
 
 
@@ -1905,8 +2006,9 @@ def _store_promotion(conn, promotion: dict) -> int:
              target_source, raw_target, raw_risk_reward, target_clamped,
              target_clamp_badge, target_clamp_reason, raw_stop, stop_source,
              displacement_score, displacement_label, displacement_components_json,
-             raw_magnitude_score, displacement_read, bos_confirmed, bos_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             raw_magnitude_score, displacement_read, bos_confirmed, bos_level,
+             macro_bias, macro_conflict, choch_conflict, choch_details_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             promotion["ticker"],
@@ -1939,6 +2041,10 @@ def _store_promotion(conn, promotion: dict) -> int:
             promotion.get("displacement_read"),
             1 if promotion.get("bos_confirmed") else 0,
             _bos_level_for_storage(promotion),
+            promotion.get("macro_bias"),
+            1 if promotion.get("macro_conflict") else 0,
+            1 if promotion.get("choch_conflict") else 0,
+            json.dumps(promotion["choch_details"], separators=(",", ":")) if promotion.get("choch_details") else None,
         ),
     )
     return cursor.lastrowid
@@ -1983,6 +2089,10 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "displacement_read": promotion_like.get("displacement_read"),
             "bos_confirmed": promotion_like.get("bos_confirmed", False),
             "bos_details": promotion_like.get("bos_details"),
+            "macro_bias": promotion_like.get("macro_bias"),
+            "macro_conflict": promotion_like.get("macro_conflict", False),
+            "choch_conflict": promotion_like.get("choch_conflict", False),
+            "choch_details": promotion_like.get("choch_details"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -2018,6 +2128,10 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "displacement_read": None,
             "bos_confirmed": False,
             "bos_details": None,
+            "macro_bias": None,
+            "macro_conflict": False,
+            "choch_conflict": False,
+            "choch_details": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -2037,8 +2151,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
              target_clamped, target_clamp_badge, target_clamp_reason,
              raw_stop, stop_source, displacement_score, displacement_label,
              displacement_components_json, raw_magnitude_score, displacement_read,
-             bos_confirmed, bos_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             bos_confirmed, bos_level, macro_bias, macro_conflict, choch_conflict,
+             choch_details_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -2069,7 +2184,11 @@ def _store_plan_preview(conn, preview: dict) -> None:
             raw_magnitude_score=excluded.raw_magnitude_score,
             displacement_read=excluded.displacement_read,
             bos_confirmed=excluded.bos_confirmed,
-            bos_level=excluded.bos_level
+            bos_level=excluded.bos_level,
+            macro_bias=excluded.macro_bias,
+            macro_conflict=excluded.macro_conflict,
+            choch_conflict=excluded.choch_conflict,
+            choch_details_json=excluded.choch_details_json
         """,
         (
             preview["ticker"],
@@ -2104,6 +2223,10 @@ def _store_plan_preview(conn, preview: dict) -> None:
             preview.get("displacement_read"),
             1 if preview.get("bos_confirmed") else 0,
             _bos_level_for_storage(preview),
+            preview.get("macro_bias"),
+            1 if preview.get("macro_conflict") else 0,
+            1 if preview.get("choch_conflict") else 0,
+            json.dumps(preview["choch_details"], separators=(",", ":")) if preview.get("choch_details") else None,
         ),
     )
 
