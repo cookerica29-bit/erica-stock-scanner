@@ -181,6 +181,10 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN displacement_label TEXT")
     if "displacement_components_json" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN displacement_components_json TEXT")
+    if "raw_magnitude_score" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN raw_magnitude_score REAL")
+    if "displacement_read" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN displacement_read TEXT")
 
 
 # CREATE TABLE IF NOT EXISTS is a no-op against an existing production table,
@@ -210,6 +214,10 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN displacement_label TEXT")
     if "displacement_components_json" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN displacement_components_json TEXT")
+    if "raw_magnitude_score" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN raw_magnitude_score REAL")
+    if "displacement_read" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN displacement_read TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -311,6 +319,8 @@ def _initialize_candidates_schema(conn) -> None:
             displacement_score REAL,
             displacement_label TEXT,
             displacement_components_json TEXT,
+            raw_magnitude_score REAL,
+            displacement_read TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -366,6 +376,8 @@ def _initialize_candidates_schema(conn) -> None:
             displacement_score REAL,
             displacement_label TEXT,
             displacement_components_json TEXT,
+            raw_magnitude_score REAL,
+            displacement_read TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -447,6 +459,8 @@ class CandidatePromotionOut(BaseModel):
     displacement_score: Optional[float] = None
     displacement_label: Optional[str] = None
     displacement_components: Optional[dict[str, Any]] = None
+    raw_magnitude_score: Optional[float] = None
+    displacement_read: Optional[str] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -489,6 +503,8 @@ class CandidatePlanPreviewOut(BaseModel):
     displacement_score: Optional[float] = None
     displacement_label: Optional[str] = None
     displacement_components: Optional[dict[str, Any]] = None
+    raw_magnitude_score: Optional[float] = None
+    displacement_read: Optional[str] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -1604,6 +1620,8 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "displacement_score": displacement["score"],
         "displacement_label": displacement["label"],
         "displacement_components": displacement["components"],
+        "raw_magnitude_score": displacement["raw_magnitude_score"],
+        "displacement_read": displacement["displacement_read"],
     }
 
 
@@ -1661,8 +1679,9 @@ def _store_promotion(conn, promotion: dict) -> None:
              atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
              target_source, raw_target, raw_risk_reward, target_clamped,
              target_clamp_badge, target_clamp_reason, raw_stop, stop_source,
-             displacement_score, displacement_label, displacement_components_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             displacement_score, displacement_label, displacement_components_json,
+             raw_magnitude_score, displacement_read)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             direction=excluded.direction,
             entry_price=excluded.entry_price,
@@ -1687,7 +1706,9 @@ def _store_promotion(conn, promotion: dict) -> None:
             stop_source=excluded.stop_source,
             displacement_score=excluded.displacement_score,
             displacement_label=excluded.displacement_label,
-            displacement_components_json=excluded.displacement_components_json
+            displacement_components_json=excluded.displacement_components_json,
+            raw_magnitude_score=excluded.raw_magnitude_score,
+            displacement_read=excluded.displacement_read
         """,
         (
             promotion["ticker"],
@@ -1716,6 +1737,8 @@ def _store_promotion(conn, promotion: dict) -> None:
             promotion.get("displacement_score"),
             promotion.get("displacement_label"),
             json.dumps(promotion["displacement_components"], separators=(",", ":")) if promotion.get("displacement_components") else None,
+            promotion.get("raw_magnitude_score"),
+            promotion.get("displacement_read"),
         ),
     )
 
@@ -1755,6 +1778,8 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "displacement_score": promotion_like.get("displacement_score"),
             "displacement_label": promotion_like.get("displacement_label"),
             "displacement_components": promotion_like.get("displacement_components"),
+            "raw_magnitude_score": promotion_like.get("raw_magnitude_score"),
+            "displacement_read": promotion_like.get("displacement_read"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -1786,6 +1811,8 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "displacement_score": None,
             "displacement_label": None,
             "displacement_components": None,
+            "raw_magnitude_score": None,
+            "displacement_read": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -1804,8 +1831,8 @@ def _store_plan_preview(conn, preview: dict) -> None:
              computed_at, candidate_updated_at, raw_target, raw_risk_reward,
              target_clamped, target_clamp_badge, target_clamp_reason,
              raw_stop, stop_source, displacement_score, displacement_label,
-             displacement_components_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             displacement_components_json, raw_magnitude_score, displacement_read)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -1832,7 +1859,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             stop_source=excluded.stop_source,
             displacement_score=excluded.displacement_score,
             displacement_label=excluded.displacement_label,
-            displacement_components_json=excluded.displacement_components_json
+            displacement_components_json=excluded.displacement_components_json,
+            raw_magnitude_score=excluded.raw_magnitude_score,
+            displacement_read=excluded.displacement_read
         """,
         (
             preview["ticker"],
@@ -1863,6 +1892,8 @@ def _store_plan_preview(conn, preview: dict) -> None:
             preview.get("displacement_score"),
             preview.get("displacement_label"),
             json.dumps(preview["displacement_components"], separators=(",", ":")) if preview.get("displacement_components") else None,
+            preview.get("raw_magnitude_score"),
+            preview.get("displacement_read"),
         ),
     )
 

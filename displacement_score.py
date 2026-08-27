@@ -82,26 +82,57 @@ def score_displacement(
     a window like the legacy gate -- averaging dilutes a single decisive
     candle's signal.
 
-    Returns {score: 0-100, components: {...}, label} -- label is
-    informational display only, never a gate; the continuous score is the
-    real output.
+    Returns {score: 0-100, raw_magnitude_score: 0-100, components: {...},
+    label, displacement_read}.
+
+    `score` (the direction-adjusted, penalty-applied value) and `label` are
+    the display/grading output, but a low score/WEAK label is ambiguous on
+    its own: it's identical whether nothing happened (a quiet candle) or
+    something real happened against the trade (a big candle, wrong
+    direction, discounted by WRONG_DIRECTION_PENALTY_MULTIPLIER). Confirmed
+    empirically, not assumed -- a genuinely quiet candle and a 100th-percentile
+    wrong-direction candle both land in WEAK, with the adverse one sometimes
+    scoring *lower* than the quiet one (see tests/displacement_score_v1.py's
+    "AMZN" and case-A/case-B regression tests).
+
+    `raw_magnitude_score` is the same weighted composite BEFORE the
+    wrong-direction penalty is applied -- "how big was this candle,
+    regardless of which way it moved." `displacement_read` turns that plus
+    `directional` into an explicit three-way, glance-safe read:
+      - "favorable": real magnitude (raw_magnitude_score >= MODERATE_LABEL_MIN_SCORE), right direction
+      - "adverse":   real magnitude, WRONG direction -- a genuine warning,
+                     never to be displayed identically to "quiet"
+      - "quiet":     magnitude didn't clear the threshold either way
+    `score`/`label` are unchanged by this -- still the grading input everywhere
+    else already consumes them. `displacement_read` is the field a card should
+    show alongside the score so "nothing happened" and "something happened
+    against you" don't collapse into the same-looking WEAK tag.
     """
     weights = weights or DEFAULT_DISPLACEMENT_WEIGHTS
     if index is None:
         index = len(df) - 1
     if index < 1 or index >= len(df):
-        return {"score": 0.0, "components": {}, "label": "N/A", "note": "index out of range"}
+        return {
+            "score": 0.0, "raw_magnitude_score": 0.0, "components": {}, "label": "N/A",
+            "displacement_read": None, "note": "index out of range",
+        }
 
     window_start = max(0, index - lookback)
     hist = df.iloc[window_start:index]  # trailing history, EXCLUDING the bar itself
     if len(hist) < 5:
-        return {"score": 0.0, "components": {}, "label": "N/A", "note": "insufficient history"}
+        return {
+            "score": 0.0, "raw_magnitude_score": 0.0, "components": {}, "label": "N/A",
+            "displacement_read": None, "note": "insufficient history",
+        }
 
     bar = df.iloc[index]
     body = abs(bar["Close"] - bar["Open"])
     rng = bar["High"] - bar["Low"]
     if rng <= 0:
-        return {"score": 0.0, "components": {}, "label": "NONE", "note": "zero-range bar"}
+        return {
+            "score": 0.0, "raw_magnitude_score": 0.0, "components": {}, "label": "NONE",
+            "displacement_read": "quiet", "note": "zero-range bar",
+        }
 
     hist_bodies = (hist["Close"] - hist["Open"]).abs()
     hist_ranges = hist["High"] - hist["Low"]
@@ -127,14 +158,14 @@ def score_displacement(
     directional = bool((bar["Close"] > bar["Open"]) if direction == "long" else (bar["Close"] < bar["Open"]))
     directional_mult = 1.0 if directional else WRONG_DIRECTION_PENALTY_MULTIPLIER
 
-    raw_score = (
+    weighted = (
         weights["body"] * body_pct
         + weights["range"] * range_pct
         + weights["clv"] * clv
         + weights["volume"] * volume_pct
-    ) * directional_mult
-
-    score = round(raw_score * 100, 1)
+    )
+    raw_magnitude_score = round(weighted * 100, 1)
+    score = round(weighted * directional_mult * 100, 1)
 
     if score >= STRONG_LABEL_MIN_SCORE:
         label = "STRONG"
@@ -143,8 +174,14 @@ def score_displacement(
     else:
         label = "WEAK"
 
+    if raw_magnitude_score >= MODERATE_LABEL_MIN_SCORE:
+        displacement_read = "favorable" if directional else "adverse"
+    else:
+        displacement_read = "quiet"
+
     return {
         "score": score,
+        "raw_magnitude_score": raw_magnitude_score,
         "components": {
             "body_percentile": round(body_pct * 100, 1),
             "range_percentile": round(range_pct * 100, 1),
@@ -153,4 +190,5 @@ def score_displacement(
             "directional": directional,
         },
         "label": label,
+        "displacement_read": displacement_read,
     }
