@@ -122,7 +122,7 @@ def test_bos_confirmation_does_not_gate_promotion_or_change_rr(router, monkeypat
 
 def test_promotion_out_model_accepts_bos_fields(router):
     payload = {
-        "ticker": "TRND", "source": "test", "direction": "long", "entry_price": 100.0,
+        "id": 1, "ticker": "TRND", "source": "test", "direction": "long", "entry_price": 100.0,
         "stop": 98.5, "target": 105.0, "risk_reward": 2.0, "rr_warning": False,
         "no_valid_target": False, "promoted_at": "2026-08-27T00:00:00Z", "position_size": None,
         "atr14": 1.5, "atr_multiplier": 1.5, "rr_warning_threshold": 1.5,
@@ -136,7 +136,7 @@ def test_promotion_out_model_accepts_bos_fields(router):
 
 def test_promotion_out_model_defaults_bos_fields_when_absent(router):
     payload = {
-        "ticker": "FLAT", "source": "test", "direction": "long", "entry_price": 100.0,
+        "id": 2, "ticker": "FLAT", "source": "test", "direction": "long", "entry_price": 100.0,
         "stop": 98.5, "target": 105.0, "risk_reward": 2.0, "rr_warning": False,
         "no_valid_target": False, "promoted_at": "2026-08-27T00:00:00Z", "position_size": None,
         "atr14": 1.5, "atr_multiplier": 1.5, "rr_warning_threshold": 1.5,

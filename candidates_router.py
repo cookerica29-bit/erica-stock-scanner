@@ -109,51 +109,45 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='candidate_promotions'"
     ).fetchone()
-    needs_rebuild = bool(row and ("target REAL NOT NULL" in row["sql"] or "risk_reward REAL NOT NULL" in row["sql"]))
+    legacy_narrow_schema = bool(row and ("target REAL NOT NULL" in row["sql"] or "risk_reward REAL NOT NULL" in row["sql"]))
+    # candidate_promotions used to be mutable: PRIMARY KEY (ticker, source)
+    # meant every re-promotion of the same ticker/source silently overwrote
+    # the previous promotion, with no record it ever existed. This is now an
+    # append-only event log -- every promotion gets its own row (id PK),
+    # never overwritten -- because outcome tracking (next) needs a real,
+    # un-lossy history of what was actually promoted and when, not just
+    # whatever the most recent promotion happened to be. Detected the same
+    # way as the narrow-schema rebuild above: inspect the table's own CREATE
+    # statement, since this table has been migrated in place before without
+    # a version flag to check instead.
+    composite_pk_schema = bool(row and "PRIMARY KEY (ticker, source)" in row["sql"])
+    needs_rebuild = legacy_narrow_schema or composite_pk_schema
     if needs_rebuild:
-        conn.execute("ALTER TABLE candidate_promotions RENAME TO candidate_promotions_old")
-        conn.execute(
-            """
-            CREATE TABLE candidate_promotions (
-                ticker TEXT NOT NULL,
-                source TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                stop REAL NOT NULL,
-                target REAL,
-                risk_reward REAL,
-                rr_warning INTEGER NOT NULL,
-                no_valid_target INTEGER NOT NULL DEFAULT 0,
-                promoted_at TEXT NOT NULL,
-                position_size REAL,
-                atr14 REAL NOT NULL,
-                atr_multiplier REAL NOT NULL,
-                rr_warning_threshold REAL NOT NULL,
-                min_target_atr_multiple REAL NOT NULL DEFAULT 2.0,
-                target_source TEXT NOT NULL,
-                PRIMARY KEY (ticker, source)
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO candidate_promotions
-                (ticker, source, direction, entry_price, stop, target, risk_reward,
-                 rr_warning, no_valid_target, promoted_at, position_size, atr14,
-                 atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
-                 target_source)
-            SELECT ticker, source, direction, entry_price, stop, target, risk_reward,
-                   rr_warning, 0, promoted_at, position_size, atr14, atr_multiplier,
-                   rr_warning_threshold, 2.0, target_source
-            FROM candidate_promotions_old
-            """
-        )
-        conn.execute("DROP TABLE candidate_promotions_old")
-        # Deliberately no early return here: fall through to the ALTER-based
-        # checks below so any columns added to this schema *after* the rebuild
-        # path was written (like the structural-target-clamp fields) still get
-        # added post-rebuild instead of silently missing until the next deploy.
+        # RENAME/CREATE/DROP are DDL -- sqlite3's default connection mode
+        # auto-commits each one immediately, even with no explicit
+        # conn.commit() call and even if the connection is later closed after
+        # an exception with no rollback (confirmed empirically before writing
+        # this). Without an explicit BEGIN here, a failure between the RENAME
+        # and the DROP -- e.g. the generic column-copy INSERT below hitting a
+        # column mismatch -- would silently leave the real promotion history
+        # sitting orphaned in candidate_promotions_old next to an empty new
+        # table, with no error surfaced. Explicit BEGIN/rollback makes the
+        # whole rebuild atomic: either it fully succeeds, or the original
+        # table is left completely untouched. This one write is worth an
+        # explicit transaction precisely because it's irreversible real
+        # production history, not a case to treat casually.
+        conn.execute("BEGIN")
+        try:
+            _rebuild_candidate_promotions_table(conn, legacy_narrow_schema)
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
 
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_promotions_ticker_source "
+        "ON candidate_promotions (ticker, source, id)"
+    )
     columns = {info["name"] for info in conn.execute("PRAGMA table_info(candidate_promotions)").fetchall()}
     if "no_valid_target" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN no_valid_target INTEGER NOT NULL DEFAULT 0")
@@ -189,6 +183,89 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN bos_confirmed INTEGER NOT NULL DEFAULT 0")
     if "bos_level" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN bos_level REAL")
+
+
+def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_schema: bool) -> None:
+    """The actual RENAME/CREATE/copy/DROP sequence, factored out so it can be
+    wrapped in one explicit transaction by the caller. Not meant to be called
+    on its own outside that BEGIN/commit-or-rollback."""
+    conn.execute("ALTER TABLE candidate_promotions RENAME TO candidate_promotions_old")
+    conn.execute(
+        """
+        CREATE TABLE candidate_promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            stop REAL NOT NULL,
+            target REAL,
+            risk_reward REAL,
+            rr_warning INTEGER NOT NULL,
+            no_valid_target INTEGER NOT NULL DEFAULT 0,
+            promoted_at TEXT NOT NULL,
+            position_size REAL,
+            atr14 REAL NOT NULL,
+            atr_multiplier REAL NOT NULL,
+            rr_warning_threshold REAL NOT NULL,
+            min_target_atr_multiple REAL NOT NULL DEFAULT 2.0,
+            target_source TEXT NOT NULL,
+            raw_target REAL,
+            raw_risk_reward REAL,
+            target_clamped INTEGER NOT NULL DEFAULT 0,
+            target_clamp_badge TEXT,
+            target_clamp_reason TEXT,
+            raw_stop REAL,
+            stop_source TEXT,
+            displacement_score REAL,
+            displacement_label TEXT,
+            displacement_components_json TEXT,
+            raw_magnitude_score REAL,
+            displacement_read TEXT,
+            bos_confirmed INTEGER NOT NULL DEFAULT 0,
+            bos_level REAL
+        )
+        """
+    )
+    # This CREATE deliberately includes every column added to this table to
+    # date (not just the narrow original set) -- the composite-PK branch
+    # below copies whatever columns the OLD table actually has, generically,
+    # via PRAGMA table_info; if this new table were missing a column the old
+    # one already has (e.g. raw_target), that copy would fail outright
+    # instead of just needing a later ALTER.
+    if legacy_narrow_schema:
+        # The old narrow schema predates raw_target/stop_source/
+        # displacement_*/bos_* entirely -- nothing to copy for those, the
+        # ALTER-based checks in the caller backfill them to NULL/0 same as
+        # they always have (no-ops now since the columns already exist on
+        # the new table, just still NULL/0 for these rows).
+        conn.execute(
+            """
+            INSERT INTO candidate_promotions
+                (ticker, source, direction, entry_price, stop, target, risk_reward,
+                 rr_warning, no_valid_target, promoted_at, position_size, atr14,
+                 atr_multiplier, rr_warning_threshold, min_target_atr_multiple,
+                 target_source)
+            SELECT ticker, source, direction, entry_price, stop, target, risk_reward,
+                   rr_warning, 0, promoted_at, position_size, atr14, atr_multiplier,
+                   rr_warning_threshold, 2.0, target_source
+            FROM candidate_promotions_old
+            """
+        )
+    else:
+        # Composite-PK rebuild only (already has raw_target/stop_source/
+        # displacement_*/bos_* etc from earlier ALTERs): copy every column
+        # the old table actually has, generically, so this never needs
+        # updating again just because a column got added elsewhere in this
+        # file. At most one row per (ticker, source) ever existed under the
+        # old PK, so this is a lossless 1:1 copy of the real promotion
+        # history on record -- nothing to dedup, nothing lost.
+        old_columns = [info["name"] for info in conn.execute("PRAGMA table_info(candidate_promotions_old)").fetchall()]
+        col_list = ", ".join(old_columns)
+        conn.execute(
+            f"INSERT INTO candidate_promotions ({col_list}) SELECT {col_list} FROM candidate_promotions_old"
+        )
+    conn.execute("DROP TABLE candidate_promotions_old")
 
 
 # CREATE TABLE IF NOT EXISTS is a no-op against an existing production table,
@@ -309,6 +386,7 @@ def _initialize_candidates_schema(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candidate_promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker TEXT NOT NULL,
             source TEXT NOT NULL,
             direction TEXT NOT NULL,
@@ -338,8 +416,7 @@ def _initialize_candidates_schema(conn) -> None:
             raw_magnitude_score REAL,
             displacement_read TEXT,
             bos_confirmed INTEGER NOT NULL DEFAULT 0,
-            bos_level REAL,
-            PRIMARY KEY (ticker, source)
+            bos_level REAL
         )
         """
     )
@@ -459,6 +536,11 @@ class CandidateOut(BaseModel):
 
 
 class CandidatePromotionOut(BaseModel):
+    # Row identity now that candidate_promotions is append-only (one row per
+    # promotion event, not one row per ticker/source) -- see
+    # _ensure_candidate_promotions_schema. Real/required: every row in the
+    # table has one, always has since the id-PK migration.
+    id: int
     ticker: str
     source: str
     direction: str
@@ -1740,8 +1822,14 @@ def _promotion_block_reason(
     return None
 
 
-def _store_promotion(conn, promotion: dict) -> None:
-    conn.execute(
+def _store_promotion(conn, promotion: dict) -> int:
+    # Append-only: a plain INSERT, no ON CONFLICT target -- there's no longer
+    # a uniqueness constraint on (ticker, source) to conflict with. Every
+    # promotion (including re-promoting a ticker that was promoted before)
+    # becomes its own row; nothing here ever overwrites an earlier one. See
+    # _ensure_candidate_promotions_schema for the migration off the old
+    # mutable PRIMARY KEY (ticker, source) table.
+    cursor = conn.execute(
         """
         INSERT INTO candidate_promotions
             (ticker, source, direction, entry_price, stop, target, risk_reward,
@@ -1752,35 +1840,6 @@ def _store_promotion(conn, promotion: dict) -> None:
              displacement_score, displacement_label, displacement_components_json,
              raw_magnitude_score, displacement_read, bos_confirmed, bos_level)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(ticker, source) DO UPDATE SET
-            direction=excluded.direction,
-            entry_price=excluded.entry_price,
-            stop=excluded.stop,
-            target=excluded.target,
-            risk_reward=excluded.risk_reward,
-            rr_warning=excluded.rr_warning,
-            no_valid_target=excluded.no_valid_target,
-            promoted_at=excluded.promoted_at,
-            position_size=excluded.position_size,
-            atr14=excluded.atr14,
-            atr_multiplier=excluded.atr_multiplier,
-            rr_warning_threshold=excluded.rr_warning_threshold,
-            min_target_atr_multiple=excluded.min_target_atr_multiple,
-            target_source=excluded.target_source,
-            raw_target=excluded.raw_target,
-            raw_risk_reward=excluded.raw_risk_reward,
-            target_clamped=excluded.target_clamped,
-            target_clamp_badge=excluded.target_clamp_badge,
-            target_clamp_reason=excluded.target_clamp_reason,
-            raw_stop=excluded.raw_stop,
-            stop_source=excluded.stop_source,
-            displacement_score=excluded.displacement_score,
-            displacement_label=excluded.displacement_label,
-            displacement_components_json=excluded.displacement_components_json,
-            raw_magnitude_score=excluded.raw_magnitude_score,
-            displacement_read=excluded.displacement_read,
-            bos_confirmed=excluded.bos_confirmed,
-            bos_level=excluded.bos_level
         """,
         (
             promotion["ticker"],
@@ -1815,6 +1874,7 @@ def _store_promotion(conn, promotion: dict) -> None:
             _bos_level_for_storage(promotion),
         ),
     )
+    return cursor.lastrowid
 
 
 def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
@@ -2129,7 +2189,27 @@ def list_candidate_promotions(
     _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
     try:
-        rows = conn.execute("SELECT * FROM candidate_promotions ORDER BY promoted_at DESC").fetchall()
+        # candidate_promotions is append-only (full history, one row per
+        # promotion event -- see _ensure_candidate_promotions_schema), but
+        # this endpoint's contract is unchanged: one row per (ticker,
+        # source), the latest. The dashboard card view wants "what's the
+        # live plan for this candidate right now," not a history browser --
+        # keeping that contract here means the frontend needed zero changes
+        # for this migration. MAX(id) (not MAX(promoted_at)) picks the
+        # latest deterministically even if two promotions ever land on the
+        # same timestamp. Full history is still there in the table for
+        # anything that needs it (e.g. the outcome-tracking resolver).
+        rows = conn.execute(
+            """
+            SELECT cp.* FROM candidate_promotions cp
+            INNER JOIN (
+                SELECT ticker, source, MAX(id) AS latest_id
+                FROM candidate_promotions
+                GROUP BY ticker, source
+            ) latest ON cp.id = latest.latest_id
+            ORDER BY cp.promoted_at DESC
+            """
+        ).fetchall()
         return [_row_to_promotion(row) for row in rows]
     finally:
         conn.close()
