@@ -710,7 +710,16 @@ class TakenUpdate(BaseModel):
     # Deliberately just this -- no fill price, no exit details. The whole
     # point (per the Option C design) is a cheap enough step that it
     # actually gets used, unlike the old journal's fuller manual entry.
-    taken: bool
+    #
+    # Optional[bool] with NO default -- the key is still required in the
+    # request body (so a client can't silently omit it and get a no-op),
+    # but its value can be true, false, or explicitly null. null is a real,
+    # supported third state here, not "field absent": it resets a promotion
+    # back to genuinely undecided (taken_at cleared too), the same state a
+    # promotion is in before anyone ever touches this endpoint. This is the
+    # only undo path -- there was no way to get back to undecided once
+    # toggled until this field existed.
+    taken: Optional[bool]
 
 
 class ScannerSessionIn(BaseModel):
@@ -2282,11 +2291,20 @@ def update_promotion_taken(
 ):
     """Mark a specific promotion (by its own row id, not ticker/source --
     this table is append-only now, so a ticker can have several promotion
-    rows) as actually taken or explicitly skipped. This is the ONLY thing
-    that makes a promotion eligible for the automatic outcome resolver (see
+    rows) as actually taken, explicitly skipped, or reset back to undecided
+    (taken: null). taken=True is the ONLY thing that makes a promotion
+    eligible for the automatic outcome resolver (see
     main._watch_candidate_promotion_outcomes) -- untaken and undecided
     (taken IS NULL) promotions are never touched by it, which is what keeps
     phantom/hypothetical promotions out of the real-outcome dataset.
+
+    A null reset clears taken_at back to null too (fully back to "never
+    touched" state) but deliberately leaves any already-computed
+    outcome/outcome_* fields alone -- those are independent historical
+    facts about what the resolver found in real bars, not something a
+    taken-flag correction should silently erase. If a genuine "undo
+    everything about this resolution" need comes up later, that's a
+    separate, deliberate decision, not a side effect of this one.
     """
     _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
@@ -2294,10 +2312,16 @@ def update_promotion_taken(
         row = conn.execute("SELECT * FROM candidate_promotions WHERE id=?", (promotion_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"No promotion found with id {promotion_id}")
-        conn.execute(
-            "UPDATE candidate_promotions SET taken=?, taken_at=? WHERE id=?",
-            (1 if update.taken else 0, datetime.now(timezone.utc).isoformat(), promotion_id),
-        )
+        if update.taken is None:
+            conn.execute(
+                "UPDATE candidate_promotions SET taken=NULL, taken_at=NULL WHERE id=?",
+                (promotion_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE candidate_promotions SET taken=?, taken_at=? WHERE id=?",
+                (1 if update.taken else 0, datetime.now(timezone.utc).isoformat(), promotion_id),
+            )
         conn.commit()
         updated = conn.execute("SELECT * FROM candidate_promotions WHERE id=?", (promotion_id,)).fetchone()
         return _row_to_promotion(updated)

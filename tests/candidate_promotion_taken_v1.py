@@ -101,6 +101,84 @@ def test_marking_taken_false_is_distinct_from_undecided(router, client):
     assert body["taken_at"] is not None
 
 
+def test_marking_taken_null_resets_to_undecided(router, client):
+    promotion_id = _seed_promotion(router)
+    client.patch(
+        f"/api/v1/scanner/candidate-promotions/{promotion_id}/taken",
+        headers={"X-API-Key": "test-scanner-key"},
+        json={"taken": True},
+    )
+
+    resp = client.patch(
+        f"/api/v1/scanner/candidate-promotions/{promotion_id}/taken",
+        headers={"X-API-Key": "test-scanner-key"},
+        json={"taken": None},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["taken"] is None
+    assert body["taken_at"] is None  # fully back to "never touched", not just taken=None with a stale timestamp
+
+    rows = client.get("/api/v1/scanner/candidate-promotions", headers={"X-API-Key": "test-scanner-key"}).json()
+    row = next(r for r in rows if r["id"] == promotion_id)
+    assert row["taken"] is None
+    assert row["taken_at"] is None
+
+
+def test_null_reset_from_false_also_works(router, client):
+    promotion_id = _seed_promotion(router)
+    client.patch(
+        f"/api/v1/scanner/candidate-promotions/{promotion_id}/taken",
+        headers={"X-API-Key": "test-scanner-key"},
+        json={"taken": False},
+    )
+    resp = client.patch(
+        f"/api/v1/scanner/candidate-promotions/{promotion_id}/taken",
+        headers={"X-API-Key": "test-scanner-key"},
+        json={"taken": None},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["taken"] is None
+
+
+def test_null_reset_leaves_already_computed_outcome_untouched(router, client):
+    """Scoping decision, tested explicitly: resetting taken back to
+    undecided does NOT erase outcome/outcome_* -- those are independent
+    historical facts about what real bars showed, not something a
+    taken-flag correction should silently wipe."""
+    promotion_id = _seed_promotion(router)
+    conn = sqlite3.connect(os.environ["KAIROS_CANDIDATES_DB"])
+    conn.execute(
+        "UPDATE candidate_promotions SET taken=1, outcome='hit_target', outcome_hit_at=? WHERE id=?",
+        ("2026-08-25T14:00:00Z", promotion_id),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.patch(
+        f"/api/v1/scanner/candidate-promotions/{promotion_id}/taken",
+        headers={"X-API-Key": "test-scanner-key"},
+        json={"taken": None},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["taken"] is None
+    assert body["outcome"] == "hit_target"
+    assert body["outcome_hit_at"] == "2026-08-25T14:00:00Z"
+
+
+def test_taken_key_is_still_required_omitting_it_is_rejected(router, client):
+    """null is a supported explicit value, not the same as leaving the key
+    out entirely -- omitting it must still be a 422, not a silent reset."""
+    promotion_id = _seed_promotion(router)
+    resp = client.patch(
+        f"/api/v1/scanner/candidate-promotions/{promotion_id}/taken",
+        headers={"X-API-Key": "test-scanner-key"},
+        json={},
+    )
+    assert resp.status_code == 422
+
+
 def test_taken_endpoint_requires_api_key(router, client):
     promotion_id = _seed_promotion(router)
     resp = client.patch(f"/api/v1/scanner/candidate-promotions/{promotion_id}/taken", json={"taken": True})
@@ -136,3 +214,28 @@ def test_taken_targets_specific_promotion_row_not_all_of_a_tickers_rows(router, 
     conn.close()
     assert first_row["taken"] == 1
     assert second_row["taken"] is None
+
+
+def test_null_reset_targets_specific_promotion_row_not_all_of_a_tickers_rows(router, client):
+    first_id = _seed_promotion(router, ticker="AAPL", promoted_at="2026-08-20T14:00:00Z")
+    second_id = _seed_promotion(router, ticker="AAPL", promoted_at="2026-08-24T14:00:00Z")
+    for pid in (first_id, second_id):
+        client.patch(
+            f"/api/v1/scanner/candidate-promotions/{pid}/taken",
+            headers={"X-API-Key": "test-scanner-key"},
+            json={"taken": True},
+        )
+
+    client.patch(
+        f"/api/v1/scanner/candidate-promotions/{first_id}/taken",
+        headers={"X-API-Key": "test-scanner-key"},
+        json={"taken": None},
+    )
+
+    conn = sqlite3.connect(os.environ["KAIROS_CANDIDATES_DB"])
+    conn.row_factory = sqlite3.Row
+    first_row = conn.execute("SELECT taken FROM candidate_promotions WHERE id=?", (first_id,)).fetchone()
+    second_row = conn.execute("SELECT taken FROM candidate_promotions WHERE id=?", (second_id,)).fetchone()
+    conn.close()
+    assert first_row["taken"] is None
+    assert second_row["taken"] == 1
