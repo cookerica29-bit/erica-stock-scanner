@@ -54,6 +54,25 @@ CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
 SCANNER_SESSION_COOKIE = "kairos_scanner_session"
 ENTRY_PROXIMITY_MAX_PCT_DEFAULT = 1.5
 ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
+# entry_status_label -- legacy's four-tier ATR-distance bucket
+# (scanner._stock_entry_status), ported as PURELY DESCRIPTIVE display sugar
+# on top of the entry_distance_atr already computed below. Explicitly
+# NOT the same thing as entry_proximity_ok above, and deliberately not
+# reconciled with it: entry_proximity_ok is a single-threshold
+# (ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT=0.5 / _MAX_PCT_DEFAULT=1.5%),
+# already-tuned, ACTUALLY-GATING boolean that's been live in ENTER_NOW
+# eligibility since earlier this session -- untouched here. This is a
+# four-tier, unvalidated, non-gating label using DIFFERENT cutoffs for a
+# conceptually related but distinct question ("how would legacy have
+# bucketed this" vs "is this close enough to trade"). The two can and
+# will disagree on real candidates -- e.g. entry_proximity_ok=True while
+# entry_status_label reads "Near Entry" rather than "Tradeable" -- that's
+# expected, not a bug (see the real example in this feature's commit).
+# Cutoffs below are copied verbatim from scanner._stock_entry_status and
+# are exactly as unvalidated as every other threshold shipped today.
+ENTRY_STATUS_TRADEABLE_MAX_ATR = 0.25
+ENTRY_STATUS_NEAR_ENTRY_MAX_ATR = 0.50
+ENTRY_STATUS_WAITING_MAX_ATR = 1.00
 MIN_CLEAN_OPTION_PREMIUM_DEFAULT = 0.50
 MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT = 50.0
 EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
@@ -951,6 +970,11 @@ class CandidatePlanPreviewOut(BaseModel):
     entry_proximity_reason: Optional[str] = None
     entry_proximity_threshold_pct: float = ENTRY_PROXIMITY_MAX_PCT_DEFAULT
     entry_proximity_threshold_atr: float = ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT
+    # Purely descriptive, legacy's four-tier bucket -- deliberately NOT
+    # reconciled with entry_proximity_ok above (different, unvalidated
+    # cutoffs; see ENTRY_STATUS_TRADEABLE_MAX_ATR's comment near the top of
+    # this file for why the two can legitimately disagree).
+    entry_status_label: str = "Waiting"
     execution_shadow_checked: bool = False
     execution_shadow_ok: Optional[bool] = None
     execution_shadow_reason: Optional[str] = None
@@ -1235,6 +1259,21 @@ def _latest_quote_for_ticker(ticker: str) -> Optional[dict[str, Any]]:
     return quote if isinstance(quote, dict) else None
 
 
+def _entry_status_label(distance_atr: Optional[float]) -> str:
+    """Legacy's four-tier bucket (scanner._stock_entry_status), verbatim
+    cutoffs. Missing distance -> "Waiting", matching legacy's own
+    fall-through for missing entry/price/atr."""
+    if distance_atr is None:
+        return "Waiting"
+    if distance_atr <= ENTRY_STATUS_TRADEABLE_MAX_ATR:
+        return "Tradeable"
+    if distance_atr <= ENTRY_STATUS_NEAR_ENTRY_MAX_ATR:
+        return "Near Entry"
+    if distance_atr <= ENTRY_STATUS_WAITING_MAX_ATR:
+        return "Waiting"
+    return "Too Far"
+
+
 def _entry_proximity(
     *,
     entry_price: Optional[float],
@@ -1255,6 +1294,7 @@ def _entry_proximity(
         "entry_proximity_reason": "Current quote unavailable",
         "entry_proximity_threshold_pct": max_pct,
         "entry_proximity_threshold_atr": max_atr,
+        "entry_status_label": _entry_status_label(None),
     }
     try:
         entry = float(entry_price)
@@ -1318,6 +1358,11 @@ def _entry_proximity(
         "entry_distance_atr": round(atr_distance, 2) if atr_distance is not None else None,
         "entry_proximity_ok": ok,
         "entry_proximity_reason": reason,
+        # Bucketed from the raw (unrounded) atr_distance, not the rounded
+        # display value above -- avoids a rounding-induced boundary
+        # mismatch right at a cutoff (e.g. a true 0.251 rounding to a
+        # displayed 0.25 shouldn't bucket as "Tradeable").
+        "entry_status_label": _entry_status_label(atr_distance),
     }
 
 
