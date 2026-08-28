@@ -38,6 +38,7 @@ from scanner import (
 )
 from structural_resistance import clamp_target, levels_near_target, resolve_stop
 from displacement_score import score_displacement
+from location_score import score_location
 
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
@@ -328,6 +329,19 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN rejection_confirmed INTEGER NOT NULL DEFAULT 0")
     if "rejection_details_json" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN rejection_details_json TEXT")
+    # Premium/discount location -- same overlay-only decision as macro/CHoCH
+    # and sweep/rejection above. Three flat columns (not JSON) -- all three
+    # are scalars, same as displacement_score/displacement_label/
+    # raw_magnitude_score. location_percentile is the primary/authoritative
+    # value; location_label/location_alignment are display-only sugar
+    # derived from it. See location_score.py for the (deliberately
+    # unvalidated, legacy-inherited) PREMIUM_THRESHOLD/DISCOUNT_THRESHOLD.
+    if "location_percentile" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN location_percentile REAL")
+    if "location_label" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN location_label TEXT")
+    if "location_alignment" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN location_alignment TEXT")
 
 
 def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_schema: bool) -> None:
@@ -383,7 +397,10 @@ def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_
             sweep_confirmed INTEGER NOT NULL DEFAULT 0,
             sweep_level REAL,
             rejection_confirmed INTEGER NOT NULL DEFAULT 0,
-            rejection_details_json TEXT
+            rejection_details_json TEXT,
+            location_percentile REAL,
+            location_label TEXT,
+            location_alignment TEXT
         )
         """
     )
@@ -479,6 +496,12 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN rejection_confirmed INTEGER NOT NULL DEFAULT 0")
     if "rejection_details_json" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN rejection_details_json TEXT")
+    if "location_percentile" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN location_percentile REAL")
+    if "location_label" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN location_label TEXT")
+    if "location_alignment" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN location_alignment TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -607,7 +630,10 @@ def _initialize_candidates_schema(conn) -> None:
             sweep_confirmed INTEGER NOT NULL DEFAULT 0,
             sweep_level REAL,
             rejection_confirmed INTEGER NOT NULL DEFAULT 0,
-            rejection_details_json TEXT
+            rejection_details_json TEXT,
+            location_percentile REAL,
+            location_label TEXT,
+            location_alignment TEXT
         )
         """
     )
@@ -674,6 +700,9 @@ def _initialize_candidates_schema(conn) -> None:
             sweep_level REAL,
             rejection_confirmed INTEGER NOT NULL DEFAULT 0,
             rejection_details_json TEXT,
+            location_percentile REAL,
+            location_label TEXT,
+            location_alignment TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -806,6 +835,15 @@ class CandidatePromotionOut(BaseModel):
     sweep_details: Optional[dict[str, Any]] = None
     rejection_confirmed: bool = False
     rejection_details: Optional[dict[str, Any]] = None
+    # Premium/discount location -- continuous score, not a fixed-bucket
+    # gate (explicit decision: legacy's _strict_location is the single
+    # hardest gate found in any port today; see location_score.py).
+    # location_percentile (0-100) is the primary/authoritative value;
+    # location_label/location_alignment are display-only sugar derived
+    # from it, never a second source of truth.
+    location_percentile: Optional[float] = None
+    location_label: Optional[str] = None
+    location_alignment: Optional[str] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -860,6 +898,9 @@ class CandidatePlanPreviewOut(BaseModel):
     sweep_details: Optional[dict[str, Any]] = None
     rejection_confirmed: bool = False
     rejection_details: Optional[dict[str, Any]] = None
+    location_percentile: Optional[float] = None
+    location_label: Optional[str] = None
+    location_alignment: Optional[str] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -2035,6 +2076,25 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     rejection_details = _evaluate_rejection(df, direction.upper(), sweep_level)
     rejection_confirmed = rejection_details is not None
 
+    # Premium/discount location -- pure informational overlay, explicitly
+    # NOT the legacy behavior. scanner._strict_location's output
+    # (valid_zone) is the single hardest gate found in any port today:
+    # appears directly in _build_trade_stage_eval's no_trade_reasons (can
+    # solo-cause "RANGE / NO TRADE"), is a mandatory AND-condition for BOTH
+    # the "A+ READY" and "BUILDING / WATCHLIST" tiers using a strict 50%
+    # cutoff, and a THIRD, looser cutoff gates "B+ TRADEABLE" -- three
+    # different threshold schemes for one number. Confirmed and flagged
+    # before building this. Also continuous by nature (a real percentile,
+    # not a structural yes/no fact like BOS/sweep) -- legacy itself has two
+    # mutually inconsistent bucketing schemes for that same percentile
+    # (_location_read's Premium/Discount/Midrange vs _strict_location's AT
+    # EXTREME variant), itself evidence neither was validated. Exposes the
+    # continuous location_percentile as the primary field (same split as
+    # raw_magnitude_score/displacement_label) -- location_label/
+    # location_alignment are display sugar derived from it, never a second
+    # source of truth, never gated on here.
+    location = score_location(entry_price, swings, direction)
+
     # Continuous displacement/conviction score for the most recent daily
     # candle -- informational grading input only, never a gate (see
     # displacement_score.score_displacement's docstring). Independent of the
@@ -2134,6 +2194,9 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "sweep_details": sweep_details,
         "rejection_confirmed": rejection_confirmed,
         "rejection_details": rejection_details,
+        "location_percentile": location["location_percentile"],
+        "location_label": location["location_label"],
+        "location_alignment": location["location_alignment"],
     }
 
 
@@ -2200,8 +2263,9 @@ def _store_promotion(conn, promotion: dict) -> int:
              displacement_score, displacement_label, displacement_components_json,
              raw_magnitude_score, displacement_read, bos_confirmed, bos_level,
              macro_bias, macro_conflict, choch_conflict, choch_details_json,
-             sweep_confirmed, sweep_level, rejection_confirmed, rejection_details_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             sweep_confirmed, sweep_level, rejection_confirmed, rejection_details_json,
+             location_percentile, location_label, location_alignment)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             promotion["ticker"],
@@ -2242,6 +2306,9 @@ def _store_promotion(conn, promotion: dict) -> int:
             _sweep_level_for_storage(promotion),
             1 if promotion.get("rejection_confirmed") else 0,
             json.dumps(promotion["rejection_details"], separators=(",", ":")) if promotion.get("rejection_details") else None,
+            promotion.get("location_percentile"),
+            promotion.get("location_label"),
+            promotion.get("location_alignment"),
         ),
     )
     return cursor.lastrowid
@@ -2294,6 +2361,9 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "sweep_details": promotion_like.get("sweep_details"),
             "rejection_confirmed": promotion_like.get("rejection_confirmed", False),
             "rejection_details": promotion_like.get("rejection_details"),
+            "location_percentile": promotion_like.get("location_percentile"),
+            "location_label": promotion_like.get("location_label"),
+            "location_alignment": promotion_like.get("location_alignment"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -2337,6 +2407,9 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "sweep_details": None,
             "rejection_confirmed": False,
             "rejection_details": None,
+            "location_percentile": None,
+            "location_label": None,
+            "location_alignment": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -2358,8 +2431,8 @@ def _store_plan_preview(conn, preview: dict) -> None:
              displacement_components_json, raw_magnitude_score, displacement_read,
              bos_confirmed, bos_level, macro_bias, macro_conflict, choch_conflict,
              choch_details_json, sweep_confirmed, sweep_level, rejection_confirmed,
-             rejection_details_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             rejection_details_json, location_percentile, location_label, location_alignment)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -2398,7 +2471,10 @@ def _store_plan_preview(conn, preview: dict) -> None:
             sweep_confirmed=excluded.sweep_confirmed,
             sweep_level=excluded.sweep_level,
             rejection_confirmed=excluded.rejection_confirmed,
-            rejection_details_json=excluded.rejection_details_json
+            rejection_details_json=excluded.rejection_details_json,
+            location_percentile=excluded.location_percentile,
+            location_label=excluded.location_label,
+            location_alignment=excluded.location_alignment
         """,
         (
             preview["ticker"],
@@ -2441,6 +2517,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             _sweep_level_for_storage(preview),
             1 if preview.get("rejection_confirmed") else 0,
             json.dumps(preview["rejection_details"], separators=(",", ":")) if preview.get("rejection_details") else None,
+            preview.get("location_percentile"),
+            preview.get("location_label"),
+            preview.get("location_alignment"),
         ),
     )
 
