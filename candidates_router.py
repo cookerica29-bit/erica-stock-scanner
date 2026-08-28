@@ -374,6 +374,19 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN confluence_counts_json TEXT")
     if "confluence_label" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN confluence_label TEXT")
+    # promotion_kind distinguishes a real ENTER_NOW/dashboard promotion
+    # ("enter_now", the only kind that existed before this column) from a
+    # short-side outcome-tracking-only row ("tracking_only", written by
+    # POST /candidates/{ticker}/track-short-outcome). Shorts still cannot
+    # reach "enter_now" -- see _promotion_block_reason -- this only lets a
+    # short accumulate real evidence (taken + the hourly outcome resolver)
+    # without any dashboard/ENTER_NOW parity. DEFAULT 'enter_now' means
+    # every row that predates this column (all real history so far) is
+    # correctly backfilled as a real promotion, not silently miscategorized.
+    if "promotion_kind" not in columns:
+        conn.execute(
+            "ALTER TABLE candidate_promotions ADD COLUMN promotion_kind TEXT NOT NULL DEFAULT 'enter_now'"
+        )
 
 
 def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_schema: bool) -> None:
@@ -435,7 +448,8 @@ def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_
             location_alignment TEXT,
             confluence_signals_json TEXT,
             confluence_counts_json TEXT,
-            confluence_label TEXT
+            confluence_label TEXT,
+            promotion_kind TEXT NOT NULL DEFAULT 'enter_now'
         )
         """
     )
@@ -677,7 +691,8 @@ def _initialize_candidates_schema(conn) -> None:
             location_alignment TEXT,
             confluence_signals_json TEXT,
             confluence_counts_json TEXT,
-            confluence_label TEXT
+            confluence_label TEXT,
+            promotion_kind TEXT NOT NULL DEFAULT 'enter_now'
         )
         """
     )
@@ -898,6 +913,15 @@ class CandidatePromotionOut(BaseModel):
     confluence_signals: Optional[dict[str, Any]] = None
     confluence_counts: Optional[dict[str, Any]] = None
     confluence_label: Optional[str] = None
+    # "enter_now" (default) is a real dashboard/ENTER_NOW-eligible promotion,
+    # same as every promotion before this field existed. "tracking_only" is
+    # a short-side outcome-evidence row written by
+    # POST /candidates/{ticker}/track-short-outcome -- it carries the exact
+    # same plan math and flows through taken/the outcome resolver like any
+    # other row, but GET /candidate-promotions excludes it by default (see
+    # that endpoint) precisely so it never renders as a real promotion
+    # anywhere the dashboard already shows Plan Preview/Current Plan Math.
+    promotion_kind: str = "enter_now"
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -1653,6 +1677,11 @@ def _gate_gap_report(candidate: sqlite3.Row | dict, preview: dict) -> dict:
     direction = str(preview.get("signal") or candidate["signal"] or "").strip().lower()
     regime_aligned = _candidate_regime_aligned(candidate, direction)
     if direction == "short":
+        # Same rule, same rationale as _promotion_block_reason's short
+        # branch (see its comment) -- insufficient forward evidence yet, not
+        # a signal-quality problem. This is the ENTER_NOW/near-miss view
+        # specifically; POST /candidates/{ticker}/track-short-outcome is the
+        # separate, non-dashboard path for building that evidence.
         return {"categorical_blocked": True, "categorical_reason": "Shorts are research-only", "failing_count": None, "gaps": []}
     if direction != "long":
         return {"categorical_blocked": True, "categorical_reason": "Unsupported direction", "failing_count": None, "gaps": []}
@@ -2328,6 +2357,28 @@ def _promotion_block_reason(
     option_contract: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
     direction = str(promotion.get("direction") or "").strip().lower()
+    # Shorts are blocked from full ENTER_NOW/dashboard promotion -- not
+    # because the SMC signals don't work for shorts (every one of them,
+    # BOS/displacement/macro-CHoCH/sweep-rejection/location/confluence, is
+    # already computed direction-symmetrically and has been since it was
+    # built), but because there is not yet enough forward evidence that a
+    # short setup here performs the way a long one does. This block
+    # predates outcome tracking existing at all (see git history --
+    # 2026-08-24, before the taken/outcome-resolver pipeline shipped); every
+    # real promotion on record from before that date, short or long, simply
+    # predates this check entirely, so its absence has never actually been
+    # tested against a real short. Verified 2026-08-28: nothing resembling
+    # relative-weakness/sector-laggard qualification logic exists anywhere
+    # in this codebase or legacy scanner.py -- that idea, if it was ever
+    # discussed, was never implemented.
+    #
+    # Now that outcome tracking exists, the responsible path is to build
+    # that evidence rather than guess -- see
+    # POST /candidates/{ticker}/track-short-outcome, which lets a short
+    # accumulate real taken/outcome-resolver history WITHOUT touching this
+    # gate or granting ENTER_NOW/dashboard parity. Loosening THIS check is a
+    # deliberate future decision to make once that evidence exists, not a
+    # side effect of adding the tracking path.
     if direction == "short":
         return "Short candidates are research-only and cannot be promoted to the clean dashboard."
     if direction != "long":
@@ -2378,8 +2429,9 @@ def _store_promotion(conn, promotion: dict) -> int:
              macro_bias, macro_conflict, choch_conflict, choch_details_json,
              sweep_confirmed, sweep_level, rejection_confirmed, rejection_details_json,
              location_percentile, location_label, location_alignment,
-             confluence_signals_json, confluence_counts_json, confluence_label)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             confluence_signals_json, confluence_counts_json, confluence_label,
+             promotion_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             promotion["ticker"],
@@ -2426,6 +2478,7 @@ def _store_promotion(conn, promotion: dict) -> int:
             json.dumps(promotion["confluence_signals"], separators=(",", ":")) if promotion.get("confluence_signals") else None,
             json.dumps(promotion["confluence_counts"], separators=(",", ":")) if promotion.get("confluence_counts") else None,
             promotion.get("confluence_label"),
+            promotion.get("promotion_kind", "enter_now"),
         ),
     )
     return cursor.lastrowid
@@ -2796,6 +2849,7 @@ def list_candidates(
 
 @router.get("/candidate-promotions", response_model=list[CandidatePromotionOut])
 def list_candidate_promotions(
+    include_tracking_only: bool = Query(default=False),
     x_api_key: Optional[str] = Header(default=None),
     scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
@@ -2812,12 +2866,29 @@ def list_candidate_promotions(
         # latest deterministically even if two promotions ever land on the
         # same timestamp. Full history is still there in the table for
         # anything that needs it (e.g. the outcome-tracking resolver).
+        #
+        # promotion_kind='tracking_only' rows (see
+        # POST /candidates/{ticker}/track-short-outcome) are excluded from
+        # the "latest" computation by default -- this is the dashboard's own
+        # feed, and a tracking-only short must never render as a real Plan
+        # Preview/Current Plan Math card. Filtered inside the latest-id
+        # subquery itself (not just the outer SELECT), so "latest" here
+        # means "latest real promotion": if a ticker has a genuine enter_now
+        # promotion on record and someone later adds a newer tracking-only
+        # row for it, that real promotion keeps showing exactly as before --
+        # a tracking-only row can never displace or hide it, since it was
+        # never a real promotion to begin with. include_tracking_only=true
+        # opts back in for anyone who needs to see/manage tracking rows
+        # directly (e.g. to find an id to mark taken) -- not used by the
+        # existing frontend, which never passes it.
+        kind_filter = "" if include_tracking_only else "WHERE promotion_kind != 'tracking_only'"
         rows = conn.execute(
-            """
+            f"""
             SELECT cp.* FROM candidate_promotions cp
             INNER JOIN (
                 SELECT ticker, source, MAX(id) AS latest_id
                 FROM candidate_promotions
+                {kind_filter}
                 GROUP BY ticker, source
             ) latest ON cp.id = latest.latest_id
             ORDER BY cp.promoted_at DESC
@@ -3128,5 +3199,76 @@ def update_candidate_status(
         if option_contract:
             response["option_contract"] = option_contract
         return response
+    finally:
+        conn.close()
+
+
+@router.post(
+    "/candidates/{ticker}/track-short-outcome",
+    response_model=CandidatePromotionOut,
+    status_code=201,
+)
+def track_short_outcome(
+    ticker: str,
+    source: str,
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Promote a SHORT candidate for outcome-evidence tracking only --
+    NOT for ENTER_NOW/dashboard trading. See _promotion_block_reason's
+    short-branch comment for why the real gate still exists and what this
+    endpoint deliberately does not change about it.
+
+    Computes the exact same plan math every other promotion uses
+    (_compute_candidate_promotion is already direction-symmetric -- BOS,
+    displacement, macro/CHoCH, sweep/rejection, location, and confluence
+    have all been computed for both directions since they were built), then
+    stores it with promotion_kind='tracking_only' instead of the default
+    'enter_now'. That's the only thing distinguishing this row from a real
+    promotion in the database -- and it's what GET /candidate-promotions
+    uses to exclude it from the default response, so it never appears on
+    the dashboard, never gets treated as ENTER_NOW-eligible, and never
+    bypasses the "research-only" framing anywhere that's currently shown.
+
+    Deliberately skips: _promotion_block_reason entirely (that's the
+    ENTER_NOW gate this path exists to not touch), option contract lookup
+    (matches the existing long-only contract-fetch pattern in
+    update_candidate_status above -- a tracking-only short has no reason to
+    pay for a chain lookup nobody will trade), and any write to
+    candidates.status (this is not a status change, just a promotion-row
+    event -- the candidate stays exactly where it was: new/dismissed/etc).
+
+    From here, the row behaves identically to any other promotion for
+    outcome purposes: PATCH /candidate-promotions/{id}/taken marks it
+    taken by id (no direction check there, never has been), and
+    main._watch_candidate_promotion_outcomes picks it up on the next hourly
+    pass through the exact same taken=1 query every long promotion uses.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    normalized_ticker = ticker.strip().upper()
+    conn = _get_db()
+    try:
+        candidate = conn.execute(
+            "SELECT * FROM candidates WHERE ticker=? AND source=?",
+            (normalized_ticker, source),
+        ).fetchone()
+        if not candidate:
+            raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {source}")
+
+        promotion = _compute_candidate_promotion(candidate)
+        direction = str(promotion.get("direction") or "").strip().lower()
+        if direction != "short":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"track-short-outcome is for short candidates only (this candidate is {direction or 'unknown'}); "
+                    "use PATCH /candidates/{ticker} with status=active for a long promotion."
+                ),
+            )
+        promotion["promotion_kind"] = "tracking_only"
+        promotion_id = _store_promotion(conn, promotion)
+        conn.commit()
+        stored = conn.execute("SELECT * FROM candidate_promotions WHERE id=?", (promotion_id,)).fetchone()
+        return _row_to_promotion(stored)
     finally:
         conn.close()

@@ -29,10 +29,11 @@ def env(tmp_path, monkeypatch):
 
 
 def _promotion_payload(ticker="AAPL", promoted_at="2026-08-01T14:00:00Z", direction="long",
-                        entry_price=100.0, stop=95.0, target=110.0):
+                        entry_price=100.0, stop=95.0, target=110.0, promotion_kind="enter_now"):
     return {
         "ticker": ticker, "source": "ma_pipeline", "direction": direction, "entry_price": entry_price,
         "stop": stop, "target": target, "risk_reward": 2.0, "rr_warning": False,
+        "promotion_kind": promotion_kind,
         "no_valid_target": target is None, "promoted_at": promoted_at, "position_size": None,
         "atr14": 1.5, "atr_multiplier": 1.5, "rr_warning_threshold": 1.5,
         "min_target_atr_multiple": 2.0, "target_source": "daily_swing_structure",
@@ -250,3 +251,29 @@ def test_state_snapshot_reflects_last_run(env, monkeypatch):
     assert snapshot["last_completed_at"] is not None
     assert snapshot["promotions_checked"] == 1
     assert snapshot["last_error"] is None
+
+
+def test_tracking_only_short_promotion_resolves_exactly_like_a_real_one(env, monkeypatch):
+    """The whole point of promotion_kind='tracking_only' (see
+    candidates_router.track_short_outcome): it must flow through this
+    resolver with zero special-casing, identical to a real 'enter_now'
+    promotion. This query has never filtered on direction or kind -- taken=1
+    is the only thing that matters -- so this is a regression guard on that
+    staying true, not a new capability being added to the resolver itself."""
+    main, router = env
+    promo_id = _seed(router, taken=True, direction="short", stop=105.0, target=90.0,
+                      promoted_at="2026-08-01T14:00:00Z", promotion_kind="tracking_only")
+
+    bars = _bars_df([
+        {"time": "2026-08-02T14:00:00Z", "high": 102.0, "low": 95.0},
+        {"time": "2026-08-03T14:00:00Z", "high": 96.0, "low": 88.0},  # short target=90 hit
+    ])
+    monkeypatch.setattr(main, "_batch_download", lambda tickers, period, interval: {"AAPL": bars})
+
+    metrics = main._watch_candidate_promotion_outcomes("test")
+
+    assert metrics["promotions_checked"] == 1
+    assert metrics["promotions_resolved"] == 1
+    row = _row(router, promo_id)
+    assert row["outcome"] == "hit_target"
+    assert row["promotion_kind"] == "tracking_only"
