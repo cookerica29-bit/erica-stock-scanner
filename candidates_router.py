@@ -51,6 +51,15 @@ ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-4-5"
 AI_CHART_REVIEW_RUBRIC_VERSION = "kairos-chart-note-v1"
 CANDIDATE_PREVIEW_TRANSIENT_OPTION_REFRESH_TTL = timedelta(minutes=10)
+# _enriched_previews_for_candidates pre-warms scanner._batch_download's own
+# TTL cache in chunks of this size before its per-candidate loop, instead of
+# letting each candidate's _compute_candidate_promotion make its own cold
+# single-ticker network call. Real profiling (2026-08-28, railway run against
+# live infra): single-ticker cold fetch averaged ~0.22s/ticker; chunked at
+# this size averaged ~0.07-0.08s/ticker -- see the commit message for the
+# full before/after numbers this was picked from. Not pushed higher (e.g.
+# 100+) without more testing at that scale against the real provider.
+CANDIDATE_PREVIEW_PREWARM_CHUNK_SIZE = 50
 SCANNER_SESSION_COOKIE = "kairos_scanner_session"
 ENTRY_PROXIMITY_MAX_PCT_DEFAULT = 1.5
 ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
@@ -570,6 +579,24 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
 # across an unbounded, network-call-heavy loop; see incident notes there).
 _schema_ready_db_paths: set[str] = set()
 _schema_ready_lock = threading.Lock()
+
+# Single-flight coordination for _enriched_previews_for_candidates' expensive
+# recompute path (real per-ticker network calls -- daily bars, option
+# contracts -- plus SQLite writes). Confirmed via a direct concurrent-request
+# test (2026-08-28) that without this, two requests arriving while the same
+# candidates were stale each independently redid the FULL computation from
+# scratch -- 10 network calls fired for 5 candidates x 2 concurrent requests,
+# not 5. This lock makes a second concurrent request wait for the first's
+# refresh to finish, then re-check the (now warm) cache, instead of
+# redundantly repeating identical expensive work. Deliberately a single
+# process-wide lock, not per-ticker: this endpoint operates on the whole
+# candidate set at once, so any two concurrent hits are almost always
+# working on a heavily overlapping stale set anyway. Scoped to a single
+# process -- if this service is ever run with multiple worker processes
+# (it isn't today; confirmed one "Started server process" per boot), this
+# lock stops coordinating across them and a cross-process mechanism (e.g. a
+# DB-level lock) would be needed instead.
+_plan_preview_refresh_lock = threading.Lock()
 
 
 def _get_db():
@@ -1193,11 +1220,33 @@ def _record_status_change(
     )
 
 
-def _safe_option_contract_for_candidate(ticker: str, direction: str, entry_price: Optional[float]) -> dict:
+def _safe_option_contract_for_candidate(
+    ticker: str, direction: str, entry_price: Optional[float], *, block_on_miss: bool = True,
+) -> dict:
+    # block_on_miss=True (default) is for the single-candidate real-promotion
+    # path (update_candidate_status below) -- one explicit user action, worth
+    # the real ~0.6s/candidate cold-fetch cost (measured 2026-08-28) to return
+    # a complete contract immediately. block_on_miss=False is for the bulk
+    # /candidate-plan-previews path (see _compute_candidate_plan_preview),
+    # where that same cost multiplied across every long candidate in the
+    # universe (402 of 557 measured that day) was the single largest
+    # contributor to that endpoint's slowness. False reuses _best_contract's
+    # own existing background-refresh mechanism (the same path its `stale`
+    # branch already uses) -- returns a "Loading" placeholder immediately and
+    # lets the real fetch happen off the request path; contract quality is
+    # already informational-only here, never a gate, so a placeholder that
+    # fills in on a later request is a real trade-off, not a silent one --
+    # see _preview_has_transient_option_unavailable, extended to treat
+    # source="loading" the same way it already treats a genuinely
+    # unavailable chain, so a stored "Loading" preview gets re-checked
+    # automatically instead of sticking forever.
     if entry_price is None or entry_price <= 0:
         return {"available": False, "execution": "No Clean Contract", "reason": "Missing candidate entry price", "source": "candidate_preview"}
     try:
-        contract = _best_contract(ticker, "LONG" if direction == "long" else "SHORT", float(entry_price), block_on_miss=True)
+        contract = _best_contract(
+            ticker, "LONG" if direction == "long" else "SHORT", float(entry_price),
+            block_on_miss=block_on_miss,
+        )
     except Exception as exc:
         return {
             "available": False,
@@ -1432,15 +1481,9 @@ def _bar_time_iso(value: Any) -> Optional[str]:
     return str(value)
 
 
-def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
+def _rows_from_4h_bars_frame(df) -> list[dict[str, Any]]:
     try:
-        raw = AlpacaMarketDataProvider().download([ticker], period="30d", interval="4h", auto_adjust=True)
-    except Exception:
-        return []
-    if raw is None or raw.empty:
-        return []
-    try:
-        df = _flatten_columns(raw.copy()).dropna().astype(float)
+        df = _flatten_columns(df.copy()).dropna().astype(float)
     except Exception:
         return []
     required = {"Open", "High", "Low", "Close"}
@@ -1459,6 +1502,34 @@ def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
+    try:
+        raw = AlpacaMarketDataProvider().download([ticker], period="30d", interval="4h", auto_adjust=True)
+    except Exception:
+        return []
+    if raw is None or raw.empty:
+        return []
+    return _rows_from_4h_bars_frame(raw)
+
+
+# A batched version of the above (fetching every shadow-eligible candidate's
+# 4h bars in one provider call, mirroring the daily-bar pre-warm) was tried
+# and reverted 2026-08-28 after real profiling showed it unsafe, not just
+# unhelpful: AlpacaMarketDataProvider.download() paginates internally per
+# request, and 4h/30d bars across enough symbols at once (measured: 25
+# real tickers) hit "max_pages_exceeded" and silently returned ZERO bars
+# for every ticker in that batch -- which _execution_shadow_from_bars reads
+# as "Recent 4H bars unavailable," a false negative on real ENTER_NOW-
+# ready candidates, not just a slow response. Even within a size that
+# didn't fail outright (10 tickers), batched cost measured ~0.52s/ticker
+# vs ~0.39s/ticker fetched individually -- batching this specific
+# interval/window combination is not actually cheaper, unlike the daily-bar
+# case. Left unbatched, individual, exactly as it always was --
+# _preview_base_enter_now_ready's existing gate (this only ever runs for
+# candidates already passing every other ENTER_NOW check) already keeps
+# this to a real subset of the universe, not all 550+.
 
 
 def _execution_shadow_from_bars(
@@ -1827,7 +1898,12 @@ def _preview_has_transient_option_unavailable(row: sqlite3.Row) -> bool:
     source = str(contract.get("source") or "").lower()
     return (
         bool(contract.get("transient_unavailable"))
-        or source in {"unavailable", "data_unavailable"}
+        # "loading" is _best_contract's block_on_miss=False placeholder (see
+        # _safe_option_contract_for_candidate) -- a stored preview with this
+        # source is exactly as temporary as a genuinely unavailable chain,
+        # and needs the same automatic re-check rather than sticking as
+        # "Loading" until candidate_updated_at happens to change on its own.
+        or source in {"unavailable", "data_unavailable", "loading"}
         or "no option expirations available" in reason
         or "option expiration data unavailable" in reason
     )
@@ -2489,10 +2565,17 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
     try:
         promotion_like = _compute_candidate_promotion(candidate)
         direction = str(promotion_like["direction"])
+        # block_on_miss=False -- this is the bulk /candidate-plan-previews
+        # path, computed for every candidate in the universe (long AND
+        # short; unconditional here, unlike update_candidate_status's
+        # single-promotion path below). See _safe_option_contract_for_candidate's
+        # own comment for the full rationale and the real numbers this was
+        # measured against.
         option_contract = _safe_option_contract_for_candidate(
             promotion_like["ticker"],
             direction,
             promotion_like["entry_price"],
+            block_on_miss=False,
         )
         return {
             "ticker": promotion_like["ticker"],
@@ -2946,13 +3029,16 @@ def update_promotion_taken(
         conn.close()
 
 
-def _enriched_previews_for_candidates(conn, candidates: list) -> tuple[list[dict], list]:
-    """Shared by /candidate-plan-previews and /candidate-near-misses: computes
-    (or reuses cached) plan previews for the given candidate rows, then
-    attaches live entry-proximity and execution-shadow the same way for
-    both -- so the two views can never compute gate state differently."""
-    previews: list[dict] = []
-    for candidate in candidates:
+def _stale_plan_preview_candidates(conn, candidates: list) -> tuple[list[Optional[dict]], list[int]]:
+    """First pass only: which of these candidates already have a fresh cached
+    preview, and which still need real (re)computation. Split out so it can
+    be run twice -- once before the single-flight lock (cheap, to decide if
+    there's any real work at all) and once again after acquiring it (a
+    concurrent request that was already refreshing may have just made some
+    or all of "stale" fresh while this request was waiting)."""
+    previews: list[Optional[dict]] = [None] * len(candidates)
+    stale_indices: list[int] = []
+    for i, candidate in enumerate(candidates):
         existing = conn.execute(
             "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
             (candidate["ticker"], candidate["source"]),
@@ -2962,29 +3048,103 @@ def _enriched_previews_for_candidates(conn, candidates: list) -> tuple[list[dict
             and existing["candidate_updated_at"] == candidate["updated_at"]
             and not _preview_transient_refresh_due(existing)
         ):
-            previews.append(_row_to_plan_preview(existing))
-            continue
-        # _compute_candidate_plan_preview() makes real network calls (regime bars,
-        # option chain lookups) per candidate. Committing right after each row's
-        # write -- instead of deferring one commit to the end of this loop -- keeps
-        # the write lock held for one upsert's duration instead of across every
-        # remaining candidate's network round-trip. With hundreds of candidates
-        # needing a refresh right after a scan (their cache keys off
-        # candidate_updated_at, and a scan can touch hundreds of rows at once),
-        # a single end-of-loop commit held the lock open long enough to exceed the
-        # busy_timeout for every other endpoint reading this database concurrently.
-        preview = _compute_candidate_plan_preview(candidate)
-        try:
-            _store_plan_preview(conn, preview)
-            conn.commit()
-        except sqlite3.OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-            preview["preview_error"] = (
-                preview.get("preview_error")
-                or "Plan preview cache is temporarily busy; showing uncached computed preview."
-            )
-        previews.append(preview)
+            previews[i] = _row_to_plan_preview(existing)
+        else:
+            stale_indices.append(i)
+    return previews, stale_indices
+
+
+def _enriched_previews_for_candidates(conn, candidates: list) -> tuple[list[dict], list]:
+    """Shared by /candidate-plan-previews and /candidate-near-misses: computes
+    (or reuses cached) plan previews for the given candidate rows, then
+    attaches live entry-proximity and execution-shadow the same way for
+    both -- so the two views can never compute gate state differently.
+
+    Real profiling (2026-08-28, railway run against live infra) found this
+    endpoint's ~45-85s slowness was ~97-98% real per-candidate network
+    latency (daily-bar + option-contract fetches done one ticker at a time,
+    sequentially -- SQLite writes and all 8 signal computations combined
+    were negligible, ~0.3s and ~3s respectively across the whole universe).
+    Two fixes below address that; a third (single-flight) addresses a
+    separate, confirmed bug where concurrent requests each redid the full
+    computation instead of one waiting on the other.
+    """
+    previews, stale_indices = _stale_plan_preview_candidates(conn, candidates)
+
+    if stale_indices:
+        # Single-flight: a concurrent request arriving here while another is
+        # already doing this same expensive work waits instead of redoing it
+        # (see _plan_preview_refresh_lock's own comment for the confirmed
+        # bug this fixes). The lock guards only the real recompute work
+        # below, never the cheap cache-hit path above.
+        with _plan_preview_refresh_lock:
+            # Re-check: whatever request held the lock before us may have
+            # already refreshed some or all of what looked stale a moment
+            # ago. Cheap (indexed SQLite reads, ~0.6ms/row measured), and
+            # avoids redoing another request's just-finished work.
+            still_stale: list[int] = []
+            for i in stale_indices:
+                if previews[i] is not None:
+                    continue
+                candidate = candidates[i]
+                existing = conn.execute(
+                    "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
+                    (candidate["ticker"], candidate["source"]),
+                ).fetchone()
+                if (
+                    existing
+                    and existing["candidate_updated_at"] == candidate["updated_at"]
+                    and not _preview_transient_refresh_due(existing)
+                ):
+                    previews[i] = _row_to_plan_preview(existing)
+                else:
+                    still_stale.append(i)
+
+            # Pre-warm scanner._batch_download's own TTL cache with ONE
+            # batched (chunked) daily-bar fetch for every candidate that
+            # still genuinely needs recomputation, instead of leaving each
+            # one to _compute_candidate_promotion's existing single-ticker
+            # _batch_download([ticker], ...) call to fetch cold, one at a
+            # time. That inner call is UNCHANGED -- this just makes it a
+            # cache hit. Real numbers: single-ticker cold fetch averaged
+            # ~0.22s/ticker; batched at CANDIDATE_PREVIEW_PREWARM_CHUNK_SIZE
+            # averaged ~0.07-0.08s/ticker. Best-effort only: if a chunk's
+            # fetch fails outright, _compute_candidate_promotion's own call
+            # below still runs and handles that failure exactly as it always
+            # has (HTTPException -> preview_error), nothing here changes
+            # that contract.
+            stale_tickers = sorted({str(candidates[i]["ticker"]).upper() for i in still_stale})
+            for chunk_start in range(0, len(stale_tickers), CANDIDATE_PREVIEW_PREWARM_CHUNK_SIZE):
+                chunk = stale_tickers[chunk_start:chunk_start + CANDIDATE_PREVIEW_PREWARM_CHUNK_SIZE]
+                try:
+                    _batch_download(chunk, period="1y", interval="1d")
+                except Exception:
+                    pass
+
+            for i in still_stale:
+                candidate = candidates[i]
+                # _compute_candidate_plan_preview() makes real network calls (regime bars,
+                # option chain lookups) per candidate. Committing right after each row's
+                # write -- instead of deferring one commit to the end of this loop -- keeps
+                # the write lock held for one upsert's duration instead of across every
+                # remaining candidate's network round-trip. With hundreds of candidates
+                # needing a refresh right after a scan (their cache keys off
+                # candidate_updated_at, and a scan can touch hundreds of rows at once),
+                # a single end-of-loop commit held the lock open long enough to exceed the
+                # busy_timeout for every other endpoint reading this database concurrently.
+                preview = _compute_candidate_plan_preview(candidate)
+                try:
+                    _store_plan_preview(conn, preview)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    if "database is locked" not in str(exc).lower():
+                        raise
+                    preview["preview_error"] = (
+                        preview.get("preview_error")
+                        or "Plan preview cache is temporarily busy; showing uncached computed preview."
+                    )
+                previews[i] = preview
+
     quotes = _latest_quotes_for_previews(previews)
     candidates_by_key = {
         (str(candidate["ticker"]).upper(), str(candidate["source"])): candidate

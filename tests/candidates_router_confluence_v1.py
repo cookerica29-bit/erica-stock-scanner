@@ -278,7 +278,7 @@ def test_store_and_reload_promotion_round_trips_none_confluence(router, tmp_path
 
 def test_plan_preview_success_path_threads_confluence_fields(router, monkeypatch):
     monkeypatch.setattr(router, "_batch_download", lambda tickers, period, interval: {"CONF": _conflict_daily_frame()})
-    monkeypatch.setattr(router, "_safe_option_contract_for_candidate", lambda ticker, direction, entry: None)
+    monkeypatch.setattr(router, "_safe_option_contract_for_candidate", lambda ticker, direction, entry, **kwargs: None)
     candidate = _FakeRow(
         ticker="CONF", signal="long", entry_price=88.05, source="test",
         updated_at="2026-08-27T00:00:00Z",

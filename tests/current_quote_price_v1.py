@@ -110,12 +110,25 @@ def test_latest_quotes_failure_returns_available_quotes_only():
     }
 
 
-def test_latest_quotes_batch_failure_retries_individual_symbols():
+def test_latest_quotes_batch_failure_retries_by_halving_not_full_fallback():
+    """Verified against a real reproduced failure (2026-08-28): a batch
+    doesn't fail because of rate-limiting -- it fails because Alpaca's
+    quotes endpoint rejects the WHOLE request the moment it contains even
+    one symbol it doesn't recognize (confirmed directly: the same real
+    157-symbol chunk succeeded once two known-bad symbols were removed, and
+    those two symbols alone reproduced the failure on their own). Falling
+    back to one request per symbol in the whole failed batch turned a
+    single bad symbol into up to chunk_size sequential requests -- this is
+    what made the endpoint slow. Fixed by halving instead: isolates a bad
+    symbol in O(log n) requests, not O(n), and only ever falls back to a
+    genuine single-symbol request once a batch is already down to size 1.
+    """
     provider, calls = provider_with_quote_pages([
-        URLError("bad symbol poisoned batch"),
-        {"quotes": {"AAPL": {"bp": 100.0, "ap": 101.0}}},
-        URLError("bad symbol"),
-        {"quotes": {"MSFT": {"bp": 400.0, "ap": 402.0}}},
+        URLError("bad symbol poisoned batch"),          # AAPL,BAD,MSFT -> fail
+        {"quotes": {"AAPL": {"bp": 100.0, "ap": 101.0}}},  # AAPL -> ok
+        URLError("bad symbol"),                          # BAD,MSFT -> fail
+        URLError("bad symbol"),                          # BAD -> fail (size 1, gives up)
+        {"quotes": {"MSFT": {"bp": 400.0, "ap": 402.0}}},  # MSFT -> ok
     ])
 
     old_env = os.environ.get("ALPACA_QUOTE_CHUNK_SIZE")
@@ -128,10 +141,55 @@ def test_latest_quotes_batch_failure_retries_individual_symbols():
         else:
             os.environ["ALPACA_QUOTE_CHUNK_SIZE"] = old_env
 
-    assert [call["symbols"] for call in calls] == ["AAPL,BAD,MSFT", "AAPL", "BAD", "MSFT"]
+    # 5 requests to fully resolve a 3-symbol batch with 1 bad symbol -- more
+    # than the "ideal" 3 individual requests would have been for THIS TINY
+    # case, but the win is in how this scales: for a real 157-symbol batch
+    # with 1-2 bad symbols, this is ~17 requests instead of ~157 (see the
+    # commit message for the real measured numbers this was verified
+    # against, not assumed).
+    assert [call["symbols"] for call in calls] == ["AAPL,BAD,MSFT", "AAPL", "BAD,MSFT", "BAD", "MSFT"]
     assert quotes["AAPL"]["price"] == 100.5
     assert quotes["MSFT"]["price"] == 401.0
     assert "BAD" not in quotes
+
+
+def test_latest_quotes_isolates_bad_symbols_in_a_large_batch_with_far_fewer_than_n_requests():
+    """The real scaling claim: for a realistically large batch (64 symbols,
+    2 bad), request count should be far below 64 (the old full-fallback
+    count), not just "less than 64 in this one tiny 3-symbol test above."""
+    good = [f"GOOD{i}" for i in range(64)]
+    symbols = good[:30] + ["BAD1"] + good[30:62] + ["BAD2"] + good[62:]
+    assert len(symbols) == 66
+
+    provider = market_data.AlpacaMarketDataProvider(api_key="key", secret_key="secret")
+    calls = []
+
+    def fake_latest_quotes(params):
+        calls.append(params["symbols"])
+        requested = params["symbols"].split(",")
+        if "BAD1" in requested or "BAD2" in requested:
+            raise URLError("bad symbol poisoned batch")
+        return {"quotes": {s: {"bp": 10.0, "ap": 10.2} for s in requested}}
+
+    provider._request_latest_quotes = fake_latest_quotes
+
+    old_env = os.environ.get("ALPACA_QUOTE_CHUNK_SIZE")
+    os.environ["ALPACA_QUOTE_CHUNK_SIZE"] = "66"
+    try:
+        quotes = provider.latest_quotes(symbols)
+    finally:
+        if old_env is None:
+            os.environ.pop("ALPACA_QUOTE_CHUNK_SIZE", None)
+        else:
+            os.environ["ALPACA_QUOTE_CHUNK_SIZE"] = old_env
+
+    assert len(quotes) == 64
+    assert "BAD1" not in quotes
+    assert "BAD2" not in quotes
+    assert all(f"GOOD{i}" in quotes for i in range(64))
+    # Old behavior: 1 (whole batch) + 66 (every symbol individually) = 67.
+    # This isolates 2 bad symbols via halving in well under half that.
+    assert len(calls) < 30, f"expected roughly O(log n) requests, got {len(calls)}"
 
 
 def test_attach_current_quotes_is_display_only():
@@ -194,7 +252,8 @@ def main() -> int:
     test_latest_quotes_uses_midpoint_then_ask_then_bid()
     test_latest_quotes_chunks_requests()
     test_latest_quotes_failure_returns_available_quotes_only()
-    test_latest_quotes_batch_failure_retries_individual_symbols()
+    test_latest_quotes_batch_failure_retries_by_halving_not_full_fallback()
+    test_latest_quotes_isolates_bad_symbols_in_a_large_batch_with_far_fewer_than_n_requests()
     test_attach_current_quotes_is_display_only()
     test_attach_current_quotes_failure_leaves_rows_unchanged()
     print("Current quote price v1 tests passed")
