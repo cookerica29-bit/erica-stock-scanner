@@ -745,9 +745,43 @@
     // same check behind the "Loaded X ENTER_NOW cards" count and the
     // default ready-only Inbox filter), just rendered as an affirmative
     // green badge instead of silence when there's nothing to warn about.
-    const reasonBadge = blockReason
-      ? `<span class="candidate-pill reason-primary" title="${escapeHtml(blockReason)}">${escapeHtml(blockReason)}</span>`
-      : '<span class="candidate-pill ready-primary" title="Passes every ENTER_NOW gate: regime, target, R:R, entry proximity, execution confirmation.">✓ Ready — ENTER_NOW eligible</span>';
+    //
+    // READY is purely mechanical (regime/target/R:R/proximity/execution --
+    // see routeBlockReason) and always has been; it has no awareness of
+    // confluence/location/macro-CHoCH, which all shipped after this badge
+    // existed. That's a real, confirmed gap (not a new gate to add) -- a
+    // candidate can pass every mechanical gate while confluence_label
+    // reads "conflicted" (2+ real unfavorable signals -- the same
+    // CONFLICTED_UNFAVORABLE_MIN threshold confluence_label itself already
+    // uses, not a new one invented here). When that happens, the badge
+    // itself -- not just the separate confluence pill next to it -- needs
+    // to say so, since a reader scanning the pill row hits THIS pill
+    // first and may never connect it back to a pill three slots over.
+    // Deliberately keyed on "conflicted" specifically, not "limited"/
+    // "some": real data (2026-08-28) showed "limited confluence" is
+    // actually the NORM among mechanically-ready candidates (5 of 7 live
+    // that day), so flagging anything short of "strong" would dilute this
+    // into noise on most cards; "conflicted" alone stayed a real minority
+    // (~1 of 7) and is the one case that actually contradicts a green
+    // checkmark. This is presentation only -- routeBlockReason/
+    // _promotion_block_reason and every filter/count built on them are
+    // completely unchanged; a conflicted-but-ready candidate is still
+    // "ready" everywhere that matters, it just doesn't get to LOOK
+    // uncomplicated about it anymore.
+    const isConflictedReady = !blockReason && effectivePlan?.confluence_label === 'conflicted';
+    let reasonBadge;
+    if (blockReason) {
+      reasonBadge = `<span class="candidate-pill reason-primary" title="${escapeHtml(blockReason)}">${escapeHtml(blockReason)}</span>`;
+    } else if (isConflictedReady) {
+      const ratio = effectivePlan.confluence_counts
+        ? `${effectivePlan.confluence_counts.favorable}/${effectivePlan.confluence_counts.applicable}`
+        : '';
+      const title = 'Passes every ENTER_NOW gate: regime, target, R:R, entry proximity, execution confirmation. '
+        + 'Confluence is conflicted (2+ real unfavorable signals) -- mechanical readiness does not account for this.';
+      reasonBadge = `<span class="candidate-pill ready-primary conflicted" title="${escapeHtml(title)}">⚠ Ready — Conflicted${ratio ? ` (${escapeHtml(ratio)})` : ''}</span>`;
+    } else {
+      reasonBadge = '<span class="candidate-pill ready-primary" title="Passes every ENTER_NOW gate: regime, target, R:R, entry proximity, execution confirmation.">✓ Ready — ENTER_NOW eligible</span>';
+    }
     return `
       <article class="candidate-card ${status === 'active' ? 'active-plan' : ''} ${status === 'dismissed' ? 'dismissed' : ''}">
         <div class="candidate-card-head">
