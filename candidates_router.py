@@ -39,6 +39,7 @@ from scanner import (
 from structural_resistance import clamp_target, levels_near_target, resolve_stop
 from displacement_score import score_displacement
 from location_score import score_location
+from confluence_summary import summarize_confluence
 
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
@@ -342,6 +343,18 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN location_label TEXT")
     if "location_alignment" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN location_alignment TEXT")
+    # Kairos-native confluence summary -- same overlay-only decision as
+    # every signal it combines. See confluence_summary.py for the
+    # (deliberately unvalidated) CONFLICTED_UNFAVORABLE_MIN/
+    # STRONG_FAVORABLE_RATIO/SOME_FAVORABLE_RATIO cutoffs behind
+    # confluence_label. confluence_signals/confluence_counts are dicts
+    # (JSON columns); confluence_label is a flat scalar.
+    if "confluence_signals_json" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN confluence_signals_json TEXT")
+    if "confluence_counts_json" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN confluence_counts_json TEXT")
+    if "confluence_label" not in columns:
+        conn.execute("ALTER TABLE candidate_promotions ADD COLUMN confluence_label TEXT")
 
 
 def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_schema: bool) -> None:
@@ -400,7 +413,10 @@ def _rebuild_candidate_promotions_table(conn: sqlite3.Connection, legacy_narrow_
             rejection_details_json TEXT,
             location_percentile REAL,
             location_label TEXT,
-            location_alignment TEXT
+            location_alignment TEXT,
+            confluence_signals_json TEXT,
+            confluence_counts_json TEXT,
+            confluence_label TEXT
         )
         """
     )
@@ -502,6 +518,12 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN location_label TEXT")
     if "location_alignment" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN location_alignment TEXT")
+    if "confluence_signals_json" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN confluence_signals_json TEXT")
+    if "confluence_counts_json" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN confluence_counts_json TEXT")
+    if "confluence_label" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN confluence_label TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -633,7 +655,10 @@ def _initialize_candidates_schema(conn) -> None:
             rejection_details_json TEXT,
             location_percentile REAL,
             location_label TEXT,
-            location_alignment TEXT
+            location_alignment TEXT,
+            confluence_signals_json TEXT,
+            confluence_counts_json TEXT,
+            confluence_label TEXT
         )
         """
     )
@@ -703,6 +728,9 @@ def _initialize_candidates_schema(conn) -> None:
             location_percentile REAL,
             location_label TEXT,
             location_alignment TEXT,
+            confluence_signals_json TEXT,
+            confluence_counts_json TEXT,
+            confluence_label TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -844,6 +872,13 @@ class CandidatePromotionOut(BaseModel):
     location_percentile: Optional[float] = None
     location_label: Optional[str] = None
     location_alignment: Optional[str] = None
+    # Kairos-native confluence summary -- NOT legacy's A+/B+ tiers (see
+    # confluence_summary.py's module docstring). Purely descriptive, flat
+    # equal-weighted count over the 7 signals above; confluence_label's
+    # cutoffs are explicitly flagged placeholders in that module.
+    confluence_signals: Optional[dict[str, Any]] = None
+    confluence_counts: Optional[dict[str, Any]] = None
+    confluence_label: Optional[str] = None
 
 
 class CandidateChartReviewOut(BaseModel):
@@ -901,6 +936,9 @@ class CandidatePlanPreviewOut(BaseModel):
     location_percentile: Optional[float] = None
     location_label: Optional[str] = None
     location_alignment: Optional[str] = None
+    confluence_signals: Optional[dict[str, Any]] = None
+    confluence_counts: Optional[dict[str, Any]] = None
+    confluence_label: Optional[str] = None
     option_contract: Optional[dict[str, Any]]
     current_price: Optional[float] = None
     current_quote_timestamp: Optional[str] = None
@@ -1045,6 +1083,8 @@ def _row_to_promotion(row: sqlite3.Row) -> dict:
     output["sweep_details"] = _sweep_details_from_row(output)
     output["rejection_confirmed"] = bool(output.get("rejection_confirmed"))
     output["rejection_details"] = _parse_displacement_components_json(output.pop("rejection_details_json", None))
+    output["confluence_signals"] = _parse_displacement_components_json(output.pop("confluence_signals_json", None))
+    output["confluence_counts"] = _parse_displacement_components_json(output.pop("confluence_counts_json", None))
     return output
 
 
@@ -1071,6 +1111,8 @@ def _row_to_plan_preview(row: sqlite3.Row | dict) -> dict:
     output["sweep_details"] = _sweep_details_from_row(output)
     output["rejection_confirmed"] = bool(output.get("rejection_confirmed"))
     output["rejection_details"] = _parse_displacement_components_json(output.pop("rejection_details_json", None))
+    output["confluence_signals"] = _parse_displacement_components_json(output.pop("confluence_signals_json", None))
+    output["confluence_counts"] = _parse_displacement_components_json(output.pop("confluence_counts_json", None))
     raw_contract = output.pop("option_contract_json", None)
     if raw_contract:
         try:
@@ -2154,6 +2196,29 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
                 rr_warning = risk_reward < RR_WARNING_THRESHOLD
                 target_clamped = True
 
+    # Kairos-native signal confluence -- NOT a port of scanner.
+    # _build_trade_stage_eval's A+ READY/B+ TRADEABLE tiers (see
+    # confluence_summary.py's module docstring for why: that logic depends
+    # on several pieces never ported here -- scanner._cleanliness_read,
+    # scanner._room_to_target's separate stricter R:R path, standalone
+    # in_ob/near_ob tracking -- and on the legacy hard-gate
+    # detect_displacement, not this session's own continuous replacement).
+    # A flat, equal-weighted count of the 7 signals already computed above,
+    # purely descriptive -- never referenced by no_valid_target,
+    # rr_warning, or promotion eligibility below.
+    confluence = summarize_confluence(
+        bos_confirmed=bos_confirmed,
+        displacement_read=displacement["displacement_read"],
+        sweep_confirmed=sweep_confirmed,
+        rejection_confirmed=rejection_confirmed,
+        macro_conflict=macro_conflict,
+        choch_conflict=choch_conflict,
+        location_alignment=location["location_alignment"],
+        risk_reward=risk_reward,
+        rr_warning=rr_warning,
+        no_valid_target=no_valid_target,
+    )
+
     promoted_at = datetime.now(timezone.utc).isoformat()
     return {
         "ticker": ticker,
@@ -2197,6 +2262,9 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "location_percentile": location["location_percentile"],
         "location_label": location["location_label"],
         "location_alignment": location["location_alignment"],
+        "confluence_signals": confluence["confluence_signals"],
+        "confluence_counts": confluence["confluence_counts"],
+        "confluence_label": confluence["confluence_label"],
     }
 
 
@@ -2264,8 +2332,9 @@ def _store_promotion(conn, promotion: dict) -> int:
              raw_magnitude_score, displacement_read, bos_confirmed, bos_level,
              macro_bias, macro_conflict, choch_conflict, choch_details_json,
              sweep_confirmed, sweep_level, rejection_confirmed, rejection_details_json,
-             location_percentile, location_label, location_alignment)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             location_percentile, location_label, location_alignment,
+             confluence_signals_json, confluence_counts_json, confluence_label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             promotion["ticker"],
@@ -2309,6 +2378,9 @@ def _store_promotion(conn, promotion: dict) -> int:
             promotion.get("location_percentile"),
             promotion.get("location_label"),
             promotion.get("location_alignment"),
+            json.dumps(promotion["confluence_signals"], separators=(",", ":")) if promotion.get("confluence_signals") else None,
+            json.dumps(promotion["confluence_counts"], separators=(",", ":")) if promotion.get("confluence_counts") else None,
+            promotion.get("confluence_label"),
         ),
     )
     return cursor.lastrowid
@@ -2364,6 +2436,9 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "location_percentile": promotion_like.get("location_percentile"),
             "location_label": promotion_like.get("location_label"),
             "location_alignment": promotion_like.get("location_alignment"),
+            "confluence_signals": promotion_like.get("confluence_signals"),
+            "confluence_counts": promotion_like.get("confluence_counts"),
+            "confluence_label": promotion_like.get("confluence_label"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -2410,6 +2485,9 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "location_percentile": None,
             "location_label": None,
             "location_alignment": None,
+            "confluence_signals": None,
+            "confluence_counts": None,
+            "confluence_label": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -2431,8 +2509,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
              displacement_components_json, raw_magnitude_score, displacement_read,
              bos_confirmed, bos_level, macro_bias, macro_conflict, choch_conflict,
              choch_details_json, sweep_confirmed, sweep_level, rejection_confirmed,
-             rejection_details_json, location_percentile, location_label, location_alignment)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             rejection_details_json, location_percentile, location_label, location_alignment,
+             confluence_signals_json, confluence_counts_json, confluence_label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -2474,7 +2553,10 @@ def _store_plan_preview(conn, preview: dict) -> None:
             rejection_details_json=excluded.rejection_details_json,
             location_percentile=excluded.location_percentile,
             location_label=excluded.location_label,
-            location_alignment=excluded.location_alignment
+            location_alignment=excluded.location_alignment,
+            confluence_signals_json=excluded.confluence_signals_json,
+            confluence_counts_json=excluded.confluence_counts_json,
+            confluence_label=excluded.confluence_label
         """,
         (
             preview["ticker"],
@@ -2520,6 +2602,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             preview.get("location_percentile"),
             preview.get("location_label"),
             preview.get("location_alignment"),
+            json.dumps(preview["confluence_signals"], separators=(",", ":")) if preview.get("confluence_signals") else None,
+            json.dumps(preview["confluence_counts"], separators=(",", ":")) if preview.get("confluence_counts") else None,
+            preview.get("confluence_label"),
         ),
     )
 
