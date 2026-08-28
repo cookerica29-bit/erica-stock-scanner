@@ -87,7 +87,19 @@
     if (preview?.entry_distance_pct == null) return '—';
     const pct = fmtNumber(preview.entry_distance_pct, 2);
     const atr = preview.entry_distance_atr == null ? '' : ` · ${fmtNumber(preview.entry_distance_atr, 2)} ATR`;
-    return `${pct}%${atr}`;
+    // entry_status_label is legacy's four-tier bucket, purely descriptive
+    // and deliberately NOT the same threshold as entry_proximity_ok (the
+    // actual gate, shown separately as an "Also: ..." pill elsewhere on the
+    // card when it fails). Kept as plain muted parenthetical text inside
+    // this KV cell -- not a colored badge -- specifically so it never reads
+    // as a second verdict next to the real one. The two can disagree (e.g.
+    // proximity_ok: true while this reads "Near Entry" not "Tradeable")
+    // and that's expected, not a bug -- see candidates_router.py's
+    // ENTRY_STATUS_TRADEABLE_MAX_ATR comment for the full explanation.
+    // Note: escapeHtml is applied once, by the caller, to this whole
+    // return value -- not escaped again in here.
+    const status = preview?.entry_status_label ? ` (${preview.entry_status_label})` : '';
+    return `${pct}%${atr}${status}`;
   }
 
   function storageGet(storage, key) {
@@ -684,6 +696,34 @@
     list.innerHTML = items.map(item => renderCandidateCard(item, promoMap.get(promotionKey(item)), previewMap.get(promotionKey(item)), reviewMap.get(promotionKey(item)))).join('');
   }
 
+  // confluence_label -> pill tone, reusing the existing pill vocabulary
+  // rather than inventing new visual language. "strong"/"conflicted" get
+  // the same green/red weight as ready-primary/reason-primary elsewhere on
+  // the card; "some"/"limited" stay deliberately quieter since neither is
+  // a verdict, just a count.
+  const CONFLUENCE_TONE = {
+    'strong confluence': 'high',
+    'some confluence': '',
+    'limited confluence': 'secondary',
+    'conflicted': 'bad',
+  };
+
+  function renderConfluencePill(plan) {
+    const label = plan?.confluence_label;
+    if (!label) return '';
+    const tone = CONFLUENCE_TONE[label] ?? '';
+    const counts = plan.confluence_counts;
+    const ratio = counts ? ` · ${counts.favorable}/${counts.applicable}` : '';
+    const display = label.replace(/\b\w/g, (c) => c.toUpperCase());
+    const breakdown = plan.confluence_signals
+      ? Object.entries(plan.confluence_signals)
+        .filter(([, v]) => v != null)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(', ')
+      : '';
+    return `<span class="candidate-pill ${escapeHtml(tone)}" title="${escapeHtml(breakdown)}">${escapeHtml(display)}${escapeHtml(ratio)}</span>`;
+  }
+
   function renderCandidateCard(item, promotion, planPreview, chartReview) {
     const status = String(item.status || 'new').toLowerCase();
     const direction = String(item.signal || '').toLowerCase();
@@ -719,6 +759,7 @@
         </div>
         <div class="candidate-pill-row">
           ${reasonBadge}
+          ${renderConfluencePill(effectivePlan)}
           <span class="candidate-pill ${escapeHtml(confidence)}">${escapeHtml(confidence)}</span>
           <span class="candidate-pill ${aligned ? 'high' : 'medium'}">${aligned ? 'regime aligned' : `regime ${regime || 'unknown'}`}</span>
           <span class="candidate-pill">${escapeHtml(status)}</span>
@@ -808,12 +849,77 @@
     return [signalRow('BOS', 'Not yet confirmed', '', 'info')];
   }
 
+  // macro_conflict/choch_conflict have no "favorable" state by design (see
+  // confluence_summary.py's module docstring) -- they only ever flag a
+  // conflict, never confirm alignment. So unlike BOS/displacement above,
+  // there is nothing informative to show when clean; this row is silent
+  // unless one of the two actually fires, same silent-when-not-applicable
+  // pattern as target-clamp/stop-source. Warning tone (not info) is
+  // deliberate -- legacy treated this signal seriously enough to warrant
+  // the same visual weight as a refused target clamp or adverse displacement.
+  function renderMacroChochSignal(obj) {
+    if (!obj || (!obj.macro_conflict && !obj.choch_conflict)) return [];
+    const parts = [];
+    if (obj.macro_conflict && obj.macro_bias) {
+      parts.push(`Bias conflict — ${escapeHtml(obj.macro_bias)}`);
+    } else if (obj.macro_conflict) {
+      parts.push('Bias conflict');
+    }
+    if (obj.choch_conflict) {
+      const level = obj.choch_details?.level == null ? '' : ` at ${escapeHtml(fmtMoney(obj.choch_details.level))}`;
+      const dir = obj.choch_details?.direction ? `${escapeHtml(obj.choch_details.direction)} ` : '';
+      parts.push(`CHoCH conflict — ${dir}break${level}`);
+    }
+    const detail = obj.choch_conflict && obj.choch_details?.reason ? escapeHtml(obj.choch_details.reason) : '';
+    return [signalRow('Macro/CHoCH', parts.join(' · '), detail, 'warning')];
+  }
+
+  // sweep/rejection have no "unfavorable" state either -- they only ever
+  // confirm FOR a direction. Silent when not confirmed, same reasoning as
+  // macro/CHoCH above but the opposite tone: these are confirmations, not
+  // warnings, so they stay at BOS's neutral 'info' weight per design.
+  function renderSweepSignal(obj) {
+    if (!obj || !obj.sweep_confirmed) return [];
+    const level = obj.sweep_details?.level == null ? '' : `Swept level ${escapeHtml(fmtMoney(obj.sweep_details.level))}`;
+    return [signalRow('Sweep', 'Confirmed', level, 'info')];
+  }
+
+  function renderRejectionSignal(obj) {
+    if (!obj || !obj.rejection_confirmed) return [];
+    const d = obj.rejection_details || {};
+    const detailParts = [];
+    if (d.condition) detailParts.push(escapeHtml(d.condition));
+    if (d.wick_body_ratio != null) detailParts.push(`wick/body ${escapeHtml(fmtNumber(d.wick_body_ratio, 2))}`);
+    return [signalRow('Rejection', 'Confirmed', detailParts.join(' · '), 'info')];
+  }
+
+  // Muted/informational by design, even when location_alignment is
+  // "unfavorable" -- location is deliberately the least gate-worthy signal
+  // here despite being legacy's harshest gate, so it never escalates to
+  // warning tone. Silent when there's no valid swing range to read at all
+  // (location_percentile == null), same as confluence_summary's own
+  // null-handling for this field.
+  function renderLocationSignal(obj) {
+    if (!obj || obj.location_percentile == null) return [];
+    const label = obj.location_label ? String(obj.location_label) : 'location';
+    const main = `${label.charAt(0).toUpperCase()}${label.slice(1)} (${fmtNumber(obj.location_percentile, 1)}%)`;
+    const alignment = obj.location_alignment;
+    const detail = (alignment === 'favorable' || alignment === 'unfavorable')
+      ? `${alignment.charAt(0).toUpperCase()}${alignment.slice(1)} for this direction`
+      : '';
+    return [signalRow('Location', escapeHtml(main), escapeHtml(detail), 'info')];
+  }
+
   function renderPlanSignals(obj) {
     const rows = [
       ...renderTargetClampSignal(obj),
       ...renderStopSourceSignal(obj),
       ...renderDisplacementSignal(obj),
       ...renderBosSignal(obj),
+      ...renderMacroChochSignal(obj),
+      ...renderSweepSignal(obj),
+      ...renderRejectionSignal(obj),
+      ...renderLocationSignal(obj),
     ];
     if (!rows.length) return '';
     return `
