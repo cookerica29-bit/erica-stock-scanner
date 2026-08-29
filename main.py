@@ -14,7 +14,7 @@ import pandas as pd
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from scanner import (
     analysis_cache_snapshot,
     analysis_cache_status,
@@ -1711,6 +1711,26 @@ def startup_market_cache_refresh():
 
 @app.get("/")
 def index():
+    # candidates.html (the SMC/confluence promotion dashboard) is the
+    # default homepage as of 2026-08-29 -- the legacy scanner.py-driven
+    # "Trade Readiness" card UI below is kept reachable at /legacy as a
+    # read-only reference, not deleted (see /legacy). This is a real
+    # routing change, not a cosmetic one: anything that assumed GET / meant
+    # "the legacy scanner page" (e.g. tests/api_cache_headers_v1.py) needs
+    # to follow the redirect, not read this response directly.
+    return RedirectResponse(url="/candidates", status_code=307)
+
+
+@app.get("/legacy")
+def legacy_index():
+    # Read-only reference copy of the pre-candidates.html scanner UI --
+    # verified before this route was added that public/index.html was ALSO
+    # already reachable at /static/index.html via the StaticFiles mount
+    # below (an incidental side effect of serving all of public/ as static
+    # assets, not an intentional route), so this isn't the only thing
+    # keeping the legacy page alive -- it's the clean, discoverable,
+    # intentional one, and what candidates.html's "Legacy Scanner" link
+    # points to.
     return FileResponse(
         "public/index.html",
         headers=NO_STORE_HEADERS,
