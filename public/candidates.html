@@ -450,24 +450,6 @@
       font-weight: 800;
     }
 
-    /* A genuine third state, not a repurposed one: mechanically ready
-       (still passes every routeBlockReason() gate -- this is presentation
-       only, no gating logic changes here) but confluence_label reads
-       "conflicted" (2+ real unfavorable signals among BOS/displacement/
-       sweep/rejection/macro-CHoCH/location/R:R). Same amber hue as
-       .medium/.warn elsewhere on the card for a consistent "caution"
-       vocabulary, but at .ready-primary's bolder weight/opacity -- this
-       needs to read as seriously as the green/red primary badges it sits
-       between, not as a quiet secondary pill. Same element as
-       .ready-primary (⚠ replaces ✓, text changes), not an adjacent pill --
-       the whole point is that the badge itself can't be read as
-       unconditionally clean anymore. */
-    .candidate-pill.ready-primary.conflicted {
-      color: #fef3c7;
-      background: rgba(245, 158, 11, 0.34);
-      border-color: rgba(245, 158, 11, 0.75);
-    }
-
     /* Real data that is NOT the operative blocking reason -- kept visible
        for context but visually quieter than reason-primary, and worded
        "Also:" so it never reads as causal. */
@@ -767,7 +749,7 @@
     </main>
   </div>
 
-  <script src="/static/candidate_dashboard.js?v=20260828-conflicted-ready-badge"></script>
+  <script src="/static/candidate_dashboard.js?v=20260828-conflicted-excluded-from-ready"></script>
   <script>
     loadCandidateDashboard(false);
   </script>

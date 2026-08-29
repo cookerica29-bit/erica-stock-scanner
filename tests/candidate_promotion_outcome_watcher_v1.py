@@ -255,7 +255,7 @@ def test_state_snapshot_reflects_last_run(env, monkeypatch):
 
 def test_tracking_only_short_promotion_resolves_exactly_like_a_real_one(env, monkeypatch):
     """The whole point of promotion_kind='tracking_only' (see
-    candidates_router.track_short_outcome): it must flow through this
+    candidates_router.track_candidate_outcome): it must flow through this
     resolver with zero special-casing, identical to a real 'enter_now'
     promotion. This query has never filtered on direction or kind -- taken=1
     is the only thing that matters -- so this is a regression guard on that

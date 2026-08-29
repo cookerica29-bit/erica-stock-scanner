@@ -477,6 +477,24 @@ def test_gate_gap_report_excludes_categorical_short():
     assert report["gaps"] == []
 
 
+def test_gate_gap_report_excludes_categorical_conflicted_confluence():
+    """Same categorical (not gradable) treatment as the short exclusion
+    above -- a candidate is either conflicted or it isn't, "closer to
+    unconflicted" isn't a real gap. Added 2026-08-29 alongside
+    _promotion_block_reason's own confluence_label=="conflicted" exclusion."""
+    import candidates_router
+
+    report = candidates_router._gate_gap_report(
+        _near_miss_candidate(signal="long", daily_regime="bullish"),
+        {"signal": "long", "no_valid_target": False, "target": 110.0, "risk_reward": 3.0,
+         "rr_warning": False, "entry_proximity_ok": True, "confluence_label": "conflicted"},
+    )
+    assert report["categorical_blocked"] is True
+    assert report["categorical_reason"] == "Confluence is conflicted"
+    assert report["failing_count"] is None
+    assert report["gaps"] == []
+
+
 def test_gate_gap_report_tier1_rr_only():
     import candidates_router
 

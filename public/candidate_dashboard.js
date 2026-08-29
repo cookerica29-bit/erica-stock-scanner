@@ -310,6 +310,12 @@
     if (proximityReason) return proximityReason;
     const executionReason = executionConfirmationBlockReason(plan);
     if (executionReason) return executionReason;
+    // Keep in sync with the backend twin, _promotion_block_reason in
+    // candidates_router.py -- see its own comment there for the full
+    // rationale (real DASH example, why "conflicted" specifically and not
+    // any softer confluence tier, the CONFLICTED_UNFAVORABLE_MIN=2
+    // placeholder now doing real gating work here for the first time).
+    if (plan.confluence_label === 'conflicted') return 'Confluence is conflicted';
     const freshnessReason = scanFreshnessBlockReason(item);
     if (freshnessReason) return freshnessReason;
     return '';
@@ -746,42 +752,22 @@
     // default ready-only Inbox filter), just rendered as an affirmative
     // green badge instead of silence when there's nothing to warn about.
     //
-    // READY is purely mechanical (regime/target/R:R/proximity/execution --
-    // see routeBlockReason) and always has been; it has no awareness of
-    // confluence/location/macro-CHoCH, which all shipped after this badge
-    // existed. That's a real, confirmed gap (not a new gate to add) -- a
-    // candidate can pass every mechanical gate while confluence_label
-    // reads "conflicted" (2+ real unfavorable signals -- the same
-    // CONFLICTED_UNFAVORABLE_MIN threshold confluence_label itself already
-    // uses, not a new one invented here). When that happens, the badge
-    // itself -- not just the separate confluence pill next to it -- needs
-    // to say so, since a reader scanning the pill row hits THIS pill
-    // first and may never connect it back to a pill three slots over.
-    // Deliberately keyed on "conflicted" specifically, not "limited"/
-    // "some": real data (2026-08-28) showed "limited confluence" is
-    // actually the NORM among mechanically-ready candidates (5 of 7 live
-    // that day), so flagging anything short of "strong" would dilute this
-    // into noise on most cards; "conflicted" alone stayed a real minority
-    // (~1 of 7) and is the one case that actually contradicts a green
-    // checkmark. This is presentation only -- routeBlockReason/
-    // _promotion_block_reason and every filter/count built on them are
-    // completely unchanged; a conflicted-but-ready candidate is still
-    // "ready" everywhere that matters, it just doesn't get to LOOK
-    // uncomplicated about it anymore.
-    const isConflictedReady = !blockReason && effectivePlan?.confluence_label === 'conflicted';
-    let reasonBadge;
-    if (blockReason) {
-      reasonBadge = `<span class="candidate-pill reason-primary" title="${escapeHtml(blockReason)}">${escapeHtml(blockReason)}</span>`;
-    } else if (isConflictedReady) {
-      const ratio = effectivePlan.confluence_counts
-        ? `${effectivePlan.confluence_counts.favorable}/${effectivePlan.confluence_counts.applicable}`
-        : '';
-      const title = 'Passes every ENTER_NOW gate: regime, target, R:R, entry proximity, execution confirmation. '
-        + 'Confluence is conflicted (2+ real unfavorable signals) -- mechanical readiness does not account for this.';
-      reasonBadge = `<span class="candidate-pill ready-primary conflicted" title="${escapeHtml(title)}">⚠ Ready — Conflicted${ratio ? ` (${escapeHtml(ratio)})` : ''}</span>`;
-    } else {
-      reasonBadge = '<span class="candidate-pill ready-primary" title="Passes every ENTER_NOW gate: regime, target, R:R, entry proximity, execution confirmation.">✓ Ready — ENTER_NOW eligible</span>';
-    }
+    // History worth knowing if this area looks odd in a diff: for a few
+    // hours on 2026-08-28/29 this badge had a third, amber "⚠ Ready —
+    // Conflicted" state for a candidate that was mechanically ready but
+    // confluence-conflicted (DASH). That was a deliberate first step --
+    // presentation only, badge just told the truth about data that already
+    // existed elsewhere on the card. It's gone now because the FOLLOW-UP
+    // decision (2026-08-29) was to stop treating a conflicted candidate as
+    // ENTER_NOW-eligible at all -- see routeBlockReason's confluence_label
+    // check above, which now makes blockReason truthy for exactly the case
+    // that amber state used to handle. The two states can't coexist: once
+    // "conflicted" makes blockReason non-empty, it always renders as the
+    // red reason-primary badge below, never reaches here. Removed rather
+    // than left as dead unreachable code.
+    const reasonBadge = blockReason
+      ? `<span class="candidate-pill reason-primary" title="${escapeHtml(blockReason)}">${escapeHtml(blockReason)}</span>`
+      : '<span class="candidate-pill ready-primary" title="Passes every ENTER_NOW gate: regime, target, R:R, entry proximity, execution confirmation.">✓ Ready — ENTER_NOW eligible</span>';
     return `
       <article class="candidate-card ${status === 'active' ? 'active-plan' : ''} ${status === 'dismissed' ? 'dismissed' : ''}">
         <div class="candidate-card-head">

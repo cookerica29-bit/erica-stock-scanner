@@ -337,3 +337,58 @@ def test_promotion_gate_allows_when_execution_confirmation_ready():
     )
 
     assert reason is None
+
+
+def test_promotion_gate_blocks_when_confluence_is_conflicted():
+    """Added 2026-08-29: a candidate that passes every mechanical
+    condition (regime/target/R:R/proximity/execution -- exactly
+    _promotion_gate_plan()'s clean defaults) must still be blocked when
+    confluence_label=="conflicted". Real example this was built from:
+    DASH showed the same green READY badge as a clean setup while carrying
+    confluence_label="conflicted" (2 unfavorable/7), a Macro Bearish
+    conflict, and Premium/Unfavorable location simultaneously."""
+    reason = candidates_router._promotion_block_reason(
+        _promotion_gate_candidate(),
+        _promotion_gate_plan(confluence_label="conflicted"),
+        _good_contract(),
+    )
+
+    assert reason is not None
+    assert "confluence" in reason.lower()
+    assert "conflicted" in reason.lower()
+
+
+def test_promotion_gate_ignores_non_conflicted_confluence_labels():
+    """Deliberately narrow: only "conflicted" blocks. "limited"/"some"/
+    "strong" confluence -- and a candidate with no confluence data at all
+    (confluence_label=None, matching every promotion computed before this
+    field existed) -- must all still pass, exactly as before this
+    exclusion was added."""
+    for label in ("limited confluence", "some confluence", "strong confluence", None):
+        reason = candidates_router._promotion_block_reason(
+            _promotion_gate_candidate(),
+            _promotion_gate_plan(confluence_label=label),
+            _good_contract(),
+        )
+        assert reason is None, f"confluence_label={label!r} should not block, got: {reason}"
+
+
+def test_mechanical_promotion_block_reason_excludes_short_and_conflicted_checks():
+    """_mechanical_promotion_block_reason is the shared helper
+    track_candidate_outcome uses to confirm a candidate has a real,
+    complete plan worth tracking -- it must NOT reapply the short or
+    confluence-conflicted exclusions itself (those are exactly the two
+    conditions that endpoint exists to work around). A short, mechanically
+    clean candidate passes here even though _promotion_block_reason itself
+    would block it; likewise a conflicted one."""
+    short_candidate = {**_promotion_gate_candidate(), "signal": "short", "daily_regime": "bearish"}
+    assert candidates_router._mechanical_promotion_block_reason(
+        short_candidate, _promotion_gate_plan(direction="short"),
+    ) is None
+    assert candidates_router._mechanical_promotion_block_reason(
+        _promotion_gate_candidate(), _promotion_gate_plan(confluence_label="conflicted"),
+    ) is None
+    # But a genuine mechanical failure still blocks here too.
+    assert candidates_router._mechanical_promotion_block_reason(
+        _promotion_gate_candidate(), _promotion_gate_plan(no_valid_target=True, target=None),
+    ) is not None

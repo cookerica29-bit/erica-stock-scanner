@@ -384,11 +384,12 @@ def _ensure_candidate_promotions_schema(conn: sqlite3.Connection) -> None:
     if "confluence_label" not in columns:
         conn.execute("ALTER TABLE candidate_promotions ADD COLUMN confluence_label TEXT")
     # promotion_kind distinguishes a real ENTER_NOW/dashboard promotion
-    # ("enter_now", the only kind that existed before this column) from a
-    # short-side outcome-tracking-only row ("tracking_only", written by
-    # POST /candidates/{ticker}/track-short-outcome). Shorts still cannot
-    # reach "enter_now" -- see _promotion_block_reason -- this only lets a
-    # short accumulate real evidence (taken + the hourly outcome resolver)
+    # ("enter_now", the only kind that existed before this column) from an
+    # outcome-tracking-only row ("tracking_only", written by
+    # POST /candidates/{ticker}/track-outcome for a short, or a long that's
+    # mechanically ready but confluence-conflicted). Neither can reach
+    # "enter_now" -- see _promotion_block_reason -- this only lets them
+    # accumulate real evidence (taken + the hourly outcome resolver)
     # without any dashboard/ENTER_NOW parity. DEFAULT 'enter_now' means
     # every row that predates this column (all real history so far) is
     # correctly backfilled as a real promotion, not silently miscategorized.
@@ -942,8 +943,9 @@ class CandidatePromotionOut(BaseModel):
     confluence_label: Optional[str] = None
     # "enter_now" (default) is a real dashboard/ENTER_NOW-eligible promotion,
     # same as every promotion before this field existed. "tracking_only" is
-    # a short-side outcome-evidence row written by
-    # POST /candidates/{ticker}/track-short-outcome -- it carries the exact
+    # an outcome-evidence row written by
+    # POST /candidates/{ticker}/track-outcome (a short, or a long that's
+    # mechanically ready but confluence-conflicted) -- it carries the exact
     # same plan math and flows through taken/the outcome resolver like any
     # other row, but GET /candidate-promotions excludes it by default (see
     # that endpoint) precisely so it never renders as a real promotion
@@ -1751,13 +1753,20 @@ def _gate_gap_report(candidate: sqlite3.Row | dict, preview: dict) -> dict:
         # Same rule, same rationale as _promotion_block_reason's short
         # branch (see its comment) -- insufficient forward evidence yet, not
         # a signal-quality problem. This is the ENTER_NOW/near-miss view
-        # specifically; POST /candidates/{ticker}/track-short-outcome is the
+        # specifically; POST /candidates/{ticker}/track-outcome is the
         # separate, non-dashboard path for building that evidence.
         return {"categorical_blocked": True, "categorical_reason": "Shorts are research-only", "failing_count": None, "gaps": []}
     if direction != "long":
         return {"categorical_blocked": True, "categorical_reason": "Unsupported direction", "failing_count": None, "gaps": []}
     if not regime_aligned:
         return {"categorical_blocked": True, "categorical_reason": "Regime is not aligned", "failing_count": None, "gaps": []}
+    if preview.get("confluence_label") == "conflicted":
+        # Same rule, same rationale as _promotion_block_reason's confluence
+        # branch (see its comment) -- categorical like short/regime above,
+        # not a gradable distance: a candidate is either conflicted or it
+        # isn't, "closer to unconflicted" isn't a real gap to report. Same
+        # track-outcome path applies here too.
+        return {"categorical_blocked": True, "categorical_reason": "Confluence is conflicted", "failing_count": None, "gaps": []}
 
     gaps: list[dict[str, str]] = []
     no_target = bool(preview.get("no_valid_target")) or preview.get("target") is None
@@ -2427,38 +2436,22 @@ def _candidate_regime_aligned(candidate: sqlite3.Row, direction: str) -> bool:
     return False
 
 
-def _promotion_block_reason(
+def _mechanical_promotion_block_reason(
     candidate: sqlite3.Row | dict[str, Any],
     promotion: dict,
-    option_contract: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
+    """The purely mechanical ENTER_NOW conditions only -- regime alignment,
+    valid target, R:R, entry proximity, execution confirmation. Deliberately
+    excludes the two non-mechanical exclusions _promotion_block_reason also
+    applies (direction/short, confluence-conflict) -- this is the shared
+    "does this candidate have a real, complete, trackable plan at all"
+    check, reused by both the real gate (which layers the non-mechanical
+    exclusions on top) and track_candidate_outcome (which needs to confirm
+    a plan is genuinely usable before accepting it for evidence-only
+    tracking, but must NOT itself reapply the short/conflicted exclusions --
+    those are exactly the conditions that endpoint exists to work around).
+    """
     direction = str(promotion.get("direction") or "").strip().lower()
-    # Shorts are blocked from full ENTER_NOW/dashboard promotion -- not
-    # because the SMC signals don't work for shorts (every one of them,
-    # BOS/displacement/macro-CHoCH/sweep-rejection/location/confluence, is
-    # already computed direction-symmetrically and has been since it was
-    # built), but because there is not yet enough forward evidence that a
-    # short setup here performs the way a long one does. This block
-    # predates outcome tracking existing at all (see git history --
-    # 2026-08-24, before the taken/outcome-resolver pipeline shipped); every
-    # real promotion on record from before that date, short or long, simply
-    # predates this check entirely, so its absence has never actually been
-    # tested against a real short. Verified 2026-08-28: nothing resembling
-    # relative-weakness/sector-laggard qualification logic exists anywhere
-    # in this codebase or legacy scanner.py -- that idea, if it was ever
-    # discussed, was never implemented.
-    #
-    # Now that outcome tracking exists, the responsible path is to build
-    # that evidence rather than guess -- see
-    # POST /candidates/{ticker}/track-short-outcome, which lets a short
-    # accumulate real taken/outcome-resolver history WITHOUT touching this
-    # gate or granting ENTER_NOW/dashboard parity. Loosening THIS check is a
-    # deliberate future decision to make once that evidence exists, not a
-    # side effect of adding the tracking path.
-    if direction == "short":
-        return "Short candidates are research-only and cannot be promoted to the clean dashboard."
-    if direction != "long":
-        return "Unsupported candidate direction."
     if not _candidate_regime_aligned(candidate, direction):
         return "Candidate regime is not aligned, so it is not ENTER_NOW dashboard-ready."
     if promotion.get("no_valid_target") or promotion.get("target") is None or promotion.get("risk_reward") is None:
@@ -2482,6 +2475,79 @@ def _promotion_block_reason(
     if promotion.get("execution_shadow_ok") is not True:
         execution_reason = str(promotion.get("execution_shadow_reason") or "Recent 4H confirmation is not ready")
         return f"Candidate execution confirmation is not ENTER_NOW-ready: {execution_reason}."
+    return None
+
+
+def _promotion_block_reason(
+    candidate: sqlite3.Row | dict[str, Any],
+    promotion: dict,
+    option_contract: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
+    direction = str(promotion.get("direction") or "").strip().lower()
+    # Shorts are blocked from full ENTER_NOW/dashboard promotion -- not
+    # because the SMC signals don't work for shorts (every one of them,
+    # BOS/displacement/macro-CHoCH/sweep-rejection/location/confluence, is
+    # already computed direction-symmetrically and has been since it was
+    # built), but because there is not yet enough forward evidence that a
+    # short setup here performs the way a long one does. This block
+    # predates outcome tracking existing at all (see git history --
+    # 2026-08-24, before the taken/outcome-resolver pipeline shipped); every
+    # real promotion on record from before that date, short or long, simply
+    # predates this check entirely, so its absence has never actually been
+    # tested against a real short. Verified 2026-08-28: nothing resembling
+    # relative-weakness/sector-laggard qualification logic exists anywhere
+    # in this codebase or legacy scanner.py -- that idea, if it was ever
+    # discussed, was never implemented.
+    #
+    # Now that outcome tracking exists, the responsible path is to build
+    # that evidence rather than guess -- see
+    # POST /candidates/{ticker}/track-outcome, which lets a short
+    # accumulate real taken/outcome-resolver history WITHOUT touching this
+    # gate or granting ENTER_NOW/dashboard parity. Loosening THIS check is a
+    # deliberate future decision to make once that evidence exists, not a
+    # side effect of adding the tracking path.
+    if direction == "short":
+        return "Short candidates are research-only and cannot be promoted to the clean dashboard."
+    if direction != "long":
+        return "Unsupported candidate direction."
+    mechanical_reason = _mechanical_promotion_block_reason(candidate, promotion)
+    if mechanical_reason:
+        return mechanical_reason
+    # Confluence-conflicted exclusion, added 2026-08-29 after a real,
+    # concrete UX gap: DASH showed the identical green "READY -- ENTER_NOW
+    # ELIGIBLE" badge as a clean setup while confluence_label read
+    # "conflicted" (2+ real unfavorable signals among BOS/displacement/
+    # sweep/rejection/macro-CHoCH/location/R:R), carrying a real Macro
+    # Bearish conflict and Premium/Unfavorable location at the same time.
+    # The badge previously had zero awareness of confluence/location/
+    # macro-CHoCH (all shipped after it existed) -- fixed for the BADGE
+    # first (presentation only, see candidate_dashboard.js), but the
+    # underlying question of whether a mechanically-ready-but-conflicted
+    # candidate should actually COUNT as ENTER_NOW-eligible (not just LOOK
+    # like it) is a real gating decision, made here deliberately, not a
+    # side effect of the badge fix.
+    #
+    # This is explicitly NOT a comprehensive "exclude anything with a real
+    # conflict" rule -- verified against real data (2026-08-29): 11 live
+    # candidates that day had macro_conflict or choch_conflict = True but
+    # confluence_label was NOT "conflicted" (only 1 total unfavorable
+    # signal, below confluence_summary.CONFLICTED_UNFAVORABLE_MIN=2 -- the
+    # same structural reason PBR's real location=unfavorable conflict
+    # doesn't trip this either). Deliberately keyed on the SYNTHESIZED
+    # confluence_label, not on checking macro_conflict/choch_conflict/
+    # location_alignment individually here -- reusing the judgment call
+    # confluence_label already makes about how many real conflicts matter,
+    # not re-deriving a parallel one with different logic.
+    #
+    # CONFLICTED_UNFAVORABLE_MIN=2 was already an unvalidated placeholder
+    # when confluence_label was built purely as display sugar; it is now
+    # doing real gating work for the first time here, same category of risk
+    # as every other unvalidated threshold in this file -- this should be
+    # revisited once real outcome data exists comparing tracked conflicted
+    # candidates (see POST /candidates/{ticker}/track-outcome) against
+    # tracked clean ones, not left as a permanent assumption.
+    if promotion.get("confluence_label") == "conflicted":
+        return "Candidate confluence is conflicted (2+ real unfavorable signals), so it is not ENTER_NOW dashboard-ready."
     return None
 
 
@@ -2951,9 +3017,9 @@ def list_candidate_promotions(
         # anything that needs it (e.g. the outcome-tracking resolver).
         #
         # promotion_kind='tracking_only' rows (see
-        # POST /candidates/{ticker}/track-short-outcome) are excluded from
+        # POST /candidates/{ticker}/track-outcome) are excluded from
         # the "latest" computation by default -- this is the dashboard's own
-        # feed, and a tracking-only short must never render as a real Plan
+        # feed, and a tracking-only row must never render as a real Plan
         # Preview/Current Plan Math card. Filtered inside the latest-id
         # subquery itself (not just the outer SELECT), so "latest" here
         # means "latest real promotion": if a ticker has a genuine enter_now
@@ -3364,20 +3430,52 @@ def update_candidate_status(
 
 
 @router.post(
-    "/candidates/{ticker}/track-short-outcome",
+    "/candidates/{ticker}/track-outcome",
     response_model=CandidatePromotionOut,
     status_code=201,
 )
-def track_short_outcome(
+def track_candidate_outcome(
     ticker: str,
     source: str,
     x_api_key: Optional[str] = Header(default=None),
     scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
-    """Promote a SHORT candidate for outcome-evidence tracking only --
-    NOT for ENTER_NOW/dashboard trading. See _promotion_block_reason's
-    short-branch comment for why the real gate still exists and what this
-    endpoint deliberately does not change about it.
+    """Promote a candidate for outcome-evidence tracking only -- NOT for
+    ENTER_NOW/dashboard trading -- when it's excluded from real promotion
+    for a reason this codebase deliberately wants evidence on rather than a
+    permanent guess, not because its plan is broken. Two such reasons exist
+    today (see _promotion_block_reason for the canonical rationale on each):
+    the candidate is short (research-only pending forward evidence), or
+    it's long but confluence_label is "conflicted" (mechanically ready, but
+    excluded 2026-08-29 pending evidence on whether tracked outcomes
+    actually differ for conflicted vs. clean setups). Originally shipped
+    2026-08-28 as track-short-outcome, short-only; generalized here the
+    next day when the conflicted-long exclusion created the exact same
+    "has a real plan, worth tracking, but not ENTER_NOW-eligible" shape a
+    second time -- one endpoint for the concept, not two near-duplicates
+    that would only drift apart.
+
+    For a LONG candidate: rejects (422) one that's ALREADY genuinely
+    ENTER_NOW-eligible (nothing to track here that the real promotion path
+    doesn't already cover -- use PATCH /candidates/{ticker} with
+    status=active instead), and separately rejects (422) one that fails a
+    MECHANICAL condition (_mechanical_promotion_block_reason -- regime,
+    valid target, R:R, entry proximity, execution confirmation): there's no
+    real, complete plan to track an outcome against in that case. Does NOT
+    re-run the confluence-conflicted check itself as a blocker -- that's
+    exactly the condition this endpoint exists to work around for longs.
+
+    For a SHORT candidate: no mechanical check is applied -- being short is
+    itself sufficient reason to track rather than promote, unchanged from
+    this endpoint's original 2026-08-28 behavior. This is a deliberate,
+    known asymmetry, not an oversight: _mechanical_promotion_block_reason's
+    execution-confirmation check can structurally never pass for a short
+    (_preview_base_enter_now_ready, which gates whether execution-shadow
+    even runs a real check, hard-requires direction=="long"), so applying
+    it to shorts would make short tracking permanently impossible rather
+    than just stricter. A genuinely short-specific mechanical check (target/
+    R:R/regime/proximity minus execution-shadow) would be a reasonable
+    future improvement but isn't built here.
 
     Computes the exact same plan math every other promotion uses
     (_compute_candidate_promotion is already direction-symmetric -- BOS,
@@ -3388,21 +3486,22 @@ def track_short_outcome(
     promotion in the database -- and it's what GET /candidate-promotions
     uses to exclude it from the default response, so it never appears on
     the dashboard, never gets treated as ENTER_NOW-eligible, and never
-    bypasses the "research-only" framing anywhere that's currently shown.
+    bypasses the "research-only"/"conflicted" framing anywhere that's
+    currently shown.
 
-    Deliberately skips: _promotion_block_reason entirely (that's the
-    ENTER_NOW gate this path exists to not touch), option contract lookup
-    (matches the existing long-only contract-fetch pattern in
-    update_candidate_status above -- a tracking-only short has no reason to
-    pay for a chain lookup nobody will trade), and any write to
-    candidates.status (this is not a status change, just a promotion-row
-    event -- the candidate stays exactly where it was: new/dismissed/etc).
+    Deliberately skips: option contract lookup (matches the existing
+    long-only contract-fetch pattern in update_candidate_status above -- a
+    tracking-only candidate has no reason to pay for a chain lookup nobody
+    will trade), and any write to candidates.status (this is not a status
+    change, just a promotion-row event -- the candidate stays exactly where
+    it was: new/dismissed/etc).
 
     From here, the row behaves identically to any other promotion for
     outcome purposes: PATCH /candidate-promotions/{id}/taken marks it
-    taken by id (no direction check there, never has been), and
-    main._watch_candidate_promotion_outcomes picks it up on the next hourly
-    pass through the exact same taken=1 query every long promotion uses.
+    taken by id (no direction or promotion_kind check there, never has
+    been), and main._watch_candidate_promotion_outcomes picks it up on the
+    next hourly pass through the exact same taken=1 query every real
+    promotion uses.
     """
     _check_api_key(x_api_key, scanner_session)
     normalized_ticker = ticker.strip().upper()
@@ -3417,14 +3516,51 @@ def track_short_outcome(
 
         promotion = _compute_candidate_promotion(candidate)
         direction = str(promotion.get("direction") or "").strip().lower()
-        if direction != "short":
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"track-short-outcome is for short candidates only (this candidate is {direction or 'unknown'}); "
-                    "use PATCH /candidates/{ticker} with status=active for a long promotion."
-                ),
-            )
+        if direction not in ("short", "long"):
+            raise HTTPException(status_code=422, detail=f"Unsupported candidate direction: {direction or 'unknown'}")
+
+        if direction == "long":
+            # _compute_candidate_promotion() never itself sets
+            # entry_proximity_ok or execution_shadow_ok -- those only exist
+            # once _promotion_with_live_gate_context (the same live
+            # enrichment update_candidate_status applies before its own gate
+            # check) has run. Skipping this made
+            # _mechanical_promotion_block_reason's execution_shadow_ok check
+            # ALWAYS fail (None is never True) -- caught 2026-08-29 by
+            # testing against real DASH/AMZN data, not assumed.
+            #
+            # Deliberately LONG-only: _preview_base_enter_now_ready (which
+            # gates whether _attach_execution_shadow does a real check at
+            # all) hard-requires direction=="long", so execution_shadow_ok
+            # can structurally never be True for a short -- running this
+            # same mechanical check against a short would make short
+            # tracking permanently impossible, not just stricter. A short's
+            # only requirement for tracking stays "is it short" (see the
+            # short branch below), same as the original 2026-08-28 version
+            # of this endpoint; this is a real, known asymmetry, not an
+            # oversight -- fixing it would mean building a genuinely
+            # separate short-specific mechanical check (target/R:R/regime/
+            # proximity minus execution-shadow), which wasn't asked for
+            # tonight and isn't done here.
+            promotion = _promotion_with_live_gate_context(candidate, promotion, None)
+            mechanical_reason = _mechanical_promotion_block_reason(candidate, promotion)
+            if mechanical_reason:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Cannot track outcome, no valid plan to track: {mechanical_reason}",
+                )
+            if promotion.get("confluence_label") != "conflicted":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "This candidate is already ENTER_NOW eligible; use "
+                        "PATCH /candidates/{ticker} with status=active for a real promotion."
+                    ),
+                )
+        # else direction == "short": no mechanical check here (unchanged
+        # from the original endpoint) -- short is, on its own, sufficient
+        # reason to track-not-promote.
+
         promotion["promotion_kind"] = "tracking_only"
         promotion_id = _store_promotion(conn, promotion)
         conn.commit()
