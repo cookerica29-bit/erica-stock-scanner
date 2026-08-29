@@ -102,6 +102,20 @@
     return `${pct}%${atr}${status}`;
   }
 
+  // Transparency requirement, not cosmetic: entry_proximity_ok can now be
+  // satisfied via the last daily close instead of a live quote (backend
+  // fallback, 2026-08-29 -- see candidates_router.py's
+  // ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS comment). Shown regardless
+  // of pass/fail -- a candidate that reads ENTER_NOW-ready PARTLY via this
+  // fallback must never look identical to one confirmed against a live
+  // price, and this is the only place that distinction is visible when the
+  // check actually passes (a failing check already gets the source noted
+  // inline in its own reason/detail text).
+  function entryProximitySourcePill(obj) {
+    if (obj?.entry_proximity_price_source !== 'fallback_daily_close') return '';
+    return '<span class="candidate-pill warn secondary">Proximity via last close, not live</span>';
+  }
+
   function storageGet(storage, key) {
     try {
       return storage.getItem(key) || '';
@@ -962,6 +976,13 @@
       warnings.push('<span class="candidate-pill bad secondary">Also: No valid target</span>');
     }
     if (promotion.position_size == null) warnings.push('<span class="candidate-pill">Options sizing pending</span>');
+    // entry_proximity_price_source is NOT carried on the stored promotion
+    // (CandidatePromotionOut has no entry-proximity fields at all -- a
+    // promotion is a locked-in plan snapshot, proximity is always
+    // evaluated live) -- the transparency pill lives on renderPlanPreview
+    // below instead, which always re-renders alongside this block for an
+    // active candidate and reflects the CURRENT live/fallback state, not a
+    // stale point-in-time one.
     return `
       <div class="candidate-pill-row">${warnings.join('')}</div>
       <div class="candidate-kv">
@@ -995,6 +1016,9 @@
     if (!preview.entry_proximity_ok && blockReason !== proximityReasonText) {
       warnings.push(`<span class="candidate-pill bad secondary">Also: ${escapeHtml(proximityReasonText)}</span>`);
     }
+    // Shown regardless of pass/fail -- see entryProximitySourcePill's own
+    // comment for why the PASS case specifically must not go unmarked.
+    warnings.push(entryProximitySourcePill(preview));
     if (preview.execution_shadow_checked) {
       if (preview.execution_shadow_ok) {
         warnings.push('<span class="candidate-pill high">Execution confirmed</span>');

@@ -63,6 +63,38 @@ CANDIDATE_PREVIEW_PREWARM_CHUNK_SIZE = 50
 SCANNER_SESSION_COOKIE = "kairos_scanner_session"
 ENTRY_PROXIMITY_MAX_PCT_DEFAULT = 1.5
 ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
+# _entry_proximity's fallback-to-last-close design (2026-08-29): confirmed
+# real via ACGL/AER that a one-sided live quote was treated as "not ok" for
+# the actual ENTER_NOW gate (update_candidate_status, track_candidate_outcome)
+# and the frontend's routeBlockReason -- despite the reason string saying
+# "not used for gating" (that text described the intent, not the actual
+# behavior). Root cause of the original one-sided-quote guard stands (a
+# stale/resting single IEX print can be wildly off the real NBBO -- see
+# ENTRY_PROXIMITY_MAX_PCT_DEFAULT's sibling comment below for the BRK.B
+# example), but "distrust a live quote" should fall back to the last
+# confirmed daily close, not silently become "distrust that this candidate
+# is near entry at all." The fallback is clearly tagged via
+# entry_proximity_price_source ("live_quote" vs "fallback_daily_close") in
+# every consumer, specifically so a candidate that reads ENTER_NOW-ready
+# only because of a fallback close is never visually indistinguishable from
+# one confirmed against a live price.
+#
+# ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS: unvalidated placeholder, same
+# category as every other threshold in this file. This is a blunt calendar-
+# hour proxy for "no more than one missed trading session," not a real
+# trading-calendar check -- a flat hour cutoff can't perfectly separate
+# "just a weekend" from "the feed is stuck": Wednesday's close is only ~2
+# calendar days old by Friday but represents 2 MISSED trading sessions and
+# should be rejected, while Friday's close is comfortably fine through a
+# normal weekend into Monday (~postmarket start you'd want it refreshed) at
+# nearly 4x that calendar age. Set generously wide (120h/5 days) to survive
+# the longest ordinary market closure (a ~3-day weekend, or the rarer 4-day
+# case around a holiday) without false-rejecting good data, while still
+# catching a genuinely broken/stuck feed serving multi-day-old bars on an
+# otherwise-normal trading week. Revisit with real trading-calendar-aware
+# logic (actual missed-session count, not raw hours) if this proves too
+# loose in practice.
+ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS = 120
 # entry_status_label -- legacy's four-tier ATR-distance bucket
 # (scanner._stock_entry_status), ported as PURELY DESCRIPTIVE display sugar
 # on top of the entry_distance_atr already computed below. Explicitly
@@ -614,6 +646,10 @@ def _ensure_candidate_plan_previews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN confluence_counts_json TEXT")
     if "confluence_label" not in columns:
         conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN confluence_label TEXT")
+    if "last_daily_close" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN last_daily_close REAL")
+    if "last_daily_close_at" not in columns:
+        conn.execute("ALTER TABLE candidate_plan_previews ADD COLUMN last_daily_close_at TEXT")
 
 
 # Schema setup (CREATE TABLE IF NOT EXISTS x7 plus a migration check) used to run
@@ -840,6 +876,8 @@ def _initialize_candidates_schema(conn) -> None:
             confluence_signals_json TEXT,
             confluence_counts_json TEXT,
             confluence_label TEXT,
+            last_daily_close REAL,
+            last_daily_close_at TEXT,
             PRIMARY KEY (ticker, source)
         )
         """
@@ -1070,6 +1108,11 @@ class CandidatePlanPreviewOut(BaseModel):
     entry_proximity_reason: Optional[str] = None
     entry_proximity_threshold_pct: float = ENTRY_PROXIMITY_MAX_PCT_DEFAULT
     entry_proximity_threshold_atr: float = ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT
+    # "live_quote" | "fallback_daily_close" | None -- see
+    # ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS's comment. Exposed
+    # specifically so the frontend can flag a candidate that reads
+    # entry_proximity_ok=True only via the fallback close, not a live quote.
+    entry_proximity_price_source: Optional[str] = None
     # Purely descriptive, legacy's four-tier bucket -- deliberately NOT
     # reconciled with entry_proximity_ok above (different, unvalidated
     # cutoffs; see ENTRY_STATUS_TRADEABLE_MAX_ATR's comment near the top of
@@ -1396,11 +1439,31 @@ def _entry_status_label(distance_atr: Optional[float]) -> str:
     return "Too Far"
 
 
+def _fallback_close_is_fresh(fallback_close_at: Optional[str]) -> bool:
+    """See ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS's comment for the
+    real rationale and its acknowledged limits as a blunt calendar-hour
+    proxy."""
+    if not fallback_close_at:
+        return False
+    try:
+        stamp = pd.Timestamp(fallback_close_at)
+    except Exception:
+        return False
+    if pd.isna(stamp):
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    age_hours = (pd.Timestamp.now(tz="UTC") - stamp).total_seconds() / 3600.0
+    return 0 <= age_hours <= ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS
+
+
 def _entry_proximity(
     *,
     entry_price: Optional[float],
     atr14: Optional[float],
     quote: Optional[dict[str, Any]],
+    fallback_close: Optional[float] = None,
+    fallback_close_at: Optional[str] = None,
 ) -> dict[str, Any]:
     max_pct = _entry_proximity_max_pct()
     max_atr = _entry_proximity_max_atr_multiple()
@@ -1417,6 +1480,12 @@ def _entry_proximity(
         "entry_proximity_threshold_pct": max_pct,
         "entry_proximity_threshold_atr": max_atr,
         "entry_status_label": _entry_status_label(None),
+        # "live_quote" | "fallback_daily_close" | None (None = never
+        # resolved at all, e.g. no usable price of either kind). Surfaced
+        # regardless of pass/fail -- see ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS's
+        # comment for why a PASS achieved only via the fallback close must
+        # never be silently indistinguishable from a live-quote-confirmed one.
+        "entry_proximity_price_source": None,
     }
     try:
         entry = float(entry_price)
@@ -1426,8 +1495,89 @@ def _entry_proximity(
     if entry <= 0:
         base["entry_proximity_reason"] = "Entry price unavailable"
         return base
+
+    def _distance_result(
+        current_price: float,
+        *,
+        source: str,
+        price_source_kind: str,
+        timestamp: Optional[str],
+        price_branch: Optional[str],
+        reason_suffix: str = "",
+    ) -> dict[str, Any]:
+        atr = float(atr14 or 0)
+        distance = abs(current_price - entry)
+        pct_distance = (distance / entry) * 100
+        atr_distance = (distance / atr) if atr > 0 else None
+        pct_threshold = entry * (max_pct / 100)
+        atr_threshold = atr * max_atr if atr > 0 else 0
+        allowed_distance = max(pct_threshold, atr_threshold)
+        ok = distance <= allowed_distance
+        if ok:
+            reason = None
+        elif atr_distance is not None:
+            reason = f"Price moved {pct_distance:.2f}% / {atr_distance:.2f} ATR away from entry{reason_suffix}"
+        else:
+            reason = f"Price moved {pct_distance:.2f}% away from entry{reason_suffix}"
+        return {
+            **base,
+            "current_price": round(current_price, 4),
+            "current_quote_timestamp": timestamp,
+            "current_quote_source": source,
+            "current_quote_price_branch": price_branch,
+            "entry_distance": round(distance, 4),
+            "entry_distance_pct": round(pct_distance, 2),
+            "entry_distance_atr": round(atr_distance, 2) if atr_distance is not None else None,
+            "entry_proximity_ok": ok,
+            "entry_proximity_reason": reason,
+            # Bucketed from the raw (unrounded) atr_distance, not the rounded
+            # display value above -- avoids a rounding-induced boundary
+            # mismatch right at a cutoff (e.g. a true 0.251 rounding to a
+            # displayed 0.25 shouldn't bucket as "Tradeable").
+            "entry_status_label": _entry_status_label(atr_distance),
+            "entry_proximity_price_source": price_source_kind,
+        }
+
+    def _fallback_result(unusable_note: str) -> dict[str, Any]:
+        # Falls back to the last confirmed daily close (already fetched by
+        # the caller as part of the normal daily-candle download -- not a
+        # new network call) when the live quote can't be trusted, instead
+        # of defaulting straight to "not ok." Confirmed real 2026-08-29 via
+        # ACGL/AER: a one-sided quote was making this function -- and
+        # everything downstream of it (the real ENTER_NOW gate, not just
+        # near-miss display) -- report "not near entry" even when a
+        # reliable price said otherwise (AER) or masking a real, otherwise-
+        # confirmable gap behind a generic data-quality caveat (ACGL).
+        if fallback_close is None:
+            result = dict(base)
+            result["entry_proximity_reason"] = unusable_note
+            return result
+        try:
+            close_price = float(fallback_close)
+        except (TypeError, ValueError):
+            result = dict(base)
+            result["entry_proximity_reason"] = unusable_note
+            return result
+        if close_price <= 0 or not _fallback_close_is_fresh(fallback_close_at):
+            result = dict(base)
+            result["entry_proximity_reason"] = (
+                f"{unusable_note}, and the last daily close is also unavailable or too old to use as a stand-in"
+            )
+            return result
+        result = _distance_result(
+            close_price,
+            source="fallback_daily_close",
+            price_source_kind="fallback_daily_close",
+            timestamp=fallback_close_at,
+            price_branch=None,
+            reason_suffix=" (based on last close -- live quote unavailable)",
+        )
+        if result["entry_proximity_ok"]:
+            result["entry_proximity_reason"] = f"{unusable_note}; confirmed near entry via last close instead"
+        return result
+
     if not quote:
-        return base
+        return _fallback_result("Current quote unavailable")
     price_branch = quote.get("price_branch")
     if price_branch in ("bid_only", "ask_only"):
         # A one-sided quote is a real, legitimate value for DISPLAY purposes
@@ -1441,51 +1591,26 @@ def _entry_proximity(
         # the stale/resting single side that's left can be far from the real
         # NBBO (confirmed live: BRK.B showed "5.81% / 3.94 ATR away from
         # entry" off a bid_only quote of 473.31, while independently checked
-        # real price was ~0.35% from entry -- a bogus $29 gap). Treat it the
-        # same as no quote at all rather than asserting a distance that
-        # might be wrong, especially now that this number is surfaced
-        # prominently in the near-miss ranking view.
-        base["entry_proximity_reason"] = "Current quote is one-sided (no reliable two-sided price); not used for gating"
-        return base
+        # real price was ~0.35% from entry -- a bogus $29 gap; AER's live
+        # bid_only print was off by ~$22 from the real last close, an even
+        # bigger gap). Fall back to the last daily close rather than either
+        # trusting this print or defaulting to "not ok" -- see
+        # ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS's comment.
+        return _fallback_result("Current quote is one-sided (no reliable two-sided price)")
     try:
         current_price = float(quote.get("price"))
     except (TypeError, ValueError):
-        return base
+        return _fallback_result("Current quote is unusable")
     if current_price <= 0:
-        return base
+        return _fallback_result("Current quote is unusable")
 
-    atr = float(atr14 or 0)
-    distance = abs(current_price - entry)
-    pct_distance = (distance / entry) * 100
-    atr_distance = (distance / atr) if atr > 0 else None
-    pct_threshold = entry * (max_pct / 100)
-    atr_threshold = atr * max_atr if atr > 0 else 0
-    allowed_distance = max(pct_threshold, atr_threshold)
-    ok = distance <= allowed_distance
-    reason = None
-    if not ok:
-        if atr_distance is not None:
-            reason = f"Price moved {pct_distance:.2f}% / {atr_distance:.2f} ATR away from entry"
-        else:
-            reason = f"Price moved {pct_distance:.2f}% away from entry"
-
-    return {
-        **base,
-        "current_price": round(current_price, 4),
-        "current_quote_timestamp": str(quote.get("timestamp")) if quote.get("timestamp") is not None else None,
-        "current_quote_source": quote.get("source"),
-        "current_quote_price_branch": quote.get("price_branch"),
-        "entry_distance": round(distance, 4),
-        "entry_distance_pct": round(pct_distance, 2),
-        "entry_distance_atr": round(atr_distance, 2) if atr_distance is not None else None,
-        "entry_proximity_ok": ok,
-        "entry_proximity_reason": reason,
-        # Bucketed from the raw (unrounded) atr_distance, not the rounded
-        # display value above -- avoids a rounding-induced boundary
-        # mismatch right at a cutoff (e.g. a true 0.251 rounding to a
-        # displayed 0.25 shouldn't bucket as "Tradeable").
-        "entry_status_label": _entry_status_label(atr_distance),
-    }
+    return _distance_result(
+        current_price,
+        source=quote.get("source"),
+        price_source_kind="live_quote",
+        timestamp=str(quote.get("timestamp")) if quote.get("timestamp") is not None else None,
+        price_branch=quote.get("price_branch"),
+    )
 
 
 def _attach_entry_proximity(preview: dict, quote: Optional[dict[str, Any]]) -> dict:
@@ -1495,6 +1620,11 @@ def _attach_entry_proximity(preview: dict, quote: Optional[dict[str, Any]]) -> d
             entry_price=preview.get("entry_price"),
             atr14=preview.get("atr14"),
             quote=quote,
+            # last_daily_close/_at come from _compute_candidate_promotion's
+            # already-fetched daily df (see its return dict) -- reused here,
+            # not re-fetched, as the fallback when `quote` can't be trusted.
+            fallback_close=preview.get("last_daily_close"),
+            fallback_close_at=preview.get("last_daily_close_at"),
         ),
     }
 
@@ -1836,10 +1966,26 @@ def _gate_gap_report(candidate: sqlite3.Row | dict, preview: dict) -> dict:
         max_pct = preview.get("entry_proximity_threshold_pct", ENTRY_PROXIMITY_MAX_PCT_DEFAULT)
         max_atr = preview.get("entry_proximity_threshold_atr", ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT)
         if pct is not None:
+            # Confirmed real 2026-08-29 via ACGL: before the fallback-close
+            # fix, a one-sided live quote meant pct/atr_d were always None
+            # here, so this branch never fired for that case -- the near-
+            # miss card showed ONLY the generic quote-caveat text below,
+            # with no indication of the real, independently-confirmable gap
+            # (ACGL genuinely failed proximity by ~1.9%/1.1 ATR per its last
+            # daily close). Now that _entry_proximity falls back to the last
+            # close instead of giving up, this branch fires with the real
+            # numbers whenever a fallback-based check still fails -- the
+            # source note makes clear those numbers are last-close-based,
+            # not live.
             atr_txt = f" / {atr_d:.2f} ATR" if atr_d is not None else ""
+            source_note = (
+                " (vs last close -- live quote unavailable)"
+                if preview.get("entry_proximity_price_source") == "fallback_daily_close"
+                else ""
+            )
             gaps.append({
                 "condition": "entry_proximity",
-                "detail": f"Entry moved {pct:.2f}%{atr_txt} from scan -- outside proximity tolerance (max {max_pct:.1f}% / {max_atr:.2f} ATR)",
+                "detail": f"Entry moved {pct:.2f}%{atr_txt} from scan -- outside proximity tolerance (max {max_pct:.1f}% / {max_atr:.2f} ATR){source_note}",
             })
         else:
             gaps.append({
@@ -1916,6 +2062,17 @@ def _attach_execution_shadow(candidate: sqlite3.Row | dict, preview: dict) -> di
 
 
 def _entry_proximity_block_reason(entry_price: Optional[float], atr14: Optional[float], ticker: str) -> Optional[str]:
+    # No fallback_close/_at here -- this is _mechanical_promotion_block_reason's
+    # defensive `else` branch for a promotion that was somehow never run
+    # through _promotion_with_live_gate_context first (confirmed unreachable
+    # in practice: both real callers -- update_candidate_status and
+    # track_candidate_outcome -- always enrich first, so `entry_proximity_ok`
+    # is always already present by the time this branch would matter). This
+    # function only has entry_price/atr14/ticker, not the daily df
+    # _compute_candidate_promotion already fetched -- adding a fallback here
+    # would mean a genuinely new network call, not a reuse, for a path that
+    # doesn't run today. Left as a real (if currently theoretical) gap
+    # rather than fetched around; revisit if this branch ever becomes live.
     proximity = _entry_proximity(
         entry_price=entry_price,
         atr14=atr14,
@@ -2507,6 +2664,13 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
         "confluence_signals": confluence["confluence_signals"],
         "confluence_counts": confluence["confluence_counts"],
         "confluence_label": confluence["confluence_label"],
+        # The last confirmed daily close, from the SAME `df` already fetched
+        # above for macro bias/BOS/target/stop -- not a new network call.
+        # Consumed by _attach_entry_proximity as the fallback price when a
+        # live quote can't be trusted (see
+        # ENTRY_PROXIMITY_FALLBACK_CLOSE_MAX_AGE_HOURS's comment).
+        "last_daily_close": round(float(df["Close"].iloc[-1]), 4),
+        "last_daily_close_at": _bar_timestamp_iso(df.index[-1]),
     }
 
 
@@ -2769,6 +2933,13 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "confluence_signals": promotion_like.get("confluence_signals"),
             "confluence_counts": promotion_like.get("confluence_counts"),
             "confluence_label": promotion_like.get("confluence_label"),
+            # See _attach_entry_proximity's comment -- this is what makes the
+            # entry-proximity fallback available for a CACHED preview too,
+            # not just a freshly-computed one (a cached preview is what
+            # _attach_entry_proximity actually runs against most of the
+            # time; see _stale_plan_preview_candidates).
+            "last_daily_close": promotion_like.get("last_daily_close"),
+            "last_daily_close_at": promotion_like.get("last_daily_close_at"),
             "option_contract": option_contract,
             "preview_error": None,
             "computed_at": computed_at,
@@ -2818,6 +2989,8 @@ def _compute_candidate_plan_preview(candidate: sqlite3.Row) -> dict:
             "confluence_signals": None,
             "confluence_counts": None,
             "confluence_label": None,
+            "last_daily_close": None,
+            "last_daily_close_at": None,
             "option_contract": None,
             "preview_error": str(exc.detail),
             "computed_at": computed_at,
@@ -2840,8 +3013,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
              bos_confirmed, bos_level, macro_bias, macro_conflict, choch_conflict,
              choch_details_json, sweep_confirmed, sweep_level, rejection_confirmed,
              rejection_details_json, location_percentile, location_label, location_alignment,
-             confluence_signals_json, confluence_counts_json, confluence_label)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             confluence_signals_json, confluence_counts_json, confluence_label,
+             last_daily_close, last_daily_close_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, source) DO UPDATE SET
             signal=excluded.signal,
             entry_price=excluded.entry_price,
@@ -2886,7 +3060,9 @@ def _store_plan_preview(conn, preview: dict) -> None:
             location_alignment=excluded.location_alignment,
             confluence_signals_json=excluded.confluence_signals_json,
             confluence_counts_json=excluded.confluence_counts_json,
-            confluence_label=excluded.confluence_label
+            confluence_label=excluded.confluence_label,
+            last_daily_close=excluded.last_daily_close,
+            last_daily_close_at=excluded.last_daily_close_at
         """,
         (
             preview["ticker"],
@@ -2935,6 +3111,8 @@ def _store_plan_preview(conn, preview: dict) -> None:
             json.dumps(preview["confluence_signals"], separators=(",", ":")) if preview.get("confluence_signals") else None,
             json.dumps(preview["confluence_counts"], separators=(",", ":")) if preview.get("confluence_counts") else None,
             preview.get("confluence_label"),
+            preview.get("last_daily_close"),
+            preview.get("last_daily_close_at"),
         ),
     )
 
