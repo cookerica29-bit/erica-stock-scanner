@@ -82,6 +82,53 @@ ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT = 0.5
 ENTRY_STATUS_TRADEABLE_MAX_ATR = 0.25
 ENTRY_STATUS_NEAR_ENTRY_MAX_ATR = 0.50
 ENTRY_STATUS_WAITING_MAX_ATR = 1.00
+# scanner._macro_bias's recency-blindness -- confirmed real 2026-08-29 via
+# DASH's actual numbers, not hypothesis: it reads pure distance from the
+# 52-week high with zero regard for WHEN that high was set or what's
+# happened since. DASH's 52-week high was set 10.5 months ago; DASH then
+# fell for ~8 months, bottomed, and has climbed every month for the last 5
+# straight (+47.9% over the last 60 trading days) -- a genuine, sustained
+# new uptrend -- yet still read "Macro Bearish" at 15.97% below that stale
+# peak (barely over the 15% cutoff). This is now more than cosmetic:
+# macro_conflict feeds confluence_label, which gates ENTER_NOW eligibility
+# as of the previous change in this file.
+#
+# _recency_adjusted_macro_bias (below) downgrades a raw "Macro Bearish"
+# reading to "Macro Neutral" -- never up to "Macro Bullish", a distinct,
+# stronger claim the raw 52-week rule already owns -- when price is
+# genuinely close to its OWN recent high, not the stale one.
+# scanner._macro_bias itself and its 3 legacy call sites are untouched;
+# this is a candidates_router-only correction, same pattern as every other
+# signal in this file that diverges from legacy on purpose.
+#
+# Two designs were tested against real live data before picking this one.
+# A recent-swing-HH/HL check (reusing _find_swings, already computed for
+# BOS/order-block/location -- "free" in the sense of no new data fetch)
+# was tried first specifically because it was the cheaper reuse: a single
+# HH+HL swing pair fired on 19 of 27 real Macro-Bearish-long candidates
+# that day -- too noisy to gate real eligibility on. Tightening to the
+# fuller 3-swing HH/HL sequence (matching legacy's own _market_structure,
+# which already treats macro_bias as one weighted vote among several
+# recency-aware ones, not a hard override) dropped that to 10/27 but
+# missed DASH entirely -- a pullback embedded in its own 5-month recovery
+# meant its last two swings didn't cleanly read as higher-high/higher-low,
+# even though the visible trend obviously was one. Swing-pair comparison
+# turned out too brittle for this. The window-high approach below fired on
+# 8/27, correctly included DASH, and gave the IDENTICAL 8 tickers across
+# every window size tested (42/63/84/126 trading days) -- not fragile to
+# the exact choice, unlike the swing approach.
+#
+# MACRO_RECENCY_WINDOW_TRADING_DAYS: unvalidated -- ~1 quarter, chosen
+# because it happened to be in the middle of the range tested, not because
+# it's provably the right number; robustness-checked (identical result
+# 42-126 days on real data that day) but still a guess long-term.
+MACRO_RECENCY_WINDOW_TRADING_DAYS = 63
+# MACRO_RECENCY_PROXIMITY_PCT: reused verbatim from scanner._macro_bias's
+# own inline Bullish rule (pct_from_52w < 0.05) -- same number, but applying
+# it to a different (shorter) window is its own judgment call, so it's
+# flagged here too, not treated as free just because the number itself was
+# already in use elsewhere.
+MACRO_RECENCY_PROXIMITY_PCT = 0.05
 MIN_CLEAN_OPTION_PREMIUM_DEFAULT = 0.50
 MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT = 50.0
 EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
@@ -2169,6 +2216,39 @@ def _nearest_structural_target(
     return None
 
 
+def _recency_adjusted_macro_bias(entry_price: float, df: pd.DataFrame) -> tuple:
+    """Wraps scanner._macro_bias with a recency correction -- see
+    MACRO_RECENCY_WINDOW_TRADING_DAYS's comment above for the full
+    real-data-driven rationale and the two designs tried before this one.
+
+    Only ever downgrades "Macro Bearish" to "Macro Neutral", never upgrades
+    to "Macro Bullish" -- being close to your OWN recent high is weaker
+    evidence than being close to the actual 52-week high, which is what
+    the raw Bullish rule already means. "Macro Neutral"/"Macro Bullish"
+    readings pass through unchanged; scanner._macro_bias itself is
+    untouched (its own 3 call sites in scanner.py keep the original,
+    unadjusted behavior).
+
+    Returns the exact same (bias, pct_from_52w, wk52_high, window_high)
+    shape as scanner._macro_bias so the one call site below doesn't need
+    to change beyond swapping which function it calls.
+    """
+    bias, pct_from_52w, wk52_high, window_high = _macro_bias(entry_price, df)
+    if bias != "Macro Bearish":
+        return bias, pct_from_52w, wk52_high, window_high
+    closes = df["Close"].astype(float)
+    recent_window = (
+        closes.iloc[-MACRO_RECENCY_WINDOW_TRADING_DAYS:]
+        if len(closes) >= MACRO_RECENCY_WINDOW_TRADING_DAYS
+        else closes
+    )
+    recent_high = float(recent_window.max())
+    pct_from_recent_high = (recent_high - entry_price) / recent_high if recent_high > 0 else 0.0
+    if pct_from_recent_high < MACRO_RECENCY_PROXIMITY_PCT:
+        return "Macro Neutral", pct_from_52w, wk52_high, window_high
+    return bias, pct_from_52w, wk52_high, window_high
+
+
 def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     ticker = str(candidate["ticker"] or "").strip().upper()
     direction = str(candidate["signal"] or "").strip().lower()
@@ -2227,8 +2307,11 @@ def _compute_candidate_promotion(candidate: sqlite3.Row) -> dict:
     # just a label, and explicitly flagged as such before building this.
     # Decision made: never touch R:R, stop, target, or promotion eligibility
     # here, same as every other port today. Reuses scanner._macro_bias/
-    # _detect_choch directly, same as _detect_bos/_find_order_block above.
-    macro_bias, _pct_from_52w, _wk52_high, _window_high = _macro_bias(entry_price, df)
+    # _detect_choch directly, same as _detect_bos/_find_order_block above --
+    # with a recency correction on top of the raw _macro_bias reading (see
+    # _recency_adjusted_macro_bias and MACRO_RECENCY_WINDOW_TRADING_DAYS's
+    # comment for the real DASH-driven rationale, added 2026-08-29).
+    macro_bias, _pct_from_52w, _wk52_high, _window_high = _recency_adjusted_macro_bias(entry_price, df)
     # Matches analyze_ticker's exact rule: LONG-only, purely categorical (no
     # price-level refinement) -- shorts are never flagged by macro bias,
     # same as legacy ("short signals use local structure detection only").
