@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import sqlite3
 import hmac
 import math
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -41,6 +43,7 @@ from displacement_score import score_displacement
 from location_score import score_location
 from confluence_summary import summarize_confluence
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
 ATR_MULTIPLIER = 1.5
@@ -165,6 +168,30 @@ MIN_CLEAN_OPTION_PREMIUM_DEFAULT = 0.50
 MIN_CLEAN_OPTION_CONTRACT_COST_DEFAULT = 50.0
 EXECUTION_SHADOW_MIN_REACTION_ATR = 0.10
 EXECUTION_SHADOW_RECENT_RANGE_BARS = 15
+# _recent_4h_bars_for_execution_shadow's single-ticker, unbatched Alpaca
+# call (see the "batched version... reverted" comment below it) turned out
+# to be genuinely flaky, not just slow -- verified 2026-08-31: one live
+# request for ticker S returned <15 bars ("Need 15 recent 4H bars"), a
+# second request 6 minutes later for the exact same ticker/window returned
+# the full 15 and passed. No logging existed anywhere in this path before
+# today, so there's no historical evidence of how often this happens --
+# this delay/cache pair is a reasoned first response to the one directly-
+# observed case, not a measured one; the logging added alongside it is what
+# lets a future session judge whether these values are actually right.
+# Retry delay mirrors the existing empty-response precedent in scanner.py
+# (OPTION_EXPIRATION_EMPTY_RETRY_DELAY_SECONDS = 1.5) -- same failure shape
+# (thin/incomplete single-entity fetch), same fix: one retry, not a loop,
+# since this runs synchronously inside a live GET request a user is
+# waiting on.
+EXECUTION_SHADOW_BARS_RETRY_DELAY_SECONDS = 1.5
+# Short TTL cache on top of the retry -- absorbs the case where Alpaca is
+# having a bad few seconds and a retry 1.5s later wouldn't have helped
+# either, without meaningfully compromising "live": 75s is a rounding
+# error against how often the underlying 4h bars actually change (a new
+# bar closes every 4 hours), and the frontend doesn't poll this at all yet
+# (see Option B/A staleness work, not built), so a 75s backend cache costs
+# nothing relative to what a user's browser tab already shows.
+EXECUTION_SHADOW_BARS_CACHE_TTL = timedelta(seconds=75)
 EXECUTION_SHADOW_CONFIRMATION_BARS = 5
 EXECUTION_SHADOW_VOLUME_LOOKBACK_BARS = EXECUTION_SHADOW_RECENT_RANGE_BARS - EXECUTION_SHADOW_CONFIRMATION_BARS
 EXECUTION_SHADOW_MIN_DIRECTIONAL_EXPANSION_ATR = 0.75
@@ -1683,14 +1710,62 @@ def _rows_from_4h_bars_frame(df) -> list[dict[str, Any]]:
     return rows
 
 
-def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
+def _fetch_recent_4h_bars_once(ticker: str) -> list[dict[str, Any]]:
+    """Single live attempt -- no retry, no cache. Split out so
+    _recent_4h_bars_for_execution_shadow can call it twice (first attempt,
+    then one retry) without duplicating the download/empty-response
+    handling."""
     try:
         raw = AlpacaMarketDataProvider().download([ticker], period="30d", interval="4h", auto_adjust=True)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "[execution_shadow] 4H bar download failed ticker=%s bars=0 error=%s",
+            ticker, exc,
+        )
         return []
     if raw is None or raw.empty:
+        logger.warning(
+            "[execution_shadow] 4H bar download returned empty ticker=%s bars=0",
+            ticker,
+        )
         return []
     return _rows_from_4h_bars_frame(raw)
+
+
+# Process-wide TTL cache for _recent_4h_bars_for_execution_shadow, keyed by
+# ticker -> (fetched_at, bars). See EXECUTION_SHADOW_BARS_CACHE_TTL's own
+# comment for why a short cache and not zero. Deliberately caches the raw
+# bars, not the final execution_shadow_ok verdict -- _execution_shadow_from_bars
+# is cheap and pure, and entry/atr/ema21 (also inputs to that verdict) still
+# come from the caller's live preview dict every time, so caching just the
+# flaky part (the bars) can't make the verdict stale in a way that matters
+# beyond the bars themselves. Single process-wide lock, same reasoning as
+# _plan_preview_refresh_lock above: this service runs one worker process
+# today (confirmed one "Started server process" per boot); a multi-process
+# deployment would need a cross-process cache instead.
+_execution_shadow_bars_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
+_execution_shadow_bars_cache_lock = threading.Lock()
+
+
+def _recent_4h_bars_for_execution_shadow(ticker: str) -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    with _execution_shadow_bars_cache_lock:
+        cached = _execution_shadow_bars_cache.get(ticker)
+    if cached is not None and now - cached[0] < EXECUTION_SHADOW_BARS_CACHE_TTL:
+        return cached[1]
+
+    bars = _fetch_recent_4h_bars_once(ticker)
+    if len(bars) < EXECUTION_SHADOW_RECENT_RANGE_BARS:
+        logger.warning(
+            "[execution_shadow] insufficient 4H bars ticker=%s bars=%s need=%s; retrying once after %.1fs",
+            ticker, len(bars), EXECUTION_SHADOW_RECENT_RANGE_BARS, EXECUTION_SHADOW_BARS_RETRY_DELAY_SECONDS,
+        )
+        time.sleep(EXECUTION_SHADOW_BARS_RETRY_DELAY_SECONDS)
+        bars = _fetch_recent_4h_bars_once(ticker)
+
+    with _execution_shadow_bars_cache_lock:
+        _execution_shadow_bars_cache[ticker] = (now, bars)
+    return bars
 
 
 # A batched version of the above (fetching every shadow-eligible candidate's
