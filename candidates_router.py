@@ -931,15 +931,24 @@ def _initialize_candidates_schema(conn) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker TEXT NOT NULL,
             source TEXT NOT NULL,
-            verdict TEXT NOT NULL,
-            reviewed_at TEXT NOT NULL,
-            note TEXT
+            setup_key TEXT NOT NULL,
+            market_structure TEXT NOT NULL,
+            location_read TEXT NOT NULL,
+            clear_path_to_target TEXT NOT NULL,
+            lower_tf_confirmation TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            note TEXT,
+            reviewed_at TEXT NOT NULL
         )
         """
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidate_visual_reviews_ticker_source "
         "ON candidate_visual_reviews (ticker, source, reviewed_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_visual_reviews_setup_key "
+        "ON candidate_visual_reviews (setup_key, reviewed_at)"
     )
     conn.execute(
         """
@@ -1126,31 +1135,45 @@ class CandidateChartReviewOut(BaseModel):
     bars_end: Optional[str]
 
 
-# Stage-3 tracking (2026-08-31 session design pass): a human's visual-review
-# verdict, captured independent of promotion/taken -- so "I looked at the
-# chart and passed" is recorded even for a candidate never promoted or
-# taken. Deliberately its own append-only table, not a field bolted onto
-# candidate_promotions (that row may not exist yet, or ever, for a reviewed
-# candidate) and not candidates.status (status already means several
-# different things -- stale, uninteresting, a genuinely bad chart -- with
-# no way to distinguish after the fact; a dedicated verdict keeps "visually
-# rejected" an honest, unambiguous signal).
+# Stage-3 tracking, redesigned 2026-08-31 for the human-in-the-loop review
+# funnel: a structured visual-review verdict, captured independent of
+# promotion/taken -- so "I looked at the chart and decided" is recorded
+# even for a candidate never promoted or taken. Deliberately its own
+# append-only table, not a field bolted onto candidate_promotions (that row
+# may not exist yet, or ever, for a reviewed candidate) and not
+# candidates.status (status already means several different things --
+# stale, uninteresting, a genuinely bad chart -- with no way to distinguish
+# after the fact; a dedicated review keeps this an honest, unambiguous
+# signal).
 #
-# Tri-state, same vocabulary as candidate_promotions.taken (approved /
-# rejected / not-yet-reviewed) -- but the THIRD state (not yet reviewed) is
-# represented by the absence of any row for a ticker/source, not a stored
-# null verdict, because this table is append-only: a review either happened
-# (and gets a real row: approved or rejected) or it hasn't happened yet (no
-# row at all). GET /candidate-visual-reviews returns the real event history;
-# a caller wanting "current verdict per ticker" takes each ticker's latest
-# row (or none = undecided) the same way GET /candidate-promotions already
-# does for its own append-only table.
-VisualReviewVerdict = Literal["approved", "rejected"]
+# Bound to setup_key (see _compute_setup_key below), NOT just ticker --
+# the whole point is that a rejection today must not silently apply to a
+# materially different future setup for the same symbol. "Current state"
+# for a setup_key is its latest row; a genuinely new setup_key (structural
+# stop/target actually moved) starts with no rows at all, i.e. Needs
+# Review, never inheriting a prior verdict. GET /candidate-visual-reviews
+# returns the real event history; a caller wanting "current decision for
+# this setup" takes the latest row for that setup_key, the same pattern
+# GET /candidate-promotions already uses for its own append-only table.
+#
+# location_read (not bare "location") deliberately avoids colliding with
+# the existing machine-computed location_percentile/location_alignment
+# fields on candidate_plan_previews -- this is the human's own visual read,
+# a distinct signal from that algorithmic one, not a duplicate of it.
+MarketStructureRead = Literal["bullish", "bearish", "range"]
+LocationRead = Literal["good", "neutral", "bad"]
+ClearPathToTarget = Literal["yes", "no"]
+LowerTfConfirmation = Literal["yes", "not_yet"]
+ReviewDecision = Literal["approve", "watch", "reject"]
 
 
 class VisualReviewIn(BaseModel):
     source: str = Field(min_length=1)
-    verdict: VisualReviewVerdict
+    market_structure: MarketStructureRead
+    location_read: LocationRead
+    clear_path_to_target: ClearPathToTarget
+    lower_tf_confirmation: LowerTfConfirmation
+    decision: ReviewDecision
     note: Optional[str] = None
 
 
@@ -1158,9 +1181,14 @@ class CandidateVisualReviewOut(BaseModel):
     id: int
     ticker: str
     source: str
-    verdict: VisualReviewVerdict
-    reviewed_at: str
+    setup_key: str
+    market_structure: MarketStructureRead
+    location_read: LocationRead
+    clear_path_to_target: ClearPathToTarget
+    lower_tf_confirmation: LowerTfConfirmation
+    decision: ReviewDecision
     note: Optional[str] = None
+    reviewed_at: str
 
 
 class CandidatePlanPreviewOut(BaseModel):
@@ -3957,14 +3985,56 @@ def list_candidate_chart_reviews(
         conn.close()
 
 
+def _compute_setup_key(candidate: sqlite3.Row | dict, preview: dict) -> str:
+    """Stable setup identity for binding a human review to a specific trade
+    thesis generation, not just a ticker -- see the 2026-08-31 session's
+    investigation before this was written.
+
+    candidates.updated_at is NOT usable here: it changes on every routine
+    rescan (upsert_candidate_shortlist's ON CONFLICT unconditionally sets
+    updated_at=excluded.updated_at, no comparison against prior values) AND
+    on every status change (update_candidate_status's plain UPDATE) --
+    neither has anything to do with the trade thesis, so keying on it would
+    create false new-generations on ordinary refresh activity, exactly the
+    failure mode this exists to prevent.
+
+    stop/target are the stable anchors instead: both derive from
+    _find_swings/_find_order_block/_nearest_structural_target off DAILY
+    bars -- discrete real structural price levels that only change when the
+    underlying swing/order-block structure genuinely shifts, not with every
+    4h tick (unlike entry_price, recomputed fresh from the latest 4h close
+    every scan). Verified empirically against 4 real live pulls of the same
+    ticker spanning over an hour: entry/stop/target were byte-identical
+    across all four while the live quote moved on every call.
+
+    Rounding to 2 decimals absorbs float noise only -- a genuine structural
+    change moves these by more than a rounding error, so this isn't a
+    material-tolerance judgment call in the same category as e.g.
+    CONFLICTED_UNFAVORABLE_MIN.
+    """
+    ticker = str(preview.get("ticker") or candidate["ticker"] or "").strip().upper()
+    source = str(preview.get("source") or candidate["source"] or "")
+    direction = str(preview.get("signal") or candidate["signal"] or "").strip().lower()
+    stop = preview.get("stop")
+    target = preview.get("target")
+    stop_part = f"{round(float(stop), 2):.2f}" if stop is not None else "no_stop"
+    target_part = f"{round(float(target), 2):.2f}" if target is not None else "no_target"
+    return f"{ticker}|{source}|{direction}|{stop_part}|{target_part}"
+
+
 def _row_to_visual_review(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
         "ticker": row["ticker"],
         "source": row["source"],
-        "verdict": row["verdict"],
-        "reviewed_at": row["reviewed_at"],
+        "setup_key": row["setup_key"],
+        "market_structure": row["market_structure"],
+        "location_read": row["location_read"],
+        "clear_path_to_target": row["clear_path_to_target"],
+        "lower_tf_confirmation": row["lower_tf_confirmation"],
+        "decision": row["decision"],
         "note": row["note"] if "note" in row.keys() else None,
+        "reviewed_at": row["reviewed_at"],
     }
 
 
@@ -3973,11 +4043,11 @@ def list_candidate_visual_reviews(
     x_api_key: Optional[str] = Header(default=None),
     scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
-    """Full event history, newest first -- a ticker/source can have several
-    rows over time (re-reviewed on a later day). This is not "current
-    verdict per ticker"; a caller wanting that takes each ticker's latest
-    row here, same pattern GET /candidate-promotions already uses for its
-    own append-only table."""
+    """Full event history, newest first -- a setup_key can have several rows
+    over time (re-reviewed after new data). This is not "current decision
+    per setup"; a caller wanting that takes each setup_key's latest row
+    here, same pattern GET /candidate-promotions already uses for its own
+    append-only table."""
     _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
     try:
@@ -3994,22 +4064,60 @@ def record_candidate_visual_review(
     x_api_key: Optional[str] = Header(default=None),
     scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
-    """Record a stage-3 visual-review verdict. Always inserts a new row --
-    this table is append-only, so re-reviewing a candidate (e.g. the next
-    day, on fresh data) adds a new event rather than overwriting the old
-    one. Deliberately does not require the candidate to have any
-    promotion/plan-preview row at all -- a visual review can happen for any
-    ticker/source the caller names, independent of ENTER_NOW status, so
-    this never blocks on that the way promotion does.
+    """Record a stage-3 structured visual-review decision. Always inserts a
+    new row -- this table is append-only, so re-reviewing a setup (e.g. the
+    next day, on fresh structural data) adds a new event rather than
+    overwriting the old one.
+
+    Requires a cached plan-preview row for this ticker/source (the review
+    queue -- Stage B -- always has one by construction, since it's what a
+    human would be looking at when submitting this) so setup_key is
+    computed from the SAME stop/target the human actually reviewed, not a
+    freshly re-derived value that could theoretically differ. If none
+    exists, this returns 422 rather than silently computing something
+    inconsistent -- the caller should load/refresh the review queue first.
     """
     _check_api_key(x_api_key, scanner_session)
     normalized_ticker = ticker.strip().upper()
     conn = _get_db()
     try:
+        candidate = conn.execute(
+            "SELECT * FROM candidates WHERE ticker=? AND source=?",
+            (normalized_ticker, review.source),
+        ).fetchone()
+        if not candidate:
+            raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {review.source}")
+        preview_row = conn.execute(
+            "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
+            (normalized_ticker, review.source),
+        ).fetchone()
+        if not preview_row:
+            raise HTTPException(
+                status_code=422,
+                detail=f"No plan preview available for {ticker} / {review.source}; load the review queue first",
+            )
+        preview = _row_to_plan_preview(preview_row)
+        setup_key = _compute_setup_key(candidate, preview)
         reviewed_at = datetime.now(timezone.utc).isoformat()
         cursor = conn.execute(
-            "INSERT INTO candidate_visual_reviews (ticker, source, verdict, reviewed_at, note) VALUES (?, ?, ?, ?, ?)",
-            (normalized_ticker, review.source, review.verdict, reviewed_at, review.note),
+            """
+            INSERT INTO candidate_visual_reviews (
+                ticker, source, setup_key, market_structure, location_read,
+                clear_path_to_target, lower_tf_confirmation, decision, note, reviewed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_ticker,
+                review.source,
+                setup_key,
+                review.market_structure,
+                review.location_read,
+                review.clear_path_to_target,
+                review.lower_tf_confirmation,
+                review.decision,
+                review.note,
+                reviewed_at,
+            ),
         )
         conn.commit()
         row = conn.execute(
