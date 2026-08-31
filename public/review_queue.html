@@ -135,6 +135,12 @@
     .option-row input[type="radio"] { accent-color: var(--accent); }
     .option-row label:has(input:checked) { border-color: var(--accent); background: var(--surface3); }
 
+    .practical-reject { border-color: rgba(251, 113, 133, 0.35); background: rgba(251, 113, 133, 0.04); }
+    .practical-reject legend { color: var(--fail); }
+    .practical-reject #practicalRejectRow button { background: var(--fail); color: #1a0508; border-color: var(--fail); font-weight: 600; }
+    .practical-reject #practicalRejectRow button:hover { background: #fda4b1; }
+    .or-divider { text-align: center; color: var(--muted); font-size: 0.78rem; margin: 14px 0; }
+
     textarea {
       width: 100%; min-height: 60px; background: var(--surface2); border: 1px solid var(--border);
       color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; resize: vertical;
@@ -173,6 +179,6 @@
     </main>
   </div>
 
-  <script src="/static/review_queue.js?v=20260901-stage-c"></script>
+  <script src="/static/review_queue.js?v=20260901-practical-rejection"></script>
 </body>
 </html>

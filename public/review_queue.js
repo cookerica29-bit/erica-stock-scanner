@@ -17,6 +17,19 @@
     loaded: false,
   };
 
+  // Early practical-disqualification path (2026-09-01 session): a real
+  // usage gap -- a candidate can be practically untradeable (options too
+  // expensive, poor liquidity/spread) before a human ever reaches chart
+  // review. Backend already refuses to accept these mixed with any
+  // visual-read field (candidates_router.py's record_candidate_visual_review),
+  // so this UI path submits ONLY {decision:"reject", practical_rejection_reason}
+  // -- never touches the visual-review form's fields at all.
+  const PRACTICAL_REASON_LABELS = {
+    options_too_expensive: 'Options too expensive',
+    poor_option_liquidity: 'Poor option liquidity/spread',
+    other: 'Other practical disqualifier',
+  };
+
   function apiKey() {
     return localStorage.getItem(KEY) || sessionStorage.getItem(KEY) || '';
   }
@@ -129,7 +142,9 @@
       : 'Confluence unavailable for this candidate';
     const current = item.current_review;
     const alreadyReviewed = current
-      ? `<div class="already-reviewed">Last reviewed ${escapeHtml(new Date(current.reviewed_at).toLocaleString())} — decision: <strong>${escapeHtml(current.decision)}</strong>${current.note ? ` — "${escapeHtml(current.note)}"` : ''}. Submitting below records a new review for this same setup.</div>`
+      ? (current.review_type === 'practical_rejection'
+          ? `<div class="already-reviewed">Last reviewed ${escapeHtml(new Date(current.reviewed_at).toLocaleString())} — <strong>practically rejected before chart review</strong> (${escapeHtml(PRACTICAL_REASON_LABELS[current.practical_rejection_reason] || current.practical_rejection_reason)})${current.note ? ` — "${escapeHtml(current.note)}"` : ''}. Submitting below records a new review for this same setup.</div>`
+          : `<div class="already-reviewed">Last reviewed ${escapeHtml(new Date(current.reviewed_at).toLocaleString())} — decision: <strong>${escapeHtml(current.decision)}</strong>${current.note ? ` — "${escapeHtml(current.note)}"` : ''}. Submitting below records a new review for this same setup.</div>`)
       : '';
     const chartUrl = `https://www.tradingview.com/symbols/${encodeURIComponent(item.ticker)}/`;
 
@@ -166,6 +181,22 @@
         <div class="chart-action">
           <a class="nav-link" href="${chartUrl}" target="_blank" rel="noopener">Open Chart on TradingView ↗</a>
         </div>
+
+        <fieldset class="practical-reject">
+          <legend>Practically untradeable? Skip chart review</legend>
+          <div class="option-row">
+            <label><input type="radio" name="practical_reason" value="options_too_expensive"> Options too expensive</label>
+            <label><input type="radio" name="practical_reason" value="poor_option_liquidity"> Poor option liquidity/spread</label>
+            <label><input type="radio" name="practical_reason" value="other"> Other practical disqualifier</label>
+          </div>
+          <textarea id="practicalRejectNote" placeholder="Optional note"></textarea>
+          <div class="submit-row" id="practicalRejectRow">
+            <button type="button" id="practicalRejectBtn"
+              onclick="submitPracticalRejection('${escapeHtml(item.ticker)}', '${escapeHtml(item.source || '')}')">Reject &amp; Next</button>
+          </div>
+        </fieldset>
+
+        <div class="or-divider">— or complete a full chart review —</div>
 
         <form id="reviewForm" onsubmit="return false;">
           <fieldset>
@@ -250,6 +281,39 @@
       </div>
       ${renderCandidate(item)}`;
   }
+
+  async function submitPracticalRejection(ticker, source) {
+    const selected = document.querySelector('input[name="practical_reason"]:checked');
+    if (!selected) {
+      alert('Select a reason before rejecting.');
+      return;
+    }
+    const row = document.getElementById('practicalRejectRow');
+    row.innerHTML = '<button type="button" disabled>Rejecting…</button>';
+    try {
+      await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/visual-review`, {
+        method: 'POST',
+        body: JSON.stringify({
+          source,
+          decision: 'reject',
+          practical_rejection_reason: selected.value,
+          // Deliberately no market_structure/location_read/clear_path_to_target/
+          // lower_tf_confirmation here at all -- the backend rejects the
+          // combination outright if any is present, and this path never
+          // touches the visual-review form's fields to begin with.
+          note: document.getElementById('practicalRejectNote').value || null,
+        }),
+      });
+      state.tally.reject = (state.tally.reject || 0) + 1;
+      state.index += 1;
+      render();
+    } catch (err) {
+      alert(`Could not save rejection: ${err.message}`);
+      row.innerHTML = '<button type="button" id="practicalRejectBtn" onclick="submitPracticalRejection(\'' +
+        ticker.replace(/'/g, "\\'") + '\', \'' + (source || '').replace(/'/g, "\\'") + '\')">Reject &amp; Next</button>';
+    }
+  }
+  window.submitPracticalRejection = submitPracticalRejection;
 
   async function submitReview(ticker, source) {
     const form = document.getElementById('reviewForm');

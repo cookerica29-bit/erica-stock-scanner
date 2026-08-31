@@ -24,6 +24,7 @@ codebase, not invented from scratch:
 """
 
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -282,6 +283,262 @@ def test_visual_review_records_a_structured_decision(client, headers, monkeypatc
     assert body["setup_key"]
     assert body["reviewed_at"]
     assert isinstance(body["id"], int)
+
+
+
+# ---------------------------------------------------------------------------
+# Early practical-disqualification path (2026-09-01 session): a candidate
+# can be practically untradeable (options too expensive, poor liquidity/
+# spread) before a human ever reaches chart review. Real usage gap found:
+# the form previously required all four visual-read fields before allowing
+# ANY submission, forcing a reviewer to fabricate chart observations just
+# to record "not trading this, the contract is unaffordable."
+# ---------------------------------------------------------------------------
+
+def test_practical_rejection_succeeds_with_all_visual_fields_null(client, headers, monkeypatch):
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    _compute_preview(client, headers)
+
+    response = client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={
+            "source": "ma_pipeline",
+            "decision": "reject",
+            "practical_rejection_reason": "options_too_expensive",
+            "note": "Nearest liquid strike is $8+, not worth the risk.",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review_type"] == "practical_rejection"
+    assert body["practical_rejection_reason"] == "options_too_expensive"
+    assert body["decision"] == "reject"
+    # No fake/inferred/defaulted visual values -- real None, not a string
+    # placeholder or a guessed enum value.
+    assert body["market_structure"] is None
+    assert body["location_read"] is None
+    assert body["clear_path_to_target"] is None
+    assert body["lower_tf_confirmation"] is None
+    assert body["setup_key"]
+
+    # And confirm what actually landed in the DB, not just the response
+    # shape -- the response is built from the same row, but this closes
+    # the loop against a hypothetical response-serialization bug hiding a
+    # real fabricated value in storage.
+    listed = client.get("/api/v1/scanner/candidate-visual-reviews", headers=headers).json()
+    stored = next(r for r in listed if r["id"] == body["id"])
+    assert stored["market_structure"] is None
+    assert stored["location_read"] is None
+    assert stored["clear_path_to_target"] is None
+    assert stored["lower_tf_confirmation"] is None
+    assert stored["review_type"] == "practical_rejection"
+
+
+@pytest.mark.parametrize("reason", ["options_too_expensive", "poor_option_liquidity", "other"])
+def test_practical_rejection_accepts_every_real_reason(client, headers, monkeypatch, reason):
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    _compute_preview(client, headers)
+
+    response = client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={"source": "ma_pipeline", "decision": "reject", "practical_rejection_reason": reason},
+    )
+    assert response.status_code == 200
+    assert response.json()["practical_rejection_reason"] == reason
+
+
+def test_practical_rejection_rejects_invalid_reason_enum(client, headers, monkeypatch):
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    _compute_preview(client, headers)
+
+    response = client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={"source": "ma_pipeline", "decision": "reject", "practical_rejection_reason": "just_dont_like_it"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("decision", ["approve", "watch"])
+def test_practical_rejection_requires_decision_reject(client, headers, monkeypatch, decision):
+    # There's no "approve, but the contract is unaffordable" case.
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    _compute_preview(client, headers)
+
+    response = client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={"source": "ma_pipeline", "decision": decision, "practical_rejection_reason": "options_too_expensive"},
+    )
+    assert response.status_code == 422
+
+    # Confirm nothing was actually written for the rejected request.
+    listed = client.get("/api/v1/scanner/candidate-visual-reviews", headers=headers).json()
+    assert listed == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("market_structure", "bullish"),
+    ("location_read", "good"),
+    ("clear_path_to_target", "yes"),
+    ("lower_tf_confirmation", "yes"),
+])
+def test_practical_rejection_rejects_mixing_with_visual_fields(client, headers, monkeypatch, field, value):
+    # A request can never produce a row with SOME real chart observations
+    # and some None ones -- caught outright, not silently dropped.
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    _compute_preview(client, headers)
+
+    payload = {"source": "ma_pipeline", "decision": "reject", "practical_rejection_reason": "options_too_expensive"}
+    payload[field] = value
+    response = client.post("/api/v1/scanner/candidates/NVDA/visual-review", headers=headers, json=payload)
+    assert response.status_code == 422
+
+    listed = client.get("/api/v1/scanner/candidate-visual-reviews", headers=headers).json()
+    assert listed == []
+
+
+def test_normal_rejection_still_requires_visual_fields(client, headers, monkeypatch):
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    _compute_preview(client, headers)
+
+    response = client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={"source": "ma_pipeline", "decision": "reject"},  # no visual fields, no practical_rejection_reason
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("decision", ["approve", "watch"])
+def test_approve_and_watch_still_require_visual_fields(client, headers, monkeypatch, decision):
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    _compute_preview(client, headers)
+
+    response = client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={"source": "ma_pipeline", "decision": decision},
+    )
+    assert response.status_code == 422
+
+
+def test_practical_rejection_binds_to_correct_setup_key(client, headers, monkeypatch):
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+    preview = _compute_preview(client, headers)
+
+    response = client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={"source": "ma_pipeline", "decision": "reject", "practical_rejection_reason": "poor_option_liquidity"},
+    )
+    body = response.json()
+
+    conn_check = client.get("/api/v1/scanner/candidates", headers=headers).json()
+    candidate_row = next(c for c in conn_check if c["ticker"] == "NVDA")
+    expected_key = router._compute_setup_key(candidate_row, preview)
+    assert body["setup_key"] == expected_key
+
+    # And it shows up as the current review for that setup in the queue.
+    queue = client.get("/api/v1/scanner/candidates/review-queue", headers=headers).json()
+    entry = next((c for c in queue["candidates"] if c["ticker"] == "NVDA"), None)
+    if entry is not None:  # only if NVDA is stage-1-ready in this fixture
+        assert entry["setup_key"] == expected_key
+        assert entry["current_review"]["review_type"] == "practical_rejection"
+        assert entry["current_review"]["practical_rejection_reason"] == "poor_option_liquidity"
+
+
+def test_practical_rejection_does_not_change_queue_qualification_or_ranking(client, headers, monkeypatch):
+    _mock_network(monkeypatch, _promotion_daily_frame)
+    _seed_candidate(client, headers)
+
+    before = client.get("/api/v1/scanner/candidates/review-queue", headers=headers).json()
+
+    client.post(
+        "/api/v1/scanner/candidates/NVDA/visual-review",
+        headers=headers,
+        json={"source": "ma_pipeline", "decision": "reject", "practical_rejection_reason": "options_too_expensive"},
+    )
+
+    after = client.get("/api/v1/scanner/candidates/review-queue", headers=headers).json()
+    assert before["count"] == after["count"]
+    before_order = [(c["rank"], c["ticker"]) for c in before["candidates"]]
+    after_order = [(c["rank"], c["ticker"]) for c in after["candidates"]]
+    assert before_order == after_order
+
+
+def test_existing_visual_reviews_remain_readable_after_migration(client, headers):
+    """Simulates the real already-deployed pre-migration schema (NOT NULL
+    visual columns, no review_type/practical_rejection_reason) with a row
+    shaped exactly like the real 2026-08-31 IGV production verification
+    review, then confirms schema init upgrades it correctly and the row
+    stays fully readable with its original values plus review_type
+    defaulted to "visual" -- not lost, not blanked, not miscategorized."""
+    db_path = os.environ["KAIROS_CANDIDATES_DB"]
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE candidate_visual_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                source TEXT NOT NULL,
+                setup_key TEXT NOT NULL,
+                market_structure TEXT NOT NULL,
+                location_read TEXT NOT NULL,
+                clear_path_to_target TEXT NOT NULL,
+                lower_tf_confirmation TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                note TEXT,
+                reviewed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO candidate_visual_reviews
+                (ticker, source, setup_key, market_structure, location_read,
+                 clear_path_to_target, lower_tf_confirmation, decision, note, reviewed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "IGV", "ma_pipeline", "IGV|ma_pipeline|long|107.95|117.02",
+                "bullish", "good", "yes", "yes", "approve",
+                "Deploy verification — real live submission, 2026-08-31",
+                "2026-08-31T20:21:03.468053+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Force a fresh schema check against this pre-migration DB (mirrors
+    # what a real server boot against the real production DB does).
+    router._schema_ready_db_paths.discard(str(Path(db_path)))
+
+    listed = client.get("/api/v1/scanner/candidate-visual-reviews", headers=headers).json()
+    igv_rows = [r for r in listed if r["ticker"] == "IGV"]
+    assert len(igv_rows) == 1
+    row = igv_rows[0]
+    assert row["setup_key"] == "IGV|ma_pipeline|long|107.95|117.02"
+    assert row["market_structure"] == "bullish"
+    assert row["location_read"] == "good"
+    assert row["clear_path_to_target"] == "yes"
+    assert row["lower_tf_confirmation"] == "yes"
+    assert row["decision"] == "approve"
+    assert row["note"] == "Deploy verification — real live submission, 2026-08-31"
+    assert row["review_type"] == "visual"  # correctly backfilled, not left null/blank
+    assert row["practical_rejection_reason"] is None
 
 
 @pytest.mark.parametrize("field,bad_value", [

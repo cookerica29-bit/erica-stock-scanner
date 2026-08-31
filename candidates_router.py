@@ -736,6 +736,87 @@ def _ensure_candidates_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidates ADD COLUMN source_universe TEXT")
 
 
+def _ensure_candidate_visual_reviews_schema(conn: sqlite3.Connection) -> None:
+    """Early practical-disqualification path (2026-09-01 session): a
+    candidate can be practically untradeable before chart review at all
+    (options too expensive, poor liquidity/spread) -- the reviewer
+    shouldn't have to fabricate market_structure/location_read/
+    clear_path_to_target/lower_tf_confirmation values just to record that.
+
+    Adds review_type ('visual' | 'practical_rejection') and
+    practical_rejection_reason (NULL for a real chart review), and relaxes
+    the four visual-read columns from NOT NULL to nullable -- SQLite has no
+    ALTER COLUMN for dropping a NOT NULL constraint, so this rebuilds the
+    table (rename -> recreate -> copy -> drop) ONLY when the old NOT NULL
+    shape is actually detected on an already-deployed database. Real
+    production data exists in this table already (at minimum the
+    2026-08-31 IGV deploy-verification review) -- every row copied across
+    keeps its exact original values; review_type defaults to 'visual' and
+    practical_rejection_reason to NULL for anything written before this
+    column existed, which is exactly correct: every row before this
+    feature shipped WAS a real chart review.
+
+    A fresh database gets the new (nullable) shape directly from
+    _initialize_candidates_schema's own CREATE TABLE literal, so this
+    function is a no-op there (its notnull check finds nothing to fix).
+    """
+    columns = {info["name"]: info for info in conn.execute("PRAGMA table_info(candidate_visual_reviews)").fetchall()}
+    if not columns:
+        return
+    needs_rebuild = any(
+        columns[name]["notnull"]
+        for name in ("market_structure", "location_read", "clear_path_to_target", "lower_tf_confirmation")
+        if name in columns
+    )
+    if needs_rebuild:
+        conn.execute("ALTER TABLE candidate_visual_reviews RENAME TO candidate_visual_reviews_old")
+        conn.execute(
+            """
+            CREATE TABLE candidate_visual_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                source TEXT NOT NULL,
+                setup_key TEXT NOT NULL,
+                review_type TEXT NOT NULL DEFAULT 'visual',
+                market_structure TEXT,
+                location_read TEXT,
+                clear_path_to_target TEXT,
+                lower_tf_confirmation TEXT,
+                practical_rejection_reason TEXT,
+                decision TEXT NOT NULL,
+                note TEXT,
+                reviewed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO candidate_visual_reviews
+                (id, ticker, source, setup_key, review_type, market_structure, location_read,
+                 clear_path_to_target, lower_tf_confirmation, practical_rejection_reason,
+                 decision, note, reviewed_at)
+            SELECT id, ticker, source, setup_key, 'visual', market_structure, location_read,
+                   clear_path_to_target, lower_tf_confirmation, NULL,
+                   decision, note, reviewed_at
+            FROM candidate_visual_reviews_old
+            """
+        )
+        conn.execute("DROP TABLE candidate_visual_reviews_old")
+        conn.commit()
+        return
+    # Already the new shape -- just make sure the two additive columns
+    # exist, same ALTER-if-missing pattern as every other schema-evolution
+    # function in this file (covers a DB created between this column's
+    # CREATE TABLE literal existing and this function's own first run,
+    # a real if narrow race no different from _ensure_candidates_schema's
+    # own source_universe check above).
+    if "review_type" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN review_type TEXT NOT NULL DEFAULT 'visual'")
+    if "practical_rejection_reason" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN practical_rejection_reason TEXT")
+    conn.commit()
+
+
 def _initialize_candidates_schema(conn) -> None:
     conn.execute(
         """
@@ -932,16 +1013,19 @@ def _initialize_candidates_schema(conn) -> None:
             ticker TEXT NOT NULL,
             source TEXT NOT NULL,
             setup_key TEXT NOT NULL,
-            market_structure TEXT NOT NULL,
-            location_read TEXT NOT NULL,
-            clear_path_to_target TEXT NOT NULL,
-            lower_tf_confirmation TEXT NOT NULL,
+            review_type TEXT NOT NULL DEFAULT 'visual',
+            market_structure TEXT,
+            location_read TEXT,
+            clear_path_to_target TEXT,
+            lower_tf_confirmation TEXT,
+            practical_rejection_reason TEXT,
             decision TEXT NOT NULL,
             note TEXT,
             reviewed_at TEXT NOT NULL
         )
         """
     )
+    _ensure_candidate_visual_reviews_schema(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidate_visual_reviews_ticker_source "
         "ON candidate_visual_reviews (ticker, source, reviewed_at)"
@@ -1166,14 +1250,38 @@ ClearPathToTarget = Literal["yes", "no"]
 LowerTfConfirmation = Literal["yes", "not_yet"]
 ReviewDecision = Literal["approve", "watch", "reject"]
 
+# Early practical-disqualification path (2026-09-01 session): a real usage
+# gap -- a candidate can be practically untradeable (options too expensive,
+# poor liquidity/spread) before a human ever looks at the chart, but the
+# form previously required all four visual-read fields before allowing
+# ANY submission, forcing a reviewer to fabricate chart observations just
+# to record "I'm not trading this, the contract is unaffordable." review_type
+# distinguishes the two real, different events this table now records:
+#   "visual"             -- mechanically qualified -> chart reviewed ->
+#                            approve/watch/reject on chart quality. All
+#                            four visual-read fields required, exactly as
+#                            before.
+#   "practical_rejection" -- mechanically qualified -> practically
+#                            rejected BEFORE chart review. decision is
+#                            always "reject" (there's no "approve, but
+#                            it's unaffordable" case). All four visual-read
+#                            fields are stored as real SQL NULL, never
+#                            inferred or defaulted -- see
+#                            record_candidate_visual_review's validation,
+#                            which rejects any request that mixes a
+#                            practical_rejection_reason with a visual field.
+ReviewType = Literal["visual", "practical_rejection"]
+PracticalRejectionReason = Literal["options_too_expensive", "poor_option_liquidity", "other"]
+
 
 class VisualReviewIn(BaseModel):
     source: str = Field(min_length=1)
-    market_structure: MarketStructureRead
-    location_read: LocationRead
-    clear_path_to_target: ClearPathToTarget
-    lower_tf_confirmation: LowerTfConfirmation
     decision: ReviewDecision
+    practical_rejection_reason: Optional[PracticalRejectionReason] = None
+    market_structure: Optional[MarketStructureRead] = None
+    location_read: Optional[LocationRead] = None
+    clear_path_to_target: Optional[ClearPathToTarget] = None
+    lower_tf_confirmation: Optional[LowerTfConfirmation] = None
     note: Optional[str] = None
 
 
@@ -1182,10 +1290,12 @@ class CandidateVisualReviewOut(BaseModel):
     ticker: str
     source: str
     setup_key: str
-    market_structure: MarketStructureRead
-    location_read: LocationRead
-    clear_path_to_target: ClearPathToTarget
-    lower_tf_confirmation: LowerTfConfirmation
+    review_type: ReviewType
+    market_structure: Optional[MarketStructureRead] = None
+    location_read: Optional[LocationRead] = None
+    clear_path_to_target: Optional[ClearPathToTarget] = None
+    lower_tf_confirmation: Optional[LowerTfConfirmation] = None
+    practical_rejection_reason: Optional[PracticalRejectionReason] = None
     decision: ReviewDecision
     note: Optional[str] = None
     reviewed_at: str
@@ -4315,17 +4425,24 @@ def _compute_setup_key(candidate: sqlite3.Row | dict, preview: dict) -> str:
 
 
 def _row_to_visual_review(row: sqlite3.Row) -> dict:
+    keys = row.keys()
     return {
         "id": row["id"],
         "ticker": row["ticker"],
         "source": row["source"],
         "setup_key": row["setup_key"],
+        # review_type defaults to "visual" for rows written before this
+        # column existed (real production data, migrated by
+        # _ensure_candidate_visual_reviews_schema) -- every one of those
+        # WAS a real chart review, so that default is correct, not a guess.
+        "review_type": row["review_type"] if "review_type" in keys and row["review_type"] else "visual",
         "market_structure": row["market_structure"],
         "location_read": row["location_read"],
         "clear_path_to_target": row["clear_path_to_target"],
         "lower_tf_confirmation": row["lower_tf_confirmation"],
+        "practical_rejection_reason": row["practical_rejection_reason"] if "practical_rejection_reason" in keys else None,
         "decision": row["decision"],
-        "note": row["note"] if "note" in row.keys() else None,
+        "note": row["note"] if "note" in keys else None,
         "reviewed_at": row["reviewed_at"],
     }
 
@@ -4356,10 +4473,25 @@ def record_candidate_visual_review(
     x_api_key: Optional[str] = Header(default=None),
     scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
-    """Record a stage-3 structured visual-review decision. Always inserts a
-    new row -- this table is append-only, so re-reviewing a setup (e.g. the
-    next day, on fresh structural data) adds a new event rather than
-    overwriting the old one.
+    """Record a stage-3 review decision -- either a real chart review, or
+    an early practical disqualification recorded BEFORE one (options too
+    expensive, poor liquidity/spread, other). Always inserts a new row --
+    this table is append-only, so re-reviewing a setup (e.g. the next day,
+    on fresh structural data) adds a new event rather than overwriting the
+    old one.
+
+    Exactly one of two shapes is accepted, enforced here (Pydantic alone
+    can't express "these fields are required together XOR that field is"):
+      - practical_rejection_reason set: decision MUST be "reject" (there's
+        no "approve, but it's unaffordable" case), and NONE of the four
+        visual-read fields may be set -- mixing them is rejected outright
+        (422) rather than silently dropped, so a request can never produce
+        a row with some real chart observations and some None ones. All
+        four are stored as real SQL NULL.
+      - practical_rejection_reason absent: this is a real chart review,
+        exactly the pre-existing flow -- all four visual-read fields are
+        required (422 if any is missing), decision can be approve/watch/
+        reject same as always.
 
     setup_key is computed via _compute_review_queue_preview -- the SAME
     lightweight, options-free computation the review queue itself uses
@@ -4375,6 +4507,38 @@ def record_candidate_visual_review(
     """
     _check_api_key(x_api_key, scanner_session)
     normalized_ticker = ticker.strip().upper()
+
+    visual_fields = {
+        "market_structure": review.market_structure,
+        "location_read": review.location_read,
+        "clear_path_to_target": review.clear_path_to_target,
+        "lower_tf_confirmation": review.lower_tf_confirmation,
+    }
+    if review.practical_rejection_reason is not None:
+        if review.decision != "reject":
+            raise HTTPException(
+                status_code=422,
+                detail="practical_rejection_reason requires decision=\"reject\" -- there is no approve/watch "
+                       "counterpart to a practical disqualification.",
+            )
+        set_visual_fields = [name for name, value in visual_fields.items() if value is not None]
+        if set_visual_fields:
+            raise HTTPException(
+                status_code=422,
+                detail=f"practical_rejection_reason cannot be combined with visual-read fields: {', '.join(set_visual_fields)}. "
+                       "A practical rejection is recorded before chart review; those fields must be omitted, not fabricated.",
+            )
+        review_type = "practical_rejection"
+    else:
+        missing_visual_fields = [name for name, value in visual_fields.items() if value is None]
+        if missing_visual_fields:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Missing required visual-review field(s): {', '.join(missing_visual_fields)}. "
+                       "Set practical_rejection_reason instead if this is a pre-chart-review disqualification.",
+            )
+        review_type = "visual"
+
     conn = _get_db()
     try:
         candidate = conn.execute(
@@ -4398,18 +4562,21 @@ def record_candidate_visual_review(
         cursor = conn.execute(
             """
             INSERT INTO candidate_visual_reviews (
-                ticker, source, setup_key, market_structure, location_read,
-                clear_path_to_target, lower_tf_confirmation, decision, note, reviewed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ticker, source, setup_key, review_type, market_structure, location_read,
+                clear_path_to_target, lower_tf_confirmation, practical_rejection_reason,
+                decision, note, reviewed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_ticker,
                 review.source,
                 setup_key,
+                review_type,
                 review.market_structure,
                 review.location_read,
                 review.clear_path_to_target,
                 review.lower_tf_confirmation,
+                review.practical_rejection_reason,
                 review.decision,
                 review.note,
                 reviewed_at,
