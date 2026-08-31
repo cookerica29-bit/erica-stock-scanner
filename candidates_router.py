@@ -2074,7 +2074,17 @@ def _execution_shadow_from_bars(
     }
 
 
-def _preview_base_enter_now_ready(candidate: sqlite3.Row | dict, preview: dict) -> bool:
+def _preview_clears_mechanical_prechecks(candidate: sqlite3.Row | dict, preview: dict) -> bool:
+    """Direction/regime/valid-target/R:R only -- deliberately everything
+    _preview_base_enter_now_ready checks EXCEPT entry proximity, extracted
+    (2026-09-01 session, review-queue performance pass) so a caller can
+    decide whether a candidate is even worth a live-quote fetch BEFORE
+    paying for one. All four conditions here are computed from data
+    _compute_candidate_promotion already produces (or, for direction/
+    regime, straight from the candidates row) -- no live network call is
+    needed to evaluate this function itself, only to have gotten the
+    preview dict to this point in the first place.
+    """
     direction = str(preview.get("signal") or candidate["signal"]).strip().lower()
     if direction != "long":
         return False
@@ -2085,6 +2095,12 @@ def _preview_base_enter_now_ready(candidate: sqlite3.Row | dict, preview: dict) 
     if preview.get("no_valid_target") or preview.get("target") is None or preview.get("risk_reward") is None:
         return False
     if preview.get("rr_warning") or float(preview.get("risk_reward") or 0) < RR_WARNING_THRESHOLD:
+        return False
+    return True
+
+
+def _preview_base_enter_now_ready(candidate: sqlite3.Row | dict, preview: dict) -> bool:
+    if not _preview_clears_mechanical_prechecks(candidate, preview):
         return False
     # Contract quality (spread/liquidity/DTE/delta) is informational only --
     # demoted from a hard gate, same pattern as the AI chart-read demotion.
@@ -2262,10 +2278,33 @@ def _store_ranking_snapshot(conn, ranked: list[dict], mechanism: str) -> str:
 # slow in practice, a dedicated lightweight cache table (mirroring
 # candidate_plan_previews minus option_contract) is the natural follow-up
 # -- flagged here, not built now.
-def _compute_review_queue_preview(
+# Performance pass (2026-09-01 session): the original version of this
+# function always attached live entry-proximity/execution-shadow, for
+# EVERY long candidate, before either gate had even been checked -- real
+# profiling (438 real candidates, cold cache) found this cost ~209s total,
+# ~45s of it (364 single-ticker _latest_quote_for_ticker calls) spent on
+# candidates that could never have qualified anyway (most fail valid-
+# target or R:R, determined by the SAME daily-bar fetch that also cost
+# ~103s unbatched). Split into a "base" computation (stop/target/R:R/
+# confluence/etc -- no live quote, no execution-shadow) and a thin
+# single-candidate wrapper below that only pays for the live gates when
+# _preview_clears_mechanical_prechecks says they're worth checking. The
+# bulk review-queue endpoint (list_review_queue) uses the base function
+# directly so it can batch the live-quote fetch across every precheck
+# survivor at once (_latest_quotes_for_previews -- already fixed this
+# session for exactly this fan-out shape) instead of one call per
+# candidate.
+def _compute_review_queue_base_preview(
     candidate: sqlite3.Row | dict,
     cached_row: Optional[sqlite3.Row] = None,
 ) -> dict:
+    """Everything _compute_review_queue_preview computes EXCEPT entry
+    proximity/execution confirmation. entry_proximity_ok/execution_shadow_ok
+    are left explicitly None/not-checked here (not omitted) -- "not yet
+    evaluated" is a real, distinct state from "evaluated and failed," and
+    _stage1_mechanical_ready already treats both identically (not True),
+    so this changes nothing about ranking outcomes.
+    """
     if cached_row is not None and cached_row["candidate_updated_at"] == candidate["updated_at"]:
         preview = _row_to_plan_preview(cached_row)
         # Already computed by someone else (main dashboard / a scan cycle)
@@ -2273,26 +2312,28 @@ def _compute_review_queue_preview(
         # sense the caller cares about (no fresh hydration was triggered
         # BY THIS REQUEST either way).
         preview["option_contract_deferred"] = False
-        # entry_proximity_ok/execution_shadow_ok are NEVER persisted in
-        # candidate_plan_previews (both are live, request-time-only values
-        # -- see _enriched_previews_for_candidates' own final pass, which
-        # this mirrors exactly). Reusing a cached row's static fields
-        # without re-attaching these would silently make every reused
-        # candidate fail _stage1_mechanical_ready (missing execution_shadow_ok
-        # reads as not-True) -- confirmed as a real bug here via test, not
-        # theoretical.
-        preview = _attach_entry_proximity(preview, _latest_quote_for_ticker(str(preview.get("ticker") or "")))
-        return _attach_execution_shadow(candidate, preview)
+        preview.setdefault("entry_proximity_ok", None)
+        preview.setdefault("execution_shadow_checked", False)
+        preview.setdefault("execution_shadow_ok", None)
+        return preview
 
     computed_at = datetime.now(timezone.utc).isoformat()
     try:
         promotion_like = _compute_candidate_promotion(candidate)
-        enriched = _promotion_with_live_gate_context(candidate, promotion_like, option_contract=None)
-        enriched["option_contract_deferred"] = True
-        enriched["preview_error"] = None
-        enriched["computed_at"] = computed_at
-        enriched["candidate_updated_at"] = candidate["updated_at"]
-        return enriched
+        ticker = str(promotion_like.get("ticker") or candidate["ticker"]).strip().upper()
+        return {
+            **promotion_like,
+            "ticker": ticker,
+            "signal": promotion_like.get("direction") or candidate["signal"],
+            "option_contract": None,
+            "option_contract_deferred": True,
+            "entry_proximity_ok": None,
+            "execution_shadow_checked": False,
+            "execution_shadow_ok": None,
+            "preview_error": None,
+            "computed_at": computed_at,
+            "candidate_updated_at": candidate["updated_at"],
+        }
     except HTTPException as exc:
         return {
             "ticker": str(candidate["ticker"] or "").strip().upper(),
@@ -2312,7 +2353,7 @@ def _compute_review_queue_preview(
             "displacement_label": None,
             "location_percentile": None,
             "location_alignment": None,
-            "entry_proximity_ok": False,
+            "entry_proximity_ok": None,
             "entry_distance_pct": None,
             "execution_shadow_checked": False,
             "execution_shadow_ok": None,
@@ -2322,6 +2363,24 @@ def _compute_review_queue_preview(
             "computed_at": computed_at,
             "candidate_updated_at": candidate["updated_at"],
         }
+
+
+def _compute_review_queue_preview(
+    candidate: sqlite3.Row | dict,
+    cached_row: Optional[sqlite3.Row] = None,
+) -> dict:
+    """Single-candidate convenience wrapper -- used by POST
+    /candidates/{ticker}/visual-review, which only ever needs one ticker at
+    a time and gets no benefit from the bulk endpoint's batched-quote path.
+    Still applies the same reordering: skips the live quote/execution-
+    shadow fetch entirely if the candidate doesn't clear the cheap
+    mechanical prechecks first, same as the bulk path below.
+    """
+    preview = _compute_review_queue_base_preview(candidate, cached_row)
+    if not _preview_clears_mechanical_prechecks(candidate, preview):
+        return preview
+    preview = _attach_entry_proximity(preview, _latest_quote_for_ticker(str(preview.get("ticker") or "")))
+    return _attach_execution_shadow(candidate, preview)
 
 
 def _latest_visual_review_for_setup(conn, setup_key: str) -> Optional[dict]:
@@ -3975,11 +4034,41 @@ def list_review_queue(
     """Stage B: the human-in-the-loop review queue's backend. Deliberately
     separate from GET /candidates/ranked (Stage 2, preserved exactly as
     built, still used for whatever else already reads it) -- this path
-    never triggers option-contract hydration (see
-    _compute_review_queue_preview's own comment for the full caching
-    tradeoff). Ranking logic itself is unchanged: same
-    _stage1_mechanical_ready/rank_stage1_candidates as Stage 2, just fed
-    lightweight previews.
+    never triggers option-contract hydration. Ranking logic itself is
+    unchanged: same _stage1_mechanical_ready/rank_stage1_candidates as
+    Stage 2 -- see rank_stage1_candidates' own call below, untouched.
+
+    Performance pass (2026-09-01 session): real profiling (438 real long
+    candidates, cold cache) found the original version cost ~209s, split
+    ~103s daily-bar fetches (438 calls, unbatched) / ~45s live-quote
+    fetches (364 calls, one per candidate) / ~58s execution-shadow (130
+    calls, already properly gated). Restructured into an explicit funnel
+    that applies the cheap, already-computed gates before paying for the
+    live ones, in this order:
+      1. regime alignment -- free, straight off the candidates row, no
+         network call needed to check it.
+      2. daily-bar pre-warm, batched (reuses CANDIDATE_PREVIEW_PREWARM_
+         CHUNK_SIZE / _batch_download's own chunked-batching, the same
+         pattern _enriched_previews_for_candidates already uses) for
+         whichever regime-aligned candidates aren't already opportunistically
+         cache-hit -- then compute the base preview (stop/target/R:R/
+         confluence/etc, no live quote yet) for each.
+      3. valid-target + R:R (_preview_clears_mechanical_prechecks) --
+         candidates that fail here never get a live quote at all.
+      4. live quotes, batched in ONE call via _latest_quotes_for_previews
+         (the chunked/halving-safe fetcher already fixed this session for
+         exactly this kind of fan-out) across every precheck survivor,
+         instead of one _latest_quote_for_ticker call per candidate.
+      5. execution-shadow -- unchanged, _attach_execution_shadow already
+         internally gates on the equivalent of steps 1-4 via
+         _preview_base_enter_now_ready, so this step's real network cost
+         was already properly scoped before this pass; also already
+         benefits from its own 75s TTL cache (EXECUTION_SHADOW_BARS_CACHE_TTL)
+         on repeat calls, built in an earlier session.
+    rank_stage1_candidates/_stage1_mechanical_ready themselves are never
+    touched -- candidates that were short-circuited at an earlier gate
+    simply arrive with entry_proximity_ok/execution_shadow_ok left None,
+    which those functions already treat identically to an explicit False.
 
     Each ranked entry also carries setup_key and current_review -- the
     latest candidate_visual_reviews row for that setup generation, or None
@@ -3998,10 +4087,57 @@ def list_review_queue(
             (row["ticker"], row["source"]): row
             for row in conn.execute("SELECT * FROM candidate_plan_previews").fetchall()
         }
-        rows = [
-            (candidate, _compute_review_queue_preview(candidate, cached_by_key.get((candidate["ticker"], candidate["source"]))))
-            for candidate in candidates
+
+        # Gate 1: regime alignment, free -- no network call.
+        regime_aligned = [
+            candidate for candidate in candidates
+            if str(candidate["signal"] or "").strip().lower() == "long"
+            and _candidate_regime_aligned(candidate, "long")
         ]
+
+        # Gate 2: batch pre-warm daily bars for whichever regime-aligned
+        # candidates aren't already a fresh cache hit -- mirrors
+        # _enriched_previews_for_candidates' own pre-warm step exactly,
+        # rather than leaving each candidate's _compute_candidate_promotion
+        # call to fetch cold, one ticker at a time.
+        def _fresh_cache_hit(candidate) -> bool:
+            cached = cached_by_key.get((candidate["ticker"], candidate["source"]))
+            return cached is not None and cached["candidate_updated_at"] == candidate["updated_at"]
+
+        needs_fresh_bars = sorted({
+            str(candidate["ticker"]).upper() for candidate in regime_aligned if not _fresh_cache_hit(candidate)
+        })
+        for chunk_start in range(0, len(needs_fresh_bars), CANDIDATE_PREVIEW_PREWARM_CHUNK_SIZE):
+            chunk = needs_fresh_bars[chunk_start:chunk_start + CANDIDATE_PREVIEW_PREWARM_CHUNK_SIZE]
+            try:
+                _batch_download(chunk, period="1y", interval="1d")
+            except Exception:
+                pass
+
+        base_rows = [
+            (candidate, _compute_review_queue_base_preview(candidate, cached_by_key.get((candidate["ticker"], candidate["source"]))))
+            for candidate in regime_aligned
+        ]
+
+        # Gate 3: valid target + R:R -- only these are worth a live quote.
+        precheck_survivors = [
+            (candidate, preview) for candidate, preview in base_rows
+            if _preview_clears_mechanical_prechecks(candidate, preview)
+        ]
+
+        # Gate 4: ONE batched quote fetch across every survivor, not one
+        # call per candidate.
+        quotes = _latest_quotes_for_previews([preview for _, preview in precheck_survivors])
+
+        rows = []
+        for candidate, preview in base_rows:
+            if _preview_clears_mechanical_prechecks(candidate, preview):
+                preview = _attach_entry_proximity(preview, quotes.get(str(preview.get("ticker") or "").upper()))
+                # Gate 5: execution-shadow -- already internally gated, see
+                # docstring above; unchanged.
+                preview = _attach_execution_shadow(candidate, preview)
+            rows.append((candidate, preview))
+
         ranked = rank_stage1_candidates(rows)
         snapshot_id = _store_ranking_snapshot(conn, ranked, RANKING_MECHANISM_VERSION)
 
