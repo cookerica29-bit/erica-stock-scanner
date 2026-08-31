@@ -2232,6 +2232,106 @@ def _store_ranking_snapshot(conn, ranked: list[dict], mechanism: str) -> str:
     return snapshot_id
 
 
+# Stage B (2026-08-31 session, human-in-the-loop review-funnel redesign):
+# the review queue's own lightweight preview computation. Deliberately
+# separate from _compute_candidate_plan_preview -- that function is left
+# completely untouched, so GET /candidate-plan-previews (today's existing
+# dashboard) keeps its exact current behavior, options included, zero
+# regression risk.
+#
+# This path never calls _safe_option_contract_for_candidate at all. Real
+# options work happens only once a human clicks Approve, reusing the
+# existing block_on_miss=True single-candidate pattern update_candidate_status's
+# promotion path already uses -- that machinery already exists and already
+# does exactly "hydrate options at approval time," it just wasn't reused
+# anywhere else before this.
+#
+# Caching tradeoff, stated plainly rather than solved silently: this
+# function does NOT write into candidate_plan_previews (writing a no-
+# options row there risked GET /candidate-plan-previews later reading it
+# back as "fresh enough" via the existing candidate_updated_at check, and
+# serving a stale, options-less row to today's dashboard -- exactly the
+# regression this is meant to avoid). It DOES opportunistically READ an
+# existing fresh row if one happens to already be cached there (e.g. the
+# main dashboard or a recent scan cycle already computed it) -- a pure
+# read carries none of that write-side risk. When nothing is cached, this
+# falls back to a real computation, which benefits from scanner.py's own
+# lower-level _batch_download price cache (PRICE_CACHE_TTL = 3 minutes)
+# when warm, but is a genuine cold-cache cost when it isn't. Not yet
+# validated against real review-queue call volume; if that turns out too
+# slow in practice, a dedicated lightweight cache table (mirroring
+# candidate_plan_previews minus option_contract) is the natural follow-up
+# -- flagged here, not built now.
+def _compute_review_queue_preview(
+    candidate: sqlite3.Row | dict,
+    cached_row: Optional[sqlite3.Row] = None,
+) -> dict:
+    if cached_row is not None and cached_row["candidate_updated_at"] == candidate["updated_at"]:
+        preview = _row_to_plan_preview(cached_row)
+        # Already computed by someone else (main dashboard / a scan cycle)
+        # -- real data, not a placeholder, so this is NOT "deferred" in the
+        # sense the caller cares about (no fresh hydration was triggered
+        # BY THIS REQUEST either way).
+        preview["option_contract_deferred"] = False
+        # entry_proximity_ok/execution_shadow_ok are NEVER persisted in
+        # candidate_plan_previews (both are live, request-time-only values
+        # -- see _enriched_previews_for_candidates' own final pass, which
+        # this mirrors exactly). Reusing a cached row's static fields
+        # without re-attaching these would silently make every reused
+        # candidate fail _stage1_mechanical_ready (missing execution_shadow_ok
+        # reads as not-True) -- confirmed as a real bug here via test, not
+        # theoretical.
+        preview = _attach_entry_proximity(preview, _latest_quote_for_ticker(str(preview.get("ticker") or "")))
+        return _attach_execution_shadow(candidate, preview)
+
+    computed_at = datetime.now(timezone.utc).isoformat()
+    try:
+        promotion_like = _compute_candidate_promotion(candidate)
+        enriched = _promotion_with_live_gate_context(candidate, promotion_like, option_contract=None)
+        enriched["option_contract_deferred"] = True
+        enriched["preview_error"] = None
+        enriched["computed_at"] = computed_at
+        enriched["candidate_updated_at"] = candidate["updated_at"]
+        return enriched
+    except HTTPException as exc:
+        return {
+            "ticker": str(candidate["ticker"] or "").strip().upper(),
+            "source": str(candidate["source"]),
+            "signal": str(candidate["signal"] or "").strip().lower(),
+            "entry_price": candidate["entry_price"],
+            "stop": None,
+            "target": None,
+            "risk_reward": None,
+            "rr_warning": True,
+            "no_valid_target": True,
+            "confluence_signals": None,
+            "confluence_counts": None,
+            "confluence_label": None,
+            "bos_confirmed": False,
+            "displacement_score": None,
+            "displacement_label": None,
+            "location_percentile": None,
+            "location_alignment": None,
+            "entry_proximity_ok": False,
+            "entry_distance_pct": None,
+            "execution_shadow_checked": False,
+            "execution_shadow_ok": None,
+            "option_contract": None,
+            "option_contract_deferred": True,
+            "preview_error": str(exc.detail),
+            "computed_at": computed_at,
+            "candidate_updated_at": candidate["updated_at"],
+        }
+
+
+def _latest_visual_review_for_setup(conn, setup_key: str) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM candidate_visual_reviews WHERE setup_key=? ORDER BY reviewed_at DESC LIMIT 1",
+        (setup_key,),
+    ).fetchone()
+    return _row_to_visual_review(row) if row else None
+
+
 def _gate_gap_report(candidate: sqlite3.Row | dict, preview: dict) -> dict:
     """Evaluate every GRADABLE ENTER_NOW gate condition independently (no
     short-circuiting) and return the real, already-computed numeric gap for
@@ -3867,6 +3967,62 @@ def list_ranked_candidates(
         conn.close()
 
 
+@router.get("/candidates/review-queue")
+def list_review_queue(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Stage B: the human-in-the-loop review queue's backend. Deliberately
+    separate from GET /candidates/ranked (Stage 2, preserved exactly as
+    built, still used for whatever else already reads it) -- this path
+    never triggers option-contract hydration (see
+    _compute_review_queue_preview's own comment for the full caching
+    tradeoff). Ranking logic itself is unchanged: same
+    _stage1_mechanical_ready/rank_stage1_candidates as Stage 2, just fed
+    lightweight previews.
+
+    Each ranked entry also carries setup_key and current_review -- the
+    latest candidate_visual_reviews row for that setup generation, or None
+    if it has never been reviewed (Needs Review). Also writes a ranking
+    snapshot, same mechanism as GET /candidates/ranked -- this endpoint is
+    what actually surfaces candidates for human review going forward, so
+    it's the operationally relevant "what did the ranking surface" event.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        candidates = conn.execute(
+            "SELECT * FROM candidates WHERE signal='long' ORDER BY updated_at DESC"
+        ).fetchall()
+        cached_by_key = {
+            (row["ticker"], row["source"]): row
+            for row in conn.execute("SELECT * FROM candidate_plan_previews").fetchall()
+        }
+        rows = [
+            (candidate, _compute_review_queue_preview(candidate, cached_by_key.get((candidate["ticker"], candidate["source"]))))
+            for candidate in candidates
+        ]
+        ranked = rank_stage1_candidates(rows)
+        snapshot_id = _store_ranking_snapshot(conn, ranked, RANKING_MECHANISM_VERSION)
+
+        by_key = {(str(row["ticker"]).upper(), row["source"]): row for row in candidates}
+        for entry in ranked:
+            candidate = by_key.get((str(entry.get("ticker") or "").upper(), entry.get("source")))
+            setup_key = _compute_setup_key(candidate, entry) if candidate is not None else None
+            entry["setup_key"] = setup_key
+            entry["current_review"] = _latest_visual_review_for_setup(conn, setup_key) if setup_key else None
+
+        return {
+            "mechanism": RANKING_MECHANISM_VERSION,
+            "disclaimer": RANKING_DISCLAIMER,
+            "snapshot_id": snapshot_id,
+            "count": len(ranked),
+            "candidates": ranked,
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/candidate-ranking-snapshots")
 def list_ranking_snapshots(
     snapshot_id: Optional[str] = Query(default=None),
@@ -4069,13 +4225,17 @@ def record_candidate_visual_review(
     next day, on fresh structural data) adds a new event rather than
     overwriting the old one.
 
-    Requires a cached plan-preview row for this ticker/source (the review
-    queue -- Stage B -- always has one by construction, since it's what a
-    human would be looking at when submitting this) so setup_key is
-    computed from the SAME stop/target the human actually reviewed, not a
-    freshly re-derived value that could theoretically differ. If none
-    exists, this returns 422 rather than silently computing something
-    inconsistent -- the caller should load/refresh the review queue first.
+    setup_key is computed via _compute_review_queue_preview -- the SAME
+    lightweight, options-free computation the review queue itself uses
+    (opportunistically reusing a fresh candidate_plan_previews row when one
+    exists, computing fresh otherwise). Deliberately NOT a hard requirement
+    that /candidate-plan-previews or /candidates/review-queue was already
+    called first (an earlier version of this endpoint required a pre-
+    existing candidate_plan_previews row and 422'd otherwise -- found via
+    testing to be a real gap: a human using only the review queue, which
+    never writes that table, could never submit a review at all). Only
+    422s now if the underlying computation genuinely fails (e.g. no daily
+    candles available for the ticker).
     """
     _check_api_key(x_api_key, scanner_session)
     normalized_ticker = ticker.strip().upper()
@@ -4087,16 +4247,16 @@ def record_candidate_visual_review(
         ).fetchone()
         if not candidate:
             raise HTTPException(status_code=404, detail=f"No candidate found for {ticker} / {review.source}")
-        preview_row = conn.execute(
+        cached_row = conn.execute(
             "SELECT * FROM candidate_plan_previews WHERE ticker=? AND source=?",
             (normalized_ticker, review.source),
         ).fetchone()
-        if not preview_row:
+        preview = _compute_review_queue_preview(candidate, cached_row)
+        if preview.get("preview_error"):
             raise HTTPException(
                 status_code=422,
-                detail=f"No plan preview available for {ticker} / {review.source}; load the review queue first",
+                detail=f"Cannot compute setup for {ticker} / {review.source}: {preview['preview_error']}",
             )
-        preview = _row_to_plan_preview(preview_row)
         setup_key = _compute_setup_key(candidate, preview)
         reviewed_at = datetime.now(timezone.utc).isoformat()
         cursor = conn.execute(

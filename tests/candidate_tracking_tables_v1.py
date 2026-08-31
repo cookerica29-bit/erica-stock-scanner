@@ -215,9 +215,9 @@ def test_visual_review_requires_auth(client):
     assert response.status_code == 401
 
 
-def test_visual_review_requires_a_cached_preview(client, headers, monkeypatch):
+def test_visual_review_requires_a_real_candidate(client, headers, monkeypatch):
     _mock_network(monkeypatch, _promotion_daily_frame)
-    # No candidate ingested at all -- no candidates row, no preview row.
+    # No candidate ingested at all -- no candidates row.
     response = client.post(
         "/api/v1/scanner/candidates/NVDA/visual-review",
         headers=headers,
@@ -228,8 +228,17 @@ def test_visual_review_requires_a_cached_preview(client, headers, monkeypatch):
     )
     assert response.status_code == 404  # no candidate row at all
 
+
+def test_visual_review_computes_setup_key_fresh_without_a_cached_preview(client, headers, monkeypatch):
+    # Real gap found via Stage B testing: the review queue (Stage B) never
+    # writes candidate_plan_previews, so requiring a cached row here would
+    # make a review impossible for anyone using only the queue. This must
+    # succeed -- computed fresh via _compute_review_queue_preview, the same
+    # lightweight path the queue itself uses -- not 422.
+    _mock_network(monkeypatch, _promotion_daily_frame)
     _seed_candidate(client, headers)
-    # Candidate exists but nothing has computed a plan preview yet.
+    # Deliberately no GET /candidate-plan-previews call first -- nothing
+    # has cached anything for this candidate yet.
     response = client.post(
         "/api/v1/scanner/candidates/NVDA/visual-review",
         headers=headers,
@@ -238,7 +247,8 @@ def test_visual_review_requires_a_cached_preview(client, headers, monkeypatch):
             "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["setup_key"]
 
 
 def test_visual_review_records_a_structured_decision(client, headers, monkeypatch):
