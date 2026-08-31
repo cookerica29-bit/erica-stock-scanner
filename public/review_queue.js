@@ -5,7 +5,13 @@
 // /candidates/{ticker}/visual-review) plus the existing session-cookie
 // auth flow (POST /session) already used by candidates.html -- same-origin,
 // so a session established there is reused here automatically.
-(function () {
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) {
+    module.exports = factory();
+  } else {
+    factory();
+  }
+})(typeof self !== 'undefined' ? self : this, function () {
   const KEY = 'kairos_scanner_api_key';
   const API_BASE = '/api/v1/scanner';
 
@@ -15,7 +21,15 @@
     disclaimer: '',
     tally: { approve: 0, watch: 0, reject: 0 },
     loaded: false,
+    authRequired: false,
   };
+  // Guards against two overlapping loadQueue() calls (e.g. a storage-event
+  // retry firing while the Connect button's own retry is still in flight)
+  // racing to write mainContent.innerHTML -- whichever resolved last would
+  // still win either way (full replace, never append), so this isn't a
+  // correctness bug on its own, just wasted duplicate fetches worth
+  // skipping.
+  let loadQueueInFlight = false;
 
   // Early practical-disqualification path (2026-09-01 session): a real
   // usage gap -- a candidate can be practically untradeable (options too
@@ -99,7 +113,29 @@
     main.innerHTML = `<div class="status-line${isError ? ' error' : ''}">${escapeHtml(message)}</div>`;
   }
 
+  // Production regression (2026-09-01 session): a fresh /review-queue load
+  // with no session/key yet established on that browser got a real 401 from
+  // GET /candidates/review-queue -- correct, expected behavior (the auth
+  // mechanism itself was investigated and found to have no bug: same
+  // localStorage key name and the same session cookie, path "/", are
+  // already shared with candidates.html), but the OLD handling here just
+  // set a small one-line status message, easy to mistake for a broken or
+  // empty queue rather than "please sign in." This is a UI-prominence fix
+  // only -- auth mechanism/API behavior untouched.
+  function renderAuthRequiredPanel() {
+    return `
+      <div class="auth-required-panel" role="alert">
+        <div class="auth-required-icon" aria-hidden="true">🔒</div>
+        <h2>Sign in required</h2>
+        <p>Your scanner API key is needed to load the review queue. Paste it in the field above and click Connect.</p>
+        <p class="auth-required-hint">Already signed in on another tab? This page will pick that up automatically -- or click Retry.</p>
+        <button type="button" onclick="loadQueue()">Retry</button>
+      </div>`;
+  }
+
   async function loadQueue() {
+    if (loadQueueInFlight) return;
+    loadQueueInFlight = true;
     setStatus('Loading review queue…');
     try {
       const result = await fetchJson(`${API_BASE}/candidates/review-queue`);
@@ -108,15 +144,37 @@
       state.index = 0;
       state.tally = { approve: 0, watch: 0, reject: 0 };
       state.loaded = true;
+      state.authRequired = false;
       render();
     } catch (err) {
       if (err.status === 401) {
+        state.authRequired = true;
         document.getElementById('apiBand').classList.remove('hidden');
-        setStatus('Enter your scanner API key above to load the review queue.');
+        document.getElementById('mainContent').innerHTML = renderAuthRequiredPanel();
+        const input = document.getElementById('apiKeyInput');
+        if (input && input.focus) input.focus();
       } else {
         setStatus(`Could not load review queue: ${err.message}`, true);
       }
+    } finally {
+      loadQueueInFlight = false;
     }
+  }
+
+  // Auto-retry when a valid key becomes available through ANY means this
+  // page didn't itself trigger -- most commonly: the user has
+  // candidates.html open in another tab and signs in there. The browser's
+  // storage event fires in OTHER tabs of the same origin when localStorage
+  // changes (never in the tab that made the change itself, which is
+  // already covered by submitApiKey()'s own retry after a successful
+  // /session call) -- exactly the cross-tab case worth covering here,
+  // with zero polling.
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('storage', (event) => {
+      if (event.key === KEY && event.newValue && state.authRequired) {
+        loadQueue();
+      }
+    });
   }
 
   function tallyChips() {
@@ -358,4 +416,8 @@
     }
     loadQueue();
   });
-})();
+
+  // Exposed for tests (tests/review_queue_auth_v1.js) -- real browser usage
+  // never touches this return value, it only matters under module.exports.
+  return { state, loadQueue, renderAuthRequiredPanel, submitApiKey };
+});
