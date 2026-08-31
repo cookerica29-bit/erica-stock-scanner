@@ -15,6 +15,7 @@ import hmac
 import math
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -924,6 +925,51 @@ def _initialize_candidates_schema(conn) -> None:
         """
     )
     _ensure_candidate_promotions_schema(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_visual_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            reviewed_at TEXT NOT NULL,
+            note TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_visual_reviews_ticker_source "
+        "ON candidate_visual_reviews (ticker, source, reviewed_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_ranking_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            mechanism TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            confluence_available INTEGER NOT NULL,
+            favorable_count INTEGER,
+            unfavorable_count INTEGER,
+            neutral_count INTEGER,
+            applicable_count INTEGER,
+            confluence_label TEXT,
+            risk_reward REAL,
+            entry_distance_pct REAL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_ranking_snapshots_snapshot "
+        "ON candidate_ranking_snapshots (snapshot_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_ranking_snapshots_ticker_source "
+        "ON candidate_ranking_snapshots (ticker, source, computed_at)"
+    )
     conn.commit()
 
 
@@ -1078,6 +1124,43 @@ class CandidateChartReviewOut(BaseModel):
     data_source: str
     bars_start: Optional[str]
     bars_end: Optional[str]
+
+
+# Stage-3 tracking (2026-08-31 session design pass): a human's visual-review
+# verdict, captured independent of promotion/taken -- so "I looked at the
+# chart and passed" is recorded even for a candidate never promoted or
+# taken. Deliberately its own append-only table, not a field bolted onto
+# candidate_promotions (that row may not exist yet, or ever, for a reviewed
+# candidate) and not candidates.status (status already means several
+# different things -- stale, uninteresting, a genuinely bad chart -- with
+# no way to distinguish after the fact; a dedicated verdict keeps "visually
+# rejected" an honest, unambiguous signal).
+#
+# Tri-state, same vocabulary as candidate_promotions.taken (approved /
+# rejected / not-yet-reviewed) -- but the THIRD state (not yet reviewed) is
+# represented by the absence of any row for a ticker/source, not a stored
+# null verdict, because this table is append-only: a review either happened
+# (and gets a real row: approved or rejected) or it hasn't happened yet (no
+# row at all). GET /candidate-visual-reviews returns the real event history;
+# a caller wanting "current verdict per ticker" takes each ticker's latest
+# row (or none = undecided) the same way GET /candidate-promotions already
+# does for its own append-only table.
+VisualReviewVerdict = Literal["approved", "rejected"]
+
+
+class VisualReviewIn(BaseModel):
+    source: str = Field(min_length=1)
+    verdict: VisualReviewVerdict
+    note: Optional[str] = None
+
+
+class CandidateVisualReviewOut(BaseModel):
+    id: int
+    ticker: str
+    source: str
+    verdict: VisualReviewVerdict
+    reviewed_at: str
+    note: Optional[str] = None
 
 
 class CandidatePlanPreviewOut(BaseModel):
@@ -1982,6 +2065,143 @@ def _preview_base_enter_now_ready(candidate: sqlite3.Row | dict, preview: dict) 
     # for the (now unused-for-gating) quality assessment, still exposed via
     # option_contract fields for display.
     return bool(preview.get("entry_proximity_ok"))
+
+
+# Stage-1/Stage-2 workflow redesign (2026-08-31 session): stage 1 is now
+# defined as the basic MECHANICAL layer only -- regime, valid target, R:R,
+# entry proximity, execution confirmation. Confluence-conflicted (the one
+# judgment-heavy exclusion that actually gated anything today -- see
+# _promotion_block_reason's own comment; "macro/CHoCH" never gated on its
+# own, it only ever fed INTO confluence_label) moves to influence ranking
+# (stage 2, see rank_stage1_candidates below), not filter stage-1
+# eligibility. This function is deliberately NOT wired into
+# _promotion_block_reason/routeBlockReason -- ENTER_NOW promotion still
+# excludes conflicted candidates exactly as it does today; this is a
+# SEPARATE, additive read of "would this candidate clear the redefined
+# stage 1," used only by the new ranking endpoint below. Relocating the
+# real gate is a distinct decision, not a side effect of adding this.
+def _stage1_mechanical_ready(candidate: sqlite3.Row | dict, preview: dict) -> bool:
+    """Redefined stage 1: _preview_base_enter_now_ready (direction, regime,
+    valid target, R:R, entry proximity) plus the live execution_shadow_ok
+    already attached to preview by _attach_execution_shadow. No new gate
+    logic -- just a narrower combination of two pieces that already exist,
+    with confluence_label deliberately left out (see module comment above).
+    """
+    return _preview_base_enter_now_ready(candidate, preview) and preview.get("execution_shadow_ok") is True
+
+
+# Stage-2 ranking, Option A from the design pass: confluence favorable desc,
+# unfavorable asc, tiebroken by R:R desc then entry-proximity asc. Reuses
+# confluence_counts exactly as confluence_summary.py already computes it --
+# zero new weights, same "count over invented weight" reasoning as that
+# module's own docstring (a weighted composite was considered and
+# deliberately not built; see the design-pass conversation). This ranking
+# has NO outcome evidence behind it -- same as every other placeholder
+# shipped this session -- see RANKING_DISCLAIMER below, surfaced in every
+# response rather than left to a code comment.
+RANKING_MECHANISM_VERSION = "stage1_mechanical_then_confluence_count_v1"
+RANKING_DISCLAIMER = "Ranking is unvalidated -- based on signal counts, not track record."
+
+
+def _confluence_sort_key(preview: dict) -> tuple:
+    """Sort key for Option A. A candidate with confluence_counts entirely
+    None (confirmed real, 2026-08-31: KMI cleared every stage-1 gate but
+    confluence never computed for it -- location_percentile was also None)
+    is NOT silently dropped, and does not crash the sort (None can't
+    compare to int in Python 3) -- the leading element sorts every
+    confluence-available candidate ahead of every confluence-unavailable
+    one, in original order among themselves, rather than an arbitrary or
+    unexplained placement. See confluence_available on the ranked output
+    for the caller-visible flag driving the "confluence unavailable" note.
+    """
+    counts = preview.get("confluence_counts")
+    has_confluence = counts is not None
+    counts = counts or {}
+    favorable = counts.get("favorable", 0)
+    unfavorable = counts.get("unfavorable", 0)
+    rr = preview.get("risk_reward")
+    rr_sort = -float(rr) if rr is not None else 0.0
+    proximity_pct = preview.get("entry_distance_pct")
+    proximity_sort = float(proximity_pct) if proximity_pct is not None else float("inf")
+    return (
+        0 if has_confluence else 1,
+        -favorable,
+        unfavorable,
+        rr_sort,
+        proximity_sort,
+    )
+
+
+def rank_stage1_candidates(rows: list[tuple[Any, dict]]) -> list[dict]:
+    """rows: (candidate, preview) pairs, any stage-1 status -- this filters
+    to _stage1_mechanical_ready itself, callers don't need to pre-filter.
+    Returns preview dicts in Option A rank order, each annotated with a
+    1-based rank and confluence_available (see _confluence_sort_key).
+    Stable sort: candidates that tie on every key above keep their
+    incoming (most-recently-updated-first) relative order, not an
+    arbitrary one.
+    """
+    ready = [(candidate, preview) for candidate, preview in rows if _stage1_mechanical_ready(candidate, preview)]
+    ready.sort(key=lambda pair: _confluence_sort_key(pair[1]))
+    ranked: list[dict] = []
+    for index, (_, preview) in enumerate(ready, start=1):
+        entry = dict(preview)
+        entry["rank"] = index
+        entry["confluence_available"] = preview.get("confluence_counts") is not None
+        ranked.append(entry)
+    return ranked
+
+
+def _store_ranking_snapshot(conn, ranked: list[dict], mechanism: str) -> str:
+    """Persist one row per ranked candidate, all sharing one snapshot_id --
+    the point (see candidate_ranking_snapshots' own comment) is that ranking
+    state is never reconstructed after the fact from data that's since
+    moved: re-querying live previews later would NOT reproduce what was
+    actually surfaced at this moment, the same lesson this session already
+    learned the hard way from execution_shadow_ok's live volatility.
+
+    Writes on every call to GET /candidates/ranked, exactly as literally
+    specified in the design pass ("captured at each ranking computation").
+    Flagging plainly for whoever wires this into frontend polling later:
+    if that endpoint ends up polled frequently, writing a full snapshot on
+    every single poll may be worth revisiting (e.g. dedupe against the
+    immediately-prior snapshot, or snapshot on a schedule instead of every
+    read) -- not decided here, deliberately left as a real open question
+    rather than guessed at before the polling behavior that would inform it
+    actually exists.
+    """
+    snapshot_id = str(uuid.uuid4())
+    computed_at = datetime.now(timezone.utc).isoformat()
+    for entry in ranked:
+        counts = entry.get("confluence_counts") or {}
+        conn.execute(
+            """
+            INSERT INTO candidate_ranking_snapshots (
+                snapshot_id, computed_at, mechanism, ticker, source, rank,
+                confluence_available, favorable_count, unfavorable_count,
+                neutral_count, applicable_count, confluence_label,
+                risk_reward, entry_distance_pct
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                computed_at,
+                mechanism,
+                entry.get("ticker"),
+                entry.get("source"),
+                entry.get("rank"),
+                1 if entry.get("confluence_available") else 0,
+                counts.get("favorable"),
+                counts.get("unfavorable"),
+                counts.get("neutral"),
+                counts.get("applicable"),
+                entry.get("confluence_label"),
+                entry.get("risk_reward"),
+                entry.get("entry_distance_pct"),
+            ),
+        )
+    conn.commit()
+    return snapshot_id
 
 
 def _gate_gap_report(candidate: sqlite3.Row | dict, preview: dict) -> dict:
@@ -3582,6 +3802,73 @@ def list_candidate_plan_previews(
         conn.close()
 
 
+@router.get("/candidates/ranked")
+def list_ranked_candidates(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Stage-2 ranking (Option A) over the redefined stage-1 mechanical
+    pool -- see _stage1_mechanical_ready and rank_stage1_candidates.
+    Reuses the exact same _enriched_previews_for_candidates live-gate
+    computation as /candidate-plan-previews (same cache, same execution-
+    shadow/proximity attachment) so this can never disagree with that
+    endpoint about which candidates are stage-1-ready. Not wired into the
+    frontend yet -- backend-only, held per the two-stage build process.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        candidates = conn.execute("SELECT * FROM candidates ORDER BY updated_at DESC").fetchall()
+        enriched, _ = _enriched_previews_for_candidates(conn, candidates)
+        by_key = {(str(row["ticker"]).upper(), row["source"]): row for row in candidates}
+        rows = [
+            (by_key.get((str(preview.get("ticker") or "").upper(), preview.get("source"))), preview)
+            for preview in enriched
+        ]
+        rows = [(candidate, preview) for candidate, preview in rows if candidate is not None]
+        ranked = rank_stage1_candidates(rows)
+        snapshot_id = _store_ranking_snapshot(conn, ranked, RANKING_MECHANISM_VERSION)
+        return {
+            "mechanism": RANKING_MECHANISM_VERSION,
+            "disclaimer": RANKING_DISCLAIMER,
+            "snapshot_id": snapshot_id,
+            "count": len(ranked),
+            "candidates": ranked,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/candidate-ranking-snapshots")
+def list_ranking_snapshots(
+    snapshot_id: Optional[str] = Query(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Read path for candidate_ranking_snapshots -- what the ranking
+    actually surfaced at a given moment, not a live re-derivation. Without
+    snapshot_id, returns every snapshot's rows (newest computed_at first,
+    rank ascending within each) -- callers doing historical analysis should
+    filter client-side by computed_at/mechanism, or pass snapshot_id for
+    one specific computation.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        if snapshot_id:
+            rows = conn.execute(
+                "SELECT * FROM candidate_ranking_snapshots WHERE snapshot_id=? ORDER BY rank ASC",
+                (snapshot_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM candidate_ranking_snapshots ORDER BY computed_at DESC, rank ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 class CandidateNearMissOut(BaseModel):
     ticker: str
     source: str
@@ -3666,6 +3953,70 @@ def list_candidate_chart_reviews(
     try:
         rows = conn.execute("SELECT * FROM candidate_ai_chart_reviews ORDER BY reviewed_at DESC").fetchall()
         return [_row_to_chart_review(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _row_to_visual_review(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "ticker": row["ticker"],
+        "source": row["source"],
+        "verdict": row["verdict"],
+        "reviewed_at": row["reviewed_at"],
+        "note": row["note"] if "note" in row.keys() else None,
+    }
+
+
+@router.get("/candidate-visual-reviews", response_model=list[CandidateVisualReviewOut])
+def list_candidate_visual_reviews(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Full event history, newest first -- a ticker/source can have several
+    rows over time (re-reviewed on a later day). This is not "current
+    verdict per ticker"; a caller wanting that takes each ticker's latest
+    row here, same pattern GET /candidate-promotions already uses for its
+    own append-only table."""
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        rows = conn.execute("SELECT * FROM candidate_visual_reviews ORDER BY reviewed_at DESC").fetchall()
+        return [_row_to_visual_review(row) for row in rows]
+    finally:
+        conn.close()
+
+
+@router.post("/candidates/{ticker}/visual-review", response_model=CandidateVisualReviewOut)
+def record_candidate_visual_review(
+    ticker: str,
+    review: VisualReviewIn,
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Record a stage-3 visual-review verdict. Always inserts a new row --
+    this table is append-only, so re-reviewing a candidate (e.g. the next
+    day, on fresh data) adds a new event rather than overwriting the old
+    one. Deliberately does not require the candidate to have any
+    promotion/plan-preview row at all -- a visual review can happen for any
+    ticker/source the caller names, independent of ENTER_NOW status, so
+    this never blocks on that the way promotion does.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    normalized_ticker = ticker.strip().upper()
+    conn = _get_db()
+    try:
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute(
+            "INSERT INTO candidate_visual_reviews (ticker, source, verdict, reviewed_at, note) VALUES (?, ?, ?, ?, ?)",
+            (normalized_ticker, review.source, review.verdict, reviewed_at, review.note),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM candidate_visual_reviews WHERE id=?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        return _row_to_visual_review(row)
     finally:
         conn.close()
 
