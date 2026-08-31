@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kairos Review Queue</title>
+  <style>
+    :root {
+      --bg: #080d14;
+      --surface: #0d1520;
+      --surface2: #121d2b;
+      --surface3: #172437;
+      --border: rgba(142, 163, 185, 0.22);
+      --text: #e8eef6;
+      --muted: #8ea0b5;
+      --accent: #38bdf8;
+      --accent2: #22c55e;
+      --pass: #22c55e;
+      --fail: #fb7185;
+      --warn: #f59e0b;
+      --shadow: rgba(0, 0, 0, 0.35);
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { max-width: 100%; overflow-x: hidden; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+    a, button { color: inherit; font: inherit; }
+    .page-shell { min-height: 100vh; display: flex; flex-direction: column; max-width: 780px; margin: 0 auto; padding: 0 16px; }
+
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap;
+    }
+    header h1 { font-size: 1.15rem; margin: 0; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; margin-top: 2px; }
+    .nav-link, button {
+      border: 1px solid var(--border); background: var(--surface2); color: var(--text);
+      border-radius: 8px; min-height: 38px; padding: 0 14px; cursor: pointer;
+      text-decoration: none; display: inline-flex; align-items: center; justify-content: center;
+      gap: 8px; white-space: nowrap; font-size: 0.85rem;
+    }
+    .nav-link:hover, button:hover { border-color: rgba(56, 189, 248, 0.55); background: var(--surface3); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary { background: var(--accent); color: #06121f; border-color: var(--accent); font-weight: 600; }
+    button.primary:hover { background: #5fcaf9; }
+
+    .api-band {
+      display: flex; gap: 10px; align-items: center; padding: 10px 0; flex-wrap: wrap;
+      border-bottom: 1px solid var(--border); margin-bottom: 16px;
+    }
+    .api-band input {
+      flex: 1 1 220px; background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 8px 10px; min-height: 38px;
+    }
+    .api-band.hidden { display: none; }
+
+    main { flex: 1; padding-bottom: 40px; }
+
+    .status-line { color: var(--muted); font-size: 0.9rem; margin: 20px 0; }
+    .status-line.error { color: var(--fail); }
+
+    .progress-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 16px; flex-wrap: wrap;
+    }
+    .progress-count { font-size: 0.9rem; color: var(--muted); }
+    .tally { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tally-chip {
+      font-size: 0.78rem; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);
+      background: var(--surface2);
+    }
+    .tally-chip.approve { color: var(--pass); border-color: rgba(34,197,94,0.4); }
+    .tally-chip.watch { color: var(--warn); border-color: rgba(245,158,11,0.4); }
+    .tally-chip.reject { color: var(--fail); border-color: rgba(251,113,133,0.4); }
+
+    .disclaimer {
+      font-size: 0.78rem; color: var(--muted); background: var(--surface2);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 16px;
+    }
+
+    .candidate-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 20px; box-shadow: 0 10px 30px var(--shadow);
+    }
+    .candidate-head {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+    }
+    .candidate-ticker { font-size: 1.6rem; font-weight: 700; }
+    .candidate-rank { color: var(--muted); font-size: 0.85rem; }
+    .direction-pill {
+      display: inline-block; font-size: 0.75rem; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--border); margin-left: 8px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+
+    .already-reviewed {
+      margin-top: 10px; font-size: 0.82rem; padding: 8px 10px; border-radius: 8px;
+      background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
+    }
+
+    .metric-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 10px; margin: 16px 0;
+    }
+    .metric { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+    .metric-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+    .metric-value { font-size: 1.05rem; font-weight: 600; margin-top: 2px; }
+
+    .signal-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px; margin: 14px 0;
+    }
+    .signal-row {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 10px; font-size: 0.82rem; display: flex; justify-content: space-between; gap: 8px;
+    }
+    .signal-row .read { font-weight: 600; }
+    .read.favorable { color: var(--pass); }
+    .read.unfavorable { color: var(--fail); }
+    .read.neutral { color: var(--muted); }
+
+    .chart-action { margin: 14px 0; }
+    .chart-action a.nav-link { width: 100%; }
+
+    fieldset {
+      border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 12px 0;
+    }
+    legend { font-size: 0.82rem; color: var(--muted); padding: 0 6px; }
+    .option-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+    .option-row label {
+      display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 6px 10px; cursor: pointer;
+    }
+    .option-row input[type="radio"] { accent-color: var(--accent); }
+    .option-row label:has(input:checked) { border-color: var(--accent); background: var(--surface3); }
+
+    textarea {
+      width: 100%; min-height: 60px; background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; resize: vertical;
+    }
+
+    .submit-row { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+
+    .summary-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 28px; text-align: center;
+    }
+    .summary-card h2 { margin-top: 0; }
+    .summary-tally { display: flex; justify-content: center; gap: 14px; margin: 18px 0; flex-wrap: wrap; }
+    .summary-tally .big { font-size: 1.6rem; font-weight: 700; display: block; }
+  </style>
+</head>
+<body>
+  <div class="page-shell">
+    <header>
+      <div>
+        <h1>Kairos Review Queue</h1>
+        <div class="subtitle">Stage 3 -- human visual review, one setup at a time.</div>
+      </div>
+      <div>
+        <a class="nav-link" href="/candidates">Back to Dashboard</a>
+      </div>
+    </header>
+
+    <div class="api-band" id="apiBand">
+      <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Paste X-API-Key" />
+      <button type="button" onclick="submitApiKey()">Connect</button>
+    </div>
+
+    <main id="mainContent">
+      <div class="status-line" id="statusLine">Loading review queue&hellip;</div>
+    </main>
+  </div>
+
+  <script src="/static/review_queue.js?v=20260901-stage-c"></script>
+</body>
+</html>

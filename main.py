@@ -1745,6 +1745,20 @@ def candidates_dashboard():
     )
 
 
+@app.get("/review-queue")
+def review_queue_dashboard():
+    # Stage C (2026-08-31 session, human-in-the-loop review-funnel
+    # redesign): a standalone page, not a tab/filter inside candidates.html
+    # -- see that session's design pass for why. Talks to GET
+    # /candidates/review-queue and POST /candidates/{ticker}/visual-review
+    # (Stage A/B), reusing the same same-origin session-cookie auth
+    # candidates.html already establishes via POST /session.
+    return FileResponse(
+        "public/review_queue.html",
+        headers=NO_STORE_HEADERS,
+    )
+
+
 def _discovery_symbols_ready(now: Optional[datetime] = None):
     status = _discovery_status_snapshot(now)
     if not status.get("has_cache") or status.get("stale") or status.get("running"):

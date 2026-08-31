@@ -60,6 +60,12 @@ try:
     legacy = client.get("/legacy")
     assert legacy.status_code == 200
     assert_no_store(legacy)
+
+    # /review-queue (Stage C, 2026-08-31 session): the standalone review-
+    # queue page, same no-store treatment as every other dashboard route.
+    review_queue = client.get("/review-queue")
+    assert review_queue.status_code == 200
+    assert_no_store(review_queue)
 finally:
     main.scan_cached = original_scan_cached
     main.analysis_cache_status = original_analysis_cache_status
