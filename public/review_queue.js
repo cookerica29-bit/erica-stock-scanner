@@ -194,6 +194,29 @@
       state.index = firstUnreviewed >= 0 ? firstUnreviewed : 0;
       state.loaded = true;
       state.authRequired = false;
+
+      // Deep-link support (2026-09 Approved/Watch Setups build): "Edit
+      // Review" on those boards links here as
+      // /review-queue?ticker=X&source=Y. If that candidate is already
+      // reviewed, jump straight to its edit view instead of the default
+      // first-unreviewed resume point. No-ops (and is a no-op in the
+      // plain-Node test fixtures, which never set window.location) when
+      // there's no query string, or the ticker doesn't resolve to a
+      // reviewed candidate in the current queue.
+      const search = (typeof window !== 'undefined' && window.location && window.location.search) || '';
+      const deepTicker = search && typeof URLSearchParams !== 'undefined'
+        ? new URLSearchParams(search).get('ticker')
+        : null;
+      if (deepTicker) {
+        const deepSource = new URLSearchParams(search).get('source') || '';
+        const deepIdx = state.queue.findIndex((item) => item.ticker === deepTicker && (item.source || '') === deepSource);
+        if (deepIdx >= 0 && isReviewed(state.queue[deepIdx])) {
+          state.filter = 'reviewed';
+          state.index = deepIdx;
+          state.editing = true;
+        }
+      }
+
       render();
     } catch (err) {
       if (err.status === 401) {
@@ -422,8 +445,12 @@
           <div><span class="big" style="color:var(--warn)">${counts.watch}</span>Watch</div>
           <div><span class="big" style="color:var(--fail)">${counts.reject}</span>Rejected</div>
         </div>
-        <button type="button" onclick="setFilter('reviewed')">Browse Reviewed</button>
-        <button type="button" onclick="loadQueue()">Reload Queue</button>
+        <div class="summary-actions">
+          <a class="nav-link" href="/approved-setups">View Approved Setups</a>
+          <a class="nav-link" href="/watch-setups">View Watch Setups</a>
+          <button type="button" onclick="setFilter('reviewed')">Browse Reviewed</button>
+          <button type="button" onclick="loadQueue()">Reload Queue</button>
+        </div>
       </div>`;
   }
 

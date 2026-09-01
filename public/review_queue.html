@@ -45,6 +45,9 @@
     button.primary { background: var(--accent); color: #06121f; border-color: var(--accent); font-weight: 600; }
     button.primary:hover { background: #5fcaf9; }
 
+    .kairos-nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+    .kairos-nav .nav-link.active { border-color: var(--accent); color: var(--accent); background: var(--surface3); font-weight: 600; }
+
     .api-band {
       display: flex; gap: 10px; align-items: center; padding: 10px 0; flex-wrap: wrap;
       border-bottom: 1px solid var(--border); margin-bottom: 16px;
@@ -191,6 +194,7 @@
     .summary-card h2 { margin-top: 0; }
     .summary-tally { display: flex; justify-content: center; gap: 14px; margin: 18px 0; flex-wrap: wrap; }
     .summary-tally .big { font-size: 1.6rem; font-weight: 700; display: block; }
+    .summary-actions { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -200,10 +204,13 @@
         <h1>Kairos Review Queue</h1>
         <div class="subtitle">Stage 3 -- human visual review, one setup at a time.</div>
       </div>
-      <div>
-        <a class="nav-link" href="/candidates">Back to Dashboard</a>
-      </div>
     </header>
+    <nav class="kairos-nav" aria-label="Kairos navigation">
+      <a class="nav-link" href="/candidates">Candidates Dashboard</a>
+      <a class="nav-link active" href="/review-queue" aria-current="page">Review Queue</a>
+      <a class="nav-link" href="/approved-setups">Approved Setups</a>
+      <a class="nav-link" href="/watch-setups">Watch Setups</a>
+    </nav>
 
     <div class="api-band" id="apiBand">
       <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Paste X-API-Key" />
@@ -215,6 +222,6 @@
     </main>
   </div>
 
-  <script src="/static/review_queue.js?v=20260901-persistence"></script>
+  <script src="/static/review_queue.js?v=20260901-boards"></script>
 </body>
 </html>

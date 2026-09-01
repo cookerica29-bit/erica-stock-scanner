@@ -1759,6 +1759,30 @@ def review_queue_dashboard():
     )
 
 
+@app.get("/approved-setups")
+def approved_setups_dashboard():
+    # Trader-facing board (2026-09 session, "bridge" build): presentation
+    # only, no new backend route -- reads the exact same GET
+    # /candidates/review-queue payload Review Queue already uses and
+    # filters client-side to current_review.decision == "approve" (see
+    # public/setup_board.js). Deliberately mirrors /review-queue's route
+    # shape exactly.
+    return FileResponse(
+        "public/approved_setups.html",
+        headers=NO_STORE_HEADERS,
+    )
+
+
+@app.get("/watch-setups")
+def watch_setups_dashboard():
+    # Same bridge build as /approved-setups, filtered to decision == "watch"
+    # instead. See public/setup_board.js.
+    return FileResponse(
+        "public/watch_setups.html",
+        headers=NO_STORE_HEADERS,
+    )
+
+
 def _discovery_symbols_ready(now: Optional[datetime] = None):
     status = _discovery_status_snapshot(now)
     if not status.get("has_cache") or status.get("stale") or status.get("running"):
