@@ -84,6 +84,32 @@
     .tally-chip.watch { color: var(--warn); border-color: rgba(245,158,11,0.4); }
     .tally-chip.reject { color: var(--fail); border-color: rgba(251,113,133,0.4); }
 
+    .filter-row { display: flex; gap: 8px; margin-bottom: 18px; }
+    .filter-tab {
+      flex: 1 1 auto; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 12px; font-size: 0.85rem; cursor: pointer;
+    }
+    .filter-tab.active { border-color: var(--accent); background: var(--surface3); color: var(--accent); font-weight: 600; }
+
+    .reviewed-list { display: flex; flex-direction: column; gap: 8px; }
+    .reviewed-row {
+      display: flex; align-items: center; gap: 12px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; cursor: pointer;
+    }
+    .reviewed-row:hover { border-color: rgba(56, 189, 248, 0.55); background: var(--surface3); }
+    .reviewed-ticker { font-weight: 700; min-width: 64px; }
+    .reviewed-decision { font-size: 0.82rem; flex: 1; }
+    .reviewed-decision.decision-approve { color: var(--pass); }
+    .reviewed-decision.decision-watch { color: var(--warn); }
+    .reviewed-decision.decision-reject { color: var(--fail); }
+    .reviewed-time { color: var(--muted); font-size: 0.78rem; }
+    .reviewed-edit { color: var(--accent); font-size: 0.82rem; white-space: nowrap; }
+
+    .cancel-edit-btn {
+      margin-left: 10px; background: var(--surface3); border: 1px solid var(--border);
+      border-radius: 6px; padding: 3px 10px; font-size: 0.78rem; cursor: pointer; color: var(--text);
+    }
+
     .disclaimer {
       font-size: 0.78rem; color: var(--muted); background: var(--surface2);
       border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 16px;
@@ -189,6 +215,6 @@
     </main>
   </div>
 
-  <script src="/static/review_queue.js?v=20260901-auth-panel"></script>
+  <script src="/static/review_queue.js?v=20260901-persistence"></script>
 </body>
 </html>

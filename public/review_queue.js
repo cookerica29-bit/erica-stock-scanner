@@ -15,11 +15,26 @@
   const KEY = 'kairos_scanner_api_key';
   const API_BASE = '/api/v1/scanner';
 
+  // Persistence + editing fix (2026-09-01 session): root cause was that
+  // GET /candidates/review-queue was ALREADY returning current_review per
+  // candidate (Stage A/B, unchanged, no backend work needed here) -- the
+  // frontend just never looked at it. Progress/tallies were tracked in a
+  // session-only state.tally that reset on every load, and navigation
+  // always started at index 0 regardless of what was already reviewed.
+  // Fixed by deriving everything from state.queue[i].current_review (the
+  // real, persisted source of truth) instead of separate mutable counters,
+  // and adding an editing path for already-reviewed candidates. Setup-key
+  // binding itself needed zero changes: current_review is already looked
+  // up by setup_key server-side, so a materially different setup_key
+  // (structural stop/target actually moved) already has no matching row
+  // and is already correctly treated as unreviewed -- this file just
+  // needs to keep trusting that field, not re-derive it from ticker.
   const state = {
     queue: [],
-    index: 0,
+    filter: 'unreviewed', // 'unreviewed' | 'reviewed'
+    index: 0, // index into state.queue of the candidate currently shown
+    editing: false, // true only while viewing a reviewed candidate's form pre-populated for editing
     disclaimer: '',
-    tally: { approve: 0, watch: 0, reject: 0 },
     loaded: false,
     authRequired: false,
   };
@@ -43,6 +58,31 @@
     poor_option_liquidity: 'Poor option liquidity/spread',
     other: 'Other practical disqualifier',
   };
+
+  // ---- pure helpers over state.queue, no DOM -- exported for tests ----
+  function isReviewed(item) {
+    return !!(item && item.current_review);
+  }
+
+  function decisionFor(item) {
+    return isReviewed(item) ? item.current_review.decision : null;
+  }
+
+  function computeCounts(queue) {
+    const counts = { approve: 0, watch: 0, reject: 0, unreviewed: 0 };
+    (queue || []).forEach((item) => {
+      const d = decisionFor(item);
+      if (d === 'approve') counts.approve += 1;
+      else if (d === 'watch') counts.watch += 1;
+      else if (d === 'reject') counts.reject += 1;
+      else counts.unreviewed += 1;
+    });
+    return counts;
+  }
+
+  function firstUnreviewedIndex(queue) {
+    return (queue || []).findIndex((item) => !isReviewed(item));
+  }
 
   function apiKey() {
     return localStorage.getItem(KEY) || sessionStorage.getItem(KEY) || '';
@@ -88,6 +128,10 @@
 
   function fmtNumber(value, digits = 2) {
     return value == null ? '--' : Number(value).toFixed(digits);
+  }
+
+  function checkedIf(condition) {
+    return condition ? 'checked' : '';
   }
 
   async function submitApiKey() {
@@ -141,8 +185,13 @@
       const result = await fetchJson(`${API_BASE}/candidates/review-queue`);
       state.queue = result.candidates || [];
       state.disclaimer = result.disclaimer || '';
-      state.index = 0;
-      state.tally = { approve: 0, watch: 0, reject: 0 };
+      state.filter = 'unreviewed';
+      state.editing = false;
+      // Resume at the first unreviewed candidate (persisted, not session-
+      // only) -- falls back to index 0 only when literally nothing is
+      // unreviewed, in which case render() shows the completion state.
+      const firstUnreviewed = firstUnreviewedIndex(state.queue);
+      state.index = firstUnreviewed >= 0 ? firstUnreviewed : 0;
       state.loaded = true;
       state.authRequired = false;
       render();
@@ -177,13 +226,69 @@
     });
   }
 
-  function tallyChips() {
+  function progressHeader() {
+    const counts = computeCounts(state.queue);
+    const reviewedTotal = counts.approve + counts.watch + counts.reject;
     return `
-      <div class="tally">
-        <span class="tally-chip approve">Approved ${state.tally.approve}</span>
-        <span class="tally-chip watch">Watch ${state.tally.watch}</span>
-        <span class="tally-chip reject">Rejected ${state.tally.reject}</span>
+      <div class="progress-row">
+        <span class="progress-count">Reviewed ${reviewedTotal} / ${state.queue.length} &middot; Remaining ${counts.unreviewed}</span>
+        <div class="tally">
+          <span class="tally-chip approve">Approved ${counts.approve}</span>
+          <span class="tally-chip watch">Watch ${counts.watch}</span>
+          <span class="tally-chip reject">Rejected ${counts.reject}</span>
+        </div>
+      </div>
+      <div class="filter-row" role="tablist">
+        <button type="button" class="filter-tab ${state.filter === 'unreviewed' ? 'active' : ''}" onclick="setFilter('unreviewed')">Unreviewed (${counts.unreviewed})</button>
+        <button type="button" class="filter-tab ${state.filter === 'reviewed' ? 'active' : ''}" onclick="setFilter('reviewed')">Reviewed (${reviewedTotal})</button>
       </div>`;
+  }
+
+  function setFilter(filter) {
+    state.filter = filter;
+    state.editing = false;
+    if (filter === 'unreviewed') {
+      const idx = firstUnreviewedIndex(state.queue);
+      state.index = idx >= 0 ? idx : 0;
+    }
+    render();
+  }
+  window.setFilter = setFilter;
+
+  function openReviewedItem(queueIndex) {
+    state.index = queueIndex;
+    state.editing = true;
+    render();
+  }
+  window.openReviewedItem = openReviewedItem;
+
+  function closeEditing() {
+    state.editing = false;
+    render();
+  }
+  window.closeEditing = closeEditing;
+
+  function renderReviewedList() {
+    const reviewedEntries = state.queue
+      .map((item, idx) => ({ item, idx }))
+      .filter(({ item }) => isReviewed(item));
+    if (!reviewedEntries.length) {
+      return `<div class="status-line">No candidates reviewed yet.</div>`;
+    }
+    const rows = reviewedEntries.map(({ item, idx }) => {
+      const cr = item.current_review;
+      const label = cr.review_type === 'practical_rejection'
+        ? `Practically rejected — ${PRACTICAL_REASON_LABELS[cr.practical_rejection_reason] || cr.practical_rejection_reason}`
+        : cr.decision.charAt(0).toUpperCase() + cr.decision.slice(1);
+      return `
+        <div class="reviewed-row" onclick="openReviewedItem(${idx})">
+          <span class="reviewed-ticker">${escapeHtml(item.ticker)}</span>
+          <span class="reviewed-decision decision-${escapeHtml(cr.decision)}">${escapeHtml(label)}</span>
+          <span class="reviewed-time">${escapeHtml(new Date(cr.reviewed_at).toLocaleString())}</span>
+          <span class="reviewed-edit">Edit &rsaquo;</span>
+        </div>`;
+    }).join('');
+    return `<div class="reviewed-list">${rows}</div>`;
   }
 
   function signalRow(label, read, detail) {
@@ -193,18 +298,21 @@
     return `<div class="signal-row"><span>${escapeHtml(label)}</span><span class="read ${escapeHtml(cls)}">${escapeHtml(text)}${detail ? ` — ${escapeHtml(detail)}` : ''}</span></div>`;
   }
 
-  function renderCandidate(item) {
+  function renderCandidate(item, editing) {
     const cc = item.confluence_counts || {};
     const confluenceLine = item.confluence_available
       ? `${cc.favorable ?? 0} favorable / ${cc.unfavorable ?? 0} unfavorable / ${cc.neutral ?? 0} neutral (${item.confluence_label || 'confluence'})`
       : 'Confluence unavailable for this candidate';
-    const current = item.current_review;
-    const alreadyReviewed = current
-      ? (current.review_type === 'practical_rejection'
-          ? `<div class="already-reviewed">Last reviewed ${escapeHtml(new Date(current.reviewed_at).toLocaleString())} — <strong>practically rejected before chart review</strong> (${escapeHtml(PRACTICAL_REASON_LABELS[current.practical_rejection_reason] || current.practical_rejection_reason)})${current.note ? ` — "${escapeHtml(current.note)}"` : ''}. Submitting below records a new review for this same setup.</div>`
-          : `<div class="already-reviewed">Last reviewed ${escapeHtml(new Date(current.reviewed_at).toLocaleString())} — decision: <strong>${escapeHtml(current.decision)}</strong>${current.note ? ` — "${escapeHtml(current.note)}"` : ''}. Submitting below records a new review for this same setup.</div>`)
+    const cr = editing ? item.current_review : null;
+    const editingBanner = editing
+      ? `<div class="already-reviewed">Editing the existing review from ${escapeHtml(new Date(cr.reviewed_at).toLocaleString())}. Submitting below records a NEW review for this same setup -- the old one stays in history, this becomes current.
+          <button type="button" class="cancel-edit-btn" onclick="closeEditing()">Cancel</button></div>`
       : '';
     const chartUrl = `https://www.tradingview.com/symbols/${encodeURIComponent(item.ticker)}/`;
+    const wasPractical = cr && cr.review_type === 'practical_rejection';
+    const wasVisual = cr && cr.review_type === 'visual';
+    const submitLabel = editing ? 'Save Updated Review' : 'Submit &amp; Next';
+    const practicalSubmitLabel = editing ? 'Save Updated Rejection' : 'Reject &amp; Next';
 
     return `
       <div class="candidate-card">
@@ -215,7 +323,7 @@
           </div>
           <span class="candidate-rank">Rank #${item.rank} · ${escapeHtml(item.source || '')}</span>
         </div>
-        ${alreadyReviewed}
+        ${editingBanner}
 
         <div class="metric-grid">
           <div class="metric"><div class="metric-label">Entry</div><div class="metric-value">${fmtMoney(item.entry_price)}</div></div>
@@ -243,14 +351,14 @@
         <fieldset class="practical-reject">
           <legend>Practically untradeable? Skip chart review</legend>
           <div class="option-row">
-            <label><input type="radio" name="practical_reason" value="options_too_expensive"> Options too expensive</label>
-            <label><input type="radio" name="practical_reason" value="poor_option_liquidity"> Poor option liquidity/spread</label>
-            <label><input type="radio" name="practical_reason" value="other"> Other practical disqualifier</label>
+            <label><input type="radio" name="practical_reason" value="options_too_expensive" ${checkedIf(wasPractical && cr.practical_rejection_reason === 'options_too_expensive')}> Options too expensive</label>
+            <label><input type="radio" name="practical_reason" value="poor_option_liquidity" ${checkedIf(wasPractical && cr.practical_rejection_reason === 'poor_option_liquidity')}> Poor option liquidity/spread</label>
+            <label><input type="radio" name="practical_reason" value="other" ${checkedIf(wasPractical && cr.practical_rejection_reason === 'other')}> Other practical disqualifier</label>
           </div>
-          <textarea id="practicalRejectNote" placeholder="Optional note"></textarea>
+          <textarea id="practicalRejectNote" placeholder="Optional note">${wasPractical && cr.note ? escapeHtml(cr.note) : ''}</textarea>
           <div class="submit-row" id="practicalRejectRow">
             <button type="button" id="practicalRejectBtn"
-              onclick="submitPracticalRejection('${escapeHtml(item.ticker)}', '${escapeHtml(item.source || '')}')">Reject &amp; Next</button>
+              onclick="submitPracticalRejection('${escapeHtml(item.ticker)}', '${escapeHtml(item.source || '')}')">${practicalSubmitLabel}</button>
           </div>
         </fieldset>
 
@@ -260,61 +368,61 @@
           <fieldset>
             <legend>Market structure</legend>
             <div class="option-row">
-              <label><input type="radio" name="market_structure" value="bullish" required> Bullish</label>
-              <label><input type="radio" name="market_structure" value="bearish"> Bearish</label>
-              <label><input type="radio" name="market_structure" value="range"> Range</label>
+              <label><input type="radio" name="market_structure" value="bullish" ${checkedIf(wasVisual && cr.market_structure === 'bullish')}> Bullish</label>
+              <label><input type="radio" name="market_structure" value="bearish" ${checkedIf(wasVisual && cr.market_structure === 'bearish')}> Bearish</label>
+              <label><input type="radio" name="market_structure" value="range" ${checkedIf(wasVisual && cr.market_structure === 'range')}> Range</label>
             </div>
           </fieldset>
           <fieldset>
             <legend>Location</legend>
             <div class="option-row">
-              <label><input type="radio" name="location_read" value="good" required> Good</label>
-              <label><input type="radio" name="location_read" value="neutral"> Neutral</label>
-              <label><input type="radio" name="location_read" value="bad"> Bad</label>
+              <label><input type="radio" name="location_read" value="good" ${checkedIf(wasVisual && cr.location_read === 'good')}> Good</label>
+              <label><input type="radio" name="location_read" value="neutral" ${checkedIf(wasVisual && cr.location_read === 'neutral')}> Neutral</label>
+              <label><input type="radio" name="location_read" value="bad" ${checkedIf(wasVisual && cr.location_read === 'bad')}> Bad</label>
             </div>
           </fieldset>
           <fieldset>
             <legend>Clear path to target</legend>
             <div class="option-row">
-              <label><input type="radio" name="clear_path_to_target" value="yes" required> Yes</label>
-              <label><input type="radio" name="clear_path_to_target" value="no"> No</label>
+              <label><input type="radio" name="clear_path_to_target" value="yes" ${checkedIf(wasVisual && cr.clear_path_to_target === 'yes')}> Yes</label>
+              <label><input type="radio" name="clear_path_to_target" value="no" ${checkedIf(wasVisual && cr.clear_path_to_target === 'no')}> No</label>
             </div>
           </fieldset>
           <fieldset>
             <legend>Lower-timeframe confirmation</legend>
             <div class="option-row">
-              <label><input type="radio" name="lower_tf_confirmation" value="yes" required> Yes</label>
-              <label><input type="radio" name="lower_tf_confirmation" value="not_yet"> Not yet</label>
+              <label><input type="radio" name="lower_tf_confirmation" value="yes" ${checkedIf(wasVisual && cr.lower_tf_confirmation === 'yes')}> Yes</label>
+              <label><input type="radio" name="lower_tf_confirmation" value="not_yet" ${checkedIf(wasVisual && cr.lower_tf_confirmation === 'not_yet')}> Not yet</label>
             </div>
           </fieldset>
           <fieldset>
             <legend>Decision</legend>
             <div class="option-row">
-              <label><input type="radio" name="decision" value="approve" required> Approve</label>
-              <label><input type="radio" name="decision" value="watch"> Watch</label>
-              <label><input type="radio" name="decision" value="reject"> Reject</label>
+              <label><input type="radio" name="decision" value="approve" ${checkedIf(wasVisual && cr.decision === 'approve')}> Approve</label>
+              <label><input type="radio" name="decision" value="watch" ${checkedIf(wasVisual && cr.decision === 'watch')}> Watch</label>
+              <label><input type="radio" name="decision" value="reject" ${checkedIf(wasVisual && cr.decision === 'reject')}> Reject</label>
             </div>
           </fieldset>
-          <textarea id="reviewNote" placeholder="Optional note"></textarea>
+          <textarea id="reviewNote" placeholder="Optional note">${wasVisual && cr.note ? escapeHtml(cr.note) : ''}</textarea>
           <div class="submit-row" id="submitRow">
-            <button type="button" onclick="submitReview('${escapeHtml(item.ticker)}', '${escapeHtml(item.source || '')}')" class="primary">Submit &amp; Next</button>
+            <button type="button" onclick="submitReview('${escapeHtml(item.ticker)}', '${escapeHtml(item.source || '')}')" class="primary">${submitLabel}</button>
           </div>
         </form>
       </div>`;
   }
 
-  function renderSummary() {
-    const total = state.tally.approve + state.tally.watch + state.tally.reject;
+  function renderAllReviewedPanel() {
+    const counts = computeCounts(state.queue);
     return `
       <div class="summary-card">
-        <h2>Queue complete</h2>
-        <p class="subtitle">Reviewed ${total} of ${state.queue.length} candidates this pass.</p>
+        <h2>All candidates reviewed</h2>
+        <p class="subtitle">Every candidate currently in the queue has a review on file.</p>
         <div class="summary-tally">
-          <div><span class="big" style="color:var(--pass)">${state.tally.approve}</span>Approved</div>
-          <div><span class="big" style="color:var(--warn)">${state.tally.watch}</span>Watch</div>
-          <div><span class="big" style="color:var(--fail)">${state.tally.reject}</span>Rejected</div>
-          <div><span class="big">${state.queue.length - total}</span>Remaining</div>
+          <div><span class="big" style="color:var(--pass)">${counts.approve}</span>Approved</div>
+          <div><span class="big" style="color:var(--warn)">${counts.watch}</span>Watch</div>
+          <div><span class="big" style="color:var(--fail)">${counts.reject}</span>Rejected</div>
         </div>
+        <button type="button" onclick="setFilter('reviewed')">Browse Reviewed</button>
         <button type="button" onclick="loadQueue()">Reload Queue</button>
       </div>`;
   }
@@ -326,18 +434,52 @@
       main.innerHTML = `<div class="disclaimer">${escapeHtml(state.disclaimer)}</div><div class="status-line">No candidates in the review queue right now.</div>`;
       return;
     }
-    if (state.index >= state.queue.length) {
-      main.innerHTML = renderSummary();
+
+    const header = `<div class="disclaimer">${escapeHtml(state.disclaimer)}</div>${progressHeader()}`;
+
+    if (state.filter === 'reviewed') {
+      if (state.editing && state.queue[state.index] && isReviewed(state.queue[state.index])) {
+        main.innerHTML = `${header}${renderCandidate(state.queue[state.index], true)}`;
+      } else {
+        main.innerHTML = `${header}${renderReviewedList()}`;
+      }
       return;
     }
-    const item = state.queue[state.index];
-    main.innerHTML = `
-      <div class="disclaimer">${escapeHtml(state.disclaimer)}</div>
-      <div class="progress-row">
-        <span class="progress-count">Candidate ${state.index + 1} of ${state.queue.length}</span>
-        ${tallyChips()}
-      </div>
-      ${renderCandidate(item)}`;
+
+    // filter === 'unreviewed'
+    const idx = firstUnreviewedIndex(state.queue);
+    if (idx < 0) {
+      main.innerHTML = `${header}${renderAllReviewedPanel()}`;
+      return;
+    }
+    state.index = idx;
+    main.innerHTML = `${header}${renderCandidate(state.queue[idx], false)}`;
+  }
+
+  // Applies a fresh CandidateVisualReviewOut response to the in-memory
+  // queue entry it belongs to (by ticker+source, unique within one
+  // queue response) -- this is what makes counters/progress update
+  // immediately without a full reload, from the SAME response the POST
+  // already returns.
+  function applyReviewResult(ticker, source, reviewResult) {
+    const idx = state.queue.findIndex((item) => item.ticker === ticker && (item.source || '') === (source || ''));
+    if (idx >= 0) {
+      state.queue[idx].current_review = reviewResult;
+    }
+    return idx;
+  }
+
+  function afterSubmit() {
+    if (state.editing) {
+      state.editing = false;
+      // stay on the reviewed list, now showing the updated decision
+      render();
+      return;
+    }
+    // Normal flow: advance to whatever is now the first unreviewed
+    // candidate (search, not a blind +1 -- correct regardless of where in
+    // the ranked list this candidate was).
+    render();
   }
 
   async function submitPracticalRejection(ticker, source) {
@@ -347,9 +489,9 @@
       return;
     }
     const row = document.getElementById('practicalRejectRow');
-    row.innerHTML = '<button type="button" disabled>Rejecting…</button>';
+    row.innerHTML = '<button type="button" disabled>Saving…</button>';
     try {
-      await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/visual-review`, {
+      const result = await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/visual-review`, {
         method: 'POST',
         body: JSON.stringify({
           source,
@@ -362,9 +504,8 @@
           note: document.getElementById('practicalRejectNote').value || null,
         }),
       });
-      state.tally.reject = (state.tally.reject || 0) + 1;
-      state.index += 1;
-      render();
+      applyReviewResult(ticker, source, result);
+      afterSubmit();
     } catch (err) {
       alert(`Could not save rejection: ${err.message}`);
       row.innerHTML = '<button type="button" id="practicalRejectBtn" onclick="submitPracticalRejection(\'' +
@@ -385,9 +526,9 @@
       }
     }
     const submitRow = document.getElementById('submitRow');
-    submitRow.innerHTML = '<button type="button" disabled>Submitting…</button>';
+    submitRow.innerHTML = '<button type="button" disabled>Saving…</button>';
     try {
-      await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/visual-review`, {
+      const result = await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/visual-review`, {
         method: 'POST',
         body: JSON.stringify({
           source,
@@ -399,9 +540,8 @@
           note: document.getElementById('reviewNote').value || null,
         }),
       });
-      state.tally[decision] = (state.tally[decision] || 0) + 1;
-      state.index += 1;
-      render();
+      applyReviewResult(ticker, source, result);
+      afterSubmit();
     } catch (err) {
       alert(`Could not save review: ${err.message}`);
       submitRow.innerHTML = '<button type="button" onclick="submitReview(\'' + ticker.replace(/'/g, "\\'") + '\', \'' + (source || '').replace(/'/g, "\\'") + '\')" class="primary">Submit &amp; Next</button>';
@@ -417,7 +557,22 @@
     loadQueue();
   });
 
-  // Exposed for tests (tests/review_queue_auth_v1.js) -- real browser usage
-  // never touches this return value, it only matters under module.exports.
-  return { state, loadQueue, renderAuthRequiredPanel, submitApiKey };
+  // Exposed for tests (tests/review_queue_auth_v1.js,
+  // tests/review_queue_persistence_v1.js) -- real browser usage never
+  // touches this return value, it only matters under module.exports.
+  return {
+    state,
+    loadQueue,
+    renderAuthRequiredPanel,
+    submitApiKey,
+    submitReview,
+    submitPracticalRejection,
+    setFilter,
+    openReviewedItem,
+    closeEditing,
+    isReviewed,
+    decisionFor,
+    computeCounts,
+    firstUnreviewedIndex,
+  };
 });
