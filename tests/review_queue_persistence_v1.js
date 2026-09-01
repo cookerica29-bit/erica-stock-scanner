@@ -224,7 +224,16 @@ async function run() {
   assert.strictEqual(reviewQueue.computeCounts(reviewQueue.state.queue).unreviewed, 1, 'a new setup_key for AAA must be treated as unreviewed, not inherit the old review');
   assert.strictEqual(reviewQueue.state.index, 0);
   assert.ok(elements.mainContent.innerHTML.includes('AAA'), 'the new-setup AAA should render in the unreviewed stepper');
-  assert.ok(!/checked/.test(elements.mainContent.innerHTML), 'a genuinely unreviewed candidate must not have any field pre-checked');
+  // Note: trigger_rule intentionally carries a direction-based convenience
+  // default (LONG -> close_above) even on a genuinely unreviewed candidate
+  // -- see Kairos trigger-capture spec Section 3 -- so the assertion below
+  // is scoped to the actual review-decision fields (the ones this test's
+  // stale-carryover bug was about), not a blanket "nothing checked" check.
+  const reviewFieldNames = ['market_structure', 'location_read', 'clear_path_to_target', 'lower_tf_confirmation', 'practical_reason', 'decision'];
+  for (const name of reviewFieldNames) {
+    const fieldGroup = new RegExp(`name="${name}"[^>]*checked`, 'g');
+    assert.ok(!fieldGroup.test(elements.mainContent.innerHTML), `a genuinely unreviewed candidate must not have ${name} pre-checked`);
+  }
 
   console.log('Review queue persistence v1 tests passed');
 }

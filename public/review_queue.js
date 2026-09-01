@@ -303,15 +303,30 @@
       const label = cr.review_type === 'practical_rejection'
         ? `Practically rejected — ${PRACTICAL_REASON_LABELS[cr.practical_rejection_reason] || cr.practical_rejection_reason}`
         : cr.decision.charAt(0).toUpperCase() + cr.decision.slice(1);
+      const triggerText = triggerSummaryText(cr);
       return `
         <div class="reviewed-row" onclick="openReviewedItem(${idx})">
           <span class="reviewed-ticker">${escapeHtml(item.ticker)}</span>
           <span class="reviewed-decision decision-${escapeHtml(cr.decision)}">${escapeHtml(label)}</span>
+          ${triggerText ? `<span class="reviewed-trigger">Waiting for: ${escapeHtml(triggerText)}</span>` : ''}
           <span class="reviewed-time">${escapeHtml(new Date(cr.reviewed_at).toLocaleString())}</span>
           <span class="reviewed-edit">Edit &rsaquo;</span>
         </div>`;
     }).join('');
     return `<div class="reviewed-list">${rows}</div>`;
+  }
+
+  // "Waiting for: 30m close above $X" -- the human-readable rendering of
+  // a stored trigger, shared by the reviewed list and the candidate card
+  // itself. Never implies Kairos is currently watching it (no monitoring
+  // exists yet) -- callers that show this alongside a decision should
+  // keep that framing (informational record of an instruction, not a
+  // live status).
+  function triggerSummaryText(cr) {
+    if (!cr || cr.trigger_rule == null || cr.trigger_level == null) return null;
+    const ruleText = cr.trigger_rule === 'close_above' ? 'above' : 'below';
+    const timeframe = cr.trigger_timeframe || '30m';
+    return `${timeframe} close ${ruleText} ${fmtMoney(cr.trigger_level)}`;
   }
 
   function signalRow(label, read, detail) {
@@ -321,21 +336,47 @@
     return `<div class="signal-row"><span>${escapeHtml(label)}</span><span class="read ${escapeHtml(cls)}">${escapeHtml(text)}${detail ? ` — ${escapeHtml(detail)}` : ''}</span></div>`;
   }
 
+  // Explicit Lower-TF Trigger Capture (2026-09 session): a human-defined
+  // objective 30m close condition, optional, recorded alongside a
+  // review -- NOT monitoring, NOT an inferred BOS/CHoCH, NOT ENTER_NOW.
+  // Only shown/relevant when lower_tf_confirmation is "not_yet"
+  // (toggleTriggerFields, wired to the radio's onchange below); when
+  // "yes" is picked, no future trigger is required or shown. Direction
+  // only supplies a DEFAULT rule (LONG->close_above, SHORT->close_below)
+  // for a fresh, never-reviewed candidate -- never enforced, and never
+  // used as a default once an existing trigger is being edited (the
+  // stored rule always wins there, whatever it is).
+  function toggleTriggerFields() {
+    const selected = document.querySelector('input[name="lower_tf_confirmation"]:checked');
+    const fields = document.getElementById('triggerFields');
+    if (!fields) return;
+    fields.style.display = selected && selected.value === 'not_yet' ? 'block' : 'none';
+  }
+  window.toggleTriggerFields = toggleTriggerFields;
+
   function renderCandidate(item, editing) {
     const cc = item.confluence_counts || {};
     const confluenceLine = item.confluence_available
       ? `${cc.favorable ?? 0} favorable / ${cc.unfavorable ?? 0} unfavorable / ${cc.neutral ?? 0} neutral (${item.confluence_label || 'confluence'})`
       : 'Confluence unavailable for this candidate';
     const cr = editing ? item.current_review : null;
+    const storedTriggerText = editing ? triggerSummaryText(cr) : null;
     const editingBanner = editing
       ? `<div class="already-reviewed">Editing the existing review from ${escapeHtml(new Date(cr.reviewed_at).toLocaleString())}. Submitting below records a NEW review for this same setup -- the old one stays in history, this becomes current.
-          <button type="button" class="cancel-edit-btn" onclick="closeEditing()">Cancel</button></div>`
+          <button type="button" class="cancel-edit-btn" onclick="closeEditing()">Cancel</button>
+          ${storedTriggerText ? `<div class="stored-trigger">Waiting for: ${escapeHtml(storedTriggerText)}</div>` : ''}
+          </div>`
       : '';
     const chartUrl = `https://www.tradingview.com/symbols/${encodeURIComponent(item.ticker)}/`;
     const wasPractical = cr && cr.review_type === 'practical_rejection';
     const wasVisual = cr && cr.review_type === 'visual';
     const submitLabel = editing ? 'Save Updated Review' : 'Submit &amp; Next';
     const practicalSubmitLabel = editing ? 'Save Updated Rejection' : 'Reject &amp; Next';
+
+    const hasStoredTrigger = wasVisual && cr.trigger_rule != null && cr.trigger_level != null;
+    const defaultTriggerRule = (item.signal || '').toLowerCase() === 'short' ? 'close_below' : 'close_above';
+    const triggerRuleValue = hasStoredTrigger ? cr.trigger_rule : defaultTriggerRule;
+    const triggerFieldsVisible = wasVisual && cr.lower_tf_confirmation === 'not_yet';
 
     return `
       <div class="candidate-card">
@@ -414,8 +455,22 @@
           <fieldset>
             <legend>Lower-timeframe confirmation</legend>
             <div class="option-row">
-              <label><input type="radio" name="lower_tf_confirmation" value="yes" ${checkedIf(wasVisual && cr.lower_tf_confirmation === 'yes')}> Yes</label>
-              <label><input type="radio" name="lower_tf_confirmation" value="not_yet" ${checkedIf(wasVisual && cr.lower_tf_confirmation === 'not_yet')}> Not yet</label>
+              <label><input type="radio" name="lower_tf_confirmation" value="yes" onchange="toggleTriggerFields()" ${checkedIf(wasVisual && cr.lower_tf_confirmation === 'yes')}> Yes</label>
+              <label><input type="radio" name="lower_tf_confirmation" value="not_yet" onchange="toggleTriggerFields()" ${checkedIf(wasVisual && cr.lower_tf_confirmation === 'not_yet')}> Not yet</label>
+            </div>
+            <div class="trigger-fields" id="triggerFields" style="display:${triggerFieldsVisible ? 'block' : 'none'}">
+              <div class="trigger-label">Waiting for 30m close:</div>
+              <div class="option-row">
+                <label><input type="radio" name="trigger_rule" value="close_above" ${checkedIf(triggerRuleValue === 'close_above')}> Above</label>
+                <label><input type="radio" name="trigger_rule" value="close_below" ${checkedIf(triggerRuleValue === 'close_below')}> Below</label>
+              </div>
+              <div class="trigger-inputs">
+                <input type="number" id="triggerLevel" step="0.01" min="0" placeholder="Price"
+                  value="${hasStoredTrigger ? cr.trigger_level : ''}">
+                <input type="text" id="triggerReason" placeholder="Optional note (why this level)"
+                  value="${wasVisual && cr.trigger_reason ? escapeHtml(cr.trigger_reason) : ''}">
+              </div>
+              <div class="trigger-hint">Optional -- not required to submit a "Not yet" review. Kairos does not monitor this yet; it is only recorded for the future.</div>
             </div>
           </fieldset>
           <fieldset>
@@ -555,17 +610,35 @@
     const submitRow = document.getElementById('submitRow');
     submitRow.innerHTML = '<button type="button" disabled>Saving…</button>';
     try {
+      const body = {
+        source,
+        market_structure: data.get('market_structure'),
+        location_read: data.get('location_read'),
+        clear_path_to_target: data.get('clear_path_to_target'),
+        lower_tf_confirmation: data.get('lower_tf_confirmation'),
+        decision,
+        note: document.getElementById('reviewNote').value || null,
+      };
+      // Trigger fields (Explicit Lower-TF Trigger Capture, 2026-09
+      // session): the trigger_rule radio always has a pre-selected
+      // default (direction-based, or the stored value when editing) even
+      // when the reviewer never touches the trigger section at all -- so
+      // the LEVEL field, not the radio, is what decides whether a real
+      // trigger is being submitted. An empty level means "no trigger,"
+      // full stop, regardless of which rule radio happens to be checked.
+      const triggerLevelInput = document.getElementById('triggerLevel');
+      const triggerLevelRaw = triggerLevelInput ? triggerLevelInput.value.trim() : '';
+      if (triggerLevelRaw !== '') {
+        body.trigger_timeframe = '30m';
+        body.trigger_rule = data.get('trigger_rule');
+        body.trigger_level = parseFloat(triggerLevelRaw);
+        const triggerReasonInput = document.getElementById('triggerReason');
+        const triggerReasonRaw = triggerReasonInput ? triggerReasonInput.value.trim() : '';
+        if (triggerReasonRaw) body.trigger_reason = triggerReasonRaw;
+      }
       const result = await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/visual-review`, {
         method: 'POST',
-        body: JSON.stringify({
-          source,
-          market_structure: data.get('market_structure'),
-          location_read: data.get('location_read'),
-          clear_path_to_target: data.get('clear_path_to_target'),
-          lower_tf_confirmation: data.get('lower_tf_confirmation'),
-          decision,
-          note: document.getElementById('reviewNote').value || null,
-        }),
+        body: JSON.stringify(body),
       });
       applyReviewResult(ticker, source, result);
       afterSubmit();
@@ -601,5 +674,6 @@
     decisionFor,
     computeCounts,
     firstUnreviewedIndex,
+    triggerSummaryText,
   };
 });

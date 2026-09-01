@@ -107,11 +107,33 @@
     .reviewed-decision.decision-reject { color: var(--fail); }
     .reviewed-time { color: var(--muted); font-size: 0.78rem; }
     .reviewed-edit { color: var(--accent); font-size: 0.82rem; white-space: nowrap; }
+    .reviewed-trigger {
+      flex-basis: 100%; color: var(--warn); font-size: 0.78rem;
+    }
 
     .cancel-edit-btn {
       margin-left: 10px; background: var(--surface3); border: 1px solid var(--border);
       border-radius: 6px; padding: 3px 10px; font-size: 0.78rem; cursor: pointer; color: var(--text);
     }
+    .stored-trigger {
+      margin-top: 6px; color: var(--warn); font-size: 0.82rem; font-weight: 600;
+    }
+
+    .trigger-fields {
+      margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+      background: var(--surface2); border: 1px dashed var(--border);
+    }
+    .trigger-label { font-size: 0.82rem; color: var(--muted); margin-bottom: 6px; }
+    .trigger-inputs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    .trigger-inputs input[type="number"] {
+      width: 120px; background: var(--surface3); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit;
+    }
+    .trigger-inputs input[type="text"] {
+      flex: 1 1 200px; background: var(--surface3); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit;
+    }
+    .trigger-hint { margin-top: 6px; font-size: 0.74rem; color: var(--muted); }
 
     .disclaimer {
       font-size: 0.78rem; color: var(--muted); background: var(--surface2);
@@ -222,6 +244,6 @@
     </main>
   </div>
 
-  <script src="/static/review_queue.js?v=20260901-boards"></script>
+  <script src="/static/review_queue.js?v=20260901-trigger"></script>
 </body>
 </html>

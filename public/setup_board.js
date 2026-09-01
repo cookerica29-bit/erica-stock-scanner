@@ -241,6 +241,25 @@
     return `/review-queue?ticker=${encodeURIComponent(item.ticker)}&source=${encodeURIComponent(item.source || '')}`;
   }
 
+  const TRIGGER_RULE_LABELS = { close_above: 'close above', close_below: 'close below' };
+
+  function triggerSummaryText(cr) {
+    if (!cr || cr.trigger_rule == null || cr.trigger_level == null) return '';
+    const rule = TRIGGER_RULE_LABELS[cr.trigger_rule] || cr.trigger_rule;
+    return `${escapeHtml(cr.trigger_timeframe || '')} ${escapeHtml(rule)} ${fmtMoney(cr.trigger_level)}`;
+  }
+
+  function triggerBlock(cr) {
+    if (!cr || cr.trigger_rule == null || cr.trigger_level == null) return '';
+    return `
+          <div class="execution-trigger">
+            <div class="execution-trigger-label">Execution Trigger</div>
+            <div class="execution-trigger-value">${triggerSummaryText(cr)}</div>
+            ${cr.trigger_reason ? `<div class="execution-trigger-reason">${escapeHtml(cr.trigger_reason)}</div>` : ''}
+            <div class="execution-trigger-status">Status: Not monitored yet</div>
+          </div>`;
+  }
+
   function renderCard(item) {
     const cr = item.current_review || {};
     const chartUrl = `https://www.tradingview.com/symbols/${encodeURIComponent(item.ticker)}/`;
@@ -281,6 +300,7 @@
             <div class="signal-row"><span>Clear path to target</span><span class="read">${escapeHtml(CLEAR_PATH_LABELS[cr.clear_path_to_target] || cr.clear_path_to_target || '--')}</span></div>
             <div class="signal-row"><span>Lower-TF confirmation</span><span class="read">${escapeHtml(LOWER_TF_LABELS[cr.lower_tf_confirmation] || cr.lower_tf_confirmation || '--')}</span></div>
           </div>
+          ${triggerBlock(cr)}
         </div>
 
         <div class="card-actions">

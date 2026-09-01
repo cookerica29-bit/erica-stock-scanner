@@ -785,7 +785,11 @@ def _ensure_candidate_visual_reviews_schema(conn: sqlite3.Connection) -> None:
                 practical_rejection_reason TEXT,
                 decision TEXT NOT NULL,
                 note TEXT,
-                reviewed_at TEXT NOT NULL
+                reviewed_at TEXT NOT NULL,
+                trigger_timeframe TEXT,
+                trigger_rule TEXT,
+                trigger_level REAL,
+                trigger_reason TEXT
             )
             """
         )
@@ -804,9 +808,9 @@ def _ensure_candidate_visual_reviews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE candidate_visual_reviews_old")
         conn.commit()
         return
-    # Already the new shape -- just make sure the two additive columns
-    # exist, same ALTER-if-missing pattern as every other schema-evolution
-    # function in this file (covers a DB created between this column's
+    # Already the new shape -- just make sure the additive columns exist,
+    # same ALTER-if-missing pattern as every other schema-evolution
+    # function in this file (covers a DB created between a column's
     # CREATE TABLE literal existing and this function's own first run,
     # a real if narrow race no different from _ensure_candidates_schema's
     # own source_universe check above).
@@ -814,6 +818,46 @@ def _ensure_candidate_visual_reviews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN review_type TEXT NOT NULL DEFAULT 'visual'")
     if "practical_rejection_reason" not in columns:
         conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN practical_rejection_reason TEXT")
+    # Explicit Lower-TF Trigger Capture (2026-09 session): a human-defined
+    # objective 30m close condition, optionally recorded alongside a
+    # review -- see VisualReviewIn's own comment for the full semantic
+    # contract. Nullable/additive, same as every other optional field on
+    # this append-only table: an old row (including FFIV/NVDA/CLH's real
+    # production reviews, written before this feature existed) simply
+    # reads back NULL for all four -- never fabricated, never guessed.
+    if "trigger_timeframe" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN trigger_timeframe TEXT")
+    if "trigger_rule" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN trigger_rule TEXT")
+    if "trigger_level" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN trigger_level REAL")
+    if "trigger_reason" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN trigger_reason TEXT")
+    conn.commit()
+
+
+def _ensure_approved_setup_memories_schema(conn: sqlite3.Connection) -> None:
+    """approved_setup_memories itself is new this session (Approved Setup
+    Memory foundation) -- no legacy shape to migrate, so unlike
+    _ensure_candidate_visual_reviews_schema this never needs a rebuild
+    branch. But it IS already a real, deployed table with real production
+    rows (FFIV/NVDA/CLH's backfilled memories) by the time the trigger
+    columns below were added -- same additive ALTER-if-missing pattern as
+    every other schema-evolution function in this file. A fresh database
+    gets the new shape directly from _initialize_candidates_schema's own
+    CREATE TABLE literal, so this is a no-op there.
+    """
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(approved_setup_memories)").fetchall()}
+    if not columns:
+        return
+    if "trigger_timeframe" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN trigger_timeframe TEXT")
+    if "trigger_rule" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN trigger_rule TEXT")
+    if "trigger_level" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN trigger_level REAL")
+    if "trigger_reason" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN trigger_reason TEXT")
     conn.commit()
 
 
@@ -1021,7 +1065,11 @@ def _initialize_candidates_schema(conn) -> None:
             practical_rejection_reason TEXT,
             decision TEXT NOT NULL,
             note TEXT,
-            reviewed_at TEXT NOT NULL
+            reviewed_at TEXT NOT NULL,
+            trigger_timeframe TEXT,
+            trigger_rule TEXT,
+            trigger_level REAL,
+            trigger_reason TEXT
         )
         """
     )
@@ -1086,10 +1134,15 @@ def _initialize_candidates_schema(conn) -> None:
             location_alignment TEXT,
             snapshot_origin TEXT NOT NULL DEFAULT 'approval_event',
             snapshot_exact INTEGER NOT NULL DEFAULT 1,
-            backfill_note TEXT
+            backfill_note TEXT,
+            trigger_timeframe TEXT,
+            trigger_rule TEXT,
+            trigger_level REAL,
+            trigger_reason TEXT
         )
         """
     )
+    _ensure_approved_setup_memories_schema(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_approved_setup_memories_setup_key "
         "ON approved_setup_memories (setup_key, approved_at)"
@@ -1368,6 +1421,19 @@ ReviewDecision = Literal["approve", "watch", "reject"]
 ReviewType = Literal["visual", "practical_rejection"]
 PracticalRejectionReason = Literal["options_too_expensive", "poor_option_liquidity", "other"]
 
+# Explicit Lower-TF Trigger Capture (2026-09 session). This is NOT
+# monitoring, NOT ENTER_NOW, NOT an inferred BOS/CHoCH -- it is only a
+# human-defined objective condition the reviewer chooses to record,
+# optionally, alongside a review. "close_above"/"close_below" both mean a
+# COMPLETED candle on trigger_timeframe closing strictly beyond
+# trigger_level -- explicitly not an intrabar wick touch. trigger_timeframe
+# is deliberately a one-value Literal today ("30m") rather than a bare
+# str, so a typo'd/unsupported timeframe 422s instead of silently being
+# stored; extending it to more timeframes later is a one-line change, not
+# a schema migration (the column is already a plain nullable TEXT).
+TriggerTimeframe = Literal["30m"]
+TriggerRule = Literal["close_above", "close_below"]
+
 
 class VisualReviewIn(BaseModel):
     source: str = Field(min_length=1)
@@ -1378,6 +1444,15 @@ class VisualReviewIn(BaseModel):
     clear_path_to_target: Optional[ClearPathToTarget] = None
     lower_tf_confirmation: Optional[LowerTfConfirmation] = None
     note: Optional[str] = None
+    # Trigger fields are always optional at the Pydantic level -- the
+    # all-or-nothing completeness rule (trigger_rule+trigger_level must be
+    # both present or both absent) is enforced in
+    # record_candidate_visual_review, not here, so the 422 message can
+    # explain the actual rule rather than Pydantic's generic one.
+    trigger_timeframe: Optional[TriggerTimeframe] = None
+    trigger_rule: Optional[TriggerRule] = None
+    trigger_level: Optional[float] = None
+    trigger_reason: Optional[str] = None
 
 
 class CandidateVisualReviewOut(BaseModel):
@@ -1394,6 +1469,10 @@ class CandidateVisualReviewOut(BaseModel):
     decision: ReviewDecision
     note: Optional[str] = None
     reviewed_at: str
+    trigger_timeframe: Optional[TriggerTimeframe] = None
+    trigger_rule: Optional[TriggerRule] = None
+    trigger_level: Optional[float] = None
+    trigger_reason: Optional[str] = None
 
 
 # Approved Setup Memory (2026-09 session, memory-foundation build). See
@@ -1454,6 +1533,10 @@ class ApprovedSetupMemoryOut(BaseModel):
     snapshot_origin: SnapshotOrigin
     snapshot_exact: bool
     backfill_note: Optional[str] = None
+    trigger_timeframe: Optional[TriggerTimeframe] = None
+    trigger_rule: Optional[TriggerRule] = None
+    trigger_level: Optional[float] = None
+    trigger_reason: Optional[str] = None
 
 
 class ApprovedSetupMonitorStateOut(BaseModel):
@@ -4625,6 +4708,12 @@ def _row_to_visual_review(row: sqlite3.Row) -> dict:
         "decision": row["decision"],
         "note": row["note"] if "note" in keys else None,
         "reviewed_at": row["reviewed_at"],
+        # Trigger fields: NULL for every row written before this feature
+        # existed (real production reviews included) -- never fabricated.
+        "trigger_timeframe": row["trigger_timeframe"] if "trigger_timeframe" in keys else None,
+        "trigger_rule": row["trigger_rule"] if "trigger_rule" in keys else None,
+        "trigger_level": row["trigger_level"] if "trigger_level" in keys else None,
+        "trigger_reason": row["trigger_reason"] if "trigger_reason" in keys else None,
     }
 
 
@@ -4721,6 +4810,10 @@ def _row_to_approved_setup_memory(row: sqlite3.Row) -> dict:
         "snapshot_origin": row["snapshot_origin"],
         "snapshot_exact": bool(row["snapshot_exact"]),
         "backfill_note": row["backfill_note"],
+        "trigger_timeframe": row["trigger_timeframe"] if "trigger_timeframe" in row.keys() else None,
+        "trigger_rule": row["trigger_rule"] if "trigger_rule" in row.keys() else None,
+        "trigger_level": row["trigger_level"] if "trigger_level" in row.keys() else None,
+        "trigger_reason": row["trigger_reason"] if "trigger_reason" in row.keys() else None,
     }
 
 
@@ -4777,6 +4870,10 @@ def _create_approved_setup_memory(
     snapshot_origin: str,
     snapshot_exact: bool,
     backfill_note: Optional[str] = None,
+    trigger_timeframe: Optional[str] = None,
+    trigger_rule: Optional[str] = None,
+    trigger_level: Optional[float] = None,
+    trigger_reason: Optional[str] = None,
 ) -> int:
     """Inserts exactly one new approved_setup_memories row plus its paired
     approved_setup_monitor_state row (state=APPROVED), in the SAME
@@ -4796,6 +4893,13 @@ def _create_approved_setup_memory(
     and only knowable at the moment that approval is created, requires no
     live-market check, and has exactly one correct answer.
 
+    trigger_timeframe/rule/level/reason (if given) are copied verbatim
+    into the memory row -- an explicit human-defined objective condition
+    recorded at review time (see VisualReviewIn's own comment for the
+    full contract), NOT anything derived from `preview`. Once written,
+    frozen with the rest of the snapshot exactly like every other field
+    here.
+
     Returns the new approved_setup_memories.id.
     """
     confluence_counts = preview.get("confluence_counts")
@@ -4810,8 +4914,9 @@ def _create_approved_setup_memory(
             bos_confirmed, displacement_score, displacement_label, macro_bias,
             sweep_confirmed, rejection_confirmed, execution_shadow_ok,
             confluence_label, confluence_counts_json, location_label, location_alignment,
-            snapshot_origin, snapshot_exact, backfill_note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            snapshot_origin, snapshot_exact, backfill_note,
+            trigger_timeframe, trigger_rule, trigger_level, trigger_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticker, source, direction, setup_key, approved_at, visual_review_id,
@@ -4828,6 +4933,7 @@ def _create_approved_setup_memory(
             json.dumps(confluence_counts) if confluence_counts is not None else None,
             preview.get("location_label"), preview.get("location_alignment"),
             snapshot_origin, 1 if snapshot_exact else 0, backfill_note,
+            trigger_timeframe, trigger_rule, trigger_level, trigger_reason,
         ),
     )
     memory_id = cursor.lastrowid
@@ -4883,6 +4989,10 @@ def _sync_approved_setup_memory_on_review(
     clear_path_to_target: Optional[str],
     lower_tf_confirmation: Optional[str],
     review_note: Optional[str],
+    trigger_timeframe: Optional[str] = None,
+    trigger_rule: Optional[str] = None,
+    trigger_level: Optional[float] = None,
+    trigger_reason: Optional[str] = None,
 ) -> None:
     """Called once per POST .../visual-review, right after the
     candidate_visual_reviews INSERT, using the SAME setup_key/preview that
@@ -4912,6 +5022,8 @@ def _sync_approved_setup_memory_on_review(
             clear_path_to_target=clear_path_to_target, lower_tf_confirmation=lower_tf_confirmation,
             review_note=review_note,
             snapshot_origin="approval_event", snapshot_exact=True,
+            trigger_timeframe=trigger_timeframe, trigger_rule=trigger_rule,
+            trigger_level=trigger_level, trigger_reason=trigger_reason,
         )
     elif decision in ("watch", "reject"):
         _withdraw_active_memory_for_setup_key(conn, setup_key, reviewed_at)
@@ -5073,6 +5185,16 @@ def backfill_approved_setup_memories(
                 lower_tf_confirmation=review_row["lower_tf_confirmation"],
                 review_note=review_row["note"] if "note" in review_row.keys() else None,
                 snapshot_origin="live_backfill", snapshot_exact=False, backfill_note=backfill_note,
+                # Trigger fields: whatever the OLD review row actually has --
+                # NULL for every pre-existing review (FFIV/NVDA/CLH's real
+                # historical approvals included), never inferred or guessed.
+                # If a NEW review is ever submitted for one of those setups,
+                # normal (non-backfill) approve semantics capture a trigger
+                # then, same as any other setup.
+                trigger_timeframe=review_row["trigger_timeframe"] if "trigger_timeframe" in review_row.keys() else None,
+                trigger_rule=review_row["trigger_rule"] if "trigger_rule" in review_row.keys() else None,
+                trigger_level=review_row["trigger_level"] if "trigger_level" in review_row.keys() else None,
+                trigger_reason=review_row["trigger_reason"] if "trigger_reason" in review_row.keys() else None,
             )
             backfilled.append({"ticker": ticker, "setup_key": setup_key, "memory_id": memory_id})
         conn.commit()
@@ -5158,6 +5280,43 @@ def record_candidate_visual_review(
             )
         review_type = "visual"
 
+    # Explicit Lower-TF Trigger Capture (2026-09 session). Completeness
+    # contract, chosen explicitly per this feature's design: trigger_rule
+    # and trigger_level must be BOTH present or BOTH absent -- a partial
+    # submission 422s with a clear, actionable message rather than being
+    # silently normalized to null, so a frontend bug or a reviewer who
+    # picked a rule but forgot the price never has their real intent
+    # silently discarded. trigger_timeframe defaults to "30m" whenever a
+    # complete rule+level pair is given but timeframe wasn't explicit
+    # (today's only supported value); an explicit timeframe with no
+    # rule/level is treated as incomplete too. trigger_reason is always
+    # independent -- a note can exist with or without a numeric trigger.
+    # No market-data call is made here or anywhere in this validation --
+    # this endpoint never checks whether the trigger has "already fired".
+    has_trigger_rule = review.trigger_rule is not None
+    has_trigger_level = review.trigger_level is not None
+    if has_trigger_rule != has_trigger_level:
+        raise HTTPException(
+            status_code=422,
+            detail="trigger_rule and trigger_level must both be set together, or both omitted.",
+        )
+    trigger_timeframe: Optional[str] = None
+    trigger_rule: Optional[str] = None
+    trigger_level: Optional[float] = None
+    if has_trigger_rule and has_trigger_level:
+        level = review.trigger_level
+        if not math.isfinite(level) or level <= 0:
+            raise HTTPException(status_code=422, detail="trigger_level must be a positive, finite number.")
+        trigger_timeframe = review.trigger_timeframe or "30m"
+        trigger_rule = review.trigger_rule
+        trigger_level = level
+    elif review.trigger_timeframe is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="trigger_timeframe requires trigger_rule and trigger_level to also be set.",
+        )
+    trigger_reason = review.trigger_reason
+
     conn = _get_db()
     try:
         candidate = conn.execute(
@@ -5183,8 +5342,9 @@ def record_candidate_visual_review(
             INSERT INTO candidate_visual_reviews (
                 ticker, source, setup_key, review_type, market_structure, location_read,
                 clear_path_to_target, lower_tf_confirmation, practical_rejection_reason,
-                decision, note, reviewed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                decision, note, reviewed_at,
+                trigger_timeframe, trigger_rule, trigger_level, trigger_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_ticker,
@@ -5199,6 +5359,10 @@ def record_candidate_visual_review(
                 review.decision,
                 review.note,
                 reviewed_at,
+                trigger_timeframe,
+                trigger_rule,
+                trigger_level,
+                trigger_reason,
             ),
         )
         visual_review_id = cursor.lastrowid
@@ -5223,6 +5387,10 @@ def record_candidate_visual_review(
             clear_path_to_target=review.clear_path_to_target,
             lower_tf_confirmation=review.lower_tf_confirmation,
             review_note=review.note,
+            trigger_timeframe=trigger_timeframe,
+            trigger_rule=trigger_rule,
+            trigger_level=trigger_level,
+            trigger_reason=trigger_reason,
         )
         conn.commit()
         row = conn.execute(

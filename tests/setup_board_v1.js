@@ -253,6 +253,35 @@ async function run() {
   await board.loadBoard();
   assert.ok(elements.mainContent.innerHTML.includes('Extended') && elements.mainContent.innerHTML.includes('do not chase'), 'H: extended card shows "Extended -- do not chase"');
 
+  // --- I. Execution trigger display: informational only, explicit
+  // "Not monitored yet" status, never implies live monitoring. ---
+  board.state.decision = 'approve';
+  const withTrigger = candidate({
+    ticker: 'TRG', setup_key: 'TRG|ma_pipeline|long|300.00|340.00',
+    current_review: review('approve', {
+      ticker: 'TRG', setup_key: 'TRG|ma_pipeline|long|300.00|340.00',
+      trigger_timeframe: '30m', trigger_rule: 'close_above', trigger_level: 318.25,
+      trigger_reason: 'Reclaim of prior range high',
+    }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([withTrigger]) }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Execution Trigger'), 'I: trigger block renders when trigger_level/trigger_rule are set');
+  assert.ok(elements.mainContent.innerHTML.includes('30m'), 'I: trigger timeframe renders');
+  assert.ok(elements.mainContent.innerHTML.includes('close above'), 'I: trigger rule renders in human-readable form');
+  assert.ok(elements.mainContent.innerHTML.includes('318.25'), 'I: trigger level renders');
+  assert.ok(elements.mainContent.innerHTML.includes('Reclaim of prior range high'), 'I: trigger_reason renders when present');
+  assert.ok(elements.mainContent.innerHTML.includes('Not monitored yet'), 'I: trigger block must explicitly state Kairos is not currently monitoring it');
+
+  // No trigger stored -> no trigger block at all (existing reviews with no trigger).
+  const noTrigger = candidate({
+    ticker: 'NTG', setup_key: 'NTG|ma_pipeline|long|300.00|340.00',
+    current_review: review('approve', { ticker: 'NTG', setup_key: 'NTG|ma_pipeline|long|300.00|340.00' }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([noTrigger]) }];
+  await board.loadBoard();
+  assert.ok(!elements.mainContent.innerHTML.includes('Execution Trigger'), 'I: no trigger block when no trigger is stored on the review');
+
   console.log('Setup board v1 tests passed');
 }
 

@@ -144,6 +144,18 @@
     .signal-row .read { font-weight: 600; }
 
     .card-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+
+    .execution-trigger {
+      margin-top: 10px; padding: 8px 10px; border-radius: 8px;
+      background: var(--surface2); border: 1px dashed var(--warn);
+    }
+    .execution-trigger-label {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+      color: var(--warn); margin-bottom: 4px;
+    }
+    .execution-trigger-value { font-size: 0.85rem; font-weight: 600; }
+    .execution-trigger-reason { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+    .execution-trigger-status { font-size: 0.76rem; color: var(--muted); margin-top: 4px; font-style: italic; }
   </style>
 </head>
 <body data-decision="watch">
@@ -171,6 +183,6 @@
     </main>
   </div>
 
-  <script src="/static/setup_board.js?v=20260901-boards-selfinit"></script>
+  <script src="/static/setup_board.js?v=20260901-trigger"></script>
 </body>
 </html>
