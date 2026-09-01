@@ -310,25 +310,49 @@
     main.innerHTML = `${header}<div class="setup-list">${state.board.map(renderCard).join('')}</div>`;
   }
 
-  function initBoard(decision) {
-    state.decision = decision;
-    if (typeof document !== 'undefined' && document.addEventListener) {
-      document.addEventListener('DOMContentLoaded', () => {
+  // Root cause of the "Approved Setups not loading" production bug
+  // (2026-09 session): this used to be an exported initBoard(decision)
+  // function that EACH board page had to call itself from a SEPARATE
+  // inline <script>initBoard('approve')</script> tag after the external
+  // setup_board.js tag. review_queue.js never has this problem -- it
+  // wires its own DOMContentLoaded listener internally, as part of the
+  // SAME script, so there is nothing else that has to load or run for it
+  // to work. The two-script split here meant that if the external
+  // setup_board.js tag failed to execute for ANY reason (slow/flaky
+  // network, a blocked/failed script load, a browser extension) -- as
+  // opposed to a normal successful load, which this session's own
+  // testing repeatedly reproduced working -- the second, inline script
+  // would throw "initBoard is not defined" with nothing to catch it, and
+  // the page would stay frozen on its static "Loading approved setups…"
+  // HTML forever: no error shown, no retry offered, matching exactly
+  // what was reported. Also: initBoard(decision) took the decision as an
+  // explicit argument the caller had to pass correctly -- despite this
+  // file's own header comment claiming decision "comes from <body
+  // data-decision=...>", the code never actually read that attribute.
+  // Fixed the same way review_queue.js already does it: one script,
+  // self-initializing, reading <body data-decision> itself, wrapped so
+  // an unexpected init-time exception is surfaced as visible text
+  // instead of leaving the page stuck on its loading state.
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('DOMContentLoaded', () => {
+      try {
+        const decision = (document.body && document.body.dataset && document.body.dataset.decision) || 'approve';
+        state.decision = decision;
         if (apiKey()) {
           document.getElementById('apiBand').classList.add('hidden');
         }
         loadBoard();
-      });
-    }
+      } catch (err) {
+        setStatus(`Could not initialize this page: ${err.message}`, true);
+      }
+    });
   }
-  window.initBoard = initBoard;
   window.loadBoard = loadBoard;
 
   // Exposed for tests (tests/setup_board_v1.js) -- real browser usage never
   // touches this return value, it only matters under module.exports.
   return {
     state,
-    initBoard,
     loadBoard,
     renderAuthRequiredPanel,
     submitApiKey,
