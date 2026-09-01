@@ -163,3 +163,82 @@ def test_concurrent_approve_requests_never_duplicate_active_memory(db_path, monk
     assert memory_count == 1, f"exactly one memory must exist even under a widened concurrent race -- got {memory_count}"
     assert active_count == 1, f"exactly one ACTIVE monitor_state must exist -- got {active_count}"
     assert review_count == 2, "both visual-review submissions ARE real, distinct events and both persist -- only the memory must not duplicate"
+
+
+def test_concurrent_watch_requests_never_duplicate_active_memory(db_path, monkeypatch):
+    """Watch Lifecycle V1: decision='watch' + a complete trigger contract is
+    a BRAND NEW code path for memory creation -- before this work,
+    decision='watch' never created a memory at all (see
+    _sync_approved_setup_memory_on_review), so this exact race-condition
+    protection had never been exercised for it. The underlying mechanism
+    (one big transaction per request, SQLite WAL single-writer semantics)
+    is unchanged and applies identically regardless of source_decision --
+    this test proves that identity empirically for the watch path rather
+    than just asserting it by analogy."""
+    headers = {"X-API-Key": "test-scanner-key"}
+
+    app = FastAPI()
+    app.include_router(router.router)
+    seed_client = TestClient(app)
+    seed_client.post("/api/v1/scanner/candidates", headers=headers, json={
+        "source": "ma_pipeline", "scanned_at": "2026-08-20T14:30:00Z",
+        "candidates": [{
+            "ticker": "AMD", "signal": "long", "entry_price": 100.0, "ema21_4h": 99.0,
+            "daily_regime": "bullish", "confidence": "high", "sma50_daily": 106.0, "sma200_daily": 104.0,
+        }],
+    })
+
+    real_check = router._active_monitor_state_row_for_setup_key
+    check_calls = []
+
+    def _slow_check(conn, setup_key):
+        result = real_check(conn, setup_key)
+        check_calls.append(setup_key)
+        time.sleep(0.3)
+        return result
+
+    monkeypatch.setattr(router, "_active_monitor_state_row_for_setup_key", _slow_check)
+
+    results = []
+
+    def _watch():
+        local_app = FastAPI()
+        local_app.include_router(router.router)
+        c = TestClient(local_app)
+        resp = c.post("/api/v1/scanner/candidates/AMD/visual-review", headers=headers, json={
+            "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "not_yet", "decision": "watch",
+            "trigger_timeframe": "30m", "trigger_rule": "close_above", "trigger_level": 100.0,
+            "trigger_reason": "waiting for reclaim",
+        })
+        results.append(resp.status_code)
+
+    t1 = threading.Thread(target=_watch)
+    t2 = threading.Thread(target=_watch)
+    t1.start()
+    time.sleep(0.05)  # let t1 begin its transaction (and its slow check) before t2 starts
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert results == [200, 200], "both concurrent watch requests must still succeed, not error out"
+    assert len(check_calls) == 2, "sanity: both threads really did reach the check -- this is a genuine concurrent scenario"
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    # WAITING_FOR_TRIGGER, not CONFIRMED -- decision='watch' with a
+    # complete trigger contract and no confirmation_rule/confirmation_level
+    # (Type B). Also confirms the byte-identical concurrent resubmission
+    # is correctly treated as a no-op, not a spurious second revision.
+    active_rows = conn.execute(
+        "SELECT * FROM approved_setup_monitor_state WHERE state='WAITING_FOR_TRIGGER'"
+    ).fetchall()
+    memory_rows = conn.execute("SELECT * FROM approved_setup_memories").fetchall()
+    review_count = conn.execute("SELECT COUNT(*) FROM candidate_visual_reviews").fetchone()[0]
+    conn.close()
+
+    assert len(memory_rows) == 1, f"exactly one memory must exist even under a widened concurrent watch race -- got {len(memory_rows)}"
+    assert memory_rows[0]["source_decision"] == "watch", "the single created memory must be tagged source_decision='watch'"
+    assert len(active_rows) == 1, f"exactly one ACTIVE monitor_state must exist -- got {len(active_rows)}"
+    assert review_count == 2, "both visual-review submissions ARE real, distinct events and both persist -- only the memory must not duplicate"

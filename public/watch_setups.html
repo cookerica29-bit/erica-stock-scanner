@@ -102,6 +102,10 @@
     .state-WAITING_FOR_ENTRY { color: var(--muted); }
     .state-EXTENDED { color: var(--warn); border-color: rgba(245, 158, 11, 0.4); }
     .state-INVALIDATED { color: var(--fail); border-color: rgba(251, 113, 133, 0.4); }
+    .state-ACTIONABLE { color: var(--pass); border-color: rgba(34, 197, 94, 0.4); }
+    .state-STALE { color: var(--muted); border-color: rgba(148, 163, 184, 0.4); }
+    .state-SUPERSEDED { color: var(--muted); border-color: rgba(148, 163, 184, 0.4); }
+    .state-MANUAL_REVIEW { color: var(--accent); border-color: rgba(56, 189, 248, 0.4); }
 
     .current-price-row {
       display: flex; justify-content: space-between; align-items: baseline;
@@ -156,6 +160,7 @@
     .execution-trigger-value { font-size: 0.85rem; font-weight: 600; }
     .execution-trigger-reason { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
     .execution-trigger-status { font-size: 0.76rem; color: var(--muted); margin-top: 4px; font-style: italic; }
+    .execution-trigger-when { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
 
     /* Observed Confirmation Anchor -- same shape as .execution-trigger,
        but --pass (not --warn) so it visually reads as "already happened"
@@ -192,6 +197,10 @@
     .actionable-banner-text { font-size: 0.88rem; margin-bottom: 8px; }
     .actionable-banner-metrics { font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; }
     .actionable-banner-disclaimer { font-size: 0.74rem; color: var(--muted); font-style: italic; }
+
+    /* Watch Lifecycle V1 */
+    .notice-manual-review { background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.30); color: var(--accent); }
+    .notice-superseded { background: rgba(148, 163, 184, 0.10); border: 1px solid rgba(148, 163, 184, 0.35); color: var(--muted); }
   </style>
 </head>
 <body data-decision="watch">
@@ -219,6 +228,6 @@
     </main>
   </div>
 
-  <script src="/static/setup_board.js?v=20260901-execution-layer"></script>
+  <script src="/static/setup_board.js?v=20260901-watch-lifecycle-2"></script>
 </body>
 </html>

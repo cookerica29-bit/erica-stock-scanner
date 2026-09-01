@@ -306,34 +306,53 @@ def test_approved_memory_trigger_frozen_across_rescans(client, headers):
 
 
 # --- watch can store trigger without creating approved memory ---
-def test_watch_stores_trigger_without_creating_memory(client, headers):
+def test_watch_with_incomplete_trigger_creates_no_memory(client, headers):
+    """A watch review WITHOUT a complete trigger contract stays passive --
+    "MANUAL REVIEW REQUIRED" (Watch Lifecycle V1 section 3), never
+    silently monitored. Full watch-WITH-a-complete-trigger coverage
+    (which DOES now create a memory) lives in
+    tests/watch_lifecycle_v1.py."""
     _seed(client, headers, "AMD")
-    resp = _review(
-        client, headers, "AMD", "watch",
-        trigger_rule="close_above", trigger_level=100.50,
-    )
+    resp = _review(client, headers, "AMD", "watch")  # no trigger at all
     assert resp.status_code == 200
-    assert resp.json()["trigger_level"] == 100.50
+    assert resp.json()["trigger_level"] is None
     assert _memories(client, headers, include_inactive=True, ticker="AMD") == []
 
 
-# --- approve -> watch preserves old approved memory and its trigger snapshot ---
-def test_approve_then_watch_preserves_memory_trigger(client, headers):
+# --- approve -> watch is a decision REVERSAL, not a same-decision revision:
+# the old approve-origin memory is withdrawn outright (not superseded/
+# revision-chained), and the new watch-origin memory is independent, with
+# its own trigger and no revision lineage back to the approval. Full
+# Watch Lifecycle V1 coverage (source_decision, WAITING_FOR_TRIGGER,
+# monitor eligibility) lives in tests/watch_lifecycle_v1.py. ---
+def test_approve_then_watch_is_a_decision_reversal_not_a_revision(client, headers):
     _seed(client, headers, "AMD")
-    _review(client, headers, "AMD", "approve", trigger_rule="close_above", trigger_level=100.50)
-    assert len(_memories(client, headers, ticker="AMD")) == 1
+    approve_resp = _review(client, headers, "AMD", "approve", trigger_rule="close_above", trigger_level=100.50)
+    original = _memories(client, headers, ticker="AMD")
+    assert len(original) == 1
+    original_memory_id = original[0]["memory"]["id"]
 
     watch_resp = _review(client, headers, "AMD", "watch", trigger_rule="close_below", trigger_level=95.0)
     assert watch_resp.status_code == 200
     assert watch_resp.json()["trigger_rule"] == "close_below", "the NEW watch review has its own (different) trigger"
 
     active = _memories(client, headers, ticker="AMD")
-    assert active == [], "the memory is withdrawn from the active listing"
+    assert len(active) == 1, "the watch's own complete trigger creates a fresh, independent memory"
+    new_memory = active[0]["memory"]
+    assert new_memory["id"] != original_memory_id
+    assert new_memory["source_decision"] == "watch"
+    assert new_memory["trigger_rule"] == "close_below"
+    assert new_memory["trigger_level"] == 95.0
+    assert new_memory["revision_of_memory_id"] is None, \
+        "a decision reversal is NOT a revision -- no lineage back to the withdrawn approval"
+
     historical = _memories(client, headers, include_inactive=True, ticker="AMD")
-    assert len(historical) == 1
-    assert historical[0]["memory"]["trigger_rule"] == "close_above", "the frozen memory keeps the ORIGINAL approval-time trigger"
-    assert historical[0]["memory"]["trigger_level"] == 100.50
-    assert historical[0]["monitor_state"]["state"] == "WITHDRAWN"
+    assert len(historical) == 2
+    old_row = next(r for r in historical if r["memory"]["id"] == original_memory_id)
+    assert old_row["memory"]["source_decision"] == "approve"
+    assert old_row["memory"]["trigger_rule"] == "close_above", "the frozen OLD memory keeps its ORIGINAL approval-time trigger"
+    assert old_row["memory"]["trigger_level"] == 100.50
+    assert old_row["monitor_state"]["state"] == "WITHDRAWN"
 
 
 # --- existing reviews with no trigger still work ---

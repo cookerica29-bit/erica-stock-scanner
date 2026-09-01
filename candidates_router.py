@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from datetime import time as datetime_time
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.error import HTTPError, URLError
@@ -917,6 +918,17 @@ def _ensure_approved_setup_memories_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN revision_of_memory_id INTEGER")
     if "revision_reason" not in columns:
         conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN revision_reason TEXT")
+    # Watch Lifecycle V1 (watch_lifecycle_v1_audit.md section 2): the ONE
+    # schema change this feature needs. "approve" | "watch" -- which
+    # human decision produced this memory. NOT a new table: every field
+    # Watch monitoring needs (frozen stop/target/entry, trigger contract,
+    # setup_key) already lives on this row; only the origin needed
+    # recording. Every row that exists before this column did came from a
+    # real approve (this table had no watch-writing path until now), so
+    # the backfill below is exact, not a guess -- never leaves a row
+    # ambiguous between the two.
+    if "source_decision" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN source_decision TEXT NOT NULL DEFAULT 'approve'")
     conn.commit()
 
 
@@ -1261,7 +1273,8 @@ def _initialize_candidates_schema(conn) -> None:
             confirmed_candle_time TEXT,
             confirmation_note TEXT,
             revision_of_memory_id INTEGER,
-            revision_reason TEXT
+            revision_reason TEXT,
+            source_decision TEXT NOT NULL DEFAULT 'approve'
         )
         """
     )
@@ -1720,6 +1733,14 @@ ApprovedSetupMonitorStateName = Literal[
 # list_approved_setup_memories/backfill_approved_setup_memories's own
 # comments for exactly which fields are/aren't trustworthy on those rows.
 SnapshotOrigin = Literal["approval_event", "live_backfill"]
+# Watch Lifecycle V1 (watch_lifecycle_v1_audit.md section 2): which human
+# decision produced this memory row. Not the same axis as SnapshotOrigin
+# (origin = how exact the snapshot is; source_decision = what the human
+# actually clicked) -- a watch-originated memory is always
+# snapshot_origin="approval_event"-equivalent exactness (frozen live at
+# the moment of the real review, same as approve), it just didn't come
+# from an Approve.
+SourceDecision = Literal["approve", "watch"]
 
 
 class ApprovedSetupMemoryOut(BaseModel):
@@ -1772,6 +1793,10 @@ class ApprovedSetupMemoryOut(BaseModel):
     # human evidence.
     revision_of_memory_id: Optional[int] = None
     revision_reason: Optional[str] = None
+    # Watch Lifecycle V1: which human decision produced this memory. Every
+    # row before this feature existed is "approve" (backfilled exactly,
+    # not guessed -- this table had no watch-writing path until now).
+    source_decision: SourceDecision = "approve"
 
 
 class ApprovedSetupMonitorStateOut(BaseModel):
@@ -5087,6 +5112,7 @@ def _row_to_approved_setup_memory(row: sqlite3.Row) -> dict:
         "confirmation_note": row["confirmation_note"] if "confirmation_note" in row.keys() else None,
         "revision_of_memory_id": row["revision_of_memory_id"] if "revision_of_memory_id" in row.keys() else None,
         "revision_reason": row["revision_reason"] if "revision_reason" in row.keys() else None,
+        "source_decision": row["source_decision"] if "source_decision" in row.keys() and row["source_decision"] else "approve",
     }
 
 
@@ -5162,6 +5188,7 @@ def _create_approved_setup_memory(
     revision_of_memory_id: Optional[int] = None,
     revision_reason: Optional[str] = None,
     supersede_monitor_state_id: Optional[int] = None,
+    source_decision: str = "approve",
 ) -> int:
     """Inserts exactly one new approved_setup_memories row plus its paired
     approved_setup_monitor_state row, in the SAME transaction -- a memory
@@ -5200,18 +5227,27 @@ def _create_approved_setup_memory(
     revision (its whole point is comparing setup_key, which is identical
     here by definition).
 
+    source_decision (Watch Lifecycle V1, watch_lifecycle_v1_audit.md
+    section 2): "approve" (default) or "watch" -- which human decision
+    actually produced this memory. Recorded verbatim, never inferred; this
+    is the entire "machine lifecycle/handoff record" a watch-originated
+    memory needs -- candidate_visual_reviews.decision stays "watch"
+    forever on the original review row, untouched.
+
     The new monitor_state row's initial `state` is decided here, once,
     from which evidence group this memory actually has -- CONFIRMED
     immediately if confirmation_rule/level are present (Type A: the
     reviewer already observed the confirming candle, no future event to
     wait for), WAITING_FOR_TRIGGER if only trigger_rule/level are present
-    (Type B: a real future condition to monitor), or APPROVED if neither
-    is present (legacy/incomplete evidence -- correctly stuck until a
-    fresh human review supplies one or the other). This is a brand-new
-    INSERT every time, never a copy of any prior monitor_state row, so a
-    revision's new monitor_state starts with every execution-tracking
-    column NULL -- nothing carries forward from what it revises (see the
-    implementation plan section 4.4 for why this is deliberate, not an
+    (Type B: a real future condition to monitor -- this is the ONLY shape
+    a watch-originated memory is ever created with, per Watch Lifecycle
+    V1's eligibility rule), or APPROVED if neither is present (legacy/
+    incomplete evidence -- correctly stuck until a fresh human review
+    supplies one or the other). This is a brand-new INSERT every time,
+    never a copy of any prior monitor_state row, so a revision's new
+    monitor_state starts with every execution-tracking column NULL --
+    nothing carries forward from what it revises (see the implementation
+    plan section 4.4 for why this is deliberate, not an
     oversight).
 
     Returns the new approved_setup_memories.id.
@@ -5231,8 +5267,8 @@ def _create_approved_setup_memory(
             snapshot_origin, snapshot_exact, backfill_note,
             trigger_timeframe, trigger_rule, trigger_level, trigger_reason,
             confirmation_timeframe, confirmation_rule, confirmation_level, confirmed_candle_time, confirmation_note,
-            revision_of_memory_id, revision_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            revision_of_memory_id, revision_reason, source_decision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticker, source, direction, setup_key, approved_at, visual_review_id,
@@ -5251,7 +5287,7 @@ def _create_approved_setup_memory(
             snapshot_origin, 1 if snapshot_exact else 0, backfill_note,
             trigger_timeframe, trigger_rule, trigger_level, trigger_reason,
             confirmation_timeframe, confirmation_rule, confirmation_level, confirmed_candle_time, confirmation_note,
-            revision_of_memory_id, revision_reason,
+            revision_of_memory_id, revision_reason, source_decision,
         ),
     )
     memory_id = cursor.lastrowid
@@ -5279,13 +5315,37 @@ def _create_approved_setup_memory(
                 "superseded_by_memory_id=? WHERE id=?",
                 (approved_at, approved_at, memory_id, stale_row["id"]),
             )
+            _record_monitor_event(
+                conn,
+                approved_memory_id=stale_row["approved_memory_id"],
+                setup_key=stale_row["setup_key"], ticker=ticker, source=source,
+                from_state=stale_row["state"], to_state="SUPERSEDED", occurred_at=approved_at,
+                event_type=_monitor_event_type(
+                    _memory_source_decision(conn, stale_row["approved_memory_id"]), "SUPERSEDED",
+                ),
+                detail="a genuinely new setup_key now has its own active approval",
+            )
 
     if supersede_monitor_state_id is not None:
+        old_state_row = conn.execute(
+            "SELECT * FROM approved_setup_monitor_state WHERE id=?", (supersede_monitor_state_id,),
+        ).fetchone()
         conn.execute(
             "UPDATE approved_setup_monitor_state SET state='SUPERSEDED', updated_at=?, terminal_at=?, "
             "superseded_by_memory_id=? WHERE id=?",
             (approved_at, approved_at, memory_id, supersede_monitor_state_id),
         )
+        if old_state_row is not None:
+            _record_monitor_event(
+                conn,
+                approved_memory_id=old_state_row["approved_memory_id"],
+                setup_key=old_state_row["setup_key"], ticker=ticker, source=source,
+                from_state=old_state_row["state"], to_state="SUPERSEDED", occurred_at=approved_at,
+                event_type=_monitor_event_type(
+                    _memory_source_decision(conn, old_state_row["approved_memory_id"]), "SUPERSEDED",
+                ),
+                detail="a newer review supplied materially different evidence for the same setup_key",
+            )
 
     return memory_id
 
@@ -5448,53 +5508,146 @@ def _sync_approved_setup_memory_on_review(
     remains queryable historical evidence forever (include_inactive=true
     on GET /candidates/approved-setup-memory still returns it).
 
-    decision in ("watch", "reject"): withdraws whatever active memory
-    exists for this setup_key, if any. A watch/reject on a setup that was
-    never approved is a safe no-op (nothing to withdraw).
+    decision == "watch", WITH a complete trigger contract (trigger_rule
+    AND trigger_level both present -- Watch Lifecycle V1's eligibility
+    rule, watch_lifecycle_v1_audit.md section 3): takes the EXACT SAME
+    create-or-revise path as approve, via _create_or_revise_active_memory
+    below, tagged source_decision="watch". This is what gives a watched
+    setup durable, frozen stop/target/entry evidence and puts it under
+    the real monitor -- before this, decision="watch" never created any
+    memory at all, so nothing was ever monitored.
+
+    decision == "watch" WITHOUT a complete trigger, or decision ==
+    "reject": withdraws whatever active memory exists for this setup_key,
+    if any (unchanged from before this feature). A watch/reject on a
+    setup that was never approved (or never watched-with-a-trigger) is a
+    safe no-op (nothing to withdraw). An incomplete-trigger watch stays
+    deliberately passive -- "MANUAL REVIEW REQUIRED" in the UI, never
+    silently monitored on inferred evidence.
     """
-    if decision == "approve":
-        active = _active_monitor_state_row_for_setup_key(conn, setup_key)
-        revision_of_memory_id: Optional[int] = None
-        revision_reason: Optional[str] = None
-        supersede_monitor_state_id: Optional[int] = None
-        if active is not None:
-            old_memory_row = conn.execute(
-                "SELECT * FROM approved_setup_memories WHERE id=?",
-                (active["approved_memory_id"],),
-            ).fetchone()
-            if old_memory_row is None or not _review_evidence_materially_differs(
-                old_memory_row,
-                market_structure=market_structure, location_read=location_read,
-                clear_path_to_target=clear_path_to_target, lower_tf_confirmation=lower_tf_confirmation,
-                review_note=review_note,
-                trigger_timeframe=trigger_timeframe, trigger_rule=trigger_rule,
-                trigger_level=trigger_level, trigger_reason=trigger_reason,
-                confirmation_timeframe=confirmation_timeframe, confirmation_rule=confirmation_rule,
-                confirmation_level=confirmation_level, confirmed_candle_time=confirmed_candle_time,
-                confirmation_note=confirmation_note,
-            ):
-                return
-            revision_of_memory_id = old_memory_row["id"]
-            revision_reason = "newer_approved_review_evidence"
-            supersede_monitor_state_id = active["id"]
-        _create_approved_setup_memory(
+    has_complete_trigger = trigger_rule is not None and trigger_level is not None
+    if decision == "approve" or (decision == "watch" and has_complete_trigger):
+        _create_or_revise_active_memory(
             conn,
             ticker=ticker, source=source, direction=direction, setup_key=setup_key,
-            approved_at=reviewed_at, visual_review_id=visual_review_id, preview=preview,
+            preview=preview, visual_review_id=visual_review_id, reviewed_at=reviewed_at,
             market_structure=market_structure, location_read=location_read,
             clear_path_to_target=clear_path_to_target, lower_tf_confirmation=lower_tf_confirmation,
             review_note=review_note,
-            snapshot_origin="approval_event", snapshot_exact=True,
             trigger_timeframe=trigger_timeframe, trigger_rule=trigger_rule,
             trigger_level=trigger_level, trigger_reason=trigger_reason,
             confirmation_timeframe=confirmation_timeframe, confirmation_rule=confirmation_rule,
             confirmation_level=confirmation_level, confirmed_candle_time=confirmed_candle_time,
             confirmation_note=confirmation_note,
-            revision_of_memory_id=revision_of_memory_id, revision_reason=revision_reason,
-            supersede_monitor_state_id=supersede_monitor_state_id,
+            source_decision="approve" if decision == "approve" else "watch",
         )
-    elif decision in ("watch", "reject"):
+    else:
         _withdraw_active_memory_for_setup_key(conn, setup_key, reviewed_at)
+
+
+def _create_or_revise_active_memory(
+    conn,
+    *,
+    ticker: str,
+    source: str,
+    direction: str,
+    setup_key: str,
+    preview: dict,
+    visual_review_id: int,
+    reviewed_at: str,
+    market_structure: Optional[str],
+    location_read: Optional[str],
+    clear_path_to_target: Optional[str],
+    lower_tf_confirmation: Optional[str],
+    review_note: Optional[str],
+    trigger_timeframe: Optional[str],
+    trigger_rule: Optional[str],
+    trigger_level: Optional[float],
+    trigger_reason: Optional[str],
+    confirmation_timeframe: Optional[str],
+    confirmation_rule: Optional[str],
+    confirmation_level: Optional[float],
+    confirmed_candle_time: Optional[str],
+    confirmation_note: Optional[str],
+    source_decision: str,
+) -> None:
+    """Shared by both approve and watch-with-a-complete-trigger (Watch
+    Lifecycle V1) -- the create-or-revise logic itself does not care which
+    decision produced it, only source_decision is threaded through so the
+    frozen row remembers. See _sync_approved_setup_memory_on_review's own
+    docstring for the full create-vs-revise-vs-no-op contract; unchanged
+    from the approve-only version this replaces, just parameterized.
+
+    The revision engine (_review_evidence_materially_differs, same-
+    setup_key evidence update) is deliberately scoped to an active memory
+    of the SAME source_decision only -- it was designed and tested for "a
+    human refines their own prior decision with new evidence," never for
+    "a human reversed their decision" (approve -> watch or watch ->
+    approve on the same setup_key). A decision REVERSAL is a materially
+    different event -- the human is taking back the old choice, not
+    updating it -- and gets its own explicit, independent handling here:
+    the old memory's monitor_state is withdrawn (state=WITHDRAWN, exactly
+    the same terminal outcome an approve->watch/reject already produced
+    before this feature existed), and a brand-new memory is created with
+    NO revision lineage (revision_of_memory_id stays NULL) -- it is not a
+    revision of the old one, it is an independent new lifecycle that
+    happens to share a setup_key. Conflating the two would smear a real
+    decision change into the same lineage as a same-decision evidence
+    update, which is exactly the kind of semantic shortcut this task
+    warns against.
+    """
+    active = _active_monitor_state_row_for_setup_key(conn, setup_key)
+    revision_of_memory_id: Optional[int] = None
+    revision_reason: Optional[str] = None
+    supersede_monitor_state_id: Optional[int] = None
+    if active is not None:
+        old_memory_row = conn.execute(
+            "SELECT * FROM approved_setup_memories WHERE id=?",
+            (active["approved_memory_id"],),
+        ).fetchone()
+        old_source_decision = (
+            old_memory_row["source_decision"]
+            if old_memory_row is not None and "source_decision" in old_memory_row.keys() and old_memory_row["source_decision"]
+            else "approve"
+        )
+        if old_memory_row is not None and old_source_decision != source_decision:
+            # Decision reversal (approve<->watch on the same setup_key) --
+            # withdraw the old lifecycle outright, then fall through to
+            # create a fresh, independent one below (no revision link).
+            _withdraw_active_memory_for_setup_key(conn, setup_key, reviewed_at)
+        elif old_memory_row is None or not _review_evidence_materially_differs(
+            old_memory_row,
+            market_structure=market_structure, location_read=location_read,
+            clear_path_to_target=clear_path_to_target, lower_tf_confirmation=lower_tf_confirmation,
+            review_note=review_note,
+            trigger_timeframe=trigger_timeframe, trigger_rule=trigger_rule,
+            trigger_level=trigger_level, trigger_reason=trigger_reason,
+            confirmation_timeframe=confirmation_timeframe, confirmation_rule=confirmation_rule,
+            confirmation_level=confirmation_level, confirmed_candle_time=confirmed_candle_time,
+            confirmation_note=confirmation_note,
+        ):
+            return
+        else:
+            revision_of_memory_id = old_memory_row["id"]
+            revision_reason = "newer_approved_review_evidence"
+            supersede_monitor_state_id = active["id"]
+    _create_approved_setup_memory(
+        conn,
+        ticker=ticker, source=source, direction=direction, setup_key=setup_key,
+        approved_at=reviewed_at, visual_review_id=visual_review_id, preview=preview,
+        market_structure=market_structure, location_read=location_read,
+        clear_path_to_target=clear_path_to_target, lower_tf_confirmation=lower_tf_confirmation,
+        review_note=review_note,
+        snapshot_origin="approval_event", snapshot_exact=True,
+        trigger_timeframe=trigger_timeframe, trigger_rule=trigger_rule,
+        trigger_level=trigger_level, trigger_reason=trigger_reason,
+        confirmation_timeframe=confirmation_timeframe, confirmation_rule=confirmation_rule,
+        confirmation_level=confirmation_level, confirmed_candle_time=confirmed_candle_time,
+        confirmation_note=confirmation_note,
+        revision_of_memory_id=revision_of_memory_id, revision_reason=revision_reason,
+        supersede_monitor_state_id=supersede_monitor_state_id,
+        source_decision=source_decision,
+    )
 
 
 @router.get("/candidates/approved-setup-memory", response_model=list[ApprovedSetupMemoryRecordOut])
@@ -5886,42 +6039,117 @@ def _fetch_recent_30m_bars(ticker: str) -> list[dict[str, Any]]:
     return _rows_from_30m_bars_frame(raw)
 
 
-def _last_completed_30m_bar(bars: list[dict[str, Any]], now: datetime) -> Optional[dict[str, Any]]:
-    """The most recent COMPLETED 30m bar -- design audit section 8 /
-    implementation plan section 8: completed candles only, never an
-    intrabar wick. Session-aware via market_data.market_session (public,
-    imported) -- once the market is closed, every fetched bar is already
-    completed (no further ticks can arrive before the next session);
-    during a session, the single latest bar is excluded if its own
-    30-minute window has not yet fully elapsed. Deliberately
-    reimplemented here rather than importing market_data.py's PRIVATE
-    _is_forming_candle -- that helper has, to date, only ever been
-    exercised in a diagnostics/comparison context, never a live gating
-    role (see design audit section 8's own caution) -- this gets its own
-    dedicated test coverage instead of inherited trust by association.
+# Watch Lifecycle V1 (watch_lifecycle_v1_audit.md section 2, "STOCK 30M
+# SESSION CONTRACT"): regular trading hours only, America/New_York.
+# RTH_SESSION_START/_END are wall-clock ET boundaries -- DST is handled
+# entirely by converting real timestamps into EASTERN_TZ (zoneinfo,
+# America/New_York) before comparing against these, never by a fixed UTC
+# offset, so the same code is correct across the DST transition without
+# any special-casing.
+RTH_SESSION_START = datetime_time(9, 30)
+RTH_SESSION_END = datetime_time(16, 0)
+RTH_30M_BAR_MINUTES = 30
+
+
+def _is_rth_30m_bar_start(bar_time_et: datetime) -> bool:
+    """True only for a bar whose OWN start time is a genuine regular-
+    session 30-minute window: 09:30-10:00, 10:00-10:30, ..., 15:30-16:00,
+    Monday-Friday. Deliberately checks the CANDLE's timestamp, not
+    "is the market open right now" -- this is what makes a completed
+    premarket/after-hours bar correctly excluded regardless of whether
+    the tick itself happens to run while the market is closed (the real
+    gap this replaces _last_completed_30m_bar for: that function trusted
+    bars[-1] unconditionally once session=='closed', with no check that
+    bars[-1] was ever an RTH bar in the first place)."""
+    if bar_time_et.weekday() >= 5:
+        return False
+    session_start = bar_time_et.replace(
+        hour=RTH_SESSION_START.hour, minute=RTH_SESSION_START.minute, second=0, microsecond=0,
+    )
+    session_end = bar_time_et.replace(
+        hour=RTH_SESSION_END.hour, minute=RTH_SESSION_END.minute, second=0, microsecond=0,
+    )
+    if not (session_start <= bar_time_et < session_end):
+        return False
+    offset_seconds = (bar_time_et - session_start).total_seconds()
+    return offset_seconds % (RTH_30M_BAR_MINUTES * 60) == 0
+
+
+def _completed_rth_30m_bars(bars: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """Every COMPLETED, regular-trading-hours-only 30m bar from `bars`, in
+    chronological order -- design audit section 8 / watch_lifecycle_v1_audit.md
+    section 2: completed candles only, never an intrabar wick, and
+    extended-hours/premarket/overnight bars must never count regardless
+    of whether the market happens to be closed at tick time. Each bar's
+    own timestamp is checked against the real RTH window (_is_rth_30m_bar_start)
+    independent of current session status; only the SINGLE bar covering
+    "now" is ever excluded for still-forming, and only while the market
+    is actually open (a bar can never be "still forming" once the market
+    has closed for the day).
     """
     if not bars:
-        return None
+        return []
     now_et = now.astimezone(EASTERN_TZ)
-    session = market_session(now_et)
-    latest = bars[-1]
-    if session == "closed":
-        return latest
-    latest_time = _parse_iso_to_utc(latest.get("time"))
-    if latest_time is None:
-        return latest
-    latest_et = latest_time.astimezone(EASTERN_TZ)
-    forming = latest_et <= now_et < latest_et + timedelta(minutes=30)
-    if not forming:
-        return latest
-    return bars[-2] if len(bars) >= 2 else None
+    market_open_now = market_session(now_et) != "closed"
+    result: list[dict[str, Any]] = []
+    for bar in bars:
+        bar_time = _parse_iso_to_utc(bar.get("time"))
+        if bar_time is None:
+            continue
+        bar_time_et = bar_time.astimezone(EASTERN_TZ)
+        if not _is_rth_30m_bar_start(bar_time_et):
+            continue
+        if market_open_now:
+            forming = bar_time_et <= now_et < bar_time_et + timedelta(minutes=RTH_30M_BAR_MINUTES)
+            if forming:
+                continue
+        result.append(bar)
+    return result
+
+
+def _first_satisfying_completed_rth_bar(
+    bars: list[dict[str, Any]],
+    rule: Optional[str],
+    level: Optional[float],
+    now: datetime,
+    since_bar_time: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """The FIRST (earliest, chronological) completed RTH bar satisfying
+    `rule`/`level` -- watch_lifecycle_v1_audit.md section 5 / task section
+    7: "persist exactly the first satisfying candle timestamp." Under
+    normal 5-minute-tick/30-minute-bar cadence this coincides with "the
+    latest completed bar" (at most one new bar appears between ticks), but
+    after a real outage spanning multiple bar completions it does not --
+    scanning every completed RTH bar strictly after since_bar_time (the
+    row's own last_evaluated_bar_time, already advanced every tick) finds
+    the TRUE first satisfying bar within the gap, not just whatever
+    happens to be latest when the server comes back. `since_bar_time`
+    being None means this row has never been evaluated before (a fresh
+    WAITING_FOR_TRIGGER row) -- deliberately checks ONLY the single latest
+    completed bar in that case (the same first-tick behavior already
+    agreed in the original design audit: check what's real right now,
+    don't reach back through the full fetch window for a review that was
+    just submitted).
+    """
+    completed = _completed_rth_30m_bars(bars, now)
+    if not completed:
+        return None
+    if since_bar_time is None:
+        candidates = completed[-1:]
+    else:
+        candidates = [bar for bar in completed if str(bar.get("time") or "") > since_bar_time]
+    for bar in candidates:
+        if _trigger_satisfied(rule, level, bar):
+            return bar
+    return None
 
 
 def _trigger_satisfied(rule: Optional[str], level: Optional[float], bar: Optional[dict[str, Any]]) -> bool:
     """Design audit section 4/8: a COMPLETED candle closing strictly
     beyond trigger_level -- explicitly not an intrabar touch. `bar` must
-    already be the result of _last_completed_30m_bar, never the raw
-    latest bar."""
+    already be a completed, regular-trading-hours bar (the result of
+    _completed_rth_30m_bars / _first_satisfying_completed_rth_bar), never
+    the raw latest fetched bar."""
     if bar is None or rule is None or level is None:
         return False
     close = bar.get("close")
@@ -5932,6 +6160,41 @@ def _trigger_satisfied(rule: Optional[str], level: Optional[float], bar: Optiona
     if rule == "close_below":
         return close < level
     return False
+
+
+# Watch Lifecycle V1 (watch_lifecycle_v1_audit.md section on the alert/
+# event contract, task section 14): a watch-originated memory's
+# meaningful transitions get their own named event_type so the "at
+# minimum" list (WATCH_TRIGGER_SATISFIED/INVALIDATED/EXTENDED/SUPERSEDED/
+# HANDED_OFF) is directly queryable, reusing the SAME
+# approved_setup_monitor_events table and dedup mechanism -- no new
+# table, no new alert architecture. ACTIONABLE is the "handoff": the
+# moment a watch-originated setup's trigger+safety-gates clear is exactly
+# "the setup becomes an execution-layer opportunity" (task section 9).
+# An approve-originated memory (or any to_state not in this map) keeps
+# the existing generic "state_transition" event_type, unchanged.
+WATCH_EVENT_TYPE_BY_STATE = {
+    "TRIGGER_SATISFIED": "WATCH_TRIGGER_SATISFIED",
+    "INVALIDATED": "WATCH_INVALIDATED",
+    "EXTENDED": "WATCH_EXTENDED",
+    "SUPERSEDED": "WATCH_SUPERSEDED",
+    "ACTIONABLE": "WATCH_HANDED_OFF",
+}
+
+
+def _monitor_event_type(source_decision: Optional[str], to_state: str) -> str:
+    if source_decision == "watch":
+        return WATCH_EVENT_TYPE_BY_STATE.get(to_state, "state_transition")
+    return "state_transition"
+
+
+def _memory_source_decision(conn, approved_memory_id: int) -> Optional[str]:
+    row = conn.execute(
+        "SELECT source_decision FROM approved_setup_memories WHERE id=?", (approved_memory_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["source_decision"] if "source_decision" in row.keys() else None
 
 
 def _record_monitor_event(
@@ -5947,6 +6210,7 @@ def _record_monitor_event(
     current_price: Optional[float] = None,
     current_rr: Optional[float] = None,
     detail: Optional[str] = None,
+    event_type: str = "state_transition",
 ) -> None:
     """Design audit section 12's dedup rule: only logs when the verdict
     actually differs from the LAST LOGGED event for this memory --
@@ -5969,9 +6233,9 @@ def _record_monitor_event(
         INSERT INTO approved_setup_monitor_events (
             approved_memory_id, setup_key, ticker, source, event_type,
             from_state, to_state, occurred_at, current_price, current_rr, detail
-        ) VALUES (?, ?, ?, ?, 'state_transition', ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (approved_memory_id, setup_key, ticker, source, from_state, to_state, occurred_at, current_price, current_rr, detail),
+        (approved_memory_id, setup_key, ticker, source, event_type, from_state, to_state, occurred_at, current_price, current_rr, detail),
     )
 
 
@@ -5987,13 +6251,25 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
     (using the frozen approved_stop, intrabar) -- if invalidated, that's
     terminal and nothing else is evaluated for that row this tick.
     Otherwise, Type B rows still WAITING_FOR_TRIGGER get checked against
-    the latest COMPLETED 30m bar; any row whose evidence gate has already
-    cleared (CONFIRMED, freshly-TRIGGER_SATISFIED, or already
-    ACTIONABLE/EXTENDED from a prior tick) gets a fresh current-R:R/
-    execution-window verdict and a freshness/staleness check, in that
-    order. A row that's still genuinely APPROVED (legacy, no trigger or
-    confirmation ever recorded) or still WAITING_FOR_TRIGGER with no
-    satisfying bar yet is left exactly where it is.
+    every COMPLETED, regular-trading-hours-only 30m bar since the last
+    evaluated one (_first_satisfying_completed_rth_bar -- Watch Lifecycle
+    V1: extended-hours/premarket bars never satisfy, and after an outage
+    the TRUE first satisfying bar is found, not just the latest). Any row
+    whose evidence gate has already cleared (CONFIRMED, freshly-
+    TRIGGER_SATISFIED, or already ACTIONABLE/EXTENDED from a prior tick)
+    gets a fresh current-R:R/execution-window verdict and a freshness/
+    staleness check, in that order. A row STILL WAITING_FOR_TRIGGER after
+    the bar check (no satisfying bar yet) ALSO gets a current-R:R check
+    (Watch Lifecycle V1 Gap 4 fix) -- if the execution window has already
+    degraded below the authoritative minimum, it moves straight to
+    EXTENDED even though the trigger never fired; staleness does not
+    apply pre-trigger. A row that's still genuinely APPROVED (legacy, no
+    trigger or confirmation ever recorded) is left exactly where it is.
+
+    Watch-originated rows (source_decision="watch" on the paired memory)
+    get named WATCH_* event_types on their logged transitions
+    (_monitor_event_type) -- same table, same dedup rule, no separate
+    alert path.
 
     A tick that can't get a fresh, usable live quote for a ticker leaves
     every row for that ticker entirely untouched this tick (last_checked_at
@@ -6072,14 +6348,18 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
             else:
                 if current_state == "WAITING_FOR_TRIGGER" and memory_row["trigger_rule"] and memory_row["trigger_level"] is not None:
                     bars = bars_by_ticker.get(row["ticker"]) or []
-                    if bars:
-                        update_fields["last_evaluated_bar_time"] = bars[-1].get("time")
-                    completed = _last_completed_30m_bar(bars, now)
-                    if _trigger_satisfied(memory_row["trigger_rule"], memory_row["trigger_level"], completed):
+                    completed_rth_bars = _completed_rth_30m_bars(bars, now)
+                    if completed_rth_bars:
+                        update_fields["last_evaluated_bar_time"] = completed_rth_bars[-1].get("time")
+                    satisfying_bar = _first_satisfying_completed_rth_bar(
+                        bars, memory_row["trigger_rule"], memory_row["trigger_level"], now,
+                        row["last_evaluated_bar_time"],
+                    )
+                    if satisfying_bar is not None:
                         new_state = "TRIGGER_SATISFIED"
                         update_fields["trigger_satisfied_at"] = now_iso
-                        update_fields["trigger_satisfied_bar_time"] = completed.get("time")
-                        update_fields["trigger_satisfied_price"] = completed.get("close")
+                        update_fields["trigger_satisfied_bar_time"] = satisfying_bar.get("time")
+                        update_fields["trigger_satisfied_price"] = satisfying_bar.get("close")
 
                 if new_state in EVIDENCE_CLEARED_MONITOR_STATES:
                     update_fields["current_rr_at_last_check"] = current_rr
@@ -6096,6 +6376,26 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
                         new_state = "STALE"
                     else:
                         new_state = _execution_window_state(current_rr)
+                elif new_state == "WAITING_FOR_TRIGGER":
+                    # Gap 4 fix (watch_lifecycle_v1_audit.md section 6 /
+                    # task section 11, Option A -- deterministically
+                    # chosen and reported before implementation): evaluate
+                    # the execution window even BEFORE the trigger has
+                    # ever fired. R:R is well-defined off the frozen
+                    # entry/stop/target regardless of whether the trigger
+                    # occurred; if it has already degraded below the
+                    # authoritative minimum, mark EXTENDED directly rather
+                    # than silently waiting -- possibly indefinitely --
+                    # for a trigger whose execution window is already
+                    # gone. Applies identically to approve- and watch-
+                    # originated Type B rows (the same shared mechanism,
+                    # no Watch-specific variant). STALE is deliberately
+                    # NOT evaluated here -- staleness means "evidence
+                    # existed, human never acted," which has no meaning
+                    # before the evidence gate ever clears.
+                    update_fields["current_rr_at_last_check"] = current_rr
+                    if _execution_window_state(current_rr) == "EXTENDED":
+                        new_state = "EXTENDED"
 
             if new_state != current_state:
                 update_fields["state"] = new_state
@@ -6108,6 +6408,9 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
             )
 
             if new_state != current_state:
+                source_decision = (
+                    memory_row["source_decision"] if "source_decision" in memory_row.keys() else "approve"
+                )
                 _record_monitor_event(
                     conn,
                     approved_memory_id=row["approved_memory_id"],
@@ -6119,6 +6422,7 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
                     occurred_at=now_iso,
                     current_price=current_price,
                     current_rr=current_rr,
+                    event_type=_monitor_event_type(source_decision, new_state),
                 )
 
         conn.commit()

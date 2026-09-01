@@ -115,3 +115,60 @@ def test_migration_adds_new_tables_without_touching_existing_rows(pre_migration_
     }
     assert new_counts == {"approved_setup_memories": 0, "approved_setup_monitor_state": 0}
     conn_after.close()
+
+
+# --- Watch Lifecycle V1: source_decision column added to an
+# ALREADY-DEPLOYED approved_setup_memories table with real rows (the
+# actual current production shape -- this table already has confirmation_*/
+# revision_* columns from the prior Execution Layer V1 release, just not
+# source_decision yet). Confirms the ALTER TABLE ADD COLUMN ... DEFAULT
+# 'approve' backfills every existing row correctly (SQLite populates the
+# DEFAULT for existing rows on ADD COLUMN, unlike some other databases --
+# confirmed here, not assumed) and never alters anything else. ---
+@pytest.fixture()
+def pre_source_decision_db(tmp_path):
+    db_path = str(tmp_path / "candidates.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    router._initialize_candidates_schema(conn)  # full current shape, including source_decision
+    conn.execute("ALTER TABLE approved_setup_memories DROP COLUMN source_decision")
+    conn.commit()
+
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(approved_setup_memories)").fetchall()}
+    assert "source_decision" not in columns
+    assert "confirmation_level" in columns, "sanity: this is the POST-Execution-Layer-V1 shape, not an ancient one"
+
+    # Real-shaped rows, matching production's actual FFIV/NVDA/CLH memories.
+    conn.execute(
+        "INSERT INTO approved_setup_memories (ticker, source, direction, setup_key, approved_at, "
+        "visual_review_id, approved_entry, approved_stop, approved_target, approved_risk_reward, "
+        "market_structure, location_read, clear_path_to_target, lower_tf_confirmation, "
+        "snapshot_origin, snapshot_exact) VALUES ('FFIV','ma_pipeline','long',"
+        "'FFIV|ma_pipeline|long|392.73|433.66','2026-08-31T21:08:53Z',10,405.76,392.7308,433.6558,2.14,"
+        "'bullish','neutral','yes','yes','live_backfill',0)"
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_source_decision_migration_backfills_existing_rows_as_approve(pre_source_decision_db, monkeypatch):
+    conn_before = sqlite3.connect(pre_source_decision_db)
+    conn_before.row_factory = sqlite3.Row
+    before_row = dict(conn_before.execute("SELECT * FROM approved_setup_memories WHERE ticker='FFIV'").fetchone())
+    conn_before.close()
+
+    router._schema_ready_db_paths.discard(pre_source_decision_db)
+    monkeypatch.setenv("KAIROS_CANDIDATES_DB", pre_source_decision_db)
+    monkeypatch.setenv("KAIROS_SCANNER_API_KEY", "test-scanner-key")
+
+    conn_after = router._get_db()
+    columns_after = {info["name"] for info in conn_after.execute("PRAGMA table_info(approved_setup_memories)").fetchall()}
+    assert "source_decision" in columns_after
+
+    after_row = dict(conn_after.execute("SELECT * FROM approved_setup_memories WHERE ticker='FFIV'").fetchone())
+    assert after_row["source_decision"] == "approve", \
+        "every row that existed before this feature came from a real approve -- backfilled exactly, not guessed"
+    for key in before_row:
+        assert after_row[key] == before_row[key], f"migration must not alter the existing {key} value"
+    conn_after.close()

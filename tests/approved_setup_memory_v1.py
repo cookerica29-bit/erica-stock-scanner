@@ -353,6 +353,37 @@ def test_persists_across_fresh_connections(client, headers, monkeypatch, tmp_pat
     assert reloaded[0]["memory"]["ticker"] == "AMD"
 
 
+# Watch Lifecycle V1: watch-with-a-complete-trigger is a brand new
+# memory-creating code path (decision="watch" never created a memory at
+# all before this work) -- this proves it persists across a fresh
+# connection/process exactly like the approve path does, on-disk, with
+# source_decision and the frozen trigger contract intact. Same "second
+# independent app/TestClient against the same on-disk db_path" simulation
+# as test_persists_across_fresh_connections above -- no in-process cache
+# involved either way.
+def test_watch_memory_persists_across_fresh_connections(client, headers):
+    _seed(client, headers, "AMD")
+    _review(
+        client, headers, "AMD", "watch",
+        lower_tf_confirmation="not_yet",
+        confirmation_rule=None, confirmation_level=None,
+        trigger_timeframe="30m", trigger_rule="close_above", trigger_level=100.0,
+        trigger_reason="waiting for reclaim",
+    )
+    assert len(_memories(client, headers)) == 1
+
+    app2 = FastAPI()
+    app2.include_router(router.router)
+    client2 = TestClient(app2)
+    reloaded = _memories(client2, headers)
+    assert len(reloaded) == 1
+    assert reloaded[0]["memory"]["ticker"] == "AMD"
+    assert reloaded[0]["memory"]["source_decision"] == "watch"
+    assert reloaded[0]["memory"]["trigger_rule"] == "close_above"
+    assert reloaded[0]["memory"]["trigger_level"] == 100.0
+    assert reloaded[0]["monitor_state"]["state"] == "WAITING_FOR_TRIGGER"
+
+
 # --- J. historical backfill is explicitly marked reconstructed ---
 # --- K. new approvals are marked exact ---
 def test_backfill_marks_reconstructed_vs_exact(client, headers):

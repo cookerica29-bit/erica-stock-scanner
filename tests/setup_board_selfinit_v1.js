@@ -54,8 +54,15 @@ global.localStorage = { getItem: () => 'test-key', setItem: () => {}, removeItem
 global.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
 
 let fetchCalls = 0;
-global.fetch = async () => {
+global.fetch = async (url) => {
   fetchCalls += 1;
+  // Watch Lifecycle V1: loadBoard() now also fetches
+  // GET /candidates/approved-setup-memory for both boards -- that
+  // endpoint returns a plain array (ApprovedSetupMemoryRecordOut[]), not
+  // the review-queue's {candidates: [...]} envelope.
+  if (String(url).includes('/candidates/approved-setup-memory')) {
+    return { ok: true, status: 200, text: async () => JSON.stringify([]) };
+  }
   return {
     ok: true,
     status: 200,
@@ -82,7 +89,7 @@ async function run() {
   domContentLoadedCallback(); // fire-and-forget, exactly like a real DOMContentLoaded dispatch
   await new Promise((resolve) => setTimeout(resolve, 0)); // flush the async loadBoard() it kicked off
   assert.strictEqual(board.state.decision, 'watch', 'self-init must read the decision from document.body.dataset.decision');
-  assert.strictEqual(fetchCalls, 1, 'self-init must call loadBoard(), which fetches the review-queue payload exactly once');
+  assert.strictEqual(fetchCalls, 2, 'self-init must call loadBoard(), which fetches the review-queue payload and the approved-setup-memory payload exactly once each');
   assert.strictEqual(board.state.loaded, true, 'the board must actually finish loading, not stay stuck');
 
   console.log('Setup board self-init v1 tests passed');

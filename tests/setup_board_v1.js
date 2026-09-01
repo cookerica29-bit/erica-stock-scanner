@@ -476,6 +476,139 @@ async function run() {
   assert.ok(!elements.mainContent.innerHTML.includes('Execution Trigger'), 'L: a confirmation-only review must not ALSO show the future-trigger block');
   memoryQueue = [];
 
+  // --- M. Watch Lifecycle V1: the Watch Setups board now shows real
+  // execution-layer states too (previously hard-gated to decision===
+  // 'approve' only). ---
+  board.state.decision = 'watch';
+
+  // M1. MANUAL REVIEW REQUIRED -- watch + not_yet + no trigger + no
+  // memory record at all (never inferred).
+  const manualReviewCandidate = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    current_review: review('watch', { ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00', lower_tf_confirmation: 'not_yet' }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([manualReviewCandidate]) }];
+  memoryQueue = [{ status: 200, body: [] }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Manual Review Required'), 'M1: badge shows Manual Review Required');
+  assert.ok(elements.mainContent.innerHTML.includes('MANUAL REVIEW REQUIRED'), 'M1: notice shows MANUAL REVIEW REQUIRED');
+  assert.ok(elements.mainContent.innerHTML.includes('no objective trigger stored'), 'M1: exact reason given');
+  memoryQueue = [];
+
+  // M2. WATCHING -- a real WAITING_FOR_TRIGGER record with source_decision
+  // ="watch" shows the trigger block with the real "Kairos is monitoring
+  // this" status (not the defensive "Not monitored yet" fallback).
+  const watchingCandidate = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    current_review: review('watch', {
+      ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00', lower_tf_confirmation: 'not_yet',
+      trigger_timeframe: '30m', trigger_rule: 'close_above', trigger_level: 105.0,
+    }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([watchingCandidate]) }];
+  memoryQueue = [{
+    status: 200,
+    body: [{
+      memory: { ...memoryRecord().memory, source_decision: 'watch', approved_at: '2026-09-01T10:00:00Z' },
+      monitor_state: { id: 1, approved_memory_id: 1, state: 'WAITING_FOR_TRIGGER' },
+    }],
+  }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Execution Trigger'), 'M2: trigger block renders for a watch-origin WAITING_FOR_TRIGGER record');
+  assert.ok(elements.mainContent.innerHTML.includes('Kairos is monitoring this'), 'M2: real monitor_state -> "Kairos is monitoring this"');
+  assert.ok(elements.mainContent.innerHTML.includes('DO NOT ENTER'), 'M2: waiting notice still present');
+  memoryQueue = [];
+
+  // M3. TRIGGER SATISFIED / HANDED OFF -- ACTIONABLE + source_decision=
+  // "watch" gets distinct, past-tense copy from the approve-origin banner.
+  const handoffCandidate = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    current_review: review('watch', {
+      ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00', lower_tf_confirmation: 'not_yet',
+      trigger_timeframe: '30m', trigger_rule: 'close_above', trigger_level: 105.0,
+    }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([handoffCandidate]) }];
+  memoryQueue = [{
+    status: 200,
+    body: [{
+      memory: { ...memoryRecord().memory, source_decision: 'watch', trigger_rule: 'close_above', trigger_level: 105.0, trigger_timeframe: '30m' },
+      monitor_state: {
+        id: 1, approved_memory_id: 1, state: 'ACTIONABLE', current_rr_at_last_check: 2.4,
+        trigger_satisfied_at: '2026-08-20T19:31:05Z', trigger_satisfied_bar_time: '2026-08-20T15:30:00-04:00',
+        trigger_satisfied_price: 105.8,
+      },
+    }],
+  }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('TRIGGER SATISFIED'), 'M3: watch-origin ACTIONABLE banner label reads TRIGGER SATISFIED');
+  assert.ok(elements.mainContent.innerHTML.includes('occurred'), 'M3: past-tense "occurred" copy');
+  assert.ok(elements.mainContent.innerHTML.includes('Kairos is evaluating this setup'), 'M3: exact required phrasing present');
+  // M3b (found via real-browser verification, added here as regression
+  // coverage): once trigger_satisfied_at is set, the LOWER trigger-contract
+  // block must stop claiming "waiting for this to happen" / "Kairos is
+  // monitoring this" -- that directly contradicted the TRIGGER SATISFIED
+  // banner just asserted above. It must instead show the frozen
+  // satisfaction fact (bar time preferred over detection time, plus price).
+  assert.ok(elements.mainContent.innerHTML.includes('Execution Trigger &mdash; satisfied'), 'M3b: trigger block label switches to "satisfied" once trigger_satisfied_at is set');
+  assert.ok(!elements.mainContent.innerHTML.includes('waiting for this to happen'), 'M3b: "waiting for this to happen" must not appear once the trigger has fired');
+  assert.ok(elements.mainContent.innerHTML.includes('Satisfied'), 'M3b: satisfied-when line renders');
+  assert.ok(elements.mainContent.innerHTML.includes('$105.80'), 'M3b: satisfied price renders');
+  memoryQueue = [];
+
+  // M4/M5. Watch-flavored EXTENDED/INVALIDATED copy, distinct from Approved's.
+  for (const [state, phrase] of [['EXTENDED', 'execution window is gone'], ['INVALIDATED', 'invalidated before confirmation']]) {
+    const c = candidate({
+      ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+      current_review: review('watch', { ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00', lower_tf_confirmation: 'not_yet' }),
+    });
+    fetchQueue = [{ status: 200, body: queuePayload([c]) }];
+    memoryQueue = [{
+      status: 200,
+      body: [{ memory: { ...memoryRecord().memory, source_decision: 'watch' }, monitor_state: { id: 1, approved_memory_id: 1, state } }],
+    }];
+    await board.loadBoard();
+    assert.ok(elements.mainContent.innerHTML.includes(phrase), `M4/M5: watch-flavored ${state} copy renders ("${phrase}")`);
+    memoryQueue = [];
+  }
+
+  // M6. SUPERSEDED -- distinct notice, "new review required".
+  const supersededCandidate = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    current_review: review('watch', { ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00', lower_tf_confirmation: 'not_yet' }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([supersededCandidate]) }];
+  memoryQueue = [{
+    status: 200,
+    body: [{ memory: { ...memoryRecord().memory, source_decision: 'watch' }, monitor_state: { id: 1, approved_memory_id: 1, state: 'SUPERSEDED' } }],
+  }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Scanner structure changed'), 'M6: SUPERSEDED notice renders');
+  assert.ok(elements.mainContent.innerHTML.includes('New review required'), 'M6: exact required phrasing present');
+  memoryQueue = [];
+
+  // M7. Queue-rotation independence -- an active watch-origin record whose
+  // ticker is NOT in today's review-queue response still renders, built
+  // entirely from the frozen memory (task section 12).
+  fetchQueue = [{ status: 200, body: queuePayload([]) }];  // empty queue -- BBB rotated out entirely
+  memoryQueue = [{
+    status: 200,
+    body: [{
+      memory: {
+        ...memoryRecord().memory, ticker: 'BBB', setup_key: 'BBB|ma_pipeline|long|50.00|60.00',
+        source_decision: 'watch', trigger_rule: 'close_above', trigger_level: 55.0, trigger_timeframe: '30m',
+      },
+      monitor_state: { id: 2, approved_memory_id: 2, state: 'WAITING_FOR_TRIGGER', last_live_price: 52.5 },
+    }],
+  }];
+  await board.loadBoard();
+  assert.strictEqual(board.state.board.length, 1, 'M7: the off-queue watch record still produces exactly one card');
+  assert.ok(elements.mainContent.innerHTML.includes('BBB'), 'M7: off-queue ticker renders');
+  assert.ok(elements.mainContent.innerHTML.includes('today’s scan') || elements.mainContent.innerHTML.includes('today&#39;s scan') || elements.mainContent.innerHTML.includes('Not in'),
+    'M7: an honest "not in today\'s scan" indicator, not a fabricated rank');
+  memoryQueue = [];
+  fetchQueue = [];
+
   console.log('Setup board v1 tests passed');
 }
 

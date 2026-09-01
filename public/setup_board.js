@@ -108,8 +108,10 @@
   // For 'approve', additionally groups by display state (waiting / extended
   // / invalidated) -- a stable partition, so rank order is preserved WITHIN
   // each group, per the task's explicit sorting rule. 'watch' preserves
-  // plain rank order with no grouping (display state is an approved-setups
-  // concept only). recordsBySetupKey (Map<setup_key, {memory, monitor_state}>)
+  // plain rank order with no grouping -- Watch Setups now has real display
+  // states too (Watch Lifecycle V1), this is a deliberate scope decision to
+  // not also add grouping there, not a leftover assumption that display
+  // state is approve-only. recordsBySetupKey (Map<setup_key, {memory, monitor_state}>)
   // is optional -- omitted entirely by any existing caller/test that
   // doesn't care about memory-anchored state, falling back to
   // computeDisplayState's own live-field fallback for every item.
@@ -208,6 +210,54 @@
       </div>`;
   }
 
+  // Watch Lifecycle V1 section 12: a card built ENTIRELY from the frozen
+  // approved_setup_memories snapshot, for a watch-originated setup_key
+  // that's no longer in today's live Review Queue response. Every field
+  // is deliberately sourced from the memory, never invented -- rank is
+  // null (renderCard shows "Not in today's scan" instead of a rank when
+  // null), current_price comes from monitor_state.last_live_price (the
+  // real last price the server-side monitor itself observed -- no new
+  // network call from the board), never from a live candidate row that
+  // may not exist anymore.
+  function syntheticWatchItem(record) {
+    const m = record.memory;
+    const ms = record.monitor_state;
+    return {
+      ticker: m.ticker,
+      source: m.source,
+      signal: m.direction,
+      rank: null,
+      entry_price: m.approved_entry,
+      stop: m.approved_stop,
+      target: m.approved_target,
+      risk_reward: m.approved_risk_reward,
+      current_price: ms ? ms.last_live_price : null,
+      entry_distance_pct: null,
+      entry_proximity_threshold_pct: null,
+      setup_key: m.setup_key,
+      offQueue: true,
+      current_review: {
+        decision: 'watch',
+        review_type: 'visual',
+        market_structure: m.market_structure,
+        location_read: m.location_read,
+        clear_path_to_target: m.clear_path_to_target,
+        lower_tf_confirmation: m.lower_tf_confirmation,
+        note: m.review_note,
+        reviewed_at: m.approved_at,
+        trigger_timeframe: m.trigger_timeframe,
+        trigger_rule: m.trigger_rule,
+        trigger_level: m.trigger_level,
+        trigger_reason: m.trigger_reason,
+        confirmation_timeframe: m.confirmation_timeframe,
+        confirmation_rule: m.confirmation_rule,
+        confirmation_level: m.confirmation_level,
+        confirmed_candle_time: m.confirmed_candle_time,
+        confirmation_note: m.confirmation_note,
+      },
+    };
+  }
+
   async function loadBoard() {
     if (loadBoardInFlight) return;
     loadBoardInFlight = true;
@@ -217,25 +267,65 @@
       const result = await fetchJson(`${API_BASE}/candidates/review-queue`);
       state.queue = result.candidates || [];
       state.disclaimer = result.disclaimer || '';
-      // Approved board only -- Watch Setups has no memory concept (memory
-      // is created on APPROVE only, see approved_setup_memories) and
-      // filterAndOrder never groups/anchors state for the watch decision
-      // anyway. A failure fetching memories must never break the whole
-      // board -- falls back to computeDisplayState's own live-field
-      // fallback for every item, same as before this fetch existed.
-      if (state.decision === 'approve') {
-        try {
-          const records = await fetchJson(`${API_BASE}/candidates/approved-setup-memory`);
-          state.recordsBySetupKey = new Map(
-            (records || []).map((record) => [record.memory.setup_key, record]),
-          );
-        } catch (memErr) {
-          state.recordsBySetupKey = new Map();
-        }
-      } else {
+      // Watch Lifecycle V1: fetched for BOTH boards now -- a watch review
+      // with a complete trigger contract creates a real
+      // approved_setup_memories row too (source_decision="watch"), see
+      // watch_lifecycle_v1_audit.md section 2/3. No cross-contamination
+      // between boards needed here: a watch-originated record's paired
+      // candidate always has current_review.decision==="watch" (that's
+      // literally what created it), so filterAndOrder's own
+      // decisionFor(item)===decision check already keeps it off the
+      // Approved board for free -- same for an approve-originated record
+      // never showing on Watch. A failure fetching memories must never
+      // break the whole board -- falls back to computeDisplayState's own
+      // live-field fallback for every item, same as before this fetch
+      // existed.
+      // include_inactive=true + keep only the MOST RECENT record per
+      // setup_key (by approved_at): the default (active-only) fetch would
+      // silently hide a REAL, server-confirmed terminal verdict
+      // (INVALIDATED/SUPERSEDED) the instant it happens, since neither is
+      // in ACTIVE_MONITOR_STATES -- the board would then fall all the way
+      // back to computeDisplayState's live-field heuristic instead of
+      // showing what the monitor actually determined. Taking the latest
+      // row per setup_key (not the full history) keeps this bounded and
+      // correct: an active lifecycle shows its real live state; a
+      // just-terminated one still shows its real terminal state until a
+      // fresh human review creates a newer memory for the same setup_key,
+      // at which point that newer one naturally becomes "most recent".
+      try {
+        const records = await fetchJson(`${API_BASE}/candidates/approved-setup-memory?include_inactive=true`);
+        const bySetupKey = new Map();
+        (records || []).forEach((record) => {
+          const key = record.memory.setup_key;
+          const existing = bySetupKey.get(key);
+          if (!existing || new Date(record.memory.approved_at) > new Date(existing.memory.approved_at)) {
+            bySetupKey.set(key, record);
+          }
+        });
+        state.recordsBySetupKey = bySetupKey;
+      } catch (memErr) {
         state.recordsBySetupKey = new Map();
       }
       state.board = filterAndOrder(state.queue, state.decision, state.recordsBySetupKey);
+      // Watch Lifecycle V1 section 12: Watch monitoring must NOT depend on
+      // the ticker remaining in today's live Review Queue -- the queue
+      // rotates intraday on mechanical gates that have nothing to do with
+      // whether Kairos is still watching a human-stated condition. Any
+      // active (non-WITHDRAWN) watch-originated record whose setup_key
+      // isn't already represented by a queue-driven card gets a
+      // synthesized one, built entirely from the frozen memory snapshot
+      // -- never from a live candidate row that may no longer exist.
+      if (state.decision === 'watch') {
+        const representedKeys = new Set(state.board.map((item) => item.setup_key));
+        const offQueueItems = [];
+        state.recordsBySetupKey.forEach((record) => {
+          if (record.memory.source_decision !== 'watch') return;
+          if (representedKeys.has(record.memory.setup_key)) return;
+          if (!record.monitor_state || record.monitor_state.state === 'WITHDRAWN') return;
+          offQueueItems.push(syntheticWatchItem(record));
+        });
+        state.board = state.board.concat(offQueueItems);
+      }
       state.loaded = true;
       state.authRequired = false;
       render();
@@ -295,6 +385,7 @@
     EXTENDED: 'EXTENDED',
     STALE: 'STALE',
     INVALIDATED: 'INVALIDATED',
+    SUPERSEDED: 'SUPERSEDED',
   };
 
   // The single source of truth for a card's display state: prefers the
@@ -312,18 +403,49 @@
     return computeDisplayState(item, record ? record.memory : null);
   }
 
+  // Watch Lifecycle V1 section 3/13: a watch review with NO complete
+  // trigger contract stays passive by design (see
+  // watch_lifecycle_v1_audit.md section 9) -- no memory is ever created
+  // for it, so `record` is undefined here. Distinguishing this from a
+  // genuinely off-record item matters: it must never be silently
+  // conflated with "DO NOT ENTER -- Kairos is monitoring" (which implies
+  // real monitoring exists).
+  function isManualReviewRequired(item, record) {
+    if (state.decision !== 'watch' || record) return false;
+    const cr = item.current_review;
+    return !!cr && cr.decision === 'watch' && cr.lower_tf_confirmation === 'not_yet'
+      && (cr.trigger_rule == null || cr.trigger_level == null);
+  }
+
   function stateBadge(item) {
-    if (state.decision !== 'approve') return '';
-    const s = displayStateFor(item, state.recordsBySetupKey.get(item.setup_key));
+    const record = state.recordsBySetupKey.get(item.setup_key);
+    if (isManualReviewRequired(item, record)) {
+      return `<span class="state-pill state-MANUAL_REVIEW">Manual Review Required</span>`;
+    }
+    const s = displayStateFor(item, record);
     return `<span class="state-pill state-${s}">${STATE_LABELS[s]}</span>`;
   }
 
   function stateNotice(item) {
-    if (state.decision !== 'approve') return '';
     const record = state.recordsBySetupKey.get(item.setup_key);
+    const isWatch = state.decision === 'watch';
+    if (isManualReviewRequired(item, record)) {
+      return `<div class="state-notice notice-manual-review">MANUAL REVIEW REQUIRED &mdash; no objective trigger stored. Kairos is not monitoring this setup.</div>`;
+    }
     const s = displayStateFor(item, record);
-    if (s === 'EXTENDED') return `<div class="state-notice notice-extended">Extended &mdash; do not chase</div>`;
-    if (s === 'INVALIDATED') return `<div class="state-notice notice-invalidated">Setup invalidated</div>`;
+    if (s === 'EXTENDED') {
+      return isWatch
+        ? `<div class="state-notice notice-extended">Confirmation came too late, or the execution window is gone. Do not chase.</div>`
+        : `<div class="state-notice notice-extended">Extended &mdash; do not chase</div>`;
+    }
+    if (s === 'INVALIDATED') {
+      return isWatch
+        ? `<div class="state-notice notice-invalidated">Original thesis invalidated before confirmation.</div>`
+        : `<div class="state-notice notice-invalidated">Setup invalidated</div>`;
+    }
+    if (s === 'SUPERSEDED') {
+      return `<div class="state-notice notice-superseded">Scanner structure changed for this ticker. New review required.</div>`;
+    }
     if (s === 'STALE') {
       return `<div class="state-notice notice-stale">Execution evidence has gone stale &mdash; needs a fresh human review before this can become actionable again</div>`;
     }
@@ -343,14 +465,30 @@
   // other states. Only ever rendered from a REAL server-computed
   // ACTIONABLE monitor_state -- never approximated client-side.
   function actionableBanner(item, record) {
-    if (state.decision !== 'approve') return '';
     if (displayStateFor(item, record) !== 'ACTIONABLE') return '';
     const monitorState = record.monitor_state;
     const rrText = monitorState.current_rr_at_last_check != null ? fmtNumber(monitorState.current_rr_at_last_check) : '--';
+    // Watch Lifecycle V1 section 9/13: for a watch-originated record,
+    // this IS the "TRIGGER SATISFIED / HANDED OFF" moment -- the human's
+    // stated condition occurred AND the safety gates independently still
+    // say the opportunity is real. Distinct copy from the approve-
+    // origin banner (which never had a "trigger" to report satisfying),
+    // same box/styling, same underlying ACTIONABLE state -- no
+    // fabricated approve review, database history still shows the
+    // original decision was watch (candidate_visual_reviews is
+    // untouched).
+    const isWatchHandoff = record.memory.source_decision === 'watch';
+    const label = isWatchHandoff ? 'TRIGGER SATISFIED' : 'ACTIONABLE';
+    // triggerSummaryText/confirmationSummaryText already escapeHtml their
+    // own output -- do not double-escape here.
+    const conditionText = triggerSummaryText(record.memory) || confirmationSummaryText(record.memory) || '30m condition';
+    const text = isWatchHandoff
+      ? `Your stated ${conditionText} occurred. Kairos is evaluating this setup -- it currently reads within an acceptable execution window.`
+      : 'Kairos has confirmed your stated execution condition, and price remains within an acceptable window.';
     return `
         <div class="actionable-banner">
-          <div class="actionable-banner-label">ACTIONABLE</div>
-          <div class="actionable-banner-text">Kairos has confirmed your stated execution condition, and price remains within an acceptable window.</div>
+          <div class="actionable-banner-label">${label}</div>
+          <div class="actionable-banner-text">${text}</div>
           <div class="actionable-banner-metrics">Current ${fmtMoney(item.current_price)} &middot; Stop ${fmtMoney(record.memory.approved_stop)} &middot; Target ${fmtMoney(record.memory.approved_target)} &middot; Current R:R ${rrText}</div>
           <div class="actionable-banner-disclaimer">This is not investment advice &mdash; you decide whether and how to act.</div>
         </div>`;
@@ -379,8 +517,29 @@
       : 'Status: Not monitored yet';
   }
 
+  // Watch Lifecycle V1 (found via real-browser verification, not in the
+  // original spec list): once the trigger has actually fired, this block
+  // MUST stop claiming "waiting for this to happen" / "Kairos is
+  // monitoring this" -- that directly contradicts the TRIGGER
+  // SATISFIED/HANDED OFF banner rendered right above it by
+  // actionableBanner(). monitor_state.trigger_satisfied_at is the
+  // authoritative signal (frozen once written server-side, see
+  // candidates_router.py's trigger_satisfied_at/_bar_time/_price columns)
+  // -- same pattern confirmationBlock already uses for "already
+  // happened" framing, applied here for the SAME reason.
   function triggerBlock(cr, record) {
     if (!cr || cr.trigger_rule == null || cr.trigger_level == null) return '';
+    const ms = record && record.monitor_state;
+    if (ms && ms.trigger_satisfied_at) {
+      const when = ms.trigger_satisfied_bar_time || ms.trigger_satisfied_at;
+      return `
+          <div class="execution-trigger">
+            <div class="execution-trigger-label">Execution Trigger &mdash; satisfied</div>
+            <div class="execution-trigger-value">${triggerSummaryText(cr)}</div>
+            ${cr.trigger_reason ? `<div class="execution-trigger-reason">${escapeHtml(cr.trigger_reason)}</div>` : ''}
+            <div class="execution-trigger-when">Satisfied ${escapeHtml(new Date(when).toLocaleString())}${ms.trigger_satisfied_price != null ? ` at ${fmtMoney(ms.trigger_satisfied_price)}` : ''}</div>
+          </div>`;
+    }
     return `
           <div class="execution-trigger">
             <div class="execution-trigger-label">Execution Trigger &mdash; waiting for this to happen</div>
@@ -427,7 +586,7 @@
             <span class="direction-pill">${escapeHtml((item.signal || '').toUpperCase())}</span>
             ${stateBadge(item)}
           </div>
-          <span class="setup-rank">Rank #${item.rank} &middot; ${escapeHtml(item.source || '')}</span>
+          <span class="setup-rank">${item.rank != null ? `Rank #${item.rank}` : 'Not in today’s scan'} &middot; ${escapeHtml(item.source || '')}</span>
         </div>
 
         ${actionableBanner(item, record)}
