@@ -1034,6 +1034,101 @@ def _initialize_candidates_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_candidate_visual_reviews_setup_key "
         "ON candidate_visual_reviews (setup_key, reviewed_at)"
     )
+    # Approved Setup Memory (2026-09 session): A = candidate_visual_reviews
+    # above (unchanged, still the append-only record of what the human
+    # reviewed/decided). B = approved_setup_memories below -- an immutable
+    # snapshot written once per approval EVENT (never UPDATEd, matching
+    # candidate_visual_reviews' own append-only style; a materially
+    # different setup_key or a fresh approve after a withdrawal gets its
+    # own new row, never a mutation of an old one). C =
+    # approved_setup_monitor_state -- deliberately a SEPARATE table, not
+    # folded into B, because it is genuinely mutable (state/last_checked_at/
+    # last_live_price get updated in place by future monitoring) in a way
+    # that would either force UPDATE semantics onto B's historical snapshot
+    # (destroying the "this row is exactly what was true at approval"
+    # guarantee) or force append-only semantics onto what's naturally a
+    # single current-status row per memory (needless row-churn for every
+    # future monitoring tick). One memory row always gets exactly one
+    # monitor_state row, created together in the same transaction -- see
+    # _create_approved_setup_memory.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approved_setup_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            setup_key TEXT NOT NULL,
+            approved_at TEXT NOT NULL,
+            visual_review_id INTEGER,
+            approved_entry REAL,
+            approved_stop REAL,
+            approved_target REAL,
+            approved_risk_reward REAL,
+            current_price_at_approval REAL,
+            entry_distance_pct_at_approval REAL,
+            entry_proximity_threshold_pct_at_approval REAL,
+            market_structure TEXT,
+            location_read TEXT,
+            clear_path_to_target TEXT,
+            lower_tf_confirmation TEXT,
+            review_note TEXT,
+            bos_confirmed INTEGER NOT NULL DEFAULT 0,
+            displacement_score REAL,
+            displacement_label TEXT,
+            macro_bias TEXT,
+            sweep_confirmed INTEGER NOT NULL DEFAULT 0,
+            rejection_confirmed INTEGER NOT NULL DEFAULT 0,
+            execution_shadow_ok INTEGER,
+            confluence_label TEXT,
+            confluence_counts_json TEXT,
+            location_label TEXT,
+            location_alignment TEXT,
+            snapshot_origin TEXT NOT NULL DEFAULT 'approval_event',
+            snapshot_exact INTEGER NOT NULL DEFAULT 1,
+            backfill_note TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approved_setup_memories_setup_key "
+        "ON approved_setup_memories (setup_key, approved_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approved_setup_memories_ticker_source "
+        "ON approved_setup_memories (ticker, source, approved_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approved_setup_monitor_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            approved_memory_id INTEGER NOT NULL,
+            setup_key TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'APPROVED',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_checked_at TEXT,
+            last_live_price REAL,
+            last_live_entry REAL,
+            invalidation_reason TEXT,
+            terminal_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approved_setup_monitor_state_setup_key "
+        "ON approved_setup_monitor_state (setup_key, state)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approved_setup_monitor_state_ticker_source "
+        "ON approved_setup_monitor_state (ticker, source, state)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approved_setup_monitor_state_memory "
+        "ON approved_setup_monitor_state (approved_memory_id)"
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candidate_ranking_snapshots (
@@ -1299,6 +1394,92 @@ class CandidateVisualReviewOut(BaseModel):
     decision: ReviewDecision
     note: Optional[str] = None
     reviewed_at: str
+
+
+# Approved Setup Memory (2026-09 session, memory-foundation build). See
+# _sync_approved_setup_memory_on_review's module comment for the full
+# design rationale (why two tables, not one; exactly what "active" means;
+# how approve/watch/reject/setup_key-change map onto state transitions).
+#
+# ApprovedSetupMonitorStateName intentionally carries the full lifecycle
+# vocabulary from the prior design-only session (APPROVED ->
+# WAITING_FOR_TRIGGER -> ... -> EXTENDED/INVALIDATED), even though this
+# build only ever writes APPROVED, WITHDRAWN, and SUPERSEDED -- the other
+# three are real, agreed states with no automatic-transition logic wired
+# to them yet (deliberately out of scope here), not placeholders invented
+# for this task.
+ApprovedSetupMonitorStateName = Literal[
+    "APPROVED", "WAITING_FOR_TRIGGER", "WITHDRAWN", "INVALIDATED", "EXTENDED", "SUPERSEDED",
+]
+# "approval_event" = written at the moment a human actually approved this
+# exact setup_key -- every field is real, contemporaneous evidence.
+# "live_backfill" = written by the one-time backfill for setups that were
+# already approved before this feature existed -- see
+# list_approved_setup_memories/backfill_approved_setup_memories's own
+# comments for exactly which fields are/aren't trustworthy on those rows.
+SnapshotOrigin = Literal["approval_event", "live_backfill"]
+
+
+class ApprovedSetupMemoryOut(BaseModel):
+    id: int
+    ticker: str
+    source: str
+    direction: str
+    setup_key: str
+    approved_at: str
+    visual_review_id: Optional[int] = None
+    approved_entry: Optional[float] = None
+    approved_stop: Optional[float] = None
+    approved_target: Optional[float] = None
+    approved_risk_reward: Optional[float] = None
+    current_price_at_approval: Optional[float] = None
+    entry_distance_pct_at_approval: Optional[float] = None
+    entry_proximity_threshold_pct_at_approval: Optional[float] = None
+    market_structure: Optional[MarketStructureRead] = None
+    location_read: Optional[LocationRead] = None
+    clear_path_to_target: Optional[ClearPathToTarget] = None
+    lower_tf_confirmation: Optional[LowerTfConfirmation] = None
+    review_note: Optional[str] = None
+    bos_confirmed: bool = False
+    displacement_score: Optional[float] = None
+    displacement_label: Optional[str] = None
+    macro_bias: Optional[str] = None
+    sweep_confirmed: bool = False
+    rejection_confirmed: bool = False
+    execution_shadow_ok: Optional[bool] = None
+    confluence_label: Optional[str] = None
+    confluence_counts: Optional[dict[str, Any]] = None
+    location_label: Optional[str] = None
+    location_alignment: Optional[str] = None
+    snapshot_origin: SnapshotOrigin
+    snapshot_exact: bool
+    backfill_note: Optional[str] = None
+
+
+class ApprovedSetupMonitorStateOut(BaseModel):
+    id: int
+    approved_memory_id: int
+    setup_key: str
+    ticker: str
+    source: str
+    state: ApprovedSetupMonitorStateName
+    created_at: str
+    updated_at: str
+    last_checked_at: Optional[str] = None
+    last_live_price: Optional[float] = None
+    last_live_entry: Optional[float] = None
+    invalidation_reason: Optional[str] = None
+    terminal_at: Optional[str] = None
+
+
+class ApprovedSetupMemoryRecordOut(BaseModel):
+    """One approved-setup memory paired with its current monitor state --
+    the shape list_approved_setup_memories returns. monitor_state is
+    Optional only as defensive typing (every memory row this codebase ever
+    writes gets a monitor_state row in the same transaction) -- see
+    _create_approved_setup_memory."""
+    memory: ApprovedSetupMemoryOut
+    monitor_state: Optional[ApprovedSetupMonitorStateOut] = None
 
 
 class CandidatePlanPreviewOut(BaseModel):
@@ -4466,6 +4647,444 @@ def list_candidate_visual_reviews(
         conn.close()
 
 
+# Approved Setup Memory (2026-09 session, memory-foundation build).
+#
+# Goal, restated precisely: when a human approves a setup, freeze exactly
+# what was true about it AT THAT MOMENT, so a future monitoring job can
+# compare live conditions against an immutable baseline instead of the
+# live candidate row (which drifts: entry_price is the latest 4H close,
+# recomputed every ma_pipeline scan -- see _compute_setup_key's own
+# docstring). This module writes that snapshot; it does NOT act on it --
+# no ENTER_NOW, no ACTIONABLE, no alerts. The only "automatic" transitions
+# here are the two that are purely mechanical consequences of a review
+# decision or a setup_key change -- not live-market monitoring.
+#
+# Design: two tables (approved_setup_memories, approved_setup_monitor_state
+# -- schema at their CREATE TABLE sites above), not one. Reasoning: this
+# codebase already has a proven pattern for immutable evidence
+# (candidate_visual_reviews: INSERT-only, "latest row wins" for current
+# state). approved_setup_memories follows that exact pattern for approval
+# snapshots. But this task also needs genuinely MUTABLE state (a monitor's
+# current status, later updated in place by a monitoring job that doesn't
+# exist yet) -- forcing that onto an append-only table would mean either
+# re-deriving "current state" by re-scanning every row every time (the
+# thing candidate_visual_reviews already avoids via "latest wins"), or
+# mutating rows that are supposed to be permanent evidence. A second,
+# genuinely-mutable table keeps B (evidence) and C (live status) as
+# separate concerns, exactly as this task's Design Principle asks.
+#
+# ACTIVE_MONITOR_STATES / TERMINAL_MONITOR_STATES: "active" means this
+# memory's approval is still the operative one for its setup_key (nothing
+# has since withdrawn, superseded, or invalidated it). Only APPROVED is
+# ever written by this build; WAITING_FOR_TRIGGER and EXTENDED are
+# included for forward-compatibility with the state machine already
+# agreed in the prior design-only session -- no code path here produces
+# them yet.
+ACTIVE_MONITOR_STATES = {"APPROVED", "WAITING_FOR_TRIGGER", "EXTENDED"}
+TERMINAL_MONITOR_STATES = {"WITHDRAWN", "INVALIDATED", "SUPERSEDED"}
+
+
+def _row_to_approved_setup_memory(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "ticker": row["ticker"],
+        "source": row["source"],
+        "direction": row["direction"],
+        "setup_key": row["setup_key"],
+        "approved_at": row["approved_at"],
+        "visual_review_id": row["visual_review_id"],
+        "approved_entry": row["approved_entry"],
+        "approved_stop": row["approved_stop"],
+        "approved_target": row["approved_target"],
+        "approved_risk_reward": row["approved_risk_reward"],
+        "current_price_at_approval": row["current_price_at_approval"],
+        "entry_distance_pct_at_approval": row["entry_distance_pct_at_approval"],
+        "entry_proximity_threshold_pct_at_approval": row["entry_proximity_threshold_pct_at_approval"],
+        "market_structure": row["market_structure"],
+        "location_read": row["location_read"],
+        "clear_path_to_target": row["clear_path_to_target"],
+        "lower_tf_confirmation": row["lower_tf_confirmation"],
+        "review_note": row["review_note"],
+        "bos_confirmed": bool(row["bos_confirmed"]),
+        "displacement_score": row["displacement_score"],
+        "displacement_label": row["displacement_label"],
+        "macro_bias": row["macro_bias"],
+        "sweep_confirmed": bool(row["sweep_confirmed"]),
+        "rejection_confirmed": bool(row["rejection_confirmed"]),
+        "execution_shadow_ok": (
+            bool(row["execution_shadow_ok"]) if row["execution_shadow_ok"] is not None else None
+        ),
+        "confluence_label": row["confluence_label"],
+        "confluence_counts": _parse_displacement_components_json(row["confluence_counts_json"]),
+        "location_label": row["location_label"],
+        "location_alignment": row["location_alignment"],
+        "snapshot_origin": row["snapshot_origin"],
+        "snapshot_exact": bool(row["snapshot_exact"]),
+        "backfill_note": row["backfill_note"],
+    }
+
+
+def _row_to_approved_setup_monitor_state(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "approved_memory_id": row["approved_memory_id"],
+        "setup_key": row["setup_key"],
+        "ticker": row["ticker"],
+        "source": row["source"],
+        "state": row["state"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_checked_at": row["last_checked_at"],
+        "last_live_price": row["last_live_price"],
+        "last_live_entry": row["last_live_entry"],
+        "invalidation_reason": row["invalidation_reason"],
+        "terminal_at": row["terminal_at"],
+    }
+
+
+def _active_monitor_state_row_for_setup_key(conn, setup_key: str) -> Optional[sqlite3.Row]:
+    placeholders = ",".join("?" for _ in ACTIVE_MONITOR_STATES)
+    return conn.execute(
+        f"SELECT * FROM approved_setup_monitor_state WHERE setup_key=? AND state IN ({placeholders}) "
+        "ORDER BY id DESC LIMIT 1",
+        (setup_key, *ACTIVE_MONITOR_STATES),
+    ).fetchone()
+
+
+def _active_monitor_state_rows_for_ticker_source(conn, ticker: str, source: str) -> list[sqlite3.Row]:
+    placeholders = ",".join("?" for _ in ACTIVE_MONITOR_STATES)
+    return conn.execute(
+        f"SELECT * FROM approved_setup_monitor_state WHERE ticker=? AND source=? AND state IN ({placeholders})",
+        (ticker, source, *ACTIVE_MONITOR_STATES),
+    ).fetchall()
+
+
+def _create_approved_setup_memory(
+    conn,
+    *,
+    ticker: str,
+    source: str,
+    direction: str,
+    setup_key: str,
+    approved_at: str,
+    visual_review_id: Optional[int],
+    preview: dict,
+    market_structure: Optional[str],
+    location_read: Optional[str],
+    clear_path_to_target: Optional[str],
+    lower_tf_confirmation: Optional[str],
+    review_note: Optional[str],
+    snapshot_origin: str,
+    snapshot_exact: bool,
+    backfill_note: Optional[str] = None,
+) -> int:
+    """Inserts exactly one new approved_setup_memories row plus its paired
+    approved_setup_monitor_state row (state=APPROVED), in the SAME
+    transaction -- a memory without a monitor_state, or vice versa, should
+    never be observable. Every execution-plan/scanner-evidence field comes
+    from `preview`, the SAME dict the caller already computed via
+    _compute_review_queue_preview (or, for backfill, the review-queue's
+    own per-candidate preview) -- no new market-data call is made here.
+
+    Also handles superseding: if an OLDER active memory exists for this
+    exact (ticker, source) under a DIFFERENT setup_key, its monitor_state
+    is marked SUPERSEDED here, in the same transaction. This is the one
+    setup_key-identity consequence that's safe to apply immediately and
+    unconditionally -- see this module's own header comment for why this
+    counts as "purely administrative" rather than monitoring logic: the
+    fact that a newer setup_key now has its own active approval is exactly
+    and only knowable at the moment that approval is created, requires no
+    live-market check, and has exactly one correct answer.
+
+    Returns the new approved_setup_memories.id.
+    """
+    confluence_counts = preview.get("confluence_counts")
+    cursor = conn.execute(
+        """
+        INSERT INTO approved_setup_memories (
+            ticker, source, direction, setup_key, approved_at, visual_review_id,
+            approved_entry, approved_stop, approved_target, approved_risk_reward,
+            current_price_at_approval, entry_distance_pct_at_approval,
+            entry_proximity_threshold_pct_at_approval,
+            market_structure, location_read, clear_path_to_target, lower_tf_confirmation, review_note,
+            bos_confirmed, displacement_score, displacement_label, macro_bias,
+            sweep_confirmed, rejection_confirmed, execution_shadow_ok,
+            confluence_label, confluence_counts_json, location_label, location_alignment,
+            snapshot_origin, snapshot_exact, backfill_note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ticker, source, direction, setup_key, approved_at, visual_review_id,
+            preview.get("entry_price"), preview.get("stop"), preview.get("target"), preview.get("risk_reward"),
+            preview.get("current_price"), preview.get("entry_distance_pct"),
+            preview.get("entry_proximity_threshold_pct"),
+            market_structure, location_read, clear_path_to_target, lower_tf_confirmation, review_note,
+            1 if preview.get("bos_confirmed") else 0,
+            preview.get("displacement_score"), preview.get("displacement_label"), preview.get("macro_bias"),
+            1 if preview.get("sweep_confirmed") else 0,
+            1 if preview.get("rejection_confirmed") else 0,
+            (None if preview.get("execution_shadow_ok") is None else (1 if preview.get("execution_shadow_ok") else 0)),
+            preview.get("confluence_label"),
+            json.dumps(confluence_counts) if confluence_counts is not None else None,
+            preview.get("location_label"), preview.get("location_alignment"),
+            snapshot_origin, 1 if snapshot_exact else 0, backfill_note,
+        ),
+    )
+    memory_id = cursor.lastrowid
+
+    conn.execute(
+        """
+        INSERT INTO approved_setup_monitor_state (
+            approved_memory_id, setup_key, ticker, source, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'APPROVED', ?, ?)
+        """,
+        (memory_id, setup_key, ticker, source, approved_at, approved_at),
+    )
+
+    for stale_row in _active_monitor_state_rows_for_ticker_source(conn, ticker, source):
+        if stale_row["setup_key"] != setup_key:
+            conn.execute(
+                "UPDATE approved_setup_monitor_state SET state='SUPERSEDED', updated_at=?, terminal_at=? WHERE id=?",
+                (approved_at, approved_at, stale_row["id"]),
+            )
+    return memory_id
+
+
+def _withdraw_active_memory_for_setup_key(conn, setup_key: str, at: str) -> bool:
+    """approve -> watch/reject: the memory row itself is never touched
+    (immutable, permanent evidence that an approval happened and what it
+    looked like) -- only its monitor_state moves to WITHDRAWN. Returns
+    False (a safe no-op) when there was no active memory for this
+    setup_key to withdraw, e.g. a watch/reject on a setup that was never
+    approved."""
+    active = _active_monitor_state_row_for_setup_key(conn, setup_key)
+    if active is None:
+        return False
+    conn.execute(
+        "UPDATE approved_setup_monitor_state SET state='WITHDRAWN', updated_at=?, terminal_at=? WHERE id=?",
+        (at, at, active["id"]),
+    )
+    return True
+
+
+def _sync_approved_setup_memory_on_review(
+    conn,
+    *,
+    ticker: str,
+    source: str,
+    direction: str,
+    setup_key: str,
+    decision: str,
+    preview: dict,
+    visual_review_id: int,
+    reviewed_at: str,
+    market_structure: Optional[str],
+    location_read: Optional[str],
+    clear_path_to_target: Optional[str],
+    lower_tf_confirmation: Optional[str],
+    review_note: Optional[str],
+) -> None:
+    """Called once per POST .../visual-review, right after the
+    candidate_visual_reviews INSERT, using the SAME setup_key/preview that
+    write already computed -- no new market-data call.
+
+    decision == "approve": if setup_key already has an active memory,
+    this is a no-op (re-affirming/editing an already-approved setup, e.g.
+    only the note changed -- must NOT create a duplicate active memory,
+    and must NOT let the "immutable at approval time" snapshot drift).
+    Otherwise, a fresh memory is created (covers a first-time approve, a
+    watch/reject -> approve transition, and a fresh approve on a
+    materially new setup_key alike -- all three are, correctly, "this
+    exact setup_key has no active approval yet").
+
+    decision in ("watch", "reject"): withdraws whatever active memory
+    exists for this setup_key, if any. A watch/reject on a setup that was
+    never approved is a safe no-op (nothing to withdraw).
+    """
+    if decision == "approve":
+        if _active_monitor_state_row_for_setup_key(conn, setup_key) is not None:
+            return
+        _create_approved_setup_memory(
+            conn,
+            ticker=ticker, source=source, direction=direction, setup_key=setup_key,
+            approved_at=reviewed_at, visual_review_id=visual_review_id, preview=preview,
+            market_structure=market_structure, location_read=location_read,
+            clear_path_to_target=clear_path_to_target, lower_tf_confirmation=lower_tf_confirmation,
+            review_note=review_note,
+            snapshot_origin="approval_event", snapshot_exact=True,
+        )
+    elif decision in ("watch", "reject"):
+        _withdraw_active_memory_for_setup_key(conn, setup_key, reviewed_at)
+
+
+@router.get("/candidates/approved-setup-memory", response_model=list[ApprovedSetupMemoryRecordOut])
+def list_approved_setup_memories(
+    include_inactive: bool = Query(default=False),
+    ticker: Optional[str] = Query(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Pure DB read -- no scanner recomputation, no market-data call.
+    Default (include_inactive=False) returns only memories whose
+    monitor_state is still active (see ACTIVE_MONITOR_STATES); pass
+    include_inactive=true for full history including withdrawn/superseded
+    rows. This is the read side of "Original Approved Plan vs Current Live
+    Plan" -- current-live values still come from GET
+    /candidates/review-queue as today; this endpoint only ever returns the
+    frozen approval-time snapshot plus its lifecycle status.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        query = "SELECT * FROM approved_setup_memories"
+        params: list[Any] = []
+        clauses = []
+        if ticker:
+            clauses.append("ticker = ?")
+            params.append(ticker.strip().upper())
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY approved_at DESC"
+        memory_rows = conn.execute(query, params).fetchall()
+
+        results = []
+        for memory_row in memory_rows:
+            state_row = conn.execute(
+                "SELECT * FROM approved_setup_monitor_state WHERE approved_memory_id=? ORDER BY id DESC LIMIT 1",
+                (memory_row["id"],),
+            ).fetchone()
+            if not include_inactive and (state_row is None or state_row["state"] not in ACTIVE_MONITOR_STATES):
+                continue
+            results.append({
+                "memory": _row_to_approved_setup_memory(memory_row),
+                "monitor_state": _row_to_approved_setup_monitor_state(state_row) if state_row else None,
+            })
+        return results
+    finally:
+        conn.close()
+
+
+@router.post("/candidates/approved-setup-memory/backfill")
+def backfill_approved_setup_memories(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """One-time (idempotent) backfill for setups that were already approved
+    before this feature existed -- currently FFIV, NVDA, CLH in production.
+    Safe to call repeatedly: any setup_key that already has an active
+    memory (including one created by a normal approve after this endpoint
+    exists) is skipped, never duplicated.
+
+    Reuses the exact same review-queue candidate list and per-candidate
+    preview computation GET /candidates/review-queue already performs --
+    no additional market-data calls beyond what that endpoint always
+    makes. This is a real, if unavoidable, network cost (same as visiting
+    Review Queue), not a NEW hydration path, and it never touches options
+    (same guarantee as review-queue itself).
+
+    What is and isn't exact on a backfilled row, and why:
+      EXACT (recovered from real stored history, not approximated):
+        ticker, source, direction, setup_key, visual_review_id,
+        approved_at (the review's own reviewed_at), market_structure,
+        location_read, clear_path_to_target, lower_tf_confirmation,
+        review_note -- all read directly off the existing
+        candidate_visual_reviews row. approved_stop and approved_target
+        are ALSO exact despite coming from a freshly-computed preview:
+        setup_key is derived from stop/target rounded to 2 decimals
+        (_compute_setup_key), and this function only ever backfills a
+        setup_key that still matches the CURRENT candidate's setup_key --
+        by construction, current stop/target must equal approval-time
+        stop/target, or the setup_key wouldn't match and this candidate
+        would already correctly read as unreviewed instead.
+      NOT EXACT (no historical record exists; populated from a fresh,
+      current computation as the best available stand-in):
+        approved_entry (entry_price is NOT part of setup_key and drifts on
+        every ma_pipeline scan -- the true approval-moment value was never
+        stored anywhere), current_price_at_approval,
+        entry_distance_pct_at_approval,
+        entry_proximity_threshold_pct_at_approval (all derived from a live
+        quote, never stored), and every scanner-evidence field
+        (bos_confirmed, displacement_score/label, macro_bias,
+        sweep_confirmed, rejection_confirmed, execution_shadow_ok,
+        confluence_label/counts, location_label/alignment) -- none of
+        these are part of setup_key either, and execution_shadow_ok in
+        particular is 4H-bar-based and can have genuinely changed since
+        approval independent of stop/target.
+    Every backfilled row is marked snapshot_origin="live_backfill",
+    snapshot_exact=false, with backfill_note spelling out the above so no
+    future reader mistakes an approximated row for real approval-time
+    evidence.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        candidates = conn.execute(
+            "SELECT * FROM candidates WHERE signal='long' ORDER BY updated_at DESC"
+        ).fetchall()
+        cached_by_key = {
+            (row["ticker"], row["source"]): row
+            for row in conn.execute("SELECT * FROM candidate_plan_previews").fetchall()
+        }
+        backfilled = []
+        skipped_already_active = []
+        skipped_no_approve_review = []
+        backfill_note = (
+            "Backfilled from live data, not the actual approval moment. approved_stop/approved_target/"
+            "setup_key are exact (recovered via setup_key's own stop/target encoding). approved_entry, "
+            "current_price_at_approval, entry_distance_pct_at_approval, "
+            "entry_proximity_threshold_pct_at_approval, and every scanner-evidence field "
+            "(bos_confirmed/displacement/macro_bias/sweep/rejection/execution_shadow_ok/confluence/location) "
+            "are reconstructed from the candidate's state at backfill time, not the true approval-time values, "
+            "which were never stored."
+        )
+        for candidate in candidates:
+            ticker = str(candidate["ticker"] or "").strip().upper()
+            source = str(candidate["source"] or "")
+            preview = _compute_review_queue_base_preview(candidate, cached_by_key.get((ticker, source)))
+            if not _preview_clears_mechanical_prechecks(candidate, preview):
+                continue
+            quote = _latest_quote_for_ticker(ticker)
+            preview = _attach_entry_proximity(preview, quote)
+            preview = _attach_execution_shadow(candidate, preview)
+            setup_key = _compute_setup_key(candidate, preview)
+
+            review_row = conn.execute(
+                "SELECT * FROM candidate_visual_reviews WHERE setup_key=? ORDER BY reviewed_at DESC LIMIT 1",
+                (setup_key,),
+            ).fetchone()
+            if review_row is None or review_row["decision"] != "approve":
+                skipped_no_approve_review.append(ticker)
+                continue
+            if _active_monitor_state_row_for_setup_key(conn, setup_key) is not None:
+                skipped_already_active.append(ticker)
+                continue
+
+            memory_id = _create_approved_setup_memory(
+                conn,
+                ticker=ticker, source=source,
+                direction=str(preview.get("signal") or candidate["signal"] or "").strip().lower(),
+                setup_key=setup_key,
+                approved_at=review_row["reviewed_at"],
+                visual_review_id=review_row["id"],
+                preview=preview,
+                market_structure=review_row["market_structure"],
+                location_read=review_row["location_read"],
+                clear_path_to_target=review_row["clear_path_to_target"],
+                lower_tf_confirmation=review_row["lower_tf_confirmation"],
+                review_note=review_row["note"] if "note" in review_row.keys() else None,
+                snapshot_origin="live_backfill", snapshot_exact=False, backfill_note=backfill_note,
+            )
+            backfilled.append({"ticker": ticker, "setup_key": setup_key, "memory_id": memory_id})
+        conn.commit()
+        return {
+            "backfilled": backfilled,
+            "skipped_already_active": skipped_already_active,
+            "skipped_no_approve_review": skipped_no_approve_review,
+        }
+    finally:
+        conn.close()
+
+
 @router.post("/candidates/{ticker}/visual-review", response_model=CandidateVisualReviewOut)
 def record_candidate_visual_review(
     ticker: str,
@@ -4582,10 +5201,33 @@ def record_candidate_visual_review(
                 reviewed_at,
             ),
         )
+        visual_review_id = cursor.lastrowid
+        # Approved Setup Memory sync -- see _sync_approved_setup_memory_on_review's
+        # own docstring. Reuses the SAME setup_key/preview this write already
+        # computed above (no new market-data call), and commits in the SAME
+        # transaction as the visual-review insert so the two can never
+        # observably disagree (e.g. a review recorded with no corresponding
+        # memory sync, or vice versa, from a crash between two commits).
+        _sync_approved_setup_memory_on_review(
+            conn,
+            ticker=normalized_ticker,
+            source=review.source,
+            direction=str(preview.get("signal") or candidate["signal"] or "").strip().lower(),
+            setup_key=setup_key,
+            decision=review.decision,
+            preview=preview,
+            visual_review_id=visual_review_id,
+            reviewed_at=reviewed_at,
+            market_structure=review.market_structure,
+            location_read=review.location_read,
+            clear_path_to_target=review.clear_path_to_target,
+            lower_tf_confirmation=review.lower_tf_confirmation,
+            review_note=review.note,
+        )
         conn.commit()
         row = conn.execute(
             "SELECT * FROM candidate_visual_reviews WHERE id=?",
-            (cursor.lastrowid,),
+            (visual_review_id,),
         ).fetchone()
         return _row_to_visual_review(row)
     finally:
