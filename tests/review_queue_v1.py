@@ -158,7 +158,7 @@ def test_review_queue_reflects_latest_review_for_setup(client, headers):
         "/api/v1/scanner/candidates/NVDA/visual-review", headers=headers,
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     )
 
@@ -439,7 +439,7 @@ def test_setup_key_and_current_review_still_bind_correctly_after_reordering(clie
         "/api/v1/scanner/candidates/BINDTEST/visual-review", headers=headers,
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     )
 

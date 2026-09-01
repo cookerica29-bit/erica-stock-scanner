@@ -105,7 +105,14 @@ from verified_history import (
     verification_to_pipeline_status,
 )
 from verified_history_store import SQLiteVerifiedHistoryRepository
-from candidates_router import CandidateIn, ShortlistIn, router as candidates_router, upsert_candidate_shortlist
+from candidates_router import (
+    CandidateIn,
+    MONITOR_TICK_SECONDS,
+    ShortlistIn,
+    router as candidates_router,
+    run_approved_setup_monitor_tick,
+    upsert_candidate_shortlist,
+)
 from ma_pipeline import MA_PIPELINE_SOURCE, scan_ma_pipeline_candidates
 import momentum_pullback_shadow as momentum_pullback
 import momentum_pullback_short_lifecycle_experiment as short_lifecycle_experiment
@@ -1642,6 +1649,18 @@ def _safe_watch_candidate_promotion_outcomes(reason: str = "periodic") -> None:
         logger.warning("[promotion_outcome_watcher] failed reason=%s error=%s", reason, exc)
 
 
+def _safe_run_approved_setup_monitor_tick(reason: str = "periodic") -> None:
+    # Execution Layer V1 (execution_layer_v1_implementation_plan.md
+    # sections 5-9) -- registered the same simple way as
+    # candidate_promotion_outcome_watcher above, same reasoning: no
+    # startup-ordering dependency, scoped to a small (5-20) active set,
+    # not the scanner universe.
+    try:
+        run_approved_setup_monitor_tick(reason)
+    except Exception as exc:
+        logger.warning("[approved_setup_monitor] failed reason=%s error=%s", reason, exc)
+
+
 def _register_discovery_background_refresh() -> None:
     register_background_periodic_task(
         "discovery_universe",
@@ -1677,6 +1696,11 @@ def _register_discovery_background_refresh() -> None:
         "candidate_promotion_outcome_watcher",
         60 * 60,
         lambda: _safe_watch_candidate_promotion_outcomes("periodic"),
+    )
+    register_background_periodic_task(
+        "approved_setup_monitor",
+        MONITOR_TICK_SECONDS,
+        lambda: _safe_run_approved_setup_monitor_tick("periodic"),
     )
 
 app.add_middleware(

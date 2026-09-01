@@ -41,8 +41,27 @@ global.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: ()
 
 let fetchCallCount = 0;
 let fetchQueue = [];
+// Execution Layer V1: loadBoard() now makes a SECOND fetch to
+// GET /candidates/approved-setup-memory when state.decision === 'approve'
+// (see public/setup_board.js's own loadBoard). Routed separately here so
+// every EXISTING test in this file -- written against the single-fetch,
+// live-field-only computeDisplayState -- keeps working unchanged: a test
+// that never touches memoryQueue gets an automatic empty-list default
+// (200, []), meaning state.recordsBySetupKey stays empty and
+// computeDisplayState falls back to its own live-field path exactly as
+// before this feature existed. Only a test that specifically wants to
+// exercise the memory-anchored fix pushes into memoryQueue.
+let memoryQueue = [];
 global.fetch = async (url) => {
   fetchCallCount += 1;
+  if (String(url).includes('/candidates/approved-setup-memory')) {
+    const next = memoryQueue.shift() || { status: 200, body: [] };
+    return {
+      ok: next.status >= 200 && next.status < 300,
+      status: next.status,
+      text: async () => JSON.stringify(next.body),
+    };
+  }
   const next = fetchQueue.shift();
   if (!next) throw new Error(`Unexpected fetch call with nothing queued: ${url}`);
   return {
@@ -116,7 +135,7 @@ async function run() {
   fetchCallCount = 0;
   await board.loadBoard();
 
-  assert.strictEqual(fetchCallCount, 1, 'G: exactly one fetch call -- no bulk options hydration, no extra network round-trips');
+  assert.strictEqual(fetchCallCount, 2, 'G: exactly two fetch calls on the Approved board (review-queue + approved-setup-memory) -- no bulk options hydration, no extra round-trips beyond those two');
   assert.strictEqual(board.state.board.length, 1, 'A: only the approved candidate should be on the Approved board');
   assert.strictEqual(board.state.board[0].ticker, 'AAA');
   assert.ok(elements.mainContent.innerHTML.includes('AAA'), 'A: approved candidate renders');
@@ -281,6 +300,181 @@ async function run() {
   fetchQueue = [{ status: 200, body: queuePayload([noTrigger]) }];
   await board.loadBoard();
   assert.ok(!elements.mainContent.innerHTML.includes('Execution Trigger'), 'I: no trigger block when no trigger is stored on the review');
+
+  // --- J. Execution Layer V1 "Finding A" fix: display state anchors to
+  // the FROZEN approved_setup_memories snapshot, not the live/drifting
+  // candidate row. Direct unit coverage of computeDisplayState(item,
+  // memory) first, then the full loadBoard()-driven render. ---
+  function memoryRecord(overrides = {}) {
+    return {
+      memory: {
+        id: 1, ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+        approved_entry: 100, approved_stop: 95, approved_target: 110,
+        entry_proximity_threshold_pct_at_approval: 1.5,
+        ...overrides,
+      },
+      monitor_state: { id: 1, approved_memory_id: 1, state: 'APPROVED' },
+    };
+  }
+
+  // Live stop has drifted UP (a rescan produced a different order-block
+  // stop) such that the LIVE stop would say "not invalidated" at this
+  // price, but the FROZEN approved_stop the human actually approved
+  // would say INVALIDATED. The frozen value must win.
+  const driftedStopCandidate = candidate({
+    ticker: 'AAA', entry_price: 100, stop: 90 /* live, drifted */, current_price: 94,
+  });
+  assert.strictEqual(
+    board.computeDisplayState(driftedStopCandidate, undefined),
+    'WAITING_FOR_ENTRY',
+    'J sanity: against the live (drifted) stop alone, 94 > 90 reads not-invalidated',
+  );
+  assert.strictEqual(
+    board.computeDisplayState(driftedStopCandidate, memoryRecord({ approved_stop: 95 }).memory),
+    'INVALIDATED',
+    'J: the FROZEN approved_stop (95) must win over the live/drifted stop (90) -- 94 <= 95',
+  );
+
+  // Same fix for EXTENDED's anchor (approved_entry /
+  // entry_proximity_threshold_pct_at_approval instead of the live,
+  // drifting entry_price / entry_proximity_threshold_pct).
+  const driftedEntryCandidate = candidate({
+    ticker: 'AAA', entry_price: 100, stop: 95, current_price: 105,
+    entry_distance_pct: 0, entry_proximity_threshold_pct: 50, // live fields would say "not extended"
+  });
+  assert.strictEqual(
+    board.computeDisplayState(driftedEntryCandidate, undefined),
+    'WAITING_FOR_ENTRY',
+    'J sanity: against the live (loose) threshold alone, 105 reads not-extended',
+  );
+  assert.strictEqual(
+    board.computeDisplayState(
+      driftedEntryCandidate,
+      memoryRecord({ approved_entry: 100, entry_proximity_threshold_pct_at_approval: 1.5 }).memory,
+    ),
+    'EXTENDED',
+    'J: the FROZEN approved_entry/threshold must win -- 105 is 5% beyond the approved 1.5% window',
+  );
+
+  // Full loadBoard()-driven render, no monitor_state at all (defensive
+  // fallback path only -- memoryQueue supplies a memory record whose
+  // monitor_state is null): falls back to the frozen-memory-anchor
+  // computeDisplayState -- approved_stop=95 while the live candidate
+  // row's stop has drifted to 80 (would otherwise read WAITING/
+  // not-invalidated using the live field alone).
+  board.state.decision = 'approve';
+  const driftedCandidateForRender = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    entry_price: 100, stop: 80, current_price: 94,
+    current_review: review('approve', { ticker: 'AAA' }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([driftedCandidateForRender]) }];
+  memoryQueue = [{
+    status: 200,
+    body: [{ memory: memoryRecord({ approved_stop: 95 }).memory, monitor_state: null }],
+  }];
+  await board.loadBoard();
+  assert.ok(
+    elements.mainContent.innerHTML.includes('Setup invalidated'),
+    'J: with no real monitor_state, falls back to the frozen approved_stop anchor -- still INVALIDATED',
+  );
+  memoryQueue = [];
+
+  // --- K. The REAL server-computed monitor_state.state is now the
+  // PRIMARY source of truth (Execution Layer V1) -- it wins even when the
+  // frozen-memory-anchor fallback math would say something different,
+  // because the server is the authority once it has actually evaluated a
+  // setup (invalidation, trigger satisfaction, current R:R -- none of
+  // which the client re-derives). ---
+  function recordWithState(monitorStateOverrides = {}, memoryOverrides = {}) {
+    return {
+      memory: memoryRecord(memoryOverrides).memory,
+      monitor_state: { id: 1, approved_memory_id: 1, state: 'APPROVED', ...monitorStateOverrides },
+    };
+  }
+
+  board.state.decision = 'approve';
+  const plainCandidate = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    entry_price: 100, stop: 95, current_price: 100,
+    current_review: review('approve', { ticker: 'AAA' }),
+  });
+
+  // K1. ACTIONABLE -- dominant banner, current R:R shown, never a small notice.
+  fetchQueue = [{ status: 200, body: queuePayload([plainCandidate]) }];
+  memoryQueue = [{ status: 200, body: [recordWithState({ state: 'ACTIONABLE', current_rr_at_last_check: 3.25 })] }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('ACTIONABLE'), 'K1: ACTIONABLE banner renders');
+  assert.ok(elements.mainContent.innerHTML.includes('3.25'), 'K1: current R:R renders in the banner');
+  assert.ok(elements.mainContent.innerHTML.includes('not investment advice'), 'K1: non-advice disclaimer present on the banner');
+  memoryQueue = [];
+
+  // K2. STALE -- distinct notice, needs-fresh-review language, not silently
+  // grouped with WAITING.
+  fetchQueue = [{ status: 200, body: queuePayload([plainCandidate]) }];
+  memoryQueue = [{ status: 200, body: [recordWithState({ state: 'STALE' })] }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('gone stale'), 'K2: STALE notice renders');
+  memoryQueue = [];
+
+  // K3. WAITING-bucket states (APPROVED/WAITING_FOR_TRIGGER/CONFIRMED/
+  // TRIGGER_SATISFIED) all read "DO NOT ENTER -- Kairos is monitoring".
+  for (const s of ['APPROVED', 'WAITING_FOR_TRIGGER', 'CONFIRMED', 'TRIGGER_SATISFIED']) {
+    fetchQueue = [{ status: 200, body: queuePayload([plainCandidate]) }];
+    memoryQueue = [{ status: 200, body: [recordWithState({ state: s })] }];
+    await board.loadBoard();
+    assert.ok(
+      elements.mainContent.innerHTML.includes('DO NOT ENTER') && elements.mainContent.innerHTML.includes('Kairos is monitoring'),
+      `K3: state=${s} must show "DO NOT ENTER -- Kairos is monitoring"`,
+    );
+    memoryQueue = [];
+  }
+
+  // K4. INVALIDATED from a REAL server verdict (not the client-side
+  // frozen-anchor fallback) still renders the existing copy.
+  fetchQueue = [{ status: 200, body: queuePayload([plainCandidate]) }];
+  memoryQueue = [{ status: 200, body: [recordWithState({ state: 'INVALIDATED' })] }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Setup invalidated'), 'K4: real server INVALIDATED renders');
+  memoryQueue = [];
+
+  // --- L. Trigger/confirmation block status line reflects REAL
+  // monitoring: "Kairos is monitoring this" when a real monitor_state
+  // exists, "Not monitored yet" only in the defensive no-record case. ---
+  const withTriggerAndRealMonitor = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    current_review: review('approve', {
+      ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+      lower_tf_confirmation: 'not_yet',
+      trigger_timeframe: '30m', trigger_rule: 'close_above', trigger_level: 318.25,
+    }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([withTriggerAndRealMonitor]) }];
+  memoryQueue = [{ status: 200, body: [recordWithState({ state: 'WAITING_FOR_TRIGGER' })] }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Kairos is monitoring this'), 'L: real monitor_state -> "Kairos is monitoring this"');
+  assert.ok(!elements.mainContent.innerHTML.includes('Not monitored yet'), 'L: must not ALSO claim not-monitored when it genuinely is');
+  memoryQueue = [];
+
+  // Confirmation block (Observed Confirmation Anchor) renders with
+  // distinct, past-tense copy from the trigger block.
+  const withConfirmation = candidate({
+    ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+    current_review: review('approve', {
+      ticker: 'AAA', setup_key: 'AAA|ma_pipeline|long|95.00|110.00',
+      lower_tf_confirmation: 'yes',
+      confirmation_timeframe: '30m', confirmation_rule: 'close_above', confirmation_level: 318.25,
+      confirmed_candle_time: '2026-09-01T14:30:00Z', confirmation_note: 'reclaimed prior range high',
+    }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([withConfirmation]) }];
+  memoryQueue = [{ status: 200, body: [recordWithState({ state: 'CONFIRMED' })] }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Observed Confirmation'), 'L: confirmation block renders');
+  assert.ok(elements.mainContent.innerHTML.includes('already happened'), 'L: confirmation block copy is past-tense/already-occurred');
+  assert.ok(elements.mainContent.innerHTML.includes('reclaimed prior range high'), 'L: confirmation_note renders');
+  assert.ok(!elements.mainContent.innerHTML.includes('Execution Trigger'), 'L: a confirmation-only review must not ALSO show the future-trigger block');
+  memoryQueue = [];
 
   console.log('Setup board v1 tests passed');
 }

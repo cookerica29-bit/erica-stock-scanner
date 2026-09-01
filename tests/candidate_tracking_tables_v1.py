@@ -210,7 +210,7 @@ def test_visual_review_requires_auth(client):
         "/api/v1/scanner/candidates/AAPL/visual-review",
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     )
     assert response.status_code == 401
@@ -224,7 +224,7 @@ def test_visual_review_requires_a_real_candidate(client, headers, monkeypatch):
         headers=headers,
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     )
     assert response.status_code == 404  # no candidate row at all
@@ -245,7 +245,7 @@ def test_visual_review_computes_setup_key_fresh_without_a_cached_preview(client,
         headers=headers,
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     )
     assert response.status_code == 200
@@ -266,6 +266,8 @@ def test_visual_review_records_a_structured_decision(client, headers, monkeypatc
             "location_read": "good",
             "clear_path_to_target": "yes",
             "lower_tf_confirmation": "yes",
+            "confirmation_rule": "close_above",
+            "confirmation_level": 100.0,
             "decision": "approve",
             "note": "Clean structure, taking it.",
         },
@@ -555,7 +557,7 @@ def test_visual_review_rejects_invalid_enum_values(client, headers, monkeypatch,
 
     payload = {
         "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-        "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+        "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
     }
     payload[field] = bad_value
     response = client.post("/api/v1/scanner/candidates/NVDA/visual-review", headers=headers, json=payload)
@@ -596,7 +598,7 @@ def test_visual_review_is_append_only_not_overwritten(client, headers, monkeypat
         "/api/v1/scanner/candidates/NVDA/visual-review", headers=headers,
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     )
     assert first.json()["id"] != second.json()["id"]
@@ -632,7 +634,7 @@ def test_same_setup_reviewed_twice_shares_setup_key(client, headers, monkeypatch
         "/api/v1/scanner/candidates/NVDA/visual-review", headers=headers,
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     ).json()
     assert first["setup_key"] == second["setup_key"]

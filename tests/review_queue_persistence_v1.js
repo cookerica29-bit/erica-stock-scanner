@@ -38,6 +38,13 @@ const elements = {
   submitRow: makeElement(),
   practicalRejectRow: makeElement(),
   practicalRejectNote: makeElement(),
+  // Fixture default is decision:'approve' + lower_tf_confirmation:'yes'
+  // (see reviewForm._formValues below) -- since that combination now
+  // requires a confirmation_level (Execution Layer V1, rule D), this
+  // mock element supplies one so every submitReview() call in this file
+  // -- none of which are actually testing that new requirement -- keeps
+  // submitting successfully, exactly as it did before this feature.
+  confirmationLevel: { value: '100.50' },
   // submitReview() reads this via `new FormData(form)` -- real Node has a
   // native FormData that requires a genuine HTML form element, so
   // global.FormData is mocked below to read straight off _formValues
@@ -46,6 +53,7 @@ const elements = {
   reviewForm: makeFormElement({
     market_structure: 'bullish', location_read: 'good',
     clear_path_to_target: 'yes', lower_tf_confirmation: 'yes', decision: 'approve',
+    confirmation_rule: 'close_above',
   }),
 };
 
@@ -73,6 +81,7 @@ global.document = {
 global.window = { addEventListener: () => {} };
 global.localStorage = { getItem: () => 'test-key', setItem: () => {}, removeItem: () => {} };
 global.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+global.alert = () => {};
 
 let fetchQueue = [];
 global.fetch = async (url) => {
@@ -234,6 +243,18 @@ async function run() {
     const fieldGroup = new RegExp(`name="${name}"[^>]*checked`, 'g');
     assert.ok(!fieldGroup.test(elements.mainContent.innerHTML), `a genuinely unreviewed candidate must not have ${name} pre-checked`);
   }
+
+  // --- Execution Layer V1: client-side required-when-approving check --
+  // approving a lower_tf_confirmation="yes" review with an empty
+  // confirmation level must be blocked BEFORE any fetch is attempted
+  // (the server enforces this regardless -- this is purely the immediate-
+  // feedback UX path). fetchQueue is deliberately left empty here: a
+  // stray fetch attempt would throw "Unexpected fetch call with nothing
+  // queued", failing this test.
+  const originalConfirmationLevel = elements.confirmationLevel.value;
+  elements.confirmationLevel.value = '';
+  await reviewQueue.submitReview('AAA', 'ma_pipeline'); // must return early, no throw
+  elements.confirmationLevel.value = originalConfirmationLevel;
 
   console.log('Review queue persistence v1 tests passed');
 }

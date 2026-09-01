@@ -134,7 +134,7 @@ def test_monitor_state_insert_failure_rolls_back_everything(client, headers, mon
             headers=headers,
             json={
                 "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-                "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+                "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
             },
         )
 
@@ -172,7 +172,7 @@ def test_memory_insert_failure_rolls_back_visual_review_too(client, headers, mon
             headers=headers,
             json={
                 "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-                "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+                "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
             },
         )
 
@@ -195,7 +195,7 @@ def test_review_change_sync_failure_rolls_back_review_too(client, headers, monke
         headers=headers,
         json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         },
     )
     assert approve_resp.status_code == 200
@@ -230,7 +230,10 @@ def test_review_change_sync_failure_rolls_back_review_too(client, headers, monke
     monitor_state = conn.execute("SELECT state FROM approved_setup_monitor_state").fetchone()
     conn.close()
     assert remaining_review["decision"] == "approve", "the original approve review must be the only one left"
-    assert monitor_state["state"] == "APPROVED", (
-        "monitor_state must still read APPROVED -- never allowed to observe "
-        "'review changed to watch' with monitor still active, or vice versa"
-    )
+    # CONFIRMED, not APPROVED -- the baseline approve above carries
+    # confirmation_rule/confirmation_level (Type A), so its initial state
+    # is CONFIRMED. The real assertion here is unchanged: the monitor_state
+    # a real (non-injected) approve produced must still read that same
+    # non-terminal state -- never allowed to observe "review changed to
+    # watch" with monitor still active, or vice versa.
+    assert monitor_state["state"] == "CONFIRMED"

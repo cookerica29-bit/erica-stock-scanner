@@ -32,6 +32,13 @@
     disclaimer: '',
     loaded: false,
     authRequired: false,
+    // setup_key -> {memory, monitor_state} (ApprovedSetupMemoryRecordOut,
+    // Approved board only -- see loadBoard). The frozen anchor
+    // computeDisplayState uses instead of live candidate fields
+    // (Execution Layer V1 "Finding A" fix), and the real server-computed
+    // execution state (monitor_state.state) the card's execution banner
+    // reads directly rather than re-deriving anything client-side.
+    recordsBySetupKey: new Map(),
   };
   let loadBoardInFlight = false;
 
@@ -48,18 +55,37 @@
   // to the server, never touches candidate_promotions or ENTER_NOW.
   //
   // INVALIDATED and EXTENDED are the only two states this computes.
-  // ACTIONABLE is deliberately NOT implemented: the closest existing single
-  // field (entry_proximity_ok) is only one piece of the real ENTER_NOW
-  // condition (which also needs execution_shadow_ok, BOS/displacement/sweep
-  // confirmation) -- using it alone here would silently approximate ENTER_NOW/
-  // Stage D, which this build is explicitly scoped to not do. EXTENDED
-  // reuses entry_distance_pct / entry_proximity_threshold_pct -- fields the
-  // backend already computes for ENTER_NOW's own proximity gate -- instead
-  // of inventing a new "materially extended" threshold.
-  function computeDisplayState(item) {
+  // ACTIONABLE is deliberately NOT implemented client-side: the real
+  // Execution Layer verdict belongs server-side in
+  // approved_setup_monitor_state.state once a monitor exists (see
+  // execution_layer_v1_implementation_plan.md) -- approximating it here
+  // from a partial signal would be exactly the kind of premature ENTER_NOW/
+  // Stage D shortcut this build is explicitly scoped to not take.
+  //
+  // Execution Layer V1 fix (design audit "Finding A"): this used to anchor
+  // INVALIDATED/EXTENDED to the LIVE, every-scan-recomputed candidate
+  // fields (item.stop/item.entry_price) -- so if a rescan ever produced a
+  // different order-block stop for the same setup_key window, INVALIDATED
+  // could be computed against a stop the human never actually approved.
+  // Now anchored to the FROZEN approved_setup_memories snapshot (via
+  // `memory`, looked up by setup_key -- see loadBoard) instead: approved_
+  // stop/approved_entry/entry_proximity_threshold_pct_at_approval, exactly
+  // what was true the moment the human approved, never drifting
+  // afterward. current_price stays LIVE on purpose (freshness matters for
+  // "is this still true right now"; only the ANCHOR needed to stop
+  // drifting). Falls back to the live candidate fields only when no
+  // memory exists yet for this setup_key -- a defensive path that
+  // shouldn't occur for a real approval going forward, since every
+  // approve now creates a memory+monitor_state row in the same
+  // transaction, but kept so a board render never breaks outright if it
+  // does.
+  function computeDisplayState(item, memory) {
     const direction = String((item && item.signal) || '').toLowerCase();
-    const entry = item ? item.entry_price : null;
-    const stop = item ? item.stop : null;
+    const entry = memory ? memory.approved_entry : (item ? item.entry_price : null);
+    const stop = memory ? memory.approved_stop : (item ? item.stop : null);
+    const thresholdPct = memory
+      ? memory.entry_proximity_threshold_pct_at_approval
+      : (item ? item.entry_proximity_threshold_pct : null);
     const price = item ? item.current_price : null;
     if (entry == null || stop == null || price == null || (direction !== 'long' && direction !== 'short')) {
       return 'WAITING_FOR_ENTRY';
@@ -67,8 +93,8 @@
     if (direction === 'long' && price <= stop) return 'INVALIDATED';
     if (direction === 'short' && price >= stop) return 'INVALIDATED';
 
-    const distPct = item.entry_distance_pct;
-    const thresholdPct = item.entry_proximity_threshold_pct;
+    const distance = Math.abs(price - entry);
+    const distPct = entry > 0 ? (distance / entry) * 100 : null;
     if (distPct != null && thresholdPct != null) {
       if (direction === 'long' && price > entry && distPct > thresholdPct) return 'EXTENDED';
       if (direction === 'short' && price < entry && distPct > thresholdPct) return 'EXTENDED';
@@ -83,12 +109,18 @@
   // / invalidated) -- a stable partition, so rank order is preserved WITHIN
   // each group, per the task's explicit sorting rule. 'watch' preserves
   // plain rank order with no grouping (display state is an approved-setups
-  // concept only).
-  function filterAndOrder(queue, decision) {
+  // concept only). recordsBySetupKey (Map<setup_key, {memory, monitor_state}>)
+  // is optional -- omitted entirely by any existing caller/test that
+  // doesn't care about memory-anchored state, falling back to
+  // computeDisplayState's own live-field fallback for every item.
+  function filterAndOrder(queue, decision, recordsBySetupKey) {
     const matches = (queue || []).filter((item) => decisionFor(item) === decision);
     if (decision !== 'approve') return matches;
     const groups = { WAITING_FOR_ENTRY: [], EXTENDED: [], INVALIDATED: [] };
-    matches.forEach((item) => { groups[computeDisplayState(item)].push(item); });
+    matches.forEach((item) => {
+      const record = recordsBySetupKey ? recordsBySetupKey.get(item.setup_key) : null;
+      groups[computeDisplayState(item, record ? record.memory : null)].push(item);
+    });
     return STATE_ORDER.reduce((acc, s) => acc.concat(groups[s]), []);
   }
 
@@ -185,7 +217,25 @@
       const result = await fetchJson(`${API_BASE}/candidates/review-queue`);
       state.queue = result.candidates || [];
       state.disclaimer = result.disclaimer || '';
-      state.board = filterAndOrder(state.queue, state.decision);
+      // Approved board only -- Watch Setups has no memory concept (memory
+      // is created on APPROVE only, see approved_setup_memories) and
+      // filterAndOrder never groups/anchors state for the watch decision
+      // anyway. A failure fetching memories must never break the whole
+      // board -- falls back to computeDisplayState's own live-field
+      // fallback for every item, same as before this fetch existed.
+      if (state.decision === 'approve') {
+        try {
+          const records = await fetchJson(`${API_BASE}/candidates/approved-setup-memory`);
+          state.recordsBySetupKey = new Map(
+            (records || []).map((record) => [record.memory.setup_key, record]),
+          );
+        } catch (memErr) {
+          state.recordsBySetupKey = new Map();
+        }
+      } else {
+        state.recordsBySetupKey = new Map();
+      }
+      state.board = filterAndOrder(state.queue, state.decision, state.recordsBySetupKey);
       state.loaded = true;
       state.authRequired = false;
       render();
@@ -218,23 +268,92 @@
   const CLEAR_PATH_LABELS = { yes: 'Yes', no: 'No' };
   const LOWER_TF_LABELS = { yes: 'Yes', not_yet: 'Not yet' };
   const STATE_LABELS = {
-    WAITING_FOR_ENTRY: 'Waiting for Entry',
+    WAITING_FOR_ENTRY: 'Waiting',
     EXTENDED: 'Extended',
     INVALIDATED: 'Invalidated',
+    ACTIONABLE: 'Actionable',
+    STALE: 'Needs Fresh Review',
   };
+
+  // Maps the REAL server-computed execution state
+  // (approved_setup_monitor_state.state, Execution Layer V1) onto this
+  // board's existing display vocabulary. This is now the SOURCE OF TRUTH
+  // for ACTIONABLE/STALE (states the old client-side heuristic never had
+  // at all) as well as EXTENDED/INVALIDATED (states the old heuristic
+  // only ever approximated from live, drifting fields -- see
+  // computeDisplayState's own "Finding A" comment). APPROVED/
+  // WAITING_FOR_TRIGGER/CONFIRMED/TRIGGER_SATISFIED are four real,
+  // distinct server states that collapse to ONE product-facing "waiting"
+  // bucket here -- execution_layer_v1_implementation_plan.md section 5:
+  // "APPROVED == the product-facing WAITING label".
+  const MONITOR_STATE_DISPLAY = {
+    APPROVED: 'WAITING_FOR_ENTRY',
+    WAITING_FOR_TRIGGER: 'WAITING_FOR_ENTRY',
+    CONFIRMED: 'WAITING_FOR_ENTRY',
+    TRIGGER_SATISFIED: 'WAITING_FOR_ENTRY',
+    ACTIONABLE: 'ACTIONABLE',
+    EXTENDED: 'EXTENDED',
+    STALE: 'STALE',
+    INVALIDATED: 'INVALIDATED',
+  };
+
+  // The single source of truth for a card's display state: prefers the
+  // REAL server-computed monitor_state.state when a record exists (see
+  // loadBoard); falls back to computeDisplayState's own live-field
+  // heuristic only when it doesn't -- shouldn't happen for any setup
+  // approved going forward (every approve creates a memory+monitor_state
+  // row in the same transaction), but kept so a render never breaks
+  // outright if it somehow does.
+  function displayStateFor(item, record) {
+    const monitorState = record && record.monitor_state ? record.monitor_state.state : null;
+    if (monitorState && MONITOR_STATE_DISPLAY[monitorState]) {
+      return MONITOR_STATE_DISPLAY[monitorState];
+    }
+    return computeDisplayState(item, record ? record.memory : null);
+  }
 
   function stateBadge(item) {
     if (state.decision !== 'approve') return '';
-    const s = computeDisplayState(item);
+    const s = displayStateFor(item, state.recordsBySetupKey.get(item.setup_key));
     return `<span class="state-pill state-${s}">${STATE_LABELS[s]}</span>`;
   }
 
   function stateNotice(item) {
     if (state.decision !== 'approve') return '';
-    const s = computeDisplayState(item);
+    const record = state.recordsBySetupKey.get(item.setup_key);
+    const s = displayStateFor(item, record);
     if (s === 'EXTENDED') return `<div class="state-notice notice-extended">Extended &mdash; do not chase</div>`;
     if (s === 'INVALIDATED') return `<div class="state-notice notice-invalidated">Setup invalidated</div>`;
+    if (s === 'STALE') {
+      return `<div class="state-notice notice-stale">Execution evidence has gone stale &mdash; needs a fresh human review before this can become actionable again</div>`;
+    }
+    if (s === 'WAITING_FOR_ENTRY') {
+      const monitored = !!(record && record.monitor_state);
+      const text = monitored
+        ? 'DO NOT ENTER &mdash; Kairos is monitoring for your stated execution condition.'
+        : 'DO NOT ENTER &mdash; this setup has no recorded execution evidence yet.';
+      return `<div class="state-notice notice-waiting">${text}</div>`;
+    }
     return '';
+  }
+
+  // ACTIONABLE must visually DOMINATE the card
+  // (execution_layer_v1_implementation_plan.md section 13) -- a
+  // full-width, success-colored banner, not a small pill/notice like the
+  // other states. Only ever rendered from a REAL server-computed
+  // ACTIONABLE monitor_state -- never approximated client-side.
+  function actionableBanner(item, record) {
+    if (state.decision !== 'approve') return '';
+    if (displayStateFor(item, record) !== 'ACTIONABLE') return '';
+    const monitorState = record.monitor_state;
+    const rrText = monitorState.current_rr_at_last_check != null ? fmtNumber(monitorState.current_rr_at_last_check) : '--';
+    return `
+        <div class="actionable-banner">
+          <div class="actionable-banner-label">ACTIONABLE</div>
+          <div class="actionable-banner-text">Kairos has confirmed your stated execution condition, and price remains within an acceptable window.</div>
+          <div class="actionable-banner-metrics">Current ${fmtMoney(item.current_price)} &middot; Stop ${fmtMoney(record.memory.approved_stop)} &middot; Target ${fmtMoney(record.memory.approved_target)} &middot; Current R:R ${rrText}</div>
+          <div class="actionable-banner-disclaimer">This is not investment advice &mdash; you decide whether and how to act.</div>
+        </div>`;
   }
 
   function editHref(item) {
@@ -249,19 +368,56 @@
     return `${escapeHtml(cr.trigger_timeframe || '')} ${escapeHtml(rule)} ${fmtMoney(cr.trigger_level)}`;
   }
 
-  function triggerBlock(cr) {
+  // Status line reflects the REAL server monitor now (Execution Layer
+  // V1) -- "Kairos is monitoring" only when a real, active monitor_state
+  // record exists for this setup; "Not monitored yet" stays the honest
+  // fallback for the defensive no-record case (shouldn't occur for any
+  // setup approved going forward, but never overclaim if it does).
+  function monitorStatusLine(record) {
+    return record && record.monitor_state
+      ? 'Status: Kairos is monitoring this'
+      : 'Status: Not monitored yet';
+  }
+
+  function triggerBlock(cr, record) {
     if (!cr || cr.trigger_rule == null || cr.trigger_level == null) return '';
     return `
           <div class="execution-trigger">
-            <div class="execution-trigger-label">Execution Trigger</div>
+            <div class="execution-trigger-label">Execution Trigger &mdash; waiting for this to happen</div>
             <div class="execution-trigger-value">${triggerSummaryText(cr)}</div>
             ${cr.trigger_reason ? `<div class="execution-trigger-reason">${escapeHtml(cr.trigger_reason)}</div>` : ''}
-            <div class="execution-trigger-status">Status: Not monitored yet</div>
+            <div class="execution-trigger-status">${monitorStatusLine(record)}</div>
+          </div>`;
+  }
+
+  const CONFIRMATION_RULE_LABELS = { close_above: 'close above', close_below: 'close below' };
+
+  function confirmationSummaryText(cr) {
+    if (!cr || cr.confirmation_rule == null || cr.confirmation_level == null) return '';
+    const rule = CONFIRMATION_RULE_LABELS[cr.confirmation_rule] || cr.confirmation_rule;
+    return `${escapeHtml(cr.confirmation_timeframe || '')} ${escapeHtml(rule)} ${fmtMoney(cr.confirmation_level)}`;
+  }
+
+  // Observed Confirmation Anchor -- a DIFFERENT concept from the trigger
+  // block above (already-occurred, past tense, vs. a future condition) --
+  // deliberately distinct label/copy so a novice never reads the two the
+  // same way. See execution_layer_v1_implementation_plan.md section 1.
+  function confirmationBlock(cr, record) {
+    if (!cr || cr.confirmation_rule == null || cr.confirmation_level == null) return '';
+    const when = cr.confirmed_candle_time || cr.reviewed_at;
+    return `
+          <div class="execution-confirmation">
+            <div class="execution-confirmation-label">Observed Confirmation &mdash; already happened</div>
+            <div class="execution-confirmation-value">${confirmationSummaryText(cr)}</div>
+            ${when ? `<div class="execution-confirmation-when">Observed ${escapeHtml(new Date(when).toLocaleString())}</div>` : ''}
+            ${cr.confirmation_note ? `<div class="execution-confirmation-note">${escapeHtml(cr.confirmation_note)}</div>` : ''}
+            <div class="execution-confirmation-status">${monitorStatusLine(record)}</div>
           </div>`;
   }
 
   function renderCard(item) {
     const cr = item.current_review || {};
+    const record = state.recordsBySetupKey.get(item.setup_key);
     const chartUrl = `https://www.tradingview.com/symbols/${encodeURIComponent(item.ticker)}/`;
     return `
       <div class="setup-card">
@@ -273,6 +429,8 @@
           </div>
           <span class="setup-rank">Rank #${item.rank} &middot; ${escapeHtml(item.source || '')}</span>
         </div>
+
+        ${actionableBanner(item, record)}
 
         <div class="current-price-row">
           <span class="current-price-label">Current Price</span>
@@ -300,7 +458,8 @@
             <div class="signal-row"><span>Clear path to target</span><span class="read">${escapeHtml(CLEAR_PATH_LABELS[cr.clear_path_to_target] || cr.clear_path_to_target || '--')}</span></div>
             <div class="signal-row"><span>Lower-TF confirmation</span><span class="read">${escapeHtml(LOWER_TF_LABELS[cr.lower_tf_confirmation] || cr.lower_tf_confirmation || '--')}</span></div>
           </div>
-          ${triggerBlock(cr)}
+          ${triggerBlock(cr, record)}
+          ${confirmationBlock(cr, record)}
         </div>
 
         <div class="card-actions">

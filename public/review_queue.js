@@ -304,11 +304,13 @@
         ? `Practically rejected — ${PRACTICAL_REASON_LABELS[cr.practical_rejection_reason] || cr.practical_rejection_reason}`
         : cr.decision.charAt(0).toUpperCase() + cr.decision.slice(1);
       const triggerText = triggerSummaryText(cr);
+      const confirmationText = confirmationSummaryText(cr);
       return `
         <div class="reviewed-row" onclick="openReviewedItem(${idx})">
           <span class="reviewed-ticker">${escapeHtml(item.ticker)}</span>
           <span class="reviewed-decision decision-${escapeHtml(cr.decision)}">${escapeHtml(label)}</span>
           ${triggerText ? `<span class="reviewed-trigger">Waiting for: ${escapeHtml(triggerText)}</span>` : ''}
+          ${confirmationText ? `<span class="reviewed-confirmation">Confirmed: ${escapeHtml(confirmationText)}</span>` : ''}
           <span class="reviewed-time">${escapeHtml(new Date(cr.reviewed_at).toLocaleString())}</span>
           <span class="reviewed-edit">Edit &rsaquo;</span>
         </div>`;
@@ -318,15 +320,31 @@
 
   // "Waiting for: 30m close above $X" -- the human-readable rendering of
   // a stored trigger, shared by the reviewed list and the candidate card
-  // itself. Never implies Kairos is currently watching it (no monitoring
-  // exists yet) -- callers that show this alongside a decision should
-  // keep that framing (informational record of an instruction, not a
-  // live status).
+  // itself. A trigger is a FUTURE condition (lower_tf_confirmation=
+  // "not_yet") -- Kairos genuinely monitors it now (Execution Layer V1),
+  // but this copy stays deliberately informational/instruction-framed
+  // rather than claiming real-time precision until that monitor has real
+  // production track record.
   function triggerSummaryText(cr) {
     if (!cr || cr.trigger_rule == null || cr.trigger_level == null) return null;
     const ruleText = cr.trigger_rule === 'close_above' ? 'above' : 'below';
     const timeframe = cr.trigger_timeframe || '30m';
     return `${timeframe} close ${ruleText} ${fmtMoney(cr.trigger_level)}`;
+  }
+
+  // "Confirmed: 30m close above $X" -- the human-readable rendering of a
+  // stored OBSERVED CONFIRMATION ANCHOR (lower_tf_confirmation="yes").
+  // Deliberately worded in the PAST tense and a distinct label from
+  // triggerSummaryText's future-tense "Waiting for:" -- these are two
+  // different concepts (an already-occurred event the reviewer observed,
+  // vs. a future event Kairos is waiting for) and must never read the
+  // same way to a novice. See execution_layer_v1_implementation_plan.md
+  // section 1.
+  function confirmationSummaryText(cr) {
+    if (!cr || cr.confirmation_rule == null || cr.confirmation_level == null) return null;
+    const ruleText = cr.confirmation_rule === 'close_above' ? 'above' : 'below';
+    const timeframe = cr.confirmation_timeframe || '30m';
+    return `${timeframe} close ${ruleText} ${fmtMoney(cr.confirmation_level)}`;
   }
 
   function signalRow(label, read, detail) {
@@ -346,11 +364,17 @@
   // for a fresh, never-reviewed candidate -- never enforced, and never
   // used as a default once an existing trigger is being edited (the
   // stored rule always wins there, whatever it is).
+  // Also toggles the confirmation-anchor block (#confirmationFields,
+  // shown under lower_tf_confirmation="yes") -- kept in the same
+  // function/onchange wiring as the trigger block since the two are
+  // mutually exclusive by construction (radio group), same trigger event.
   function toggleTriggerFields() {
     const selected = document.querySelector('input[name="lower_tf_confirmation"]:checked');
-    const fields = document.getElementById('triggerFields');
-    if (!fields) return;
-    fields.style.display = selected && selected.value === 'not_yet' ? 'block' : 'none';
+    const value = selected ? selected.value : null;
+    const triggerFields = document.getElementById('triggerFields');
+    if (triggerFields) triggerFields.style.display = value === 'not_yet' ? 'block' : 'none';
+    const confirmationFields = document.getElementById('confirmationFields');
+    if (confirmationFields) confirmationFields.style.display = value === 'yes' ? 'block' : 'none';
   }
   window.toggleTriggerFields = toggleTriggerFields;
 
@@ -361,10 +385,12 @@
       : 'Confluence unavailable for this candidate';
     const cr = editing ? item.current_review : null;
     const storedTriggerText = editing ? triggerSummaryText(cr) : null;
+    const storedConfirmationText = editing ? confirmationSummaryText(cr) : null;
     const editingBanner = editing
       ? `<div class="already-reviewed">Editing the existing review from ${escapeHtml(new Date(cr.reviewed_at).toLocaleString())}. Submitting below records a NEW review for this same setup -- the old one stays in history, this becomes current.
           <button type="button" class="cancel-edit-btn" onclick="closeEditing()">Cancel</button>
           ${storedTriggerText ? `<div class="stored-trigger">Waiting for: ${escapeHtml(storedTriggerText)}</div>` : ''}
+          ${storedConfirmationText ? `<div class="stored-confirmation">Confirmed: ${escapeHtml(storedConfirmationText)}</div>` : ''}
           </div>`
       : '';
     const chartUrl = `https://www.tradingview.com/symbols/${encodeURIComponent(item.ticker)}/`;
@@ -377,6 +403,15 @@
     const defaultTriggerRule = (item.signal || '').toLowerCase() === 'short' ? 'close_below' : 'close_above';
     const triggerRuleValue = hasStoredTrigger ? cr.trigger_rule : defaultTriggerRule;
     const triggerFieldsVisible = wasVisual && cr.lower_tf_confirmation === 'not_yet';
+
+    // Observed Confirmation Anchor (execution_layer_v1_implementation_plan.md
+    // section 8) -- same direction-default-only pattern as the trigger
+    // fields above: a pre-selected rule is convenience only, never
+    // enforced; the LEVEL input (not the radio) is what decides whether a
+    // real confirmation anchor is being submitted (see submitReview).
+    const hasStoredConfirmation = wasVisual && cr.confirmation_rule != null && cr.confirmation_level != null;
+    const confirmationRuleValue = hasStoredConfirmation ? cr.confirmation_rule : defaultTriggerRule;
+    const confirmationFieldsVisible = wasVisual && cr.lower_tf_confirmation === 'yes';
 
     return `
       <div class="candidate-card">
@@ -470,7 +505,23 @@
                 <input type="text" id="triggerReason" placeholder="Optional note (why this level)"
                   value="${wasVisual && cr.trigger_reason ? escapeHtml(cr.trigger_reason) : ''}">
               </div>
-              <div class="trigger-hint">Optional -- not required to submit a "Not yet" review. Kairos does not monitor this yet; it is only recorded for the future.</div>
+              <div class="trigger-hint">Optional -- not required to submit a "Not yet" review. Kairos monitors this going forward, watching for a completed 30m close matching what you describe here.</div>
+            </div>
+            <div class="confirmation-fields" id="confirmationFields" style="display:${confirmationFieldsVisible ? 'block' : 'none'}">
+              <div class="confirmation-label">You saw a 30m candle already close:</div>
+              <div class="option-row">
+                <label><input type="radio" name="confirmation_rule" value="close_above" ${checkedIf(confirmationRuleValue === 'close_above')}> Above</label>
+                <label><input type="radio" name="confirmation_rule" value="close_below" ${checkedIf(confirmationRuleValue === 'close_below')}> Below</label>
+              </div>
+              <div class="confirmation-inputs">
+                <input type="number" id="confirmationLevel" step="0.01" min="0" placeholder="Price"
+                  value="${hasStoredConfirmation ? cr.confirmation_level : ''}">
+                <input type="text" id="confirmedCandleTime" placeholder="When did that candle close? (optional)"
+                  value="${wasVisual && cr.confirmed_candle_time ? escapeHtml(cr.confirmed_candle_time) : ''}">
+                <input type="text" id="confirmationNote" placeholder="Optional note (what you saw)"
+                  value="${wasVisual && cr.confirmation_note ? escapeHtml(cr.confirmation_note) : ''}">
+              </div>
+              <div class="confirmation-hint">Required to Approve -- describes an ALREADY-OBSERVED confirmation, not a future condition. The candle-close time is optional but helpful if you remember it.</div>
             </div>
           </fieldset>
           <fieldset>
@@ -607,6 +658,18 @@
         return;
       }
     }
+    // Required-when-approving (execution_layer_v1_implementation_plan.md
+    // section 2 rule D): the server enforces this regardless -- this is
+    // UX only, so a reviewer gets a clear, immediate message instead of a
+    // round-trip 422.
+    if (decision === 'approve' && data.get('lower_tf_confirmation') === 'yes') {
+      const confirmationLevelInput = document.getElementById('confirmationLevel');
+      const confirmationLevelRaw = confirmationLevelInput ? confirmationLevelInput.value.trim() : '';
+      if (confirmationLevelRaw === '') {
+        alert('Approving a "Yes" (already confirmed) setup requires describing the completed candle you observed -- fill in the confirmation price below.');
+        return;
+      }
+    }
     const submitRow = document.getElementById('submitRow');
     submitRow.innerHTML = '<button type="button" disabled>Saving…</button>';
     try {
@@ -635,6 +698,22 @@
         const triggerReasonInput = document.getElementById('triggerReason');
         const triggerReasonRaw = triggerReasonInput ? triggerReasonInput.value.trim() : '';
         if (triggerReasonRaw) body.trigger_reason = triggerReasonRaw;
+      }
+      // Confirmation fields (Observed Confirmation Anchor, Execution
+      // Layer V1 session): same "the LEVEL field decides, not the radio"
+      // rule as trigger fields above.
+      const confirmationLevelInput = document.getElementById('confirmationLevel');
+      const confirmationLevelRaw = confirmationLevelInput ? confirmationLevelInput.value.trim() : '';
+      if (confirmationLevelRaw !== '') {
+        body.confirmation_timeframe = '30m';
+        body.confirmation_rule = data.get('confirmation_rule');
+        body.confirmation_level = parseFloat(confirmationLevelRaw);
+        const confirmedCandleTimeInput = document.getElementById('confirmedCandleTime');
+        const confirmedCandleTimeRaw = confirmedCandleTimeInput ? confirmedCandleTimeInput.value.trim() : '';
+        if (confirmedCandleTimeRaw) body.confirmed_candle_time = confirmedCandleTimeRaw;
+        const confirmationNoteInput = document.getElementById('confirmationNote');
+        const confirmationNoteRaw = confirmationNoteInput ? confirmationNoteInput.value.trim() : '';
+        if (confirmationNoteRaw) body.confirmation_note = confirmationNoteRaw;
       }
       const result = await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/visual-review`, {
         method: 'POST',
@@ -675,5 +754,6 @@
     computeCounts,
     firstUnreviewedIndex,
     triggerSummaryText,
+    confirmationSummaryText,
   };
 });

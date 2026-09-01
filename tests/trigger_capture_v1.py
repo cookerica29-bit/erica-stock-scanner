@@ -397,6 +397,15 @@ def test_no_promotions_writes_and_monitor_state_unaffected(client, headers):
     assert promo_count == 0
 
     monitor_state = _memories(client, headers, ticker="AMD")[0]["monitor_state"]
-    assert monitor_state["state"] == "APPROVED", "a trigger must not itself cause any state transition"
+    # WAITING_FOR_TRIGGER, not the old hardcoded APPROVED -- a memory with
+    # trigger_rule/trigger_level present now starts there directly (see
+    # execution_layer_v1_implementation_plan.md section 5): a real,
+    # deliberate initial-state fact about "this memory has a Type B
+    # trigger to wait for", not itself a monitor-driven TRANSITION -- no
+    # monitor tick, bar fetch, or live-market check produced this value;
+    # it's decided once, at creation, purely from which evidence fields
+    # the review supplied.
+    assert monitor_state["state"] == "WAITING_FOR_TRIGGER"
     assert monitor_state["terminal_at"] is None
     assert monitor_state["last_checked_at"] is None
+    assert monitor_state["trigger_satisfied_at"] is None, "no monitor exists yet -- must never be pre-populated"

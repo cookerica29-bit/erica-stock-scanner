@@ -110,6 +110,9 @@
     .reviewed-trigger {
       flex-basis: 100%; color: var(--warn); font-size: 0.78rem;
     }
+    .reviewed-confirmation {
+      flex-basis: 100%; color: var(--pass); font-size: 0.78rem;
+    }
 
     .cancel-edit-btn {
       margin-left: 10px; background: var(--surface3); border: 1px solid var(--border);
@@ -117,6 +120,9 @@
     }
     .stored-trigger {
       margin-top: 6px; color: var(--warn); font-size: 0.82rem; font-weight: 600;
+    }
+    .stored-confirmation {
+      margin-top: 6px; color: var(--pass); font-size: 0.82rem; font-weight: 600;
     }
 
     .trigger-fields {
@@ -134,6 +140,25 @@
       color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit;
     }
     .trigger-hint { margin-top: 6px; font-size: 0.74rem; color: var(--muted); }
+
+    /* Observed Confirmation Anchor: same shape as .trigger-fields, but a
+       distinct border/label color (--pass, not --warn) so a novice
+       visually tells "already happened" apart from "waiting for". */
+    .confirmation-fields {
+      margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+      background: var(--surface2); border: 1px dashed var(--pass);
+    }
+    .confirmation-label { font-size: 0.82rem; color: var(--muted); margin-bottom: 6px; }
+    .confirmation-inputs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    .confirmation-inputs input[type="number"] {
+      width: 120px; background: var(--surface3); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit;
+    }
+    .confirmation-inputs input[type="text"] {
+      flex: 1 1 160px; background: var(--surface3); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit;
+    }
+    .confirmation-hint { margin-top: 6px; font-size: 0.74rem; color: var(--muted); }
 
     .disclaimer {
       font-size: 0.78rem; color: var(--muted); background: var(--surface2);
@@ -244,6 +269,6 @@
     </main>
   </div>
 
-  <script src="/static/review_queue.js?v=20260901-trigger"></script>
+  <script src="/static/review_queue.js?v=20260901-execution-layer"></script>
 </body>
 </html>

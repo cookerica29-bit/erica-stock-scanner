@@ -128,12 +128,21 @@ def _seed(client, headers, ticker="AMD", entry_price=100.0):
 
 
 def _review(client, headers, ticker, decision, source="ma_pipeline", **overrides):
+    # confirmation_rule/confirmation_level default alongside
+    # lower_tf_confirmation="yes" -- required to approve since the
+    # Execution Layer V1 session (a "yes" approve now needs an objective
+    # confirmation anchor, not just the label). A caller overriding
+    # lower_tf_confirmation to "not_yet" must also override these to None
+    # (or use trigger_rule/trigger_level instead) -- mutual exclusivity is
+    # enforced server-side.
     body = {
         "source": source,
         "market_structure": "bullish",
         "location_read": "good",
         "clear_path_to_target": "yes",
         "lower_tf_confirmation": "yes",
+        "confirmation_rule": "close_above",
+        "confirmation_level": 100.0,
         "decision": decision,
         "note": "test note",
         **overrides,
@@ -175,7 +184,11 @@ def test_approve_creates_memory(client, headers):
     assert memory["visual_review_id"] == review["id"]
     assert memory["snapshot_origin"] == "approval_event"
     assert memory["snapshot_exact"] is True
-    assert records[0]["monitor_state"]["state"] == "APPROVED"
+    # CONFIRMED, not the old hardcoded APPROVED -- _review()'s default body
+    # carries a confirmation_rule/confirmation_level pair (Type A: the
+    # reviewer already observed the confirming candle), and the Execution
+    # Layer V1 initial-state rule reflects that immediately at creation.
+    assert records[0]["monitor_state"]["state"] == "CONFIRMED"
 
 
 # --- B. approved_entry does not change when live candidate entry changes ---
@@ -271,23 +284,55 @@ def test_watch_then_approve_creates_active_memory(client, headers):
     _review(client, headers, "AMD", "approve")
     active = _memories(client, headers)
     assert len(active) == 1
-    assert active[0]["monitor_state"]["state"] == "APPROVED"
+    assert active[0]["monitor_state"]["state"] == "CONFIRMED"
 
 
-# --- H. no duplicate active memory for same setup_key ---
-def test_no_duplicate_active_memory_on_repeat_approve(client, headers):
+# --- H. re-approving the SAME setup_key: idempotent when evidence is
+# unchanged, a new revision when it genuinely differs (Approved Setup
+# Memory Revision, execution_layer_v1_implementation_plan.md section 4).
+# Full CLH-failure-mode regression coverage lives in
+# approved_setup_memory_revision_v1.py -- these two cover the base case
+# this file already owned before that feature existed.
+def test_identical_repeat_approve_is_idempotent(client, headers):
     _seed(client, headers, "AMD")
-    _review(client, headers, "AMD", "approve", note="first note")
+    _review(client, headers, "AMD", "approve", note="same note")
     first = _memories(client, headers, include_inactive=True)
     assert len(first) == 1
 
-    # Re-affirm/edit the same approval (e.g. just the note changes) --
-    # decision is still "approve" for the SAME setup_key.
-    _review(client, headers, "AMD", "approve", note="edited note")
+    # Byte-identical resubmission -- same setup_key, same everything.
+    _review(client, headers, "AMD", "approve", note="same note")
     second = _memories(client, headers, include_inactive=True)
-    assert len(second) == 1, "must not create a second memory row for the same active setup_key"
-    assert second[0]["memory"]["review_note"] == "first note", \
-        "the ORIGINAL memory snapshot must not be overwritten by the later edit -- immutability"
+    assert len(second) == 1, "an identical resubmission must not create a second memory row"
+    assert second[0]["memory"]["review_note"] == "same note"
+
+
+def test_note_change_on_reapprove_creates_a_revision(client, headers):
+    _seed(client, headers, "AMD")
+    first = _review(client, headers, "AMD", "approve", note="first note")
+    original = _memories(client, headers, include_inactive=True)
+    assert len(original) == 1
+    original_memory_id = original[0]["memory"]["id"]
+
+    # Re-affirm the SAME setup_key with a genuinely different note --
+    # per the Execution Layer V1 decision, review_note is real evidence,
+    # not cosmetic, so this must now create a new memory revision (NOT the
+    # old silent no-op).
+    _review(client, headers, "AMD", "approve", note="edited note")
+    all_rows = _memories(client, headers, include_inactive=True)
+    assert len(all_rows) == 2, "a materially different review_note must create a new memory revision"
+
+    active_rows = _memories(client, headers)
+    assert len(active_rows) == 1, "exactly one memory stays active/authoritative"
+    new_memory = active_rows[0]["memory"]
+    assert new_memory["review_note"] == "edited note"
+    assert new_memory["revision_of_memory_id"] == original_memory_id
+    assert new_memory["revision_reason"] == "newer_approved_review_evidence"
+
+    old_row = next(r for r in all_rows if r["memory"]["id"] == original_memory_id)
+    assert old_row["memory"]["review_note"] == "first note", \
+        "the ORIGINAL memory snapshot must not be overwritten -- immutability"
+    assert old_row["monitor_state"]["state"] == "SUPERSEDED"
+    assert old_row["monitor_state"]["superseded_by_memory_id"] == new_memory["id"]
 
 
 # --- I. reload/database persistence ---

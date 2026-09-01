@@ -129,7 +129,8 @@ def test_concurrent_approve_requests_never_duplicate_active_memory(db_path, monk
         c = TestClient(local_app)
         resp = c.post("/api/v1/scanner/candidates/AMD/visual-review", headers=headers, json={
             "source": "ma_pipeline", "market_structure": "bullish", "location_read": "good",
-            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes", "decision": "approve",
+            "clear_path_to_target": "yes", "lower_tf_confirmation": "yes",
+            "confirmation_rule": "close_above", "confirmation_level": 100.0, "decision": "approve",
         })
         results.append(resp.status_code)
 
@@ -146,8 +147,14 @@ def test_concurrent_approve_requests_never_duplicate_active_memory(db_path, monk
 
     import sqlite3
     conn = sqlite3.connect(db_path)
+    # CONFIRMED, not APPROVED -- both concurrent requests carry
+    # confirmation_rule/confirmation_level (Type A). This also confirms
+    # the revision-comparison logic correctly treats a byte-identical
+    # concurrent resubmission as "no difference" (a no-op), not as new
+    # evidence -- the two submitted bodies are exactly the same, so a
+    # second memory revision must NOT be created just because they raced.
     active_count = conn.execute(
-        "SELECT COUNT(*) FROM approved_setup_monitor_state WHERE state='APPROVED'"
+        "SELECT COUNT(*) FROM approved_setup_monitor_state WHERE state='CONFIRMED'"
     ).fetchone()[0]
     memory_count = conn.execute("SELECT COUNT(*) FROM approved_setup_memories").fetchone()[0]
     review_count = conn.execute("SELECT COUNT(*) FROM candidate_visual_reviews").fetchone()[0]

@@ -26,7 +26,7 @@ from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 import pandas as pd
 
-from market_data import AlpacaMarketDataProvider
+from market_data import AlpacaMarketDataProvider, EASTERN_TZ, market_session
 from scanner import (
     _batch_download,
     _best_contract,
@@ -789,7 +789,12 @@ def _ensure_candidate_visual_reviews_schema(conn: sqlite3.Connection) -> None:
                 trigger_timeframe TEXT,
                 trigger_rule TEXT,
                 trigger_level REAL,
-                trigger_reason TEXT
+                trigger_reason TEXT,
+                confirmation_timeframe TEXT,
+                confirmation_rule TEXT,
+                confirmation_level REAL,
+                confirmed_candle_time TEXT,
+                confirmation_note TEXT
             )
             """
         )
@@ -833,6 +838,32 @@ def _ensure_candidate_visual_reviews_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN trigger_level REAL")
     if "trigger_reason" not in columns:
         conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN trigger_reason TEXT")
+    # Observed Confirmation Anchor (2026-09 Execution Layer session): a
+    # SEPARATE field group from trigger_* above, deliberately not sharing
+    # storage with it -- see execution_layer_v1_implementation_plan.md
+    # section 1 for the full reasoning (every trigger_* row ever written
+    # means "future condition, not yet observed"; overloading that meaning
+    # with a status discriminator would make every future reader of
+    # trigger_level responsible for remembering to also check it). This
+    # group instead means "the reviewer already observed a completed
+    # candle satisfying this condition" -- lower_tf_confirmation="yes",
+    # not "not_yet". confirmed_candle_time is the market event's own
+    # timestamp (human-entered, never derived from reviewed_at, never
+    # validated against live market data here) -- deliberately distinct
+    # from reviewed_at (when the human filed the review), which can differ
+    # by hours or days. Nullable/additive, same as trigger_* -- an old row
+    # (including every real production review written before this existed)
+    # simply reads back NULL for all five, never fabricated.
+    if "confirmation_timeframe" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN confirmation_timeframe TEXT")
+    if "confirmation_rule" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN confirmation_rule TEXT")
+    if "confirmation_level" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN confirmation_level REAL")
+    if "confirmed_candle_time" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN confirmed_candle_time TEXT")
+    if "confirmation_note" not in columns:
+        conn.execute("ALTER TABLE candidate_visual_reviews ADD COLUMN confirmation_note TEXT")
     conn.commit()
 
 
@@ -858,6 +889,91 @@ def _ensure_approved_setup_memories_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN trigger_level REAL")
     if "trigger_reason" not in columns:
         conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN trigger_reason TEXT")
+    # Observed Confirmation Anchor -- see the matching comment on
+    # _ensure_candidate_visual_reviews_schema for the full semantic
+    # contract. Copied verbatim into the frozen snapshot at approval time,
+    # exactly like trigger_* -- once written, immutable with the rest of
+    # this row.
+    if "confirmation_timeframe" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN confirmation_timeframe TEXT")
+    if "confirmation_rule" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN confirmation_rule TEXT")
+    if "confirmation_level" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN confirmation_level REAL")
+    if "confirmed_candle_time" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN confirmed_candle_time TEXT")
+    if "confirmation_note" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN confirmation_note TEXT")
+    # Approved Setup Memory Revision (2026-09 Execution Layer session): see
+    # execution_layer_v1_implementation_plan.md section 4. revision_of_memory_id
+    # is NULL for a memory that starts a fresh setup_key generation (the
+    # pre-existing path, unchanged) and non-null only when this memory
+    # revises an EARLIER memory for the SAME setup_key because a new
+    # approve review supplied materially different human evidence (see
+    # _review_evidence_materially_differs). Set once at INSERT, never
+    # UPDATEd -- the revised-from memory row itself is never touched,
+    # preserving its own historical immutability exactly.
+    if "revision_of_memory_id" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN revision_of_memory_id INTEGER")
+    if "revision_reason" not in columns:
+        conn.execute("ALTER TABLE approved_setup_memories ADD COLUMN revision_reason TEXT")
+    conn.commit()
+
+
+def _ensure_approved_setup_monitor_state_schema(conn: sqlite3.Connection) -> None:
+    """approved_setup_monitor_state is also new this session and, like
+    approved_setup_memories before it, never needed a migration function
+    until now -- it's already a real, deployed table with real production
+    rows (FFIV/NVDA/CLH's monitor_state rows) by the time the Execution
+    Layer columns below were added. Same additive ALTER-if-missing pattern
+    as every other schema-evolution function in this file. A fresh
+    database gets the new shape directly from _initialize_candidates_schema's
+    own CREATE TABLE literal, so this is a no-op there.
+
+    Unlike approved_setup_memories, this table is genuinely mutable by
+    design (see its own header comment) -- every column added here gets
+    UPDATEd in place by the future monitor, not frozen at INSERT time.
+    """
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(approved_setup_monitor_state)").fetchall()}
+    if not columns:
+        return
+    # Approved Setup Memory Revision (execution_layer_v1_implementation_plan.md
+    # section 4.1): forward pointer, set via UPDATE in the same transaction
+    # that already flips a superseded row's state -- symmetric with
+    # approved_setup_memories.revision_of_memory_id's backward pointer.
+    # Used for BOTH the pre-existing different-setup_key supersede path and
+    # the new same-setup_key evidence-revision path; a genuinely new column
+    # value, not a change to any currently-observable behavior.
+    if "superseded_by_memory_id" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN superseded_by_memory_id INTEGER")
+    # Execution Layer V1 monitor columns (execution_layer_v1_implementation_plan.md
+    # sections 5/7/8). ACTIONABLE/EXTENDED are `state` values themselves
+    # (see ApprovedSetupMonitorStateName), NOT a separate field -- EXTENDED
+    # was already a pre-reserved `state` value from the prior design-only
+    # session, so a second, separately-named "live window verdict" column
+    # would have created two disagreeing sources of truth for the same
+    # question. `state` is UPDATEd freely between ACTIONABLE/EXTENDED as
+    # price moves (not one-way once a memory reaches its evidence gate),
+    # exactly the same UPDATE-in-place mechanism already used for
+    # WITHDRAWN/SUPERSEDED. trigger_satisfied_* are frozen once written
+    # (persisted exactly once, per the design audit's section 8) -- the
+    # specific completed 30m bar and price that satisfied a Type B trigger,
+    # kept even after `state` later moves on to ACTIONABLE/EXTENDED/STALE,
+    # distinct from "now" (the server may observe it up to one
+    # tick-interval late). last_evaluated_bar_time is the dedup/idempotency
+    # anchor so a tick that re-observes the same still-latest completed bar
+    # never re-fires a transition. current_rr_at_last_check is reused for
+    # both UI display and future alert bodies without recomputing.
+    if "trigger_satisfied_at" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN trigger_satisfied_at TEXT")
+    if "trigger_satisfied_bar_time" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN trigger_satisfied_bar_time TEXT")
+    if "trigger_satisfied_price" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN trigger_satisfied_price REAL")
+    if "last_evaluated_bar_time" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN last_evaluated_bar_time TEXT")
+    if "current_rr_at_last_check" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN current_rr_at_last_check REAL")
     conn.commit()
 
 
@@ -1138,7 +1254,14 @@ def _initialize_candidates_schema(conn) -> None:
             trigger_timeframe TEXT,
             trigger_rule TEXT,
             trigger_level REAL,
-            trigger_reason TEXT
+            trigger_reason TEXT,
+            confirmation_timeframe TEXT,
+            confirmation_rule TEXT,
+            confirmation_level REAL,
+            confirmed_candle_time TEXT,
+            confirmation_note TEXT,
+            revision_of_memory_id INTEGER,
+            revision_reason TEXT
         )
         """
     )
@@ -1166,10 +1289,17 @@ def _initialize_candidates_schema(conn) -> None:
             last_live_price REAL,
             last_live_entry REAL,
             invalidation_reason TEXT,
-            terminal_at TEXT
+            terminal_at TEXT,
+            superseded_by_memory_id INTEGER,
+            trigger_satisfied_at TEXT,
+            trigger_satisfied_bar_time TEXT,
+            trigger_satisfied_price REAL,
+            last_evaluated_bar_time TEXT,
+            current_rr_at_last_check REAL
         )
         """
     )
+    _ensure_approved_setup_monitor_state_schema(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_approved_setup_monitor_state_setup_key "
         "ON approved_setup_monitor_state (setup_key, state)"
@@ -1181,6 +1311,40 @@ def _initialize_candidates_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_approved_setup_monitor_state_memory "
         "ON approved_setup_monitor_state (approved_memory_id)"
+    )
+    # Execution Layer V1 alert contract (execution_layer_v1_implementation_plan.md
+    # section 10 / design audit section 12): append-only, ONE row per
+    # MEANINGFUL state transition a monitor tick actually makes (never one
+    # row per tick) -- this is the dedup log "only alert on meaningful
+    # state transition, no repeated alerts every monitor cycle" is built
+    # on, and (until a real delivery channel exists -- none does today,
+    # see the design audit) also the only durable record of what Kairos
+    # would have told the user. Kept as its own table, not folded into
+    # approved_setup_monitor_state, for the same B/C separation reason
+    # approved_setup_memories/approved_setup_monitor_state are already two
+    # tables: "current status" (mutable, one row) and "history of what
+    # happened" (append-only, many rows) are different concerns.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approved_setup_monitor_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            approved_memory_id INTEGER NOT NULL,
+            setup_key TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            source TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            from_state TEXT,
+            to_state TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            current_price REAL,
+            current_rr REAL,
+            detail TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approved_setup_monitor_events_memory "
+        "ON approved_setup_monitor_events (approved_memory_id, id)"
     )
     conn.execute(
         """
@@ -1433,6 +1597,18 @@ PracticalRejectionReason = Literal["options_too_expensive", "poor_option_liquidi
 # a schema migration (the column is already a plain nullable TEXT).
 TriggerTimeframe = Literal["30m"]
 TriggerRule = Literal["close_above", "close_below"]
+# Observed Confirmation Anchor (2026-09 Execution Layer session): reuses the
+# SAME validation vocabulary as trigger_timeframe/trigger_rule above (a
+# shared type alias, not shared storage -- see
+# execution_layer_v1_implementation_plan.md section 1 for why this field
+# group is intentionally NOT stored in trigger_timeframe/trigger_rule/
+# trigger_level/trigger_reason). ConfirmationTimeframe/ConfirmationRule are
+# distinct aliases only so each field's own type annotation is
+# self-documenting; their allowed values are identical to TriggerTimeframe/
+# TriggerRule today by design (same "30m"/"close_above"/"close_below"
+# vocabulary), not by coincidence.
+ConfirmationTimeframe = Literal["30m"]
+ConfirmationRule = Literal["close_above", "close_below"]
 
 
 class VisualReviewIn(BaseModel):
@@ -1448,11 +1624,26 @@ class VisualReviewIn(BaseModel):
     # all-or-nothing completeness rule (trigger_rule+trigger_level must be
     # both present or both absent) is enforced in
     # record_candidate_visual_review, not here, so the 422 message can
-    # explain the actual rule rather than Pydantic's generic one.
+    # explain the actual rule rather than Pydantic's generic one. Same
+    # deferred-to-endpoint pattern for confirmation_* below, PLUS the new
+    # mutual-exclusivity-with-lower_tf_confirmation rule and the
+    # required-when-approve-and-yes rule -- see execution_layer_v1_
+    # implementation_plan.md section 2.
     trigger_timeframe: Optional[TriggerTimeframe] = None
     trigger_rule: Optional[TriggerRule] = None
     trigger_level: Optional[float] = None
     trigger_reason: Optional[str] = None
+    # Observed Confirmation Anchor -- a reviewer-stated, already-occurred
+    # completed candle (lower_tf_confirmation="yes"), NOT a future trigger.
+    # confirmed_candle_time is the market event's own timestamp, human-
+    # entered as plain text/ISO8601, deliberately never derived from or
+    # compared against reviewed_at (different concepts -- see the module
+    # comment on _ensure_candidate_visual_reviews_schema).
+    confirmation_timeframe: Optional[ConfirmationTimeframe] = None
+    confirmation_rule: Optional[ConfirmationRule] = None
+    confirmation_level: Optional[float] = None
+    confirmed_candle_time: Optional[str] = None
+    confirmation_note: Optional[str] = None
 
 
 class CandidateVisualReviewOut(BaseModel):
@@ -1473,6 +1664,11 @@ class CandidateVisualReviewOut(BaseModel):
     trigger_rule: Optional[TriggerRule] = None
     trigger_level: Optional[float] = None
     trigger_reason: Optional[str] = None
+    confirmation_timeframe: Optional[ConfirmationTimeframe] = None
+    confirmation_rule: Optional[ConfirmationRule] = None
+    confirmation_level: Optional[float] = None
+    confirmed_candle_time: Optional[str] = None
+    confirmation_note: Optional[str] = None
 
 
 # Approved Setup Memory (2026-09 session, memory-foundation build). See
@@ -1487,8 +1683,35 @@ class CandidateVisualReviewOut(BaseModel):
 # three are real, agreed states with no automatic-transition logic wired
 # to them yet (deliberately out of scope here), not placeholders invented
 # for this task.
+#
+# CONFIRMED / TRIGGER_SATISFIED / ACTIONABLE / STALE added for the
+# Execution Layer V1 build (execution_layer_v1_implementation_plan.md
+# section 5): CONFIRMED = Type A's evidence gate cleared
+# (confirmation_rule/level present at approval), TRIGGER_SATISFIED = Type
+# B's evidence gate cleared (a completed 30m close matched
+# trigger_rule/trigger_level). Deliberately two distinct names for the
+# same downstream role (both make a memory eligible for the execution-
+# window/current-R:R check) rather than one shared name -- CONFIRMED
+# reflects something already true at approval time, while
+# TRIGGER_SATISFIED reflects something the monitor observed later; folding
+# them into one name would erase that real, useful distinction (real
+# alert-log entries, real freshness-clock anchors) for no benefit.
+#
+# ACTIONABLE is the live execution-window verdict, reached from CONFIRMED
+# or TRIGGER_SATISFIED once current-price R:R/distance checks pass --
+# deliberately a `state` value itself, NOT a separate column, because
+# EXTENDED already was one from the prior design-only session (a second,
+# separately-named "live window verdict" field would disagree with
+# `state` about the same question). `state` is UPDATEd freely between
+# ACTIONABLE and EXTENDED as price moves once a memory has cleared its
+# evidence gate -- not a one-way transition past that point, unlike
+# APPROVED->CONFIRMED->... which only ever moves forward.
+#
+# None of these five are written by this schema-only pass -- see the
+# implementation plan for what wires each transition.
 ApprovedSetupMonitorStateName = Literal[
-    "APPROVED", "WAITING_FOR_TRIGGER", "WITHDRAWN", "INVALIDATED", "EXTENDED", "SUPERSEDED",
+    "APPROVED", "WAITING_FOR_TRIGGER", "CONFIRMED", "TRIGGER_SATISFIED", "ACTIONABLE", "STALE",
+    "WITHDRAWN", "INVALIDATED", "EXTENDED", "SUPERSEDED",
 ]
 # "approval_event" = written at the moment a human actually approved this
 # exact setup_key -- every field is real, contemporaneous evidence.
@@ -1537,6 +1760,18 @@ class ApprovedSetupMemoryOut(BaseModel):
     trigger_rule: Optional[TriggerRule] = None
     trigger_level: Optional[float] = None
     trigger_reason: Optional[str] = None
+    confirmation_timeframe: Optional[ConfirmationTimeframe] = None
+    confirmation_rule: Optional[ConfirmationRule] = None
+    confirmation_level: Optional[float] = None
+    confirmed_candle_time: Optional[str] = None
+    confirmation_note: Optional[str] = None
+    # Approved Setup Memory Revision (implementation plan section 4.1):
+    # NULL for a memory that starts a fresh setup_key generation; non-null
+    # only when this memory revises an earlier memory for the SAME
+    # setup_key because a new approve review supplied materially different
+    # human evidence.
+    revision_of_memory_id: Optional[int] = None
+    revision_reason: Optional[str] = None
 
 
 class ApprovedSetupMonitorStateOut(BaseModel):
@@ -1553,6 +1788,20 @@ class ApprovedSetupMonitorStateOut(BaseModel):
     last_live_entry: Optional[float] = None
     invalidation_reason: Optional[str] = None
     terminal_at: Optional[str] = None
+    # Approved Setup Memory Revision: forward pointer to whichever memory
+    # made THIS row's memory non-authoritative (a genuinely new setup_key
+    # generation OR an evidence revision on the same setup_key).
+    superseded_by_memory_id: Optional[int] = None
+    # Execution Layer V1 monitor columns -- see the module comment on
+    # _ensure_approved_setup_monitor_state_schema for what each one means
+    # and why (the live ACTIONABLE/EXTENDED verdict is `state` itself, not
+    # a separate field here -- see ApprovedSetupMonitorStateName). All
+    # None until a future monitor tick populates them.
+    trigger_satisfied_at: Optional[str] = None
+    trigger_satisfied_bar_time: Optional[str] = None
+    trigger_satisfied_price: Optional[float] = None
+    last_evaluated_bar_time: Optional[str] = None
+    current_rr_at_last_check: Optional[float] = None
 
 
 class ApprovedSetupMemoryRecordOut(BaseModel):
@@ -4714,6 +4963,14 @@ def _row_to_visual_review(row: sqlite3.Row) -> dict:
         "trigger_rule": row["trigger_rule"] if "trigger_rule" in keys else None,
         "trigger_level": row["trigger_level"] if "trigger_level" in keys else None,
         "trigger_reason": row["trigger_reason"] if "trigger_reason" in keys else None,
+        # Confirmation fields: same "never fabricated" guarantee as
+        # trigger_* above -- NULL for every row written before this
+        # feature existed.
+        "confirmation_timeframe": row["confirmation_timeframe"] if "confirmation_timeframe" in keys else None,
+        "confirmation_rule": row["confirmation_rule"] if "confirmation_rule" in keys else None,
+        "confirmation_level": row["confirmation_level"] if "confirmation_level" in keys else None,
+        "confirmed_candle_time": row["confirmed_candle_time"] if "confirmed_candle_time" in keys else None,
+        "confirmation_note": row["confirmation_note"] if "confirmation_note" in keys else None,
     }
 
 
@@ -4769,7 +5026,16 @@ def list_candidate_visual_reviews(
 # included for forward-compatibility with the state machine already
 # agreed in the prior design-only session -- no code path here produces
 # them yet.
-ACTIVE_MONITOR_STATES = {"APPROVED", "WAITING_FOR_TRIGGER", "EXTENDED"}
+# Extended for Execution Layer V1 (execution_layer_v1_implementation_plan.md
+# section 5): CONFIRMED/TRIGGER_SATISFIED/ACTIONABLE/STALE are all real,
+# non-terminal states a memory can sit in while it's still the operative
+# approval for its setup_key -- STALE in particular is NOT terminal
+# (nothing about the thesis was contradicted, it just needs fresh human
+# evidence; a fresh review still finds this memory "active" for the
+# revision-vs-fresh-approval decision in _sync_approved_setup_memory_on_review).
+ACTIVE_MONITOR_STATES = {
+    "APPROVED", "WAITING_FOR_TRIGGER", "CONFIRMED", "TRIGGER_SATISFIED", "ACTIONABLE", "EXTENDED", "STALE",
+}
 TERMINAL_MONITOR_STATES = {"WITHDRAWN", "INVALIDATED", "SUPERSEDED"}
 
 
@@ -4814,10 +5080,18 @@ def _row_to_approved_setup_memory(row: sqlite3.Row) -> dict:
         "trigger_rule": row["trigger_rule"] if "trigger_rule" in row.keys() else None,
         "trigger_level": row["trigger_level"] if "trigger_level" in row.keys() else None,
         "trigger_reason": row["trigger_reason"] if "trigger_reason" in row.keys() else None,
+        "confirmation_timeframe": row["confirmation_timeframe"] if "confirmation_timeframe" in row.keys() else None,
+        "confirmation_rule": row["confirmation_rule"] if "confirmation_rule" in row.keys() else None,
+        "confirmation_level": row["confirmation_level"] if "confirmation_level" in row.keys() else None,
+        "confirmed_candle_time": row["confirmed_candle_time"] if "confirmed_candle_time" in row.keys() else None,
+        "confirmation_note": row["confirmation_note"] if "confirmation_note" in row.keys() else None,
+        "revision_of_memory_id": row["revision_of_memory_id"] if "revision_of_memory_id" in row.keys() else None,
+        "revision_reason": row["revision_reason"] if "revision_reason" in row.keys() else None,
     }
 
 
 def _row_to_approved_setup_monitor_state(row: sqlite3.Row) -> dict:
+    keys = row.keys()
     return {
         "id": row["id"],
         "approved_memory_id": row["approved_memory_id"],
@@ -4832,6 +5106,12 @@ def _row_to_approved_setup_monitor_state(row: sqlite3.Row) -> dict:
         "last_live_entry": row["last_live_entry"],
         "invalidation_reason": row["invalidation_reason"],
         "terminal_at": row["terminal_at"],
+        "superseded_by_memory_id": row["superseded_by_memory_id"] if "superseded_by_memory_id" in keys else None,
+        "trigger_satisfied_at": row["trigger_satisfied_at"] if "trigger_satisfied_at" in keys else None,
+        "trigger_satisfied_bar_time": row["trigger_satisfied_bar_time"] if "trigger_satisfied_bar_time" in keys else None,
+        "trigger_satisfied_price": row["trigger_satisfied_price"] if "trigger_satisfied_price" in keys else None,
+        "last_evaluated_bar_time": row["last_evaluated_bar_time"] if "last_evaluated_bar_time" in keys else None,
+        "current_rr_at_last_check": row["current_rr_at_last_check"] if "current_rr_at_last_check" in keys else None,
     }
 
 
@@ -4874,14 +5154,22 @@ def _create_approved_setup_memory(
     trigger_rule: Optional[str] = None,
     trigger_level: Optional[float] = None,
     trigger_reason: Optional[str] = None,
+    confirmation_timeframe: Optional[str] = None,
+    confirmation_rule: Optional[str] = None,
+    confirmation_level: Optional[float] = None,
+    confirmed_candle_time: Optional[str] = None,
+    confirmation_note: Optional[str] = None,
+    revision_of_memory_id: Optional[int] = None,
+    revision_reason: Optional[str] = None,
+    supersede_monitor_state_id: Optional[int] = None,
 ) -> int:
     """Inserts exactly one new approved_setup_memories row plus its paired
-    approved_setup_monitor_state row (state=APPROVED), in the SAME
-    transaction -- a memory without a monitor_state, or vice versa, should
-    never be observable. Every execution-plan/scanner-evidence field comes
-    from `preview`, the SAME dict the caller already computed via
-    _compute_review_queue_preview (or, for backfill, the review-queue's
-    own per-candidate preview) -- no new market-data call is made here.
+    approved_setup_monitor_state row, in the SAME transaction -- a memory
+    without a monitor_state, or vice versa, should never be observable.
+    Every execution-plan/scanner-evidence field comes from `preview`, the
+    SAME dict the caller already computed via _compute_review_queue_preview
+    (or, for backfill, the review-queue's own per-candidate preview) -- no
+    new market-data call is made here.
 
     Also handles superseding: if an OLDER active memory exists for this
     exact (ticker, source) under a DIFFERENT setup_key, its monitor_state
@@ -4893,12 +5181,38 @@ def _create_approved_setup_memory(
     and only knowable at the moment that approval is created, requires no
     live-market check, and has exactly one correct answer.
 
-    trigger_timeframe/rule/level/reason (if given) are copied verbatim
-    into the memory row -- an explicit human-defined objective condition
-    recorded at review time (see VisualReviewIn's own comment for the
-    full contract), NOT anything derived from `preview`. Once written,
-    frozen with the rest of the snapshot exactly like every other field
-    here.
+    trigger_timeframe/rule/level/reason and confirmation_timeframe/rule/
+    level/candle_time/note (if given) are copied verbatim into the memory
+    row -- explicit human-recorded evidence (see VisualReviewIn's own
+    comment for the full contract), NOT anything derived from `preview`.
+    Once written, frozen with the rest of the snapshot exactly like every
+    other field here.
+
+    Approved Setup Memory Revision (execution_layer_v1_implementation_plan.md
+    section 4): revision_of_memory_id/revision_reason, when given, are
+    copied verbatim into the new memory row (lineage, immutable once
+    written -- the OLD memory row this one revises is never touched).
+    supersede_monitor_state_id, when given, is a SEPARATE mechanism from
+    the different-setup_key loop below: it explicitly retires one specific
+    monitor_state row (the active row for the setup_key being revised,
+    found by the caller BEFORE calling this function) by id, since the
+    different-setup_key loop below can never catch a same-setup_key
+    revision (its whole point is comparing setup_key, which is identical
+    here by definition).
+
+    The new monitor_state row's initial `state` is decided here, once,
+    from which evidence group this memory actually has -- CONFIRMED
+    immediately if confirmation_rule/level are present (Type A: the
+    reviewer already observed the confirming candle, no future event to
+    wait for), WAITING_FOR_TRIGGER if only trigger_rule/level are present
+    (Type B: a real future condition to monitor), or APPROVED if neither
+    is present (legacy/incomplete evidence -- correctly stuck until a
+    fresh human review supplies one or the other). This is a brand-new
+    INSERT every time, never a copy of any prior monitor_state row, so a
+    revision's new monitor_state starts with every execution-tracking
+    column NULL -- nothing carries forward from what it revises (see the
+    implementation plan section 4.4 for why this is deliberate, not an
+    oversight).
 
     Returns the new approved_setup_memories.id.
     """
@@ -4915,8 +5229,10 @@ def _create_approved_setup_memory(
             sweep_confirmed, rejection_confirmed, execution_shadow_ok,
             confluence_label, confluence_counts_json, location_label, location_alignment,
             snapshot_origin, snapshot_exact, backfill_note,
-            trigger_timeframe, trigger_rule, trigger_level, trigger_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            trigger_timeframe, trigger_rule, trigger_level, trigger_reason,
+            confirmation_timeframe, confirmation_rule, confirmation_level, confirmed_candle_time, confirmation_note,
+            revision_of_memory_id, revision_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticker, source, direction, setup_key, approved_at, visual_review_id,
@@ -4934,25 +5250,43 @@ def _create_approved_setup_memory(
             preview.get("location_label"), preview.get("location_alignment"),
             snapshot_origin, 1 if snapshot_exact else 0, backfill_note,
             trigger_timeframe, trigger_rule, trigger_level, trigger_reason,
+            confirmation_timeframe, confirmation_rule, confirmation_level, confirmed_candle_time, confirmation_note,
+            revision_of_memory_id, revision_reason,
         ),
     )
     memory_id = cursor.lastrowid
+
+    if confirmation_rule is not None and confirmation_level is not None:
+        initial_state = "CONFIRMED"
+    elif trigger_rule is not None and trigger_level is not None:
+        initial_state = "WAITING_FOR_TRIGGER"
+    else:
+        initial_state = "APPROVED"
 
     conn.execute(
         """
         INSERT INTO approved_setup_monitor_state (
             approved_memory_id, setup_key, ticker, source, state, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'APPROVED', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (memory_id, setup_key, ticker, source, approved_at, approved_at),
+        (memory_id, setup_key, ticker, source, initial_state, approved_at, approved_at),
     )
 
     for stale_row in _active_monitor_state_rows_for_ticker_source(conn, ticker, source):
         if stale_row["setup_key"] != setup_key:
             conn.execute(
-                "UPDATE approved_setup_monitor_state SET state='SUPERSEDED', updated_at=?, terminal_at=? WHERE id=?",
-                (approved_at, approved_at, stale_row["id"]),
+                "UPDATE approved_setup_monitor_state SET state='SUPERSEDED', updated_at=?, terminal_at=?, "
+                "superseded_by_memory_id=? WHERE id=?",
+                (approved_at, approved_at, memory_id, stale_row["id"]),
             )
+
+    if supersede_monitor_state_id is not None:
+        conn.execute(
+            "UPDATE approved_setup_monitor_state SET state='SUPERSEDED', updated_at=?, terminal_at=?, "
+            "superseded_by_memory_id=? WHERE id=?",
+            (approved_at, approved_at, memory_id, supersede_monitor_state_id),
+        )
+
     return memory_id
 
 
@@ -4971,6 +5305,91 @@ def _withdraw_active_memory_for_setup_key(conn, setup_key: str, at: str) -> bool
         (at, at, active["id"]),
     )
     return True
+
+
+def _review_evidence_materially_differs(
+    old_memory_row: sqlite3.Row,
+    *,
+    market_structure: Optional[str],
+    location_read: Optional[str],
+    clear_path_to_target: Optional[str],
+    lower_tf_confirmation: Optional[str],
+    review_note: Optional[str],
+    trigger_timeframe: Optional[str],
+    trigger_rule: Optional[str],
+    trigger_level: Optional[float],
+    trigger_reason: Optional[str],
+    confirmation_timeframe: Optional[str],
+    confirmation_rule: Optional[str],
+    confirmation_level: Optional[float],
+    confirmed_candle_time: Optional[str],
+    confirmation_note: Optional[str],
+) -> bool:
+    """Approved Setup Memory Revision (execution_layer_v1_implementation_plan.md
+    section 4.2): explicit, deterministic comparison of a NEW approve
+    review's human-authored evidence against what an already-active memory
+    for the SAME setup_key has frozen. Compares EXACTLY the fields listed
+    in the decision -- nothing else, and never reviewed_at/id/any
+    timestamp -- so a byte-identical resubmission, or a resubmission that
+    only differs in reviewed_at, always compares as "no difference" and
+    stays a no-op (the pre-existing behavior for an unchanged re-approve).
+
+    Deliberately EXCLUDES every mechanical/live-computed field (approved_
+    entry/stop/target/risk_reward, current_price_at_approval, entry_
+    distance/proximity_*_at_approval, bos_confirmed, displacement_*,
+    macro_bias, sweep_confirmed, rejection_confirmed, execution_shadow_ok,
+    confluence_*, location_label/alignment) -- those always get a fresh
+    value from `preview` on any new review regardless of whether the human
+    said anything new, so comparing them would make an ordinary rescan
+    look indistinguishable from real new evidence.
+
+    Text fields (review_note, trigger_reason, confirmation_note) are
+    compared after a trivial .strip() (a stray trailing space from a form
+    field must never manufacture a false revision) but are otherwise
+    compared byte-for-byte -- no case-folding, no fuzzy matching.
+    trigger_level/confirmation_level are compared for EXACT equality, not
+    with a rounding tolerance -- unlike stop/target elsewhere in this
+    codebase (recomputed floats that genuinely need tolerance), these are
+    raw human-typed values stored and read back unchanged. Any single
+    field differing is sufficient -- returns True on the first mismatch
+    found, no weighting or partial-credit logic.
+    """
+    def _norm_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text if text else None
+
+    keys = old_memory_row.keys()
+
+    def _old(name: str) -> Any:
+        return old_memory_row[name] if name in keys else None
+
+    for name, new_value in (
+        ("review_note", review_note),
+        ("trigger_reason", trigger_reason),
+        ("confirmation_note", confirmation_note),
+    ):
+        if _norm_text(_old(name)) != _norm_text(new_value):
+            return True
+
+    for name, new_value in (
+        ("market_structure", market_structure),
+        ("location_read", location_read),
+        ("clear_path_to_target", clear_path_to_target),
+        ("lower_tf_confirmation", lower_tf_confirmation),
+        ("trigger_timeframe", trigger_timeframe),
+        ("trigger_rule", trigger_rule),
+        ("trigger_level", trigger_level),
+        ("confirmation_timeframe", confirmation_timeframe),
+        ("confirmation_rule", confirmation_rule),
+        ("confirmation_level", confirmation_level),
+        ("confirmed_candle_time", confirmed_candle_time),
+    ):
+        if _old(name) != new_value:
+            return True
+
+    return False
 
 
 def _sync_approved_setup_memory_on_review(
@@ -4993,27 +5412,71 @@ def _sync_approved_setup_memory_on_review(
     trigger_rule: Optional[str] = None,
     trigger_level: Optional[float] = None,
     trigger_reason: Optional[str] = None,
+    confirmation_timeframe: Optional[str] = None,
+    confirmation_rule: Optional[str] = None,
+    confirmation_level: Optional[float] = None,
+    confirmed_candle_time: Optional[str] = None,
+    confirmation_note: Optional[str] = None,
 ) -> None:
     """Called once per POST .../visual-review, right after the
     candidate_visual_reviews INSERT, using the SAME setup_key/preview that
     write already computed -- no new market-data call.
 
-    decision == "approve": if setup_key already has an active memory,
-    this is a no-op (re-affirming/editing an already-approved setup, e.g.
-    only the note changed -- must NOT create a duplicate active memory,
-    and must NOT let the "immutable at approval time" snapshot drift).
-    Otherwise, a fresh memory is created (covers a first-time approve, a
-    watch/reject -> approve transition, and a fresh approve on a
-    materially new setup_key alike -- all three are, correctly, "this
-    exact setup_key has no active approval yet").
+    decision == "approve", no active memory for this setup_key: a fresh
+    memory is created (covers a first-time approve, a watch/reject ->
+    approve transition, and a fresh approve on a materially new setup_key
+    alike -- all three are, correctly, "this exact setup_key has no active
+    approval yet").
+
+    decision == "approve", an active memory already exists for this exact
+    setup_key: Approved Setup Memory Revision
+    (execution_layer_v1_implementation_plan.md section 4). If the new
+    review's evidence is byte-identical to what's already frozen (per
+    _review_evidence_materially_differs), this stays a no-op -- exactly
+    the pre-existing behavior for re-affirming/editing an already-approved
+    setup with nothing evidentiary changed, and the "immutable at approval
+    time" snapshot never drifts. If the evidence DIFFERS, a NEW memory
+    generation is created for the SAME setup_key (revision_of_memory_id
+    pointing back at the old one), the old memory's monitor_state is
+    retired to SUPERSEDED, and the new memory becomes authoritative --
+    this is the fix for the real bug where a genuinely new human
+    confirmation (e.g. lower_tf_confirmation flipping not_yet -> yes with
+    a real confirmation anchor) was previously silently discarded.
+    Critically, this is NOT a new setup-generation change (setup_key is
+    identical) -- it is an approval-evidence revision; the old memory row
+    itself is never UPDATEd, only superseded via its monitor_state, so it
+    remains queryable historical evidence forever (include_inactive=true
+    on GET /candidates/approved-setup-memory still returns it).
 
     decision in ("watch", "reject"): withdraws whatever active memory
     exists for this setup_key, if any. A watch/reject on a setup that was
     never approved is a safe no-op (nothing to withdraw).
     """
     if decision == "approve":
-        if _active_monitor_state_row_for_setup_key(conn, setup_key) is not None:
-            return
+        active = _active_monitor_state_row_for_setup_key(conn, setup_key)
+        revision_of_memory_id: Optional[int] = None
+        revision_reason: Optional[str] = None
+        supersede_monitor_state_id: Optional[int] = None
+        if active is not None:
+            old_memory_row = conn.execute(
+                "SELECT * FROM approved_setup_memories WHERE id=?",
+                (active["approved_memory_id"],),
+            ).fetchone()
+            if old_memory_row is None or not _review_evidence_materially_differs(
+                old_memory_row,
+                market_structure=market_structure, location_read=location_read,
+                clear_path_to_target=clear_path_to_target, lower_tf_confirmation=lower_tf_confirmation,
+                review_note=review_note,
+                trigger_timeframe=trigger_timeframe, trigger_rule=trigger_rule,
+                trigger_level=trigger_level, trigger_reason=trigger_reason,
+                confirmation_timeframe=confirmation_timeframe, confirmation_rule=confirmation_rule,
+                confirmation_level=confirmation_level, confirmed_candle_time=confirmed_candle_time,
+                confirmation_note=confirmation_note,
+            ):
+                return
+            revision_of_memory_id = old_memory_row["id"]
+            revision_reason = "newer_approved_review_evidence"
+            supersede_monitor_state_id = active["id"]
         _create_approved_setup_memory(
             conn,
             ticker=ticker, source=source, direction=direction, setup_key=setup_key,
@@ -5024,6 +5487,11 @@ def _sync_approved_setup_memory_on_review(
             snapshot_origin="approval_event", snapshot_exact=True,
             trigger_timeframe=trigger_timeframe, trigger_rule=trigger_rule,
             trigger_level=trigger_level, trigger_reason=trigger_reason,
+            confirmation_timeframe=confirmation_timeframe, confirmation_rule=confirmation_rule,
+            confirmation_level=confirmation_level, confirmed_candle_time=confirmed_candle_time,
+            confirmation_note=confirmation_note,
+            revision_of_memory_id=revision_of_memory_id, revision_reason=revision_reason,
+            supersede_monitor_state_id=supersede_monitor_state_id,
         )
     elif decision in ("watch", "reject"):
         _withdraw_active_memory_for_setup_key(conn, setup_key, reviewed_at)
@@ -5195,6 +5663,21 @@ def backfill_approved_setup_memories(
                 trigger_rule=review_row["trigger_rule"] if "trigger_rule" in review_row.keys() else None,
                 trigger_level=review_row["trigger_level"] if "trigger_level" in review_row.keys() else None,
                 trigger_reason=review_row["trigger_reason"] if "trigger_reason" in review_row.keys() else None,
+                # Confirmation fields: same "read exactly what the OLD review
+                # row has, never fabricate" rule as trigger_* above. NULL for
+                # every one of FFIV/NVDA/CLH's real historical approvals --
+                # this feature didn't exist when those reviews were written.
+                # Not special-cased: if backfill is ever re-run after a
+                # setup_key's review row genuinely does carry a confirmation
+                # anchor (a fresh non-backfill approve already created its
+                # own memory by then, so this path wouldn't even run for
+                # it -- see _active_monitor_state_row_for_setup_key check
+                # above), this simply reads whatever is really there.
+                confirmation_timeframe=review_row["confirmation_timeframe"] if "confirmation_timeframe" in review_row.keys() else None,
+                confirmation_rule=review_row["confirmation_rule"] if "confirmation_rule" in review_row.keys() else None,
+                confirmation_level=review_row["confirmation_level"] if "confirmation_level" in review_row.keys() else None,
+                confirmed_candle_time=review_row["confirmed_candle_time"] if "confirmed_candle_time" in review_row.keys() else None,
+                confirmation_note=review_row["confirmation_note"] if "confirmation_note" in review_row.keys() else None,
             )
             backfilled.append({"ticker": ticker, "setup_key": setup_key, "memory_id": memory_id})
         conn.commit()
@@ -5203,6 +5686,443 @@ def backfill_approved_setup_memories(
             "skipped_already_active": skipped_already_active,
             "skipped_no_approve_review": skipped_no_approve_review,
         }
+    finally:
+        conn.close()
+
+
+def _parse_iso_to_utc(value: Optional[str]) -> Optional[datetime]:
+    """Shared timestamp parser for both request-validation (well-formedness
+    only, e.g. confirmed_candle_time) and monitor freshness math (real
+    elapsed-time comparisons). Handles the plain 'Z' UTC suffix explicitly
+    since datetime.fromisoformat doesn't accept it on the Python version
+    this service runs (3.9) -- same minimal normalization main.py's own
+    _coerce_utc_datetime already applies for the identical reason,
+    reimplemented locally here rather than imported to avoid a
+    candidates_router -> main import (main already imports
+    candidates_router as its router, so the reverse would be circular)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_parseable_timestamp(value: str) -> bool:
+    """Well-formedness check ONLY for confirmed_candle_time -- never a
+    market-data lookup, never compared against what the market actually
+    did."""
+    return _parse_iso_to_utc(value) is not None
+
+
+# ---------------------------------------------------------------------------
+# Execution Layer V1 -- server-side monitor. Design/rationale lives in
+# execution_layer_v1_design_audit.md (sections 5, 6, 7, 8, 9, 11, 12, 15)
+# and execution_layer_v1_implementation_plan.md (sections 5-9) -- this is
+# the implementation of that already-agreed design, not a new decision.
+#
+# Scope discipline (repeated here because it's the single most important
+# constraint on this section): operates ONLY on approved_setup_monitor_state
+# rows already in ACTIVE_MONITOR_STATES (typically 5-20 real approvals),
+# NEVER the 550+-symbol scanner universe. Never writes candidate_promotions,
+# never computes ENTER_NOW, never infers a trigger/confirmation Kairos
+# wasn't explicitly told about, never revives a terminal (INVALIDATED/
+# WITHDRAWN/SUPERSEDED) memory, never calls an EXTENDED setup ACTIONABLE.
+# ---------------------------------------------------------------------------
+
+MONITOR_TICK_SECONDS = 300  # 5 minutes -- design audit section 11: checking
+# every 30s would be wasteful against a bar that only closes every 30
+# minutes; 5 minutes discovers a new completed close within 5 minutes of
+# it happening -- acceptable latency for this use case, not HFT. Reused
+# directly as the register_background_periodic_task TTL (see main.py).
+
+# Unvalidated placeholder, same honesty-about-thresholds convention as
+# every other constant in this file (RR_WARNING_THRESHOLD,
+# ENTRY_PROXIMITY_MAX_PCT_DEFAULT, etc.) -- design audit section 3/9,
+# implementation plan section 5: a CONFIRMED/TRIGGER_SATISFIED memory
+# decays to STALE after this many hours without the human acting, so a
+# week-old confirmation can never silently read as a fresh ACTIONABLE
+# signal on its own. Not backed by real forward evidence yet.
+EXECUTION_EVIDENCE_FRESHNESS_HOURS = 72
+
+# States whose evidence gate has already cleared -- eligible for the
+# execution-window/current-R:R check every tick (design audit section 9).
+# STALE is deliberately EXCLUDED: once a memory goes stale, the monitor's
+# job for it is done until a fresh human review supersedes it (implementation
+# plan section 4) -- it does not auto-revive back to ACTIONABLE on its own.
+EVIDENCE_CLEARED_MONITOR_STATES = {"CONFIRMED", "TRIGGER_SATISFIED", "ACTIONABLE", "EXTENDED"}
+
+
+def _monitor_active_rows(conn) -> list[sqlite3.Row]:
+    placeholders = ",".join("?" for _ in ACTIVE_MONITOR_STATES)
+    return conn.execute(
+        f"SELECT * FROM approved_setup_monitor_state WHERE state IN ({placeholders})",
+        tuple(ACTIVE_MONITOR_STATES),
+    ).fetchall()
+
+
+def _is_invalidated(direction: str, current_price: float, approved_stop: float) -> bool:
+    """Design audit section 5: intrabar breach of the FROZEN approved_stop
+    -- deliberately not "completed candle only" (unlike trigger
+    satisfaction). A real stop-loss order does not wait for a candle to
+    close, and a false-positive invalidation (a wick that reverses) just
+    costs a re-review, while a false negative (still reading tradeable
+    after a real stop-out) is the dangerous direction -- see the audit's
+    own asymmetry reasoning. Symmetric: LONG invalidated at price <=
+    stop, SHORT at price >= stop."""
+    if direction == "long":
+        return current_price <= approved_stop
+    if direction == "short":
+        return current_price >= approved_stop
+    return False
+
+
+def _current_rr(direction: str, current_price: float, approved_stop: float, approved_target: float) -> Optional[float]:
+    """Design audit section 7 -- current-price R:R using the FROZEN
+    approved_stop/approved_target, never a live-recomputed stop/target."""
+    if direction == "long":
+        risk = current_price - approved_stop
+        reward = approved_target - current_price
+    elif direction == "short":
+        risk = approved_stop - current_price
+        reward = current_price - approved_target
+    else:
+        return None
+    if risk <= 0:
+        return None
+    return reward / risk
+
+
+def _execution_window_state(current_rr: Optional[float]) -> str:
+    """ACTIONABLE vs EXTENDED -- design audit section 6: gated on
+    current-price R:R alone, using RR_WARNING_THRESHOLD -- the SAME
+    constant Stage 1 candidate qualification and the target-clamp's own
+    min_viable_rr already use, reused rather than inventing a second,
+    different "acceptable R:R" number for this new question. A distance-
+    based backstop was explicitly evaluated and rejected as a SEPARATE
+    gate (design audit section 6): for a LONG setup, reward shrinks and
+    risk grows as price rises toward target, so R:R alone already
+    degrades exactly when price has "chased" too far -- a second,
+    independently-thresholded distance check could only ever disagree
+    with R:R, never usefully agree, so it is not implemented as a gate.
+    """
+    if current_rr is None or current_rr < RR_WARNING_THRESHOLD:
+        return "EXTENDED"
+    return "ACTIONABLE"
+
+
+def _evidence_freshness_anchor(
+    *,
+    trigger_satisfied_at: Optional[str],
+    confirmed_candle_time: Optional[str],
+    approved_at: str,
+) -> Optional[str]:
+    """The real 'when did the qualifying market event happen' timestamp --
+    NEVER reviewed_at/approved_at alone when a more specific anchor
+    exists (design audit section 8: the completed-candle timestamp and
+    reviewed_at are different concepts and must not be conflated). Type B
+    (trigger_satisfied_at set): that is always the most specific anchor
+    available. Type A: confirmed_candle_time if the reviewer gave one,
+    else approved_at (the review's own timestamp) as the best available
+    stand-in -- never fabricated beyond what was actually recorded.
+    """
+    if trigger_satisfied_at:
+        return trigger_satisfied_at
+    return confirmed_candle_time or approved_at
+
+
+def _is_stale(anchor_iso: Optional[str], now: datetime) -> bool:
+    if not anchor_iso:
+        return False
+    anchor = _parse_iso_to_utc(anchor_iso)
+    if anchor is None:
+        return False
+    return (now - anchor) > timedelta(hours=EXECUTION_EVIDENCE_FRESHNESS_HOURS)
+
+
+def _rows_from_30m_bars_frame(df) -> list[dict[str, Any]]:
+    """Same shape/conversion as _rows_from_4h_bars_frame, deliberately
+    NOT shared with it (that function's own EXECUTION_SHADOW_RECENT_RANGE_BARS
+    tail-count is specific to the execution_shadow feature) -- only the
+    last few bars are ever needed here to check for a newly completed
+    30m close."""
+    try:
+        df = _flatten_columns(df.copy()).dropna().astype(float)
+    except Exception:
+        return []
+    required = {"Open", "High", "Low", "Close"}
+    if df.empty or not required.issubset(set(df.columns)):
+        return []
+    rows: list[dict[str, Any]] = []
+    for index, row in df.tail(4).iterrows():
+        rows.append(
+            {
+                "time": _bar_time_iso(index),
+                "open": _as_float(row.get("Open")),
+                "high": _as_float(row.get("High")),
+                "low": _as_float(row.get("Low")),
+                "close": _as_float(row.get("Close")),
+            }
+        )
+    return rows
+
+
+def _fetch_recent_30m_bars(ticker: str) -> list[dict[str, Any]]:
+    """Single live attempt -- no retry, no cache (unlike the 4H execution-
+    shadow path, this only runs for the small active-monitor set, on a
+    5-minute tick, so a single miss is cheaply retried on the NEXT tick
+    rather than needing an in-request retry)."""
+    try:
+        raw = AlpacaMarketDataProvider().download([ticker], period="5d", interval="30m", auto_adjust=True)
+    except Exception as exc:
+        logger.warning("[approved_setup_monitor] 30m bar download failed ticker=%s error=%s", ticker, exc)
+        return []
+    if raw is None or raw.empty:
+        return []
+    return _rows_from_30m_bars_frame(raw)
+
+
+def _last_completed_30m_bar(bars: list[dict[str, Any]], now: datetime) -> Optional[dict[str, Any]]:
+    """The most recent COMPLETED 30m bar -- design audit section 8 /
+    implementation plan section 8: completed candles only, never an
+    intrabar wick. Session-aware via market_data.market_session (public,
+    imported) -- once the market is closed, every fetched bar is already
+    completed (no further ticks can arrive before the next session);
+    during a session, the single latest bar is excluded if its own
+    30-minute window has not yet fully elapsed. Deliberately
+    reimplemented here rather than importing market_data.py's PRIVATE
+    _is_forming_candle -- that helper has, to date, only ever been
+    exercised in a diagnostics/comparison context, never a live gating
+    role (see design audit section 8's own caution) -- this gets its own
+    dedicated test coverage instead of inherited trust by association.
+    """
+    if not bars:
+        return None
+    now_et = now.astimezone(EASTERN_TZ)
+    session = market_session(now_et)
+    latest = bars[-1]
+    if session == "closed":
+        return latest
+    latest_time = _parse_iso_to_utc(latest.get("time"))
+    if latest_time is None:
+        return latest
+    latest_et = latest_time.astimezone(EASTERN_TZ)
+    forming = latest_et <= now_et < latest_et + timedelta(minutes=30)
+    if not forming:
+        return latest
+    return bars[-2] if len(bars) >= 2 else None
+
+
+def _trigger_satisfied(rule: Optional[str], level: Optional[float], bar: Optional[dict[str, Any]]) -> bool:
+    """Design audit section 4/8: a COMPLETED candle closing strictly
+    beyond trigger_level -- explicitly not an intrabar touch. `bar` must
+    already be the result of _last_completed_30m_bar, never the raw
+    latest bar."""
+    if bar is None or rule is None or level is None:
+        return False
+    close = bar.get("close")
+    if close is None:
+        return False
+    if rule == "close_above":
+        return close > level
+    if rule == "close_below":
+        return close < level
+    return False
+
+
+def _record_monitor_event(
+    conn,
+    *,
+    approved_memory_id: int,
+    setup_key: str,
+    ticker: str,
+    source: str,
+    from_state: Optional[str],
+    to_state: str,
+    occurred_at: str,
+    current_price: Optional[float] = None,
+    current_rr: Optional[float] = None,
+    detail: Optional[str] = None,
+) -> None:
+    """Design audit section 12's dedup rule: only logs when the verdict
+    actually differs from the LAST LOGGED event for this memory --
+    compares against the most recent event's own to_state, not
+    monitor_state.state directly, so a long run of ticks that all
+    recompute the SAME to_state (e.g. ACTIONABLE holding true for hours)
+    never re-logs, and "no repeated alerts every monitor cycle" holds
+    without any extra bookkeeping. This is the alert CONTRACT (data +
+    dedup) -- no delivery transport exists in this codebase (confirmed in
+    the design audit), so this table is, for now, the complete alert
+    surface; a future UI reads it directly."""
+    last = conn.execute(
+        "SELECT to_state FROM approved_setup_monitor_events WHERE approved_memory_id=? ORDER BY id DESC LIMIT 1",
+        (approved_memory_id,),
+    ).fetchone()
+    if last is not None and last["to_state"] == to_state:
+        return
+    conn.execute(
+        """
+        INSERT INTO approved_setup_monitor_events (
+            approved_memory_id, setup_key, ticker, source, event_type,
+            from_state, to_state, occurred_at, current_price, current_rr, detail
+        ) VALUES (?, ?, ?, ?, 'state_transition', ?, ?, ?, ?, ?, ?)
+        """,
+        (approved_memory_id, setup_key, ticker, source, from_state, to_state, occurred_at, current_price, current_rr, detail),
+    )
+
+
+def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
+    """Execution Layer V1 monitor -- one tick. Registered via
+    register_background_periodic_task("approved_setup_monitor",
+    MONITOR_TICK_SECONDS, ...) in main.py, the SAME in-process daemon
+    thread/mechanism candidate_promotion_outcome_watcher already uses for
+    comparable periodic, batched-market-data-consuming work (design audit
+    section 11) -- no new scheduling infrastructure.
+
+    Order per row, every tick: invalidation checked FIRST and always
+    (using the frozen approved_stop, intrabar) -- if invalidated, that's
+    terminal and nothing else is evaluated for that row this tick.
+    Otherwise, Type B rows still WAITING_FOR_TRIGGER get checked against
+    the latest COMPLETED 30m bar; any row whose evidence gate has already
+    cleared (CONFIRMED, freshly-TRIGGER_SATISFIED, or already
+    ACTIONABLE/EXTENDED from a prior tick) gets a fresh current-R:R/
+    execution-window verdict and a freshness/staleness check, in that
+    order. A row that's still genuinely APPROVED (legacy, no trigger or
+    confirmation ever recorded) or still WAITING_FOR_TRIGGER with no
+    satisfying bar yet is left exactly where it is.
+
+    A tick that can't get a fresh, usable live quote for a ticker leaves
+    every row for that ticker entirely untouched this tick (last_checked_at
+    does not advance) -- never forces a stale/wrong verdict from missing
+    data (design audit section 11's "warn and skip, never guess").
+    """
+    conn = _get_db()
+    try:
+        rows = _monitor_active_rows(conn)
+        if not rows:
+            return {"checked": 0, "updated": 0, "reason": reason}
+
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+
+        memory_by_id: dict[int, sqlite3.Row] = {}
+        for row in rows:
+            if row["approved_memory_id"] in memory_by_id:
+                continue
+            memory_row = conn.execute(
+                "SELECT * FROM approved_setup_memories WHERE id=?",
+                (row["approved_memory_id"],),
+            ).fetchone()
+            if memory_row is not None:
+                memory_by_id[row["approved_memory_id"]] = memory_row
+
+        tickers = sorted({row["ticker"] for row in rows if row["approved_memory_id"] in memory_by_id})
+        quotes = _latest_quotes_for_previews([{"ticker": ticker} for ticker in tickers])
+
+        # Only rows genuinely still waiting on a Type B trigger need a bar
+        # fetch at all -- design audit section 6's cost split.
+        waiting_tickers = sorted({
+            row["ticker"] for row in rows
+            if row["state"] == "WAITING_FOR_TRIGGER" and row["approved_memory_id"] in memory_by_id
+        })
+        bars_by_ticker = {ticker: _fetch_recent_30m_bars(ticker) for ticker in waiting_tickers}
+
+        checked = 0
+        updated = 0
+        for row in rows:
+            memory_row = memory_by_id.get(row["approved_memory_id"])
+            if memory_row is None:
+                continue
+            checked += 1
+
+            quote = quotes.get(row["ticker"])
+            current_price: Optional[float] = None
+            if quote is not None:
+                try:
+                    current_price = float(quote.get("price"))
+                except (TypeError, ValueError):
+                    current_price = None
+            if current_price is None or current_price <= 0:
+                continue  # no fresh, usable price -- leave this row untouched this tick
+
+            direction = str(memory_row["direction"] or "").strip().lower()
+            approved_stop = memory_row["approved_stop"]
+            approved_target = memory_row["approved_target"]
+            if approved_stop is None or direction not in ("long", "short"):
+                continue
+
+            update_fields: dict[str, Any] = {"last_checked_at": now_iso, "last_live_price": current_price}
+            current_state = row["state"]
+            new_state = current_state
+            current_rr = None
+            if approved_target is not None:
+                current_rr = _current_rr(direction, current_price, approved_stop, approved_target)
+
+            if _is_invalidated(direction, current_price, approved_stop):
+                new_state = "INVALIDATED"
+                update_fields["terminal_at"] = now_iso
+                comparator = "<=" if direction == "long" else ">="
+                update_fields["invalidation_reason"] = (
+                    f"current price {current_price} {comparator} approved stop {approved_stop}"
+                )
+            else:
+                if current_state == "WAITING_FOR_TRIGGER" and memory_row["trigger_rule"] and memory_row["trigger_level"] is not None:
+                    bars = bars_by_ticker.get(row["ticker"]) or []
+                    if bars:
+                        update_fields["last_evaluated_bar_time"] = bars[-1].get("time")
+                    completed = _last_completed_30m_bar(bars, now)
+                    if _trigger_satisfied(memory_row["trigger_rule"], memory_row["trigger_level"], completed):
+                        new_state = "TRIGGER_SATISFIED"
+                        update_fields["trigger_satisfied_at"] = now_iso
+                        update_fields["trigger_satisfied_bar_time"] = completed.get("time")
+                        update_fields["trigger_satisfied_price"] = completed.get("close")
+
+                if new_state in EVIDENCE_CLEARED_MONITOR_STATES:
+                    update_fields["current_rr_at_last_check"] = current_rr
+                    trigger_satisfied_at = update_fields.get("trigger_satisfied_at", row["trigger_satisfied_at"])
+                    confirmed_candle_time = (
+                        memory_row["confirmed_candle_time"] if "confirmed_candle_time" in memory_row.keys() else None
+                    )
+                    anchor = _evidence_freshness_anchor(
+                        trigger_satisfied_at=trigger_satisfied_at,
+                        confirmed_candle_time=confirmed_candle_time,
+                        approved_at=memory_row["approved_at"],
+                    )
+                    if _is_stale(anchor, now):
+                        new_state = "STALE"
+                    else:
+                        new_state = _execution_window_state(current_rr)
+
+            if new_state != current_state:
+                update_fields["state"] = new_state
+                updated += 1
+
+            set_clause = ", ".join(f"{key}=?" for key in update_fields)
+            conn.execute(
+                f"UPDATE approved_setup_monitor_state SET {set_clause} WHERE id=?",
+                (*update_fields.values(), row["id"]),
+            )
+
+            if new_state != current_state:
+                _record_monitor_event(
+                    conn,
+                    approved_memory_id=row["approved_memory_id"],
+                    setup_key=row["setup_key"],
+                    ticker=row["ticker"],
+                    source=row["source"],
+                    from_state=current_state,
+                    to_state=new_state,
+                    occurred_at=now_iso,
+                    current_price=current_price,
+                    current_rr=current_rr,
+                )
+
+        conn.commit()
+        return {"checked": checked, "updated": updated, "reason": reason}
     finally:
         conn.close()
 
@@ -5317,6 +6237,89 @@ def record_candidate_visual_review(
         )
     trigger_reason = review.trigger_reason
 
+    # Observed Confirmation Anchor (2026-09 Execution Layer session). Same
+    # all-or-nothing completeness contract as trigger_rule/trigger_level
+    # above -- see execution_layer_v1_implementation_plan.md section 2.
+    # confirmed_candle_time is checked only for well-formedness (parses as
+    # a timestamp) -- never checked against what the market actually did
+    # at that time; no market-data call is made anywhere in this
+    # validation, matching the trigger contract's own explicit rule.
+    has_confirmation_rule = review.confirmation_rule is not None
+    has_confirmation_level = review.confirmation_level is not None
+    if has_confirmation_rule != has_confirmation_level:
+        raise HTTPException(
+            status_code=422,
+            detail="confirmation_rule and confirmation_level must both be set together, or both omitted.",
+        )
+    confirmation_timeframe: Optional[str] = None
+    confirmation_rule: Optional[str] = None
+    confirmation_level: Optional[float] = None
+    if has_confirmation_rule and has_confirmation_level:
+        c_level = review.confirmation_level
+        if not math.isfinite(c_level) or c_level <= 0:
+            raise HTTPException(status_code=422, detail="confirmation_level must be a positive, finite number.")
+        confirmation_timeframe = review.confirmation_timeframe or "30m"
+        confirmation_rule = review.confirmation_rule
+        confirmation_level = c_level
+    elif review.confirmation_timeframe is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="confirmation_timeframe requires confirmation_rule and confirmation_level to also be set.",
+        )
+    confirmed_candle_time = review.confirmed_candle_time
+    if confirmed_candle_time is not None and not _is_parseable_timestamp(confirmed_candle_time):
+        raise HTTPException(
+            status_code=422,
+            detail="confirmed_candle_time must be a parseable timestamp (e.g. ISO 8601).",
+        )
+    confirmation_note = review.confirmation_note
+
+    # Mutual exclusivity (new -- tightens trigger_* too, which had no such
+    # check before this session): a future trigger and an observed
+    # confirmation are two different concepts about two different moments
+    # -- a review can never sensibly carry both, and neither belongs on a
+    # practical-rejection review (no chart was read at all). Checked
+    # BEFORE the not_yet/yes-requirement checks below, deliberately: a
+    # practical-rejection review always has lower_tf_confirmation=None
+    # (enforced by the visual_fields check way above), which would
+    # otherwise make this exact combination unreachable behind the more
+    # generic "requires not_yet"/"requires yes" messages below and hide
+    # the real, more specific reason from the caller.
+    if review.practical_rejection_reason is not None and (
+        trigger_rule is not None or confirmation_rule is not None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="trigger_rule/confirmation_rule cannot be combined with practical_rejection_reason -- "
+                   "a practical rejection is recorded before chart review; there is no future trigger or "
+                   "observed confirmation to record yet.",
+        )
+    if trigger_rule is not None and review.lower_tf_confirmation != "not_yet":
+        raise HTTPException(
+            status_code=422,
+            detail="trigger_rule/trigger_level (a FUTURE condition to wait for) require "
+                   "lower_tf_confirmation=\"not_yet\".",
+        )
+    if confirmation_rule is not None and review.lower_tf_confirmation != "yes":
+        raise HTTPException(
+            status_code=422,
+            detail="confirmation_rule/confirmation_level (an ALREADY-OBSERVED confirmation) require "
+                   "lower_tf_confirmation=\"yes\".",
+        )
+
+    # Required-when-approve-and-yes (the user's explicit decision, scoped
+    # precisely -- see execution_layer_v1_implementation_plan.md section 2
+    # rule D): a NEW approved setup with lower_tf_confirmation="yes" must
+    # supply an objective confirmation anchor going forward. NOT extended
+    # to watch/reject -- those never create a memory, so there is no
+    # Execution Layer consequence to leaving it optional there.
+    if review.decision == "approve" and review.lower_tf_confirmation == "yes" and confirmation_rule is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Approving a setup with lower_tf_confirmation=\"yes\" requires confirmation_rule and "
+                   "confirmation_level -- describe the completed candle you already observed.",
+        )
+
     conn = _get_db()
     try:
         candidate = conn.execute(
@@ -5343,8 +6346,10 @@ def record_candidate_visual_review(
                 ticker, source, setup_key, review_type, market_structure, location_read,
                 clear_path_to_target, lower_tf_confirmation, practical_rejection_reason,
                 decision, note, reviewed_at,
-                trigger_timeframe, trigger_rule, trigger_level, trigger_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trigger_timeframe, trigger_rule, trigger_level, trigger_reason,
+                confirmation_timeframe, confirmation_rule, confirmation_level,
+                confirmed_candle_time, confirmation_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_ticker,
@@ -5363,6 +6368,11 @@ def record_candidate_visual_review(
                 trigger_rule,
                 trigger_level,
                 trigger_reason,
+                confirmation_timeframe,
+                confirmation_rule,
+                confirmation_level,
+                confirmed_candle_time,
+                confirmation_note,
             ),
         )
         visual_review_id = cursor.lastrowid
@@ -5391,6 +6401,11 @@ def record_candidate_visual_review(
             trigger_rule=trigger_rule,
             trigger_level=trigger_level,
             trigger_reason=trigger_reason,
+            confirmation_timeframe=confirmation_timeframe,
+            confirmation_rule=confirmation_rule,
+            confirmation_level=confirmation_level,
+            confirmed_candle_time=confirmed_candle_time,
+            confirmation_note=confirmation_note,
         )
         conn.commit()
         row = conn.execute(
