@@ -204,7 +204,18 @@ def test_long_invalidated_when_price_at_or_below_approved_stop(client, headers, 
         "AMD": {"price": approved_stop - 0.01, "timestamp": "2026-08-20T18:30:00Z",
                 "source": "mock_latest_quote", "price_branch": "mid"},
     })
-    result = router.run_approved_setup_monitor_tick("test")
+    # Entry-Reached Alert V1's quote-freshness guard compares the quote's
+    # own timestamp against the tick's real "now" -- freeze "now" to
+    # match the quote's timestamp above so it reads as fresh (this test
+    # predates that guard and used a real wall-clock-independent fixed
+    # quote timestamp, which the guard would otherwise read as stale).
+    import datetime as dt
+    now = dt.datetime(2026, 8, 20, 18, 30, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(router, "datetime", type("_dt", (dt.datetime,), {"now": staticmethod(lambda tz=None: now)}))
+    try:
+        result = router.run_approved_setup_monitor_tick("test")
+    finally:
+        monkeypatch.setattr(router, "datetime", dt.datetime)
     assert result["checked"] == 1
     assert result["updated"] == 1
 
@@ -214,9 +225,20 @@ def test_long_invalidated_when_price_at_or_below_approved_stop(client, headers, 
     assert "approved stop" in after["invalidation_reason"]
 
     events = _events(db_path, memory_id)
-    assert len(events) == 1
-    assert events[0]["to_state"] == "INVALIDATED"
-    assert events[0]["from_state"] == "CONFIRMED"
+    # Entry-Reached Alert V1: a LONG's approved_stop is always below
+    # approved_entry by construction, so this same price (past the stop)
+    # is necessarily also past the frozen entry -- entry-reached fires
+    # honestly on this same first-observation tick, ordered BEFORE the
+    # invalidation transition (see run_approved_setup_monitor_tick's own
+    # ordering contract). Two real, distinct events, not a duplicate.
+    assert len(events) == 2
+    entry_reached = [e for e in events if e["event_type"] == "ENTRY_REACHED"]
+    transitions = [e for e in events if e["event_type"] != "ENTRY_REACHED"]
+    assert len(entry_reached) == 1
+    assert len(transitions) == 1
+    assert entry_reached[0]["id"] < transitions[0]["id"]
+    assert transitions[0]["to_state"] == "INVALIDATED"
+    assert transitions[0]["from_state"] == "CONFIRMED"
 
 
 def test_short_invalidated_when_price_at_or_above_approved_stop():
@@ -587,6 +609,12 @@ def test_event_log_does_not_duplicate_the_same_transition(client, headers, tmp_p
     router.run_approved_setup_monitor_tick("test")
 
     events = _events(db_path, memory_id)
+    # Entry-Reached Alert V1's quote-freshness guard fails closed on this
+    # mock's dummy, unparseable "t" timestamp -- no ENTRY_REACHED event is
+    # expected here (unlike the invalidation test above, which explicitly
+    # freezes "now" to match a real timestamp). This test's own original
+    # assertion stands unchanged: three ticks producing the SAME
+    # ACTIONABLE verdict must log exactly one event, not three.
     assert len(events) == 1, "three ticks producing the SAME ACTIONABLE verdict must log exactly one event, not three"
     assert events[0]["to_state"] == "ACTIONABLE"
 

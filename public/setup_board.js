@@ -172,6 +172,26 @@
     return value == null ? '--' : Number(value).toFixed(digits);
   }
 
+  // Entry-Reached Alert V1: the SERVER's persisted verdict
+  // (monitor_state.entry_reached_at/entry_reached_price) is the only
+  // source of truth here -- never inferred ad hoc in the browser from
+  // item.current_price vs. item.entry_price, which would be re-deriving
+  // a judgment the monitor already makes deterministically (and could
+  // disagree with it, e.g. right after a price briefly wicks back). "The
+  // reviewed location is available" is explicitly NOT "confirmation
+  // satisfied" -- the pending-confirmation suffix is added only when the
+  // row is still WAITING_FOR_TRIGGER, regardless of source_decision.
+  function entryReachedLine(record) {
+    const ms = record && record.monitor_state;
+    if (!ms || !ms.entry_reached_at) return 'Entry not reached';
+    const when = new Date(ms.entry_reached_at).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+    const price = ms.entry_reached_price != null ? ` at ${fmtMoney(ms.entry_reached_price)}` : '';
+    const pending = ms.state === 'WAITING_FOR_TRIGGER' ? ' — confirmation still pending' : '';
+    return `Entry reached ${when}${price}${pending}`;
+  }
+
   function fmtPct(value) {
     return value == null ? '--' : `${Number(value).toFixed(2)}%`;
   }
@@ -595,6 +615,8 @@
           <span class="current-price-label">Current Price</span>
           <span class="current-price-value">${fmtMoney(item.current_price)}</span>
         </div>
+
+        <div class="entry-reached-line">${escapeHtml(entryReachedLine(record))}</div>
 
         <div class="metric-grid primary-metrics">
           <div class="metric"><div class="metric-label">Entry</div><div class="metric-value">${fmtMoney(item.entry_price)}</div></div>

@@ -986,6 +986,18 @@ def _ensure_approved_setup_monitor_state_schema(conn: sqlite3.Connection) -> Non
         conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN last_evaluated_bar_time TEXT")
     if "current_rr_at_last_check" not in columns:
         conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN current_rr_at_last_check REAL")
+    # Entry-Reached Alert V1: frozen once written (never overwritten,
+    # same "persist exactly once" convention as trigger_satisfied_at
+    # above), and doubles as the dedup gate itself -- a row with
+    # entry_reached_at already set is never re-evaluated for this event
+    # again, no separate lookup needed. entry_reached_price is the real
+    # OBSERVED price at detection time (never the frozen approved_entry
+    # itself -- a gap-through is real evidence of where price actually
+    # was, not a fabricated print at the exact entry level).
+    if "entry_reached_at" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN entry_reached_at TEXT")
+    if "entry_reached_price" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN entry_reached_price REAL")
     conn.commit()
 
 
@@ -1308,7 +1320,9 @@ def _initialize_candidates_schema(conn) -> None:
             trigger_satisfied_bar_time TEXT,
             trigger_satisfied_price REAL,
             last_evaluated_bar_time TEXT,
-            current_rr_at_last_check REAL
+            current_rr_at_last_check REAL,
+            entry_reached_at TEXT,
+            entry_reached_price REAL
         )
         """
     )
@@ -1827,6 +1841,11 @@ class ApprovedSetupMonitorStateOut(BaseModel):
     trigger_satisfied_price: Optional[float] = None
     last_evaluated_bar_time: Optional[str] = None
     current_rr_at_last_check: Optional[float] = None
+    # Entry-Reached Alert V1: a persisted, deduplicated LOCATION event --
+    # "the reviewed entry became available," never "confirmation
+    # satisfied" or "actionable." None until the monitor observes it.
+    entry_reached_at: Optional[str] = None
+    entry_reached_price: Optional[float] = None
 
 
 class ApprovedSetupMemoryRecordOut(BaseModel):
@@ -5138,6 +5157,8 @@ def _row_to_approved_setup_monitor_state(row: sqlite3.Row) -> dict:
         "trigger_satisfied_price": row["trigger_satisfied_price"] if "trigger_satisfied_price" in keys else None,
         "last_evaluated_bar_time": row["last_evaluated_bar_time"] if "last_evaluated_bar_time" in keys else None,
         "current_rr_at_last_check": row["current_rr_at_last_check"] if "current_rr_at_last_check" in keys else None,
+        "entry_reached_at": row["entry_reached_at"] if "entry_reached_at" in keys else None,
+        "entry_reached_price": row["entry_reached_price"] if "entry_reached_price" in keys else None,
     }
 
 
@@ -6239,6 +6260,190 @@ def _record_monitor_event(
     )
 
 
+# ---------------------------------------------------------------------------
+# Entry-Reached Alert V1 (entry_reached_alert_v1_audit.md)
+#
+# "The reviewed location is available." Not confirmation, not ACTIONABLE,
+# not ENTER_NOW, not trade authorization. Reuses approved_setup_memories/
+# approved_setup_monitor_state/approved_setup_monitor_events exactly --
+# no new table, no competing state machine. The authoritative entry is
+# ALWAYS approved_setup_memories.approved_entry (frozen at review time),
+# never a live/drifting scanner entry.
+#
+# Eligibility: audited against the real state names in
+# ApprovedSetupMonitorStateName, not invented aliases. Terminal states
+# (INVALIDATED/WITHDRAWN/SUPERSEDED) are already excluded structurally --
+# _monitor_active_rows only ever returns ACTIVE_MONITOR_STATES rows, so a
+# terminal row is never even seen here. EXTENDED is explicitly excluded
+# per spec (a setup whose execution window is already gone must never
+# get a fresh entry-reached alert).
+#
+# STALE excluded (decision confirmed 2026-09, reversing the V1 draft's
+# initial "leave it eligible" default): once a memory reaches STALE, this
+# monitor's OWN existing design already treats it as effectively done --
+# STALE rows are deliberately never re-evaluated for
+# EVIDENCE_CLEARED_MONITOR_STATES transitions and never auto-revive on
+# their own (see EVIDENCE_CLEARED_MONITOR_STATES's own comment: "once a
+# memory goes stale, the monitor's job for it is done until a fresh human
+# review supersedes it"). Confirmed no conflict with that existing
+# behavior: invalidation still runs for a STALE row every tick regardless
+# (unconditional, first, for every active row) -- excluding STALE from
+# entry-reached eligibility doesn't touch that at all, it only stops a
+# NEW opportunity-style alert from firing for a thesis the human has
+# already, functionally, stopped acting on. A STALE row can still reach
+# entry AFTER a fresh human review supersedes it -- that creates a
+# genuinely new memory row (a new setup generation), which gets its own,
+# fully independent eligibility and dedup scope.
+ENTRY_REACHED_INELIGIBLE_STATES = {"EXTENDED", "STALE"}
+
+# Quote-freshness audit (2026-09, before production): _latest_quotes_for_
+# previews (AlpacaMarketDataProvider.latest_quotes in market_data.py)
+# already carries a real, authoritative quote timestamp -- Alpaca's own
+# "t" field off its /v2/stocks/quotes/latest NBBO response, an RFC3339 UTC
+# string (see quote["timestamp"] = quote.get("t")) -- but it was, until
+# now, DISCARDED at this call site: run_approved_setup_monitor_tick reads
+# quote.get("price") only, never quote.get("timestamp"). Confirmed this is
+# true for the WHOLE monitor, not just entry-reached -- invalidation and
+# current-R:R still use whatever price comes back with no age check at
+# all, exactly as before; that broader gap is unchanged here (see the
+# module's earlier "no freshness enforced anywhere" note) -- ONLY
+# entry-reached gets this new, narrow guard, per explicit instruction not
+# to change unrelated scanner/monitor behavior.
+#
+# The price itself: AlpacaMarketDataProvider._quote_price returns the
+# bid/ask midpoint when both sides are present ("midpoint" branch), or a
+# one-sided bid/ask otherwise -- entry-reached does NOT special-case the
+# one-sided branch the way _entry_proximity's ENTER_NOW gate does
+# (distrust + fall back to daily close): the far coarser location
+# question this event answers ("did price cross a specific level") is
+# much less sensitive to a few cents of one-sided-quote noise than
+# _entry_proximity's tight ATR-based proximity gate is, and a location
+# event that fires a tick late because of a stale one-sided print is a
+# far smaller cost than the actionability gate reading confidently wrong.
+# What DOES matter here is the quote's AGE, not its bid/ask sidedness.
+#
+# Alpaca's IEX feed (the default; no `feed=sip` param is sent anywhere in
+# this codebase) only trades during the regular session -- a "latest
+# quote" fetched pre-market/after-hours/on a weekend returns the most
+# recent quote IEX actually has, i.e. a real, well-formed, two-sided
+# response object that is nonetheless HOURS OR DAYS stale. This could not
+# be verified against live Alpaca infrastructure from this environment
+# (no working API credentials here), so this is Alpaca's documented IEX
+# behavior plus this codebase's own prior finding (BRK.B/AER, see
+# _entry_proximity's comment) that a "valid-looking" quote object can
+# still be far from anything currently true -- not an empirical
+# confirmation. The guard below is deliberately timestamp-based rather
+# than session-based specifically because it doesn't care WHY a quote is
+# old (closed market, a stuck feed, anything else) -- it only checks the
+# one fact that actually matters: how long ago Alpaca itself says this
+# quote was captured.
+#
+# ENTRY_REACHED_QUOTE_MAX_AGE_MINUTES: unvalidated placeholder, same
+# honesty-about-thresholds convention as every other constant in this
+# file. 15 minutes is generous against MONITOR_TICK_SECONDS=300 (5 min)
+# real-trading latency (an IEX quote should be seconds old during actual
+# market activity) while still decisively rejecting an hours/days-stale
+# closed-market quote -- not backed by real forward evidence yet.
+ENTRY_REACHED_QUOTE_MAX_AGE_MINUTES = 15
+
+
+def _entry_reached_quote_is_fresh(quote: Optional[dict[str, Any]], now: datetime) -> bool:
+    """Fail-closed: a missing quote, a missing/unparseable timestamp, or a
+    timestamp older than ENTRY_REACHED_QUOTE_MAX_AGE_MINUTES all read as
+    NOT fresh -- entry-reached simply does not evaluate this tick (the
+    row is left untouched for THIS check only; last_live_price/
+    invalidation/R:R are unaffected, and a later, genuinely fresh tick
+    can still fire normally -- no evidence is lost, nothing is
+    fabricated). Reuses _parse_iso_to_utc, the same shared parser
+    _is_stale already uses for its own freshness math."""
+    if not quote:
+        return False
+    timestamp = _parse_iso_to_utc(str(quote.get("timestamp")) if quote.get("timestamp") is not None else None)
+    if timestamp is None:
+        return False
+    return (now - timestamp) <= timedelta(minutes=ENTRY_REACHED_QUOTE_MAX_AGE_MINUTES)
+
+
+def _entry_reached(
+    direction: str,
+    previous_price: Optional[float],
+    current_price: float,
+    approved_entry: float,
+) -> bool:
+    """Touch/cross contract -- a price-LEVEL event, not a completed-30m-
+    candle rule (deliberately NOT the RTH bar machinery used for
+    structural triggers). previous_price is the row's own
+    last_live_price from BEFORE this tick's update (None only on this
+    memory's very first-ever monitor observation -- never reset by a
+    restart, since last_live_price is a real persisted column). Equality
+    counts on both sides. A gap through the level counts as reached at
+    whatever price was actually observed -- never fabricates an exact
+    print at approved_entry itself."""
+    if previous_price is None:
+        # First observation while active: already on/past the reached
+        # side counts immediately -- this is also the correct,
+        # deterministic restart/outage contract (recover using whatever
+        # persisted previous-price evidence exists; when none exists,
+        # judge only from what's observed right now, never invent an
+        # earlier crossing time).
+        if direction == "long":
+            return current_price <= approved_entry
+        if direction == "short":
+            return current_price >= approved_entry
+        return False
+    if direction == "long":
+        return previous_price > approved_entry and current_price <= approved_entry
+    if direction == "short":
+        return previous_price < approved_entry and current_price >= approved_entry
+    return False
+
+
+def _record_entry_reached_event(
+    conn,
+    *,
+    approved_memory_id: int,
+    setup_key: str,
+    ticker: str,
+    source: str,
+    state: str,
+    occurred_at: str,
+    current_price: float,
+    current_rr: Optional[float],
+    approved_entry: float,
+    previous_price: Optional[float],
+) -> None:
+    """Deliberately bypasses _record_monitor_event's generic dedup
+    (compares only against the LAST LOGGED event's to_state for this
+    memory). That rule is unsuitable here: EVIDENCE_CLEARED_MONITOR_STATES
+    rows can legitimately revisit an earlier to_state value over their
+    lifetime (e.g. CONFIRMED -> EXTENDED -> CONFIRMED again if current
+    R:R recovers), so routing an ENTRY_REACHED insert through it could
+    silently swallow a genuine, never-before-logged entry-reached event
+    purely because its to_state (the row's own unchanged current state --
+    this is an observational event, not a transition, so from_state ==
+    to_state deliberately) happens to coincide with an unrelated,
+    already-logged state-transition event. Dedup for this event type is
+    the caller's own check instead (monitor_state.entry_reached_at IS
+    NULL), keyed on approved_memory_id -- the durable memory/setup-
+    generation identity, exactly as specified; a later genuinely new
+    setup generation gets its own row and its own independent dedup
+    scope."""
+    conn.execute(
+        """
+        INSERT INTO approved_setup_monitor_events (
+            approved_memory_id, setup_key, ticker, source, event_type,
+            from_state, to_state, occurred_at, current_price, current_rr, detail
+        ) VALUES (?, ?, ?, ?, 'ENTRY_REACHED', ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            approved_memory_id, setup_key, ticker, source,
+            state, state, occurred_at, current_price, current_rr,
+            f"observed price {current_price} reached the frozen entry {approved_entry}"
+            + (f" (previous observed price {previous_price})" if previous_price is not None else " (first observation while active)"),
+        ),
+    )
+
+
 def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
     """Execution Layer V1 monitor -- one tick. Registered via
     register_background_periodic_task("approved_setup_monitor",
@@ -6275,6 +6480,34 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
     every row for that ticker entirely untouched this tick (last_checked_at
     does not advance) -- never forces a stale/wrong verdict from missing
     data (design audit section 11's "warn and skip, never guess").
+
+    Entry-Reached Alert V1 (entry_reached_alert_v1_audit.md): evaluated
+    per row, once, right after current_rr is computed and BEFORE
+    invalidation/trigger/actionability -- so its event always gets a
+    lower id than any state-transition event this same tick, even one
+    that independently invalidates or hands off the same row this same
+    tick (eligibility uses the row's PRE-tick state, deliberately not
+    gated on this tick's own conclusions). Deliberately NOT gated to
+    regular-session-only, despite that being the initial ask -- see the
+    audit report's "market-closed / extended-hours semantics" section:
+    last_live_price advances on EVERY tick regardless of session (true
+    for the whole monitor already, unchanged), so a session gate on ONLY
+    this check would silently let an off-session tick "consume" the
+    crossing evidence into last_live_price before a later, gated
+    regular-session tick ever got to see it as fresh -- permanently
+    missing a genuine overnight gap-through rather than correctly
+    recovering it. Matching the rest of this monitor's existing,
+    uniformly session-blind cadence avoids that trap and needs no new
+    schema. Confirmed session-blind still, decision reaffirmed 2026-09
+    (no dedicated RTH-previous-price field added). EXTENDED and STALE are
+    both ineligible for a new entry-reached event (see
+    ENTRY_REACHED_INELIGIBLE_STATES's own comment for the STALE decision
+    and why it doesn't conflict with STALE's existing no-auto-revival
+    semantics). Gated on a narrow, entry-reached-only quote-freshness
+    check (_entry_reached_quote_is_fresh) -- invalidation/current-R:R
+    below are UNCHANGED and still evaluate against whatever price comes
+    back with no age check at all, exactly as before this feature
+    existed.
     """
     conn = _get_db()
     try:
@@ -6337,6 +6570,25 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
             current_rr = None
             if approved_target is not None:
                 current_rr = _current_rr(direction, current_price, approved_stop, approved_target)
+
+            approved_entry = memory_row["approved_entry"]
+            if (
+                approved_entry is not None
+                and current_state not in ENTRY_REACHED_INELIGIBLE_STATES
+                and row["entry_reached_at"] is None
+                and _entry_reached_quote_is_fresh(quote, now)
+                and _entry_reached(direction, row["last_live_price"], current_price, approved_entry)
+            ):
+                update_fields["entry_reached_at"] = now_iso
+                update_fields["entry_reached_price"] = current_price
+                _record_entry_reached_event(
+                    conn,
+                    approved_memory_id=row["approved_memory_id"],
+                    setup_key=row["setup_key"], ticker=row["ticker"], source=row["source"],
+                    state=current_state, occurred_at=now_iso,
+                    current_price=current_price, current_rr=current_rr,
+                    approved_entry=approved_entry, previous_price=row["last_live_price"],
+                )
 
             if _is_invalidated(direction, current_price, approved_stop):
                 new_state = "INVALIDATED"

@@ -609,6 +609,85 @@ async function run() {
   memoryQueue = [];
   fetchQueue = [];
 
+  // ==========================================================================
+  // Section N -- Entry-Reached Alert V1: the persisted server verdict
+  // (monitor_state.entry_reached_at/entry_reached_price) is the ONLY
+  // source of truth for this line, never inferred ad hoc from
+  // item.current_price. ---
+  board.state.decision = 'approve';
+
+  // N1. No entry_reached_at at all -- "Entry not reached".
+  const notReachedCandidate = candidate({
+    ticker: 'AAA', current_review: review('approve'),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([notReachedCandidate]) }];
+  memoryQueue = [{
+    status: 200,
+    body: [{
+      memory: memoryRecord().memory,
+      monitor_state: { id: 1, approved_memory_id: 1, state: 'CONFIRMED', entry_reached_at: null, entry_reached_price: null },
+    }],
+  }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Entry not reached'), 'N1: no entry_reached_at renders "Entry not reached"');
+  memoryQueue = [];
+
+  // N2. entry_reached_at set, state already past WAITING_FOR_TRIGGER --
+  // plain "Entry reached <date> at $<price>", no pending suffix.
+  const reachedCandidate = candidate({
+    ticker: 'AAA', current_review: review('approve'),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([reachedCandidate]) }];
+  memoryQueue = [{
+    status: 200,
+    body: [{
+      memory: memoryRecord().memory,
+      monitor_state: {
+        id: 1, approved_memory_id: 1, state: 'ACTIONABLE',
+        entry_reached_at: '2026-09-02T14:35:00Z', entry_reached_price: 60.90,
+      },
+    }],
+  }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Entry reached'), 'N2: entry_reached_at renders "Entry reached"');
+  assert.ok(elements.mainContent.innerHTML.includes('$60.90'), 'N2: observed entry-reached price renders');
+  assert.ok(!elements.mainContent.innerHTML.includes('confirmation still pending'), 'N2: no pending suffix once past WAITING_FOR_TRIGGER');
+  memoryQueue = [];
+
+  // N3. entry_reached_at set, but STILL WAITING_FOR_TRIGGER -- location
+  // reached, confirmation not yet -- "confirmation still pending" suffix
+  // required (location != confirmation, must read as pending, not done).
+  board.state.decision = 'watch';
+  const watchReachedCandidate = candidate({
+    ticker: 'AAA', current_review: review('watch', { lower_tf_confirmation: 'not_yet', trigger_rule: 'close_above', trigger_level: 62.0, trigger_timeframe: '30m' }),
+  });
+  fetchQueue = [{ status: 200, body: queuePayload([watchReachedCandidate]) }];
+  memoryQueue = [{
+    status: 200,
+    body: [{
+      memory: { ...memoryRecord().memory, source_decision: 'watch', trigger_rule: 'close_above', trigger_level: 62.0, trigger_timeframe: '30m' },
+      monitor_state: {
+        id: 1, approved_memory_id: 1, state: 'WAITING_FOR_TRIGGER',
+        entry_reached_at: '2026-09-02T14:35:00Z', entry_reached_price: 60.90,
+      },
+    }],
+  }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Entry reached'), 'N3: entry_reached_at renders "Entry reached"');
+  assert.ok(elements.mainContent.innerHTML.includes('confirmation still pending'), 'N3: still WAITING_FOR_TRIGGER must read as pending, not done');
+  memoryQueue = [];
+  board.state.decision = 'approve';
+
+  // N4. No record at all for this item -- must still render the honest
+  // "Entry not reached" fallback, never crash, never fabricate a status.
+  const noRecordCandidate = candidate({ ticker: 'AAA', current_review: review('approve') });
+  fetchQueue = [{ status: 200, body: queuePayload([noRecordCandidate]) }];
+  memoryQueue = [{ status: 200, body: [] }];
+  await board.loadBoard();
+  assert.ok(elements.mainContent.innerHTML.includes('Entry not reached'), 'N4: no record at all still renders "Entry not reached", never crashes');
+  memoryQueue = [];
+  fetchQueue = [];
+
   console.log('Setup board v1 tests passed');
 }
 
