@@ -4973,6 +4973,99 @@ def list_ranked_candidates(
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Review Queue asset-type eligibility (2026-09 session, Sprint 1 follow-up).
+# The Stock Review Queue is meant to surface individual equities for human
+# chart review -- broad-market/sector/bond/commodity ETFs and trusts can
+# clear every existing gate (real regime alignment, real R:R, real
+# confluence) and still not be what a human wants a "stock chart review"
+# slot spent on. Scoped ENTIRELY to list_review_queue below -- does not
+# touch the broader candidate universe, ma_pipeline.py, /candidates/ranked,
+# scanner strategy, Review Value scoring weights, or any lifecycle code.
+#
+# Classification rule, chosen after checking REAL Alpaca asset names (not
+# guessed) against the actual candidate pool that motivated this, plus a
+# broader validation sample -- see the real ticker-by-ticker checks in the
+# deployment report:
+#   - "ETF" or "FUND" (case-insensitive substring) in the real, Alpaca-
+#     registered asset name. Modern exchange-traded products are required
+#     by SEC/exchange listing convention to carry one of these words
+#     (verified: VGK/VYM/SHY/ACWI/VEA/VTI/IVV/EEM/VOO/SPYM/DGRO/SPY/XLF/
+#     XLK/XLE/XLI/XLB/XLU/XLV/BND/AGG/TLT/ARKK/JEPI/JEPQ/SCHD/SGOV/BIL/
+#     RSP/MDY/DIA/IWM/SIVR/PPLT/PALL all contain "ETF"; USO/UNG/BNO/UGA
+#     all contain "Fund").
+#   - A bare "TRUST" keyword was tested and explicitly REJECTED: it
+#     produces a real, confirmed false positive on NTRS ("Northern Trust
+#     Corporation Common Stock" -- a genuine individual bank stock, not a
+#     fund). "Trust" alone is not a reliable signal.
+#   - REVIEW_QUEUE_LEGACY_FUND_TICKERS: a small, curated supplement for
+#     well-known funds whose registered name predates the ETF/Fund naming
+#     convention and contains neither word (verified via Alpaca, 2026-09):
+#     QQQ ("Invesco QQQ Trust, Series 1"), GLD ("SPDR Gold Trust..."),
+#     SLV ("iShares Silver Trust").
+REVIEW_QUEUE_FUND_NAME_KEYWORDS = ("ETF", "FUND")
+REVIEW_QUEUE_LEGACY_FUND_TICKERS = {"QQQ", "GLD", "SLV"}
+# Asset names/classification change extremely rarely (unlike live quotes)
+# -- a long TTL avoids re-fetching Alpaca's full ~14k-asset list on every
+# review-queue load, especially now that Sprint 1 added a 60s auto-refresh.
+REVIEW_QUEUE_ASSET_NAME_CACHE_TTL_SECONDS = 24 * 3600
+
+_review_queue_asset_name_cache: dict[str, Any] = {"fetched_at": None, "names": {}}
+_review_queue_asset_name_cache_lock = threading.Lock()
+
+
+def _review_queue_asset_names(now: datetime) -> dict[str, str]:
+    """Real Alpaca asset names for the active us_equity universe, cached
+    (24h TTL). Reuses the EXISTING AlpacaAssetDiscoveryClient
+    (discovery.py) -- the same client/endpoint the discovery-universe
+    pipeline already calls -- no new provider, no new integration.
+    Fail-open at the WHOLE-FETCH level: if the fetch itself fails, this
+    returns whatever was last cached (even if stale), or an empty dict if
+    nothing has ever been fetched -- a transient Alpaca hiccup must never
+    empty the review queue (same "warn and skip, never guess" convention
+    as the rest of this monitor/funnel)."""
+    with _review_queue_asset_name_cache_lock:
+        cached = _review_queue_asset_name_cache
+        if cached["fetched_at"] is not None:
+            age = (now - cached["fetched_at"]).total_seconds()
+            if age <= REVIEW_QUEUE_ASSET_NAME_CACHE_TTL_SECONDS:
+                return cached["names"]
+    try:
+        from discovery import AlpacaAssetDiscoveryClient
+        assets = AlpacaAssetDiscoveryClient().fetch_assets()
+        names = {
+            str(asset.get("symbol") or "").strip().upper(): str(asset.get("name") or "")
+            for asset in assets if asset.get("symbol")
+        }
+    except Exception:
+        with _review_queue_asset_name_cache_lock:
+            return dict(_review_queue_asset_name_cache["names"])
+    with _review_queue_asset_name_cache_lock:
+        _review_queue_asset_name_cache["fetched_at"] = now
+        _review_queue_asset_name_cache["names"] = names
+        return names
+
+
+def _review_queue_asset_type(ticker: str, name: Optional[str]) -> dict[str, Any]:
+    """Returns {is_fund_or_etf, asset_name, asset_name_available} --
+    always returned (never silently omitted) so a developer/reviewer can
+    see exactly what classification decision was made and why, per
+    ticker. asset_name_available=False means the name lookup itself
+    failed/was unavailable for this ticker (network failure or a ticker
+    genuinely absent from Alpaca's active us_equity list) -- fails OPEN
+    for that one ticker (never excluded merely because its name
+    couldn't be verified this tick; the whole-fetch failure mode above
+    is the real safety net, not a per-ticker guess)."""
+    ticker = str(ticker or "").strip().upper()
+    if ticker in REVIEW_QUEUE_LEGACY_FUND_TICKERS:
+        return {"is_fund_or_etf": True, "asset_name": name or None, "asset_name_available": bool(name)}
+    if not name:
+        return {"is_fund_or_etf": False, "asset_name": None, "asset_name_available": False}
+    upper = name.upper()
+    is_fund = any(keyword in upper for keyword in REVIEW_QUEUE_FUND_NAME_KEYWORDS)
+    return {"is_fund_or_etf": is_fund, "asset_name": name, "asset_name_available": True}
+
+
 @router.get("/candidates/review-queue")
 def list_review_queue(
     x_api_key: Optional[str] = Header(default=None),
@@ -5073,13 +5166,34 @@ def list_review_queue(
         ]
         excluded_mechanical_count = len(regime_aligned) - len(precheck_survivors)
 
-        # Gate 4: ONE batched quote fetch across every survivor. UNCHANGED.
-        quotes = _latest_quotes_for_previews([preview for _, preview in precheck_survivors])
+        # Gate 3.5: asset-type eligibility -- individual equities only,
+        # ETFs/funds excluded BEFORE ranking (and before the live-quote
+        # fetch below, same "don't pay for a live quote on an excluded
+        # candidate" performance philosophy Gate 3 already uses). Scoped
+        # to this endpoint only -- see the module comment above this
+        # function's definition for the classification rule and the real
+        # data it was validated against.
+        asset_names = _review_queue_asset_names(now)
+        equity_survivors: list[tuple[Any, dict]] = []
+        excluded_fund_or_etf_count = 0
+        for candidate, preview in precheck_survivors:
+            ticker = str(preview.get("ticker") or "").upper()
+            asset_type = _review_queue_asset_type(ticker, asset_names.get(ticker))
+            preview.update(asset_type)
+            if asset_type["is_fund_or_etf"]:
+                excluded_fund_or_etf_count += 1
+                continue
+            equity_survivors.append((candidate, preview))
+
+        # Gate 4: ONE batched quote fetch across every survivor. UNCHANGED
+        # apart from operating on equity_survivors instead of
+        # precheck_survivors (excluded funds never get a live quote fetched).
+        quotes = _latest_quotes_for_previews([preview for _, preview in equity_survivors])
 
         eligible_rows: list[tuple[Any, dict]] = []
         excluded_target_reached_count = 0
         promoted_from_near_miss_count = 0
-        for candidate, preview in precheck_survivors:
+        for candidate, preview in equity_survivors:
             quote = quotes.get(str(preview.get("ticker") or "").upper())
             preview = _attach_entry_proximity(preview, quote)
             preview = _attach_execution_shadow(candidate, preview)
@@ -5163,6 +5277,7 @@ def list_review_queue(
                 "regime_aligned_count": len(regime_aligned),
                 "eligible_pool_count": len(ranked),
                 "excluded_mechanical_count": excluded_mechanical_count,
+                "excluded_fund_or_etf_count": excluded_fund_or_etf_count,
                 "excluded_target_reached_count": excluded_target_reached_count,
                 "promoted_from_near_miss_count": promoted_from_near_miss_count,
                 "staleness_or_extension_penalized_count": staleness_or_extension_penalized_count,
