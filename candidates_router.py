@@ -737,6 +737,32 @@ def _ensure_candidates_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidates ADD COLUMN source_universe TEXT")
 
 
+def _ensure_candidate_ranking_snapshots_schema(conn: sqlite3.Connection) -> None:
+    """Review Queue Evolution Sprint 1 (2026-09 session): additive columns
+    for the new Review Value diagnostics -- NULL for any pre-existing
+    snapshot row (written by the old stage1_mechanical_then_confluence_
+    count_v1 mechanism, which has none of these fields) and for every
+    row GET /candidates/ranked ("Stage 2", untouched this sprint) still
+    writes via the same shared _store_ranking_snapshot function -- that
+    call site's `ranked` entries simply don't have these keys, so
+    `.get(...)` on them returns None, same as an old historical row."""
+    columns = {info["name"] for info in conn.execute("PRAGMA table_info(candidate_ranking_snapshots)").fetchall()}
+    if not columns:
+        return
+    additions = [
+        ("review_value_score", "REAL"),
+        ("entry_proximity_ok", "INTEGER"),
+        ("execution_shadow_ok", "INTEGER"),
+        ("extension_penalty", "REAL"),
+        ("target_room_penalty", "REAL"),
+        ("staleness_penalty", "REAL"),
+        ("included_in_display", "INTEGER"),
+    ]
+    for name, sql_type in additions:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE candidate_ranking_snapshots ADD COLUMN {name} {sql_type}")
+
+
 def _ensure_candidate_visual_reviews_schema(conn: sqlite3.Connection) -> None:
     """Early practical-disqualification path (2026-09-01 session): a
     candidate can be practically untradeable before chart review at all
@@ -1390,10 +1416,18 @@ def _initialize_candidates_schema(conn) -> None:
             applicable_count INTEGER,
             confluence_label TEXT,
             risk_reward REAL,
-            entry_distance_pct REAL
+            entry_distance_pct REAL,
+            review_value_score REAL,
+            entry_proximity_ok INTEGER,
+            execution_shadow_ok INTEGER,
+            extension_penalty REAL,
+            target_room_penalty REAL,
+            staleness_penalty REAL,
+            included_in_display INTEGER
         )
         """
     )
+    _ensure_candidate_ranking_snapshots_schema(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidate_ranking_snapshots_snapshot "
         "ON candidate_ranking_snapshots (snapshot_id)"
@@ -2885,14 +2919,23 @@ def _store_ranking_snapshot(conn, ranked: list[dict], mechanism: str) -> str:
     computed_at = datetime.now(timezone.utc).isoformat()
     for entry in ranked:
         counts = entry.get("confluence_counts") or {}
+        # review_value_breakdown/entry_proximity_ok/execution_shadow_ok/
+        # included_in_display only exist on Sprint 1 review-queue entries
+        # (RANKING_MECHANISM_VERSION_V2) -- .get(...) returns None/absent
+        # for GET /candidates/ranked's Stage 2 entries (untouched this
+        # sprint), which is exactly the intended, harmless NULL fallback
+        # (see _ensure_candidate_ranking_snapshots_schema's own comment).
+        breakdown = entry.get("review_value_breakdown") or {}
         conn.execute(
             """
             INSERT INTO candidate_ranking_snapshots (
                 snapshot_id, computed_at, mechanism, ticker, source, rank,
                 confluence_available, favorable_count, unfavorable_count,
                 neutral_count, applicable_count, confluence_label,
-                risk_reward, entry_distance_pct
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                risk_reward, entry_distance_pct, review_value_score,
+                entry_proximity_ok, execution_shadow_ok, extension_penalty,
+                target_room_penalty, staleness_penalty, included_in_display
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot_id,
@@ -2909,10 +2952,247 @@ def _store_ranking_snapshot(conn, ranked: list[dict], mechanism: str) -> str:
                 entry.get("confluence_label"),
                 entry.get("risk_reward"),
                 entry.get("entry_distance_pct"),
+                entry.get("review_value_score"),
+                None if entry.get("entry_proximity_ok") is None else (1 if entry.get("entry_proximity_ok") else 0),
+                None if entry.get("execution_shadow_ok") is None else (1 if entry.get("execution_shadow_ok") else 0),
+                breakdown.get("extension_penalty"),
+                breakdown.get("target_room_penalty"),
+                breakdown.get("staleness_penalty"),
+                None if entry.get("included_in_display") is None else (1 if entry.get("included_in_display") else 0),
             ),
         )
     conn.commit()
     return snapshot_id
+
+
+# ---------------------------------------------------------------------------
+# Review Queue Evolution Sprint 1 (2026-09 session, per
+# review_queue_evolution_audit.md). Reclassifies entry_proximity_ok/
+# execution_shadow_ok from HARD ELIMINATION gates into REVIEW-QUEUE-ONLY
+# ranking evidence -- scoped entirely to list_review_queue below.
+# _stage1_mechanical_ready/_preview_base_enter_now_ready/
+# _mechanical_promotion_block_reason/_promotion_block_reason (the
+# SEPARATE gate system governing "ENTER_NOW dashboard-ready" for
+# candidates.html/index.html's promotion workflow) are completely
+# UNTOUCHED -- every other consumer of those functions behaves exactly
+# as before this sprint. rank_stage1_candidates/_confluence_sort_key
+# (GET /candidates/ranked, "Stage 2") are also completely untouched.
+#
+# _preview_clears_mechanical_prechecks remains the hard-exclusion
+# boundary here too (direction, regime, data availability, valid
+# target, scan-time R:R>=1.5) -- the audit's "true market/data/
+# eligibility failures," deliberately kept hard. R:R is treated
+# conservatively per explicit instruction: the audit found it's computed
+# from a twice-daily-stale entry_price, so it is NOT loosened this
+# sprint -- instead, the fresh-price sanity layer below (
+# _fresh_price_state) adds a SEPARATE, additional hard exclusion
+# (target_reached_or_passed) using the SAME already-fetched live quote,
+# and a continuous "how much room is left, using the live price against
+# the frozen stop/target" penalty (current_rr_live) that feeds scoring,
+# not elimination -- exactly the "penalty, not fabricated hard gate"
+# shape requested.
+#
+# ma_pipeline.py's 4H EMA21<=3% candidate-GENERATION-time gate is
+# explicitly OUT OF SCOPE this sprint -- a ticker failing it never
+# becomes a `candidates` row at all, so reclassifying it would mean
+# either duplicating candidate generation or changing behavior for
+# every consumer of the `candidates` table (near-miss, the generic
+# /candidates list, etc.), not just the review queue. Deferred and
+# disclosed in the sprint report, not silently skipped.
+REVIEW_VALUE_FAVORABLE_POINTS = 2.0
+REVIEW_VALUE_UNFAVORABLE_POINTS = -2.0
+REVIEW_VALUE_ENTRY_PROXIMITY_BONUS = 1.5
+REVIEW_VALUE_EXECUTION_SHADOW_BONUS = 1.5
+REVIEW_VALUE_RR_POINT_WEIGHT = 0.5
+REVIEW_VALUE_RR_CAP_FOR_SCORING = 5.0
+# Extension penalty only kicks in BEYOND the existing entry-proximity
+# threshold (reused, not reinvented -- the same ATR multiple that used
+# to be a hard cutoff) -- normal pre-entry distance is not penalized.
+REVIEW_VALUE_EXTENSION_PENALTY_PER_ATR = -1.0
+REVIEW_VALUE_EXTENSION_PENALTY_MAX = -4.0
+# Same shape/threshold as the existing RR_WARNING_THRESHOLD (reused, not
+# reinvented) -- but applied to CURRENT price against the frozen stop/
+# target, not the twice-daily-stale scan-time entry.
+REVIEW_VALUE_TARGET_ROOM_PENALTY_WEIGHT = -1.5
+REVIEW_VALUE_TARGET_ROOM_PENALTY_MAX = -4.0
+# Grace period roughly matches one ma_pipeline scan cycle (twice daily,
+# ~5.75h apart under the default schedule) -- a candidate isn't
+# penalized just for being "since this morning's scan," only for
+# genuinely outliving a normal refresh cycle.
+REVIEW_VALUE_STALENESS_GRACE_HOURS = 8.0
+REVIEW_VALUE_STALENESS_PENALTY_PER_HOUR = -0.05
+REVIEW_VALUE_STALENESS_PENALTY_MAX = -3.0
+
+# All six REVIEW_VALUE_* weights/caps above are unvalidated placeholders,
+# same disclosed-not-hidden category as every other threshold in this
+# file (RR_WARNING_THRESHOLD, ENTRY_PROXIMITY_MAX_PCT_DEFAULT,
+# CONFLICTED_UNFAVORABLE_MIN, etc.) -- picked to be directionally
+# sensible and transparently explainable (every term is a named,
+# returned field), not tuned against real outcome data. Revisit once
+# real review-queue usage/outcome evidence exists.
+
+REVIEW_QUEUE_TOP_N = 10
+REVIEW_QUEUE_MAX_N = 15
+# A rank-11..15 candidate is only shown if its score is within this
+# fraction of the #10 candidate's score (and still net-positive) --
+# "never force-fill," implemented as a real quality floor relative to
+# what's actually at the cutoff today, not an invented absolute number.
+REVIEW_QUEUE_EXPANSION_MIN_RATIO = 0.75
+
+RANKING_MECHANISM_VERSION_V2 = "review_value_v1_freshprice_sprint1"
+RANKING_DISCLAIMER_V2 = (
+    "Review Value ranking is unvalidated -- a transparent, disclosed point "
+    "system (not a trade-readiness score), based on signal counts, "
+    "extension/staleness penalties, and current price vs. the frozen plan. "
+    "Not based on track record."
+)
+
+
+def _fresh_price_state(
+    *,
+    direction: str,
+    entry_price: Optional[float],
+    stop: Optional[float],
+    target: Optional[float],
+    atr14: Optional[float],
+    current_price: Optional[float],
+    scanned_at: Optional[str],
+    now: datetime,
+) -> dict:
+    """Sprint 1 fresh-price sanity layer. Reuses the SAME live quote
+    already fetched for entry proximity (_latest_quotes_for_previews) --
+    no new network call -- and recomputes only PRICE-DEPENDENT numbers
+    against the already-computed frozen stop/target/entry. Never
+    rebuilds swings/ATR/structure (_compute_candidate_promotion is not
+    called again). Mirrors the existing, already-proven _current_rr
+    direction math (candidates_router.py's Approved/Watch monitor) --
+    same formula, reused, not re-derived.
+    """
+    result: dict[str, Any] = {
+        "current_rr_live": None,
+        "target_reached_or_passed": False,
+        "extension_atr": None,
+        "candidate_age_hours": None,
+    }
+    if scanned_at:
+        parsed = _parse_iso_to_utc(str(scanned_at))
+        if parsed is not None:
+            result["candidate_age_hours"] = round((now - parsed).total_seconds() / 3600.0, 2)
+
+    if (
+        current_price is None
+        or entry_price is None
+        or stop is None
+        or direction not in ("long", "short")
+    ):
+        return result
+
+    if direction == "long":
+        if atr14:
+            result["extension_atr"] = round((current_price - entry_price) / atr14, 3)
+        if target is not None:
+            result["target_reached_or_passed"] = current_price >= target
+        risk = current_price - stop
+        if target is not None and risk > 0:
+            result["current_rr_live"] = round((target - current_price) / risk, 3)
+    else:
+        if atr14:
+            result["extension_atr"] = round((entry_price - current_price) / atr14, 3)
+        if target is not None:
+            result["target_reached_or_passed"] = current_price <= target
+        risk = stop - current_price
+        if target is not None and risk > 0:
+            result["current_rr_live"] = round((current_price - target) / risk, 3)
+
+    return result
+
+
+def _review_value_score(preview: dict, fresh: dict) -> dict:
+    """Transparent, additive point system -- every term is a named,
+    returned field so a developer can explain exactly why candidate A
+    outranks candidate B (see review_queue_evolution_audit.md section 3
+    for why this codebase deliberately favors flat, disclosed counts
+    over an opaque weighted composite)."""
+    counts = preview.get("confluence_counts") or {}
+    favorable = counts.get("favorable", 0)
+    unfavorable = counts.get("unfavorable", 0)
+    rr = preview.get("risk_reward")
+
+    favorable_points = REVIEW_VALUE_FAVORABLE_POINTS * favorable
+    unfavorable_points = REVIEW_VALUE_UNFAVORABLE_POINTS * unfavorable
+    entry_proximity_points = REVIEW_VALUE_ENTRY_PROXIMITY_BONUS if preview.get("entry_proximity_ok") else 0.0
+    execution_shadow_points = REVIEW_VALUE_EXECUTION_SHADOW_BONUS if preview.get("execution_shadow_ok") else 0.0
+    rr_points = (
+        REVIEW_VALUE_RR_POINT_WEIGHT * min(float(rr), REVIEW_VALUE_RR_CAP_FOR_SCORING)
+        if rr is not None else 0.0
+    )
+
+    extension_atr = fresh.get("extension_atr")
+    threshold_atr = preview.get("entry_proximity_threshold_atr") or ENTRY_PROXIMITY_MAX_ATR_MULTIPLE_DEFAULT
+    extension_penalty = 0.0
+    if extension_atr is not None and extension_atr > threshold_atr:
+        extension_penalty = max(
+            REVIEW_VALUE_EXTENSION_PENALTY_MAX,
+            REVIEW_VALUE_EXTENSION_PENALTY_PER_ATR * (extension_atr - threshold_atr),
+        )
+
+    current_rr_live = fresh.get("current_rr_live")
+    target_room_penalty = 0.0
+    if current_rr_live is not None and current_rr_live < RR_WARNING_THRESHOLD:
+        gap = RR_WARNING_THRESHOLD - current_rr_live
+        target_room_penalty = max(
+            REVIEW_VALUE_TARGET_ROOM_PENALTY_MAX,
+            REVIEW_VALUE_TARGET_ROOM_PENALTY_WEIGHT * gap,
+        )
+
+    age_hours = fresh.get("candidate_age_hours")
+    staleness_penalty = 0.0
+    if age_hours is not None and age_hours > REVIEW_VALUE_STALENESS_GRACE_HOURS:
+        staleness_penalty = max(
+            REVIEW_VALUE_STALENESS_PENALTY_MAX,
+            REVIEW_VALUE_STALENESS_PENALTY_PER_HOUR * (age_hours - REVIEW_VALUE_STALENESS_GRACE_HOURS),
+        )
+
+    score = (
+        favorable_points + unfavorable_points + entry_proximity_points
+        + execution_shadow_points + rr_points + extension_penalty
+        + target_room_penalty + staleness_penalty
+    )
+
+    return {
+        "review_value_score": round(score, 3),
+        "review_value_breakdown": {
+            "favorable_points": round(favorable_points, 3),
+            "unfavorable_points": round(unfavorable_points, 3),
+            "entry_proximity_points": entry_proximity_points,
+            "execution_shadow_points": execution_shadow_points,
+            "rr_points": round(rr_points, 3),
+            "extension_penalty": round(extension_penalty, 3),
+            "target_room_penalty": round(target_room_penalty, 3),
+            "staleness_penalty": round(staleness_penalty, 3),
+        },
+    }
+
+
+def _rank_review_queue_candidates_v2(rows: list[tuple[Any, dict]]) -> list[dict]:
+    """rows: (candidate, preview) pairs that have ALREADY cleared
+    _preview_clears_mechanical_prechecks and are NOT target_reached_or_
+    passed (both applied by the caller before this). Sorts by
+    review_value_score descending, stable (ties keep incoming --
+    most-recently-updated-first -- order, same convention as
+    _confluence_sort_key/rank_stage1_candidates). Global rank is
+    assigned over the FULL eligible pool passed in, before any Top-10/15
+    display truncation -- truncation is a separate, later step in
+    list_review_queue, never baked into this function."""
+    ranked: list[dict] = []
+    for index, (_, preview) in enumerate(
+        sorted(rows, key=lambda pair: -pair[1]["review_value_score"]), start=1
+    ):
+        entry = dict(preview)
+        entry["rank"] = index
+        entry["confluence_available"] = preview.get("confluence_counts") is not None
+        ranked.append(entry)
+    return ranked
 
 
 # Stage B (2026-08-31 session, human-in-the-loop review-funnel redesign):
@@ -4698,55 +4978,57 @@ def list_review_queue(
     x_api_key: Optional[str] = Header(default=None),
     scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
-    """Stage B: the human-in-the-loop review queue's backend. Deliberately
-    separate from GET /candidates/ranked (Stage 2, preserved exactly as
-    built, still used for whatever else already reads it) -- this path
-    never triggers option-contract hydration. Ranking logic itself is
-    unchanged: same _stage1_mechanical_ready/rank_stage1_candidates as
-    Stage 2 -- see rank_stage1_candidates' own call below, untouched.
+    """Review Queue Evolution Sprint 1 (2026-09 session, per
+    review_queue_evolution_audit.md). Steps 1-4 below (regime alignment,
+    batched daily-bar prewarm, base preview, _preview_clears_mechanical_
+    prechecks, batched live-quote fetch) are UNCHANGED from before this
+    sprint -- same hard-exclusion boundary (direction, regime, data
+    availability, valid target, scan-time R:R>=1.5), same performance
+    shape. What changes is everything from live-quote attachment onward:
 
-    Performance pass (2026-09-01 session): real profiling (438 real long
-    candidates, cold cache) found the original version cost ~209s, split
-    ~103s daily-bar fetches (438 calls, unbatched) / ~45s live-quote
-    fetches (364 calls, one per candidate) / ~58s execution-shadow (130
-    calls, already properly gated). Restructured into an explicit funnel
-    that applies the cheap, already-computed gates before paying for the
-    live ones, in this order:
-      1. regime alignment -- free, straight off the candidates row, no
-         network call needed to check it.
-      2. daily-bar pre-warm, batched (reuses CANDIDATE_PREVIEW_PREWARM_
-         CHUNK_SIZE / _batch_download's own chunked-batching, the same
-         pattern _enriched_previews_for_candidates already uses) for
-         whichever regime-aligned candidates aren't already opportunistically
-         cache-hit -- then compute the base preview (stop/target/R:R/
-         confluence/etc, no live quote yet) for each.
-      3. valid-target + R:R (_preview_clears_mechanical_prechecks) --
-         candidates that fail here never get a live quote at all.
-      4. live quotes, batched in ONE call via _latest_quotes_for_previews
-         (the chunked/halving-safe fetcher already fixed this session for
-         exactly this kind of fan-out) across every precheck survivor,
-         instead of one _latest_quote_for_ticker call per candidate.
-      5. execution-shadow -- unchanged, _attach_execution_shadow already
-         internally gates on the equivalent of steps 1-4 via
-         _preview_base_enter_now_ready, so this step's real network cost
-         was already properly scoped before this pass; also already
-         benefits from its own 75s TTL cache (EXECUTION_SHADOW_BARS_CACHE_TTL)
-         on repeat calls, built in an earlier session.
-    rank_stage1_candidates/_stage1_mechanical_ready themselves are never
-    touched -- candidates that were short-circuited at an earlier gate
-    simply arrive with entry_proximity_ok/execution_shadow_ok left None,
-    which those functions already treat identically to an explicit False.
+    5. entry_proximity/execution_shadow are still attached (same
+       mechanism, same live quote, same diagnostics), but NO LONGER
+       eliminate a candidate -- _stage1_mechanical_ready is not called
+       here anymore. They feed the Review Value score instead (reward
+       points, not gates). _stage1_mechanical_ready/rank_stage1_
+       candidates themselves are untouched -- GET /candidates/ranked
+       still uses them exactly as before.
+    6. Fresh-price sanity layer (_fresh_price_state): reuses the SAME
+       already-fetched live quote to recompute current_rr_live,
+       target_reached_or_passed, extension_atr, and candidate_age_hours
+       -- no new network call, no swing/ATR/structure recomputation.
+       target_reached_or_passed is a NEW hard exclusion (the opportunity
+       is definitionally over); current_rr_live/extension_atr/age feed
+       Review Value as penalties, not exclusions.
+    7. Review Value scoring + global ranking (_review_value_score /
+       _rank_review_queue_candidates_v2) over the full eligible pool --
+       ranking happens strictly after all hard exclusions, over
+       EVERYONE who clears them, never a truncated/first-passing subset.
+    8. setup_key/current_review attached exactly as before (unchanged
+       mechanism) -- this is what determines "needs review" vs already
+       reviewed.
+    9. Top-10/expand-to-15 display cap applies ONLY to candidates that
+       still need a NEW review (current_review is None) -- already-
+       reviewed candidates keep their real global rank and are still
+       returned (so the existing edit/re-review UX in review_queue.js
+       keeps working exactly as before) but never occupy a "new review"
+       slot. Expansion past 10 requires candidates 11-15 to clear
+       REVIEW_QUEUE_EXPANSION_MIN_RATIO of the #10 candidate's score AND
+       be net-positive -- never force-filled.
 
-    Each ranked entry also carries setup_key and current_review -- the
-    latest candidate_visual_reviews row for that setup generation, or None
-    if it has never been reviewed (Needs Review). Also writes a ranking
-    snapshot, same mechanism as GET /candidates/ranked -- this endpoint is
-    what actually surfaces candidates for human review going forward, so
-    it's the operationally relevant "what did the ranking surface" event.
+    Writes a ranking snapshot (mechanism RANKING_MECHANISM_VERSION_V2)
+    covering the FULL eligible pool, including candidates the display
+    cap excluded -- see included_in_display on each stored row -- so a
+    developer can always explain why a given candidate wasn't shown.
+    Returns a "diagnostics" block with the pool-size/promotion/exclusion
+    counts requested for this sprint.
     """
     _check_api_key(x_api_key, scanner_session)
     conn = _get_db()
     try:
+        now = datetime.now(timezone.utc)
+        total_candidate_count = conn.execute("SELECT COUNT(*) AS n FROM candidates").fetchone()["n"]
+
         candidates = conn.execute(
             "SELECT * FROM candidates WHERE signal='long' ORDER BY updated_at DESC"
         ).fetchall()
@@ -4755,18 +5037,14 @@ def list_review_queue(
             for row in conn.execute("SELECT * FROM candidate_plan_previews").fetchall()
         }
 
-        # Gate 1: regime alignment, free -- no network call.
+        # Gate 1: regime alignment, free -- no network call. UNCHANGED.
         regime_aligned = [
             candidate for candidate in candidates
             if str(candidate["signal"] or "").strip().lower() == "long"
             and _candidate_regime_aligned(candidate, "long")
         ]
 
-        # Gate 2: batch pre-warm daily bars for whichever regime-aligned
-        # candidates aren't already a fresh cache hit -- mirrors
-        # _enriched_previews_for_candidates' own pre-warm step exactly,
-        # rather than leaving each candidate's _compute_candidate_promotion
-        # call to fetch cold, one ticker at a time.
+        # Gate 2: batch pre-warm daily bars. UNCHANGED.
         def _fresh_cache_hit(candidate) -> bool:
             cached = cached_by_key.get((candidate["ticker"], candidate["source"]))
             return cached is not None and cached["candidate_updated_at"] == candidate["updated_at"]
@@ -4786,27 +5064,56 @@ def list_review_queue(
             for candidate in regime_aligned
         ]
 
-        # Gate 3: valid target + R:R -- only these are worth a live quote.
+        # Gate 3: valid target + R:R -- the hard-exclusion boundary,
+        # UNCHANGED and kept conservative this sprint (see module comment
+        # above _fresh_price_state).
         precheck_survivors = [
             (candidate, preview) for candidate, preview in base_rows
             if _preview_clears_mechanical_prechecks(candidate, preview)
         ]
+        excluded_mechanical_count = len(regime_aligned) - len(precheck_survivors)
 
-        # Gate 4: ONE batched quote fetch across every survivor, not one
-        # call per candidate.
+        # Gate 4: ONE batched quote fetch across every survivor. UNCHANGED.
         quotes = _latest_quotes_for_previews([preview for _, preview in precheck_survivors])
 
-        rows = []
-        for candidate, preview in base_rows:
-            if _preview_clears_mechanical_prechecks(candidate, preview):
-                preview = _attach_entry_proximity(preview, quotes.get(str(preview.get("ticker") or "").upper()))
-                # Gate 5: execution-shadow -- already internally gated, see
-                # docstring above; unchanged.
-                preview = _attach_execution_shadow(candidate, preview)
-            rows.append((candidate, preview))
+        eligible_rows: list[tuple[Any, dict]] = []
+        excluded_target_reached_count = 0
+        promoted_from_near_miss_count = 0
+        for candidate, preview in precheck_survivors:
+            quote = quotes.get(str(preview.get("ticker") or "").upper())
+            preview = _attach_entry_proximity(preview, quote)
+            preview = _attach_execution_shadow(candidate, preview)
 
-        ranked = rank_stage1_candidates(rows)
-        snapshot_id = _store_ranking_snapshot(conn, ranked, RANKING_MECHANISM_VERSION)
+            fresh = _fresh_price_state(
+                direction=str(preview.get("signal") or "").strip().lower(),
+                entry_price=preview.get("entry_price"),
+                stop=preview.get("stop"),
+                target=preview.get("target"),
+                atr14=preview.get("atr14"),
+                current_price=preview.get("current_price"),
+                scanned_at=candidate["scanned_at"] if "scanned_at" in candidate.keys() else None,
+                now=now,
+            )
+            preview["fresh_price_state"] = fresh
+
+            if fresh.get("target_reached_or_passed"):
+                excluded_target_reached_count += 1
+                continue
+
+            if preview.get("entry_proximity_ok") is not True or preview.get("execution_shadow_ok") is not True:
+                promoted_from_near_miss_count += 1
+
+            score = _review_value_score(preview, fresh)
+            preview.update(score)
+            eligible_rows.append((candidate, preview))
+
+        ranked = _rank_review_queue_candidates_v2(eligible_rows)
+        staleness_or_extension_penalized_count = sum(
+            1 for entry in ranked
+            if (entry["review_value_breakdown"]["extension_penalty"] < 0)
+            or (entry["review_value_breakdown"]["staleness_penalty"] < 0)
+            or (entry["review_value_breakdown"]["target_room_penalty"] < 0)
+        )
 
         by_key = {(str(row["ticker"]).upper(), row["source"]): row for row in candidates}
         for entry in ranked:
@@ -4815,12 +5122,58 @@ def list_review_queue(
             entry["setup_key"] = setup_key
             entry["current_review"] = _latest_visual_review_for_setup(conn, setup_key) if setup_key else None
 
+        # Top-10/expand-to-15 display cap -- applies ONLY to candidates
+        # that still need a NEW review. Already-reviewed candidates keep
+        # their real global rank and are still returned (existing
+        # edit/re-review UX untouched) but never consume a new-review
+        # slot. See module docstring above for the expansion rule.
+        needs_review = [entry for entry in ranked if entry.get("current_review") is None]
+        already_reviewed = [entry for entry in ranked if entry.get("current_review") is not None]
+
+        display_needs_review = needs_review[:REVIEW_QUEUE_TOP_N]
+        if len(needs_review) > REVIEW_QUEUE_TOP_N:
+            tenth_score = needs_review[REVIEW_QUEUE_TOP_N - 1]["review_value_score"]
+            expansion_floor = tenth_score * REVIEW_QUEUE_EXPANSION_MIN_RATIO
+            for candidate_entry in needs_review[REVIEW_QUEUE_TOP_N:REVIEW_QUEUE_MAX_N]:
+                if candidate_entry["review_value_score"] > 0 and candidate_entry["review_value_score"] >= expansion_floor:
+                    display_needs_review.append(candidate_entry)
+                else:
+                    break  # ranked descending -- once one fails the floor, none after it can clear it either
+
+        displayed_setup_keys = {entry["setup_key"] for entry in display_needs_review}
+        for entry in ranked:
+            entry["included_in_display"] = (
+                entry["setup_key"] in displayed_setup_keys or entry.get("current_review") is not None
+            )
+
+        top_cutoff_score = display_needs_review[-1]["review_value_score"] if display_needs_review else None
+
+        snapshot_id = _store_ranking_snapshot(conn, ranked, RANKING_MECHANISM_VERSION_V2)
+
+        response_candidates = display_needs_review + already_reviewed
+
         return {
-            "mechanism": RANKING_MECHANISM_VERSION,
-            "disclaimer": RANKING_DISCLAIMER,
+            "mechanism": RANKING_MECHANISM_VERSION_V2,
+            "disclaimer": RANKING_DISCLAIMER_V2,
             "snapshot_id": snapshot_id,
-            "count": len(ranked),
-            "candidates": ranked,
+            "count": len(response_candidates),
+            "candidates": response_candidates,
+            "diagnostics": {
+                "total_candidate_count": total_candidate_count,
+                "regime_aligned_count": len(regime_aligned),
+                "eligible_pool_count": len(ranked),
+                "excluded_mechanical_count": excluded_mechanical_count,
+                "excluded_target_reached_count": excluded_target_reached_count,
+                "promoted_from_near_miss_count": promoted_from_near_miss_count,
+                "staleness_or_extension_penalized_count": staleness_or_extension_penalized_count,
+                "needs_review_total_count": len(needs_review),
+                "needs_review_displayed_count": len(display_needs_review),
+                "already_reviewed_count": len(already_reviewed),
+                "top_cutoff_score": top_cutoff_score,
+                "review_queue_top_n": REVIEW_QUEUE_TOP_N,
+                "review_queue_max_n": REVIEW_QUEUE_MAX_N,
+                "review_queue_expansion_min_ratio": REVIEW_QUEUE_EXPANSION_MIN_RATIO,
+            },
         }
     finally:
         conn.close()

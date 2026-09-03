@@ -37,6 +37,10 @@
     disclaimer: '',
     loaded: false,
     authRequired: false,
+    // Sprint 1 (2026-09 session) freshness metadata -- see loadQueue's
+    // silent/auto-refresh path and renderFreshnessBar below.
+    lastLoadedAt: null,
+    diagnostics: null,
   };
   // Guards against two overlapping loadQueue() calls (e.g. a storage-event
   // retry firing while the Connect button's own retry is still in flight)
@@ -177,14 +181,70 @@
       </div>`;
   }
 
-  async function loadQueue() {
+  // Review Queue freshness (Sprint 1, 2026-09 session): a reasonable
+  // cadence for a human trading-review screen -- fresh enough that price
+  // extension/staleness (the whole point of this sprint's fresh-price
+  // layer) doesn't sit stale on screen for many minutes, but far short of
+  // "excessive load" -- the backend already batches every live quote into
+  // ONE call per /review-queue request regardless of candidate count, so
+  // this interval directly bounds request FREQUENCY, not fan-out.
+  const REVIEW_QUEUE_AUTO_REFRESH_MS = 60000;
+  let autoRefreshTimer = null;
+
+  function relativeTimeLabel(date) {
+    if (!date) return 'never';
+    const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+    if (seconds < 5) return 'just now';
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    return `${hours}h ago`;
+  }
+
+  // Deliberately updates ONLY the standalone #freshnessBar element, never
+  // #mainContent -- see review_queue.html's own comment on why: an
+  // in-progress, unsubmitted review form must never be silently wiped out
+  // by a background refresh tick.
+  function renderFreshnessBar() {
+    const bar = typeof document !== 'undefined' ? document.getElementById('freshnessBar') : null;
+    if (!bar || !state.loaded) return;
+    const staleMs = state.lastLoadedAt ? Date.now() - state.lastLoadedAt.getTime() : Infinity;
+    const isStale = staleMs > REVIEW_QUEUE_AUTO_REFRESH_MS * 3; // 3 missed cycles -- auto-refresh may have stalled (e.g. background tab throttling)
+    bar.style.display = 'flex';
+    bar.classList.toggle('stale', isStale);
+    const diag = state.diagnostics;
+    const poolNote = diag ? ` &middot; ${diag.needs_review_displayed_count}/${diag.needs_review_total_count} shown` : '';
+    bar.innerHTML = `
+      <span>Queue and live prices updated ${escapeHtml(relativeTimeLabel(state.lastLoadedAt))}${poolNote}${isStale ? ' &mdash; auto-refresh may be paused' : ''}</span>
+      <button type="button" class="freshness-refresh-btn" onclick="manualRefreshQueue()" ${loadQueueInFlight ? 'disabled' : ''}>Refresh now</button>`;
+  }
+
+  // silent=true: background/auto-refresh tick -- updates state.queue/
+  // state.diagnostics/state.lastLoadedAt and the freshness bar ONLY,
+  // leaves #mainContent (and any in-progress form input on it) completely
+  // untouched. silent=false (initial load, manual refresh, retry): full
+  // behavior exactly as before this sprint -- resumes at first
+  // unreviewed, deep-link handling, full render().
+  async function loadQueue(options) {
+    const silent = !!(options && options.silent);
     if (loadQueueInFlight) return;
     loadQueueInFlight = true;
-    setStatus('Loading review queue…');
+    if (!silent) setStatus('Loading review queue…');
     try {
       const result = await fetchJson(`${API_BASE}/candidates/review-queue`);
       state.queue = result.candidates || [];
       state.disclaimer = result.disclaimer || '';
+      state.diagnostics = result.diagnostics || null;
+      state.lastLoadedAt = new Date();
+      state.loaded = true;
+      state.authRequired = false;
+
+      if (silent) {
+        renderFreshnessBar();
+        return;
+      }
+
       state.filter = 'unreviewed';
       state.editing = false;
       // Resume at the first unreviewed candidate (persisted, not session-
@@ -192,8 +252,6 @@
       // unreviewed, in which case render() shows the completion state.
       const firstUnreviewed = firstUnreviewedIndex(state.queue);
       state.index = firstUnreviewed >= 0 ? firstUnreviewed : 0;
-      state.loaded = true;
-      state.authRequired = false;
 
       // Deep-link support (2026-09 Approved/Watch Setups build): "Edit
       // Review" on those boards links here as
@@ -218,7 +276,16 @@
       }
 
       render();
+      renderFreshnessBar();
     } catch (err) {
+      if (silent) {
+        // A background tick failing must never interrupt whatever the
+        // human is doing -- just leave the last-known-good state and
+        // freshness label as-is (it will naturally read "stale" once
+        // enough cycles pass, see isStale above) rather than surfacing an
+        // error over an active review.
+        return;
+      }
       if (err.status === 401) {
         state.authRequired = true;
         document.getElementById('apiBand').classList.remove('hidden');
@@ -232,6 +299,34 @@
       loadQueueInFlight = false;
     }
   }
+
+  // Manual refresh -- an explicit human action, so (unlike the silent
+  // auto-refresh tick) it's expected/acceptable to do a full reload
+  // exactly like the initial page load does (resumes at first
+  // unreviewed). Exposed on the freshness bar's own button.
+  function manualRefreshQueue() {
+    return loadQueue({ silent: false });
+  }
+  window.manualRefreshQueue = manualRefreshQueue;
+
+  function startAutoRefresh() {
+    if (autoRefreshTimer !== null) return; // already running -- never stack multiple intervals
+    autoRefreshTimer = setInterval(() => {
+      if (state.authRequired) return; // nothing to refresh until signed in
+      loadQueue({ silent: true });
+    }, REVIEW_QUEUE_AUTO_REFRESH_MS);
+  }
+  // Exposed for tests / callers that need to stop the timer (e.g. a SPA
+  // navigating away without a full page unload -- not currently a real
+  // scenario for this standalone page, but a clean stop path costs
+  // nothing to provide).
+  function stopAutoRefresh() {
+    if (autoRefreshTimer !== null) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+  }
+  window.stopAutoRefresh = stopAutoRefresh;
 
   // Auto-retry when a valid key becomes available through ANY means this
   // page didn't itself trigger -- most commonly: the user has
@@ -734,6 +829,7 @@
       document.getElementById('apiBand').classList.add('hidden');
     }
     loadQueue();
+    startAutoRefresh();
   });
 
   // Exposed for tests (tests/review_queue_auth_v1.js,
@@ -755,5 +851,11 @@
     firstUnreviewedIndex,
     triggerSummaryText,
     confirmationSummaryText,
+    renderFreshnessBar,
+    manualRefreshQueue,
+    startAutoRefresh,
+    stopAutoRefresh,
+    relativeTimeLabel,
+    REVIEW_QUEUE_AUTO_REFRESH_MS,
   };
 });

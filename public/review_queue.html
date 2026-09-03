@@ -58,6 +58,16 @@
     }
     .api-band.hidden { display: none; }
 
+    .freshness-bar {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      font-size: 0.78rem; color: var(--muted); padding: 6px 10px; margin-bottom: 10px;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    }
+    .freshness-bar .freshness-refresh-btn {
+      font-size: 0.76rem; padding: 3px 10px; min-height: unset;
+    }
+    .freshness-bar.stale { border-color: rgba(245,158,11,0.4); color: var(--warn); }
+
     main { flex: 1; padding-bottom: 40px; }
 
     .status-line { color: var(--muted); font-size: 0.9rem; margin: 20px 0; }
@@ -264,11 +274,18 @@
       <button type="button" onclick="submitApiKey()">Connect</button>
     </div>
 
+    <!-- Sprint 1 (2026-09 session): freshness bar lives OUTSIDE #mainContent
+         deliberately -- auto-refresh updates ONLY this element (never
+         #mainContent), so an in-progress, unsubmitted review form is never
+         silently wiped out by a background refresh. See review_queue.js's
+         renderFreshnessBar()/loadQueue({silent}). -->
+    <div class="freshness-bar" id="freshnessBar" style="display:none;"></div>
+
     <main id="mainContent">
       <div class="status-line" id="statusLine">Loading review queue&hellip;</div>
     </main>
   </div>
 
-  <script src="/static/review_queue.js?v=20260901-execution-layer"></script>
+  <script src="/static/review_queue.js?v=20260902-review-value-sprint1"></script>
 </body>
 </html>
