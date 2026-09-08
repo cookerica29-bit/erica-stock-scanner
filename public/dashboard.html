@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kairos Dashboard</title>
+  <style>
+    :root {
+      --bg: #080d14;
+      --surface: #0d1520;
+      --surface2: #121d2b;
+      --surface3: #172437;
+      --border: rgba(142, 163, 185, 0.22);
+      --text: #e8eef6;
+      --muted: #8ea0b5;
+      --accent: #38bdf8;
+      --pass: #22c55e;
+      --fail: #fb7185;
+      --warn: #f59e0b;
+      --shadow: rgba(0, 0, 0, 0.35);
+      /* Sprint 2.1 (density polish): these colors now drive ONLY the
+         Current State PILL -- see dashboard.js's STATE_COLOR. Full-row
+         solid backgrounds are reserved for ENTRY_READY (green) and
+         INVALIDATED (restrained red) only; every other state's row uses
+         the plain neutral table background below. */
+      --state-gray: rgba(142, 163, 185, 0.14);
+      --state-gray-text: var(--muted);
+      --state-blue: rgba(56, 189, 248, 0.16);
+      --state-blue-text: #7dd3fc;
+      --state-yellow: rgba(245, 158, 11, 0.16);
+      --state-yellow-text: #fbbf24;
+      --state-orange: rgba(251, 146, 60, 0.20);
+      --state-orange-text: #fb923c;
+      --state-red: rgba(251, 113, 133, 0.16);
+      --state-red-text: #fb7185;
+      --state-purple: rgba(168, 85, 247, 0.18);
+      --state-purple-text: #c084fc;
+      /* ENTRY_READY is the single most important signal Kairos produces --
+         deliberately NOT a subtle tint. Full saturated fill across the
+         whole row, dark high-contrast text. */
+      --state-green: #16a34a;
+      --state-green-hover: #1bbf57;
+      --state-green-text: #04170a;
+      /* INVALIDATED: also a full-row treatment (per Sprint 2.1), but
+         deliberately RESTRAINED relative to green -- a tint, not a solid
+         fill -- so green stays the one unmistakable, can't-miss-it color. */
+      --row-invalidated-bg: rgba(251, 113, 133, 0.16);
+      --row-invalidated-hover: rgba(251, 113, 133, 0.24);
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { max-width: 100%; overflow-x: hidden; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+    a, button { color: inherit; font: inherit; }
+    .page-shell { min-height: 100vh; display: flex; flex-direction: column; max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap;
+    }
+    header h1 { font-size: 1.15rem; margin: 0; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; margin-top: 2px; }
+    .nav-link, button {
+      border: 1px solid var(--border); background: var(--surface2); color: var(--text);
+      border-radius: 8px; min-height: 38px; padding: 0 14px; cursor: pointer;
+      text-decoration: none; display: inline-flex; align-items: center; justify-content: center;
+      gap: 8px; white-space: nowrap; font-size: 0.85rem;
+    }
+    .nav-link:hover, button:hover { border-color: rgba(56, 189, 248, 0.55); background: var(--surface3); }
+    .kairos-nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+    .kairos-nav .nav-link.active { border-color: var(--accent); color: var(--accent); background: var(--surface3); font-weight: 600; }
+
+    .api-band {
+      display: flex; gap: 10px; align-items: center; padding: 10px 0; flex-wrap: wrap;
+      border-bottom: 1px solid var(--border); margin-bottom: 16px;
+    }
+    .api-band input {
+      flex: 1 1 220px; background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 8px 10px; min-height: 38px;
+    }
+    .api-band.hidden { display: none; }
+
+    .freshness-bar {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      font-size: 0.78rem; color: var(--muted); padding: 6px 10px; margin-bottom: 10px;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    }
+    .freshness-bar .freshness-refresh-btn { font-size: 0.76rem; padding: 3px 10px; min-height: unset; }
+    .freshness-bar.stale { border-color: rgba(245,158,11,0.4); color: var(--warn); }
+
+    main { flex: 1; padding-bottom: 40px; }
+    .status-line { color: var(--muted); font-size: 0.9rem; margin: 20px 0; }
+    .status-line.error { color: var(--fail); }
+
+    .disclaimer {
+      font-size: 0.76rem; color: var(--muted); background: var(--surface2);
+      border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; margin-bottom: 10px;
+    }
+    .progress-row { color: var(--muted); font-size: 0.82rem; margin-bottom: 8px; }
+
+    .auth-required-panel {
+      text-align: center; background: var(--surface); border: 1px solid var(--warn);
+      border-radius: 14px; padding: 40px 24px; margin-top: 24px;
+    }
+    .auth-required-icon { font-size: 2.2rem; margin-bottom: 8px; }
+    .auth-required-panel h2 { margin: 0 0 10px; color: var(--warn); }
+    .auth-required-panel p { color: var(--text); margin: 6px 0; max-width: 440px; margin-left: auto; margin-right: auto; }
+    .auth-required-panel .auth-required-hint { color: var(--muted); font-size: 0.85rem; }
+    .auth-required-panel button { margin-top: 14px; }
+
+    /* ---- The spreadsheet-style table itself -- dark, compact, Excel-like:
+       dense rows, monospace-leaning numerics, borders instead of card
+       shadows, no rounded "card" chrome anywhere in the data rows.
+       Sprint 2.1: padding tightened further to restore a denser
+       spreadsheet feel. ---- */
+    .dash-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+    table.dash-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    .dash-table thead th {
+      text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border);
+      color: var(--muted); font-weight: 600; text-transform: uppercase;
+      font-size: 0.68rem; letter-spacing: 0.04em; background: var(--surface);
+      white-space: nowrap; position: sticky; top: 0;
+    }
+    .dash-table tbody td {
+      padding: 4px 10px; border-bottom: 1px solid var(--border); vertical-align: middle;
+      line-height: 1.3;
+    }
+    .dash-table tbody tr.setup-row { cursor: pointer; background: var(--surface); }
+    .dash-table tbody tr.setup-row:not(.row-accent-green):hover td { background: var(--surface3); }
+
+    .setup-cell { display: flex; align-items: center; gap: 6px; font-weight: 700; white-space: nowrap; }
+    .chevron { display: inline-block; width: 10px; color: var(--muted); font-size: 0.7rem; }
+    .chevron::before { content: '\25B8'; }
+    .setup-row.expanded .chevron::before { content: '\25BE'; }
+    .setup-row.row-accent-green .chevron { color: var(--state-green-text); }
+
+    .direction-pill {
+      display: inline-block; font-size: 0.7rem; padding: 1px 7px; border-radius: 999px;
+      border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.03em;
+      color: var(--text); background: transparent;
+      /* Deliberately colorless -- direction is NEVER what drives red/green
+         here (that critical rule is state-driven only, see dashboard.js). */
+    }
+    .row-accent-green .direction-pill { border-color: var(--state-green-text); color: var(--state-green-text); }
+
+    /* Current State pill -- the ONE place every state's individual color
+       still lives (Sprint 2.1 requirement #5/#6: the pill is how a state
+       is identified now, not the row background). Colored by its own
+       pill-<color> class, entirely independent of the row's class. */
+    .state-pill {
+      display: inline-block; font-size: 0.74rem; padding: 1px 8px; border-radius: 999px;
+      font-weight: 600;
+    }
+    .state-pill.pill-gray { background: var(--state-gray); color: var(--state-gray-text); }
+    .state-pill.pill-blue { background: var(--state-blue); color: var(--state-blue-text); }
+    .state-pill.pill-yellow { background: var(--state-yellow); color: var(--state-yellow-text); }
+    .state-pill.pill-orange { background: var(--state-orange); color: var(--state-orange-text); }
+    .state-pill.pill-red { background: var(--state-red); color: var(--state-red-text); }
+    .state-pill.pill-purple { background: var(--state-purple); color: var(--state-purple-text); }
+    .state-pill.pill-green { background: var(--state-green-text); color: var(--state-green); }
+
+    /* Trade-Management Automation badges (2026-09 session): independent
+       flags shown ALONGSIDE the state pill, not replacing it -- a setup
+       can be ACTIONABLE with breakeven set AND a pending partial-profit
+       suggestion at once, so these can never be a single-value pill the
+       way TARGET_HIT is. Small and neutral-bordered on purpose: they're
+       informational annotations, not a second state. */
+    .mgmt-badge {
+      display: inline-block; font-size: 0.66rem; padding: 1px 6px; border-radius: 999px;
+      border: 1px solid var(--border); color: var(--muted); margin-left: 4px; white-space: nowrap;
+    }
+    .mgmt-badge.breakeven { border-color: var(--state-green); color: var(--state-green); }
+    .mgmt-badge.partial { border-color: var(--state-orange); color: var(--state-orange); }
+
+    /* Full-row solid/tinted backgrounds -- Sprint 2.1: reserved for
+       ENTRY_READY and INVALIDATED ONLY. Every other state's row uses the
+       plain neutral .setup-row background above; its pill alone carries
+       the color. */
+    /* ENTRY_READY: loud, on purpose -- the whole row, solid fill, dark
+       high-contrast text, a bright inset ring. This is the central
+       operational signal Kairos produces; it must never read as subtle. */
+    tr.row-accent-green td {
+      background: var(--state-green) !important;
+      color: var(--state-green-text) !important;
+      font-weight: 700;
+      box-shadow: inset 0 0 0 1px var(--state-green-hover);
+    }
+    tr.row-accent-green:hover td { background: var(--state-green-hover) !important; }
+    tr.row-accent-green .next-step-cell,
+    tr.row-accent-green .last-change-cell { font-weight: 500; }
+    /* INVALIDATED: also a full-row treatment, but deliberately restrained
+       -- a tint, not a solid fill -- so green remains the one color that
+       reads as "act now". */
+    tr.row-accent-red td { background: var(--row-invalidated-bg); }
+    tr.row-accent-red:hover td { background: var(--row-invalidated-hover); }
+
+    tr.detail-row td { background: var(--surface2); padding: 10px 16px; }
+    tr.setup-row.row-accent-green + tr.detail-row td { box-shadow: inset 3px 0 0 var(--state-green); }
+    tr.setup-row.row-accent-red + tr.detail-row td { box-shadow: inset 3px 0 0 var(--state-red-text); }
+    .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .detail-field .detail-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+    .detail-field .detail-value { font-size: 0.9rem; font-weight: 600; margin-top: 2px; }
+    .detail-empty { color: var(--muted); font-size: 0.82rem; }
+  </style>
+</head>
+<body>
+  <div class="page-shell">
+    <header>
+      <div>
+        <h1>Kairos Dashboard</h1>
+        <div class="subtitle">Every active setup's state, in one spreadsheet-style view.</div>
+      </div>
+    </header>
+    <nav class="kairos-nav" aria-label="Kairos navigation">
+      <a class="nav-link" href="/candidates">Candidates Dashboard</a>
+      <a class="nav-link" href="/review-queue">Review Queue</a>
+      <a class="nav-link" href="/approved-setups">Approved Setups</a>
+      <a class="nav-link" href="/watch-setups">Watch Setups</a>
+      <a class="nav-link active" href="/dashboard" aria-current="page">Dashboard</a>
+    </nav>
+
+    <div class="api-band" id="apiBand">
+      <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Paste X-API-Key" />
+      <button type="button" onclick="submitApiKey()">Connect</button>
+    </div>
+
+    <div class="freshness-bar" id="freshnessBar" style="display:none;"></div>
+
+    <main id="mainContent">
+      <div class="disclaimer" id="dashboardDisclaimer" hidden></div>
+      <div class="progress-row" id="dashboardCount" hidden></div>
+      <div class="status-line" id="statusLine">Loading dashboard&hellip;</div>
+      <div class="status-line" id="emptyState" hidden>No active setups right now.</div>
+      <div class="auth-required-panel" id="authPanel" hidden></div>
+      <div class="dash-table-wrap" id="dashTableWrap" hidden>
+        <table class="dash-table">
+          <thead>
+            <tr>
+              <th>Setup</th>
+              <th>Market</th>
+              <th>Direction</th>
+              <th>Current State</th>
+              <th>Next Step</th>
+              <th>Last Change</th>
+            </tr>
+          </thead>
+          <tbody id="dashboardBody"></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/dashboard.js?v=20260906-dashboard-sprint2-1"></script>
+</body>
+</html>

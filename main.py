@@ -116,9 +116,12 @@ from candidates_router import (
 from ma_pipeline import MA_PIPELINE_SOURCE, scan_ma_pipeline_candidates
 import momentum_pullback_shadow as momentum_pullback
 import momentum_pullback_short_lifecycle_experiment as short_lifecycle_experiment
+from smc_shadow_engine import smc_shadow_enabled
+from smc_shadow_router import router as smc_shadow_router, safe_run_smc_shadow_tick
 
 app = FastAPI(title="Stock Options Scanner")
 app.include_router(candidates_router)
+app.include_router(smc_shadow_router)
 logger = logging.getLogger(__name__)
 
 DISCOVERY_POOL_VERSION = "kairos-weekly-discovery-pool-v1"
@@ -1702,6 +1705,18 @@ def _register_discovery_background_refresh() -> None:
         MONITOR_TICK_SECONDS,
         lambda: _safe_run_approved_setup_monitor_tick("periodic"),
     )
+    # Sprint 4 -- Shadow SMC Strategy/State Engine: registered ONLY when
+    # KAIROS_SMC_SHADOW_ENABLED is set at startup. With the flag off (the
+    # default), this periodic tick is never scheduled at all -- not
+    # registered-but-inert, genuinely absent from the background task
+    # list. Same tick cadence as the production monitor for now (a
+    # research choice, not a claim they must match going forward).
+    if smc_shadow_enabled():
+        register_background_periodic_task(
+            "smc_shadow_engine",
+            MONITOR_TICK_SECONDS,
+            lambda: safe_run_smc_shadow_tick("periodic"),
+        )
 
 app.add_middleware(
     CORSMiddleware,
@@ -1803,6 +1818,33 @@ def watch_setups_dashboard():
     # instead. See public/setup_board.js.
     return FileResponse(
         "public/watch_setups.html",
+        headers=NO_STORE_HEADERS,
+    )
+
+
+@app.get("/dashboard")
+def dashboard_state_page():
+    # Dashboard Sprint 2 (2026-09 session): Erica's live spreadsheet-style
+    # view. Presentation only, no new backend route beyond the Sprint 1
+    # read model it talks to -- GET /candidates/dashboard-state (see
+    # dashboard_state.py / candidates_router.py). Reuses the same
+    # same-origin session-cookie auth every other scanner page already
+    # establishes via POST /session. See public/dashboard.js.
+    return FileResponse(
+        "public/dashboard.html",
+        headers=NO_STORE_HEADERS,
+    )
+
+
+@app.get("/signals")
+def minimal_signals_page():
+    # Dashboard Sprint 3 (2026-09 session): a second, minimal presentation
+    # over the SAME GET /candidates/dashboard-state read model -- stocks
+    # only, plain-language states, no trading terminology. Does not touch
+    # or share code with public/dashboard.js (the Erica dashboard), and
+    # adds no new trading-decision logic -- see public/signals.js.
+    return FileResponse(
+        "public/signals.html",
         headers=NO_STORE_HEADERS,
     )
 

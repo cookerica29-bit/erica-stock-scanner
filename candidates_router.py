@@ -44,6 +44,8 @@ from structural_resistance import clamp_target, levels_near_target, resolve_stop
 from displacement_score import score_displacement
 from location_score import score_location
 from confluence_summary import summarize_confluence
+import dashboard_state
+from journal_store import SQLiteJournalRepository, default_journal_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -1024,6 +1026,31 @@ def _ensure_approved_setup_monitor_state_schema(conn: sqlite3.Connection) -> Non
         conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN entry_reached_at TEXT")
     if "entry_reached_price" not in columns:
         conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN entry_reached_price REAL")
+    # Trade-Management Automation (2026-09 session): breakeven stop / ATR
+    # trail / partial-profit alert. current_stop is the ONLY live-
+    # recomputed stop this codebase ever writes -- deliberately separate
+    # from approved_setup_memories.approved_stop, which stays frozen
+    # forever (the "Finding A" bug this whole design guards against was a
+    # DIFFERENT stop silently overriding the human-approved one; this is
+    # the human's OWN approved risk-management ratchet moving forward,
+    # not a competing recomputation). NULL until breakeven first sets it;
+    # _is_invalidated reads current_stop when present, approved_stop
+    # otherwise (see run_approved_setup_monitor_tick's own comment).
+    # breakeven_set_at is frozen once written (same "persist exactly
+    # once, doubles as its own dedup gate" convention as
+    # entry_reached_at). last_trail_evaluated_bar_time is the same kind
+    # of dedup/idempotency anchor last_evaluated_bar_time already is for
+    # the trigger check, just scoped to the (separate) 4H trail cadence.
+    # partial_profit_suggested_at is frozen once written -- informational
+    # only, fires exactly once, never re-evaluated after.
+    if "current_stop" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN current_stop REAL")
+    if "breakeven_set_at" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN breakeven_set_at TEXT")
+    if "last_trail_evaluated_bar_time" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN last_trail_evaluated_bar_time TEXT")
+    if "partial_profit_suggested_at" not in columns:
+        conn.execute("ALTER TABLE approved_setup_monitor_state ADD COLUMN partial_profit_suggested_at TEXT")
     conn.commit()
 
 
@@ -1348,7 +1375,11 @@ def _initialize_candidates_schema(conn) -> None:
             last_evaluated_bar_time TEXT,
             current_rr_at_last_check REAL,
             entry_reached_at TEXT,
-            entry_reached_price REAL
+            entry_reached_price REAL,
+            current_stop REAL,
+            breakeven_set_at TEXT,
+            last_trail_evaluated_bar_time TEXT,
+            partial_profit_suggested_at TEXT
         )
         """
     )
@@ -1773,6 +1804,13 @@ class CandidateVisualReviewOut(BaseModel):
 ApprovedSetupMonitorStateName = Literal[
     "APPROVED", "WAITING_FOR_TRIGGER", "CONFIRMED", "TRIGGER_SATISFIED", "ACTIONABLE", "STALE",
     "WITHDRAWN", "INVALIDATED", "EXTENDED", "SUPERSEDED",
+    # TARGET_HIT (2026-09 session): the mirror-image outcome of INVALIDATED --
+    # current price crossed the frozen approved_target instead of the frozen
+    # approved_stop. Added specifically because, until now, this state
+    # machine could resolve a setup as a loss but had NO path to ever
+    # resolve one as a win -- see _is_target_hit's own comment for the full
+    # reasoning. Terminal, same as INVALIDATED (see TERMINAL_MONITOR_STATES).
+    "TARGET_HIT",
 ]
 # "approval_event" = written at the moment a human actually approved this
 # exact setup_key -- every field is real, contemporaneous evidence.
@@ -1880,6 +1918,15 @@ class ApprovedSetupMonitorStateOut(BaseModel):
     # satisfied" or "actionable." None until the monitor observes it.
     entry_reached_at: Optional[str] = None
     entry_reached_price: Optional[float] = None
+    # Trade-Management Automation (2026-09 session) -- see
+    # _ensure_approved_setup_monitor_state_schema's own comment for what
+    # each one means. current_stop is the live-recomputed stop
+    # (breakeven/trailed); None means "no ratchet has fired yet, the
+    # frozen approved_stop is still the real stop."
+    current_stop: Optional[float] = None
+    breakeven_set_at: Optional[str] = None
+    last_trail_evaluated_bar_time: Optional[str] = None
+    partial_profit_suggested_at: Optional[str] = None
 
 
 class ApprovedSetupMemoryRecordOut(BaseModel):
@@ -1890,6 +1937,49 @@ class ApprovedSetupMemoryRecordOut(BaseModel):
     _create_approved_setup_memory."""
     memory: ApprovedSetupMemoryOut
     monitor_state: Optional[ApprovedSetupMonitorStateOut] = None
+
+
+# ---------------------------------------------------------------------------
+# Manual Candidate Submission (2026-09 session): Erica submitting a setup
+# directly -- no scanner candidate, no candidate_visual_reviews row, no
+# _compute_review_queue_preview call. Deliberately reuses
+# _create_approved_setup_memory (the same primitive the review-queue path
+# ultimately calls) rather than _create_or_revise_active_memory / _sync_
+# approved_setup_memory_on_review -- those two are wired specifically to
+# candidate_visual_reviews' own re-review/decision-reversal semantics
+# (visual_review_id, decision revision), none of which exist for a manual
+# entry. Reusing the lower-level primitive gets the identical downstream
+# lifecycle (same table, same monitor_state initial-state derivation, same
+# same-ticker/source superseding) without dragging in irrelevant machinery.
+class ManualCandidateIn(BaseModel):
+    ticker: str = Field(min_length=1)
+    direction: Literal["long", "short"]
+    entry: float
+    stop: float
+    target: float
+    # Freeform written rationale -- stored in review_note, the same column
+    # a review-queue chart review's own note uses. No categorical market_
+    # structure/location_read/etc. fields: those describe a formal chart
+    # review that didn't happen here, and this feature is explicit that
+    # the discretionary judgment stays with Erica, not an inferred category.
+    rationale: str = Field(min_length=1)
+    # Optional at submission -- see set_manual_candidate_trigger below for
+    # adding one later. All-or-nothing (both or neither), same completeness
+    # rule VisualReviewIn already uses for the identical fields, enforced
+    # in the endpoint rather than at the Pydantic level so the 422 message
+    # can explain the actual rule.
+    trigger_timeframe: Optional[TriggerTimeframe] = None
+    trigger_rule: Optional[TriggerRule] = None
+    trigger_level: Optional[float] = None
+    trigger_reason: Optional[str] = None
+
+
+class ManualTriggerIn(BaseModel):
+    source: str = Field(min_length=1)
+    trigger_timeframe: Optional[TriggerTimeframe] = None
+    trigger_rule: TriggerRule
+    trigger_level: float
+    trigger_reason: Optional[str] = None
 
 
 class CandidatePlanPreviewOut(BaseModel):
@@ -5548,7 +5638,12 @@ def list_candidate_visual_reviews(
 ACTIVE_MONITOR_STATES = {
     "APPROVED", "WAITING_FOR_TRIGGER", "CONFIRMED", "TRIGGER_SATISFIED", "ACTIONABLE", "EXTENDED", "STALE",
 }
-TERMINAL_MONITOR_STATES = {"WITHDRAWN", "INVALIDATED", "SUPERSEDED"}
+# TARGET_HIT (2026-09 session): terminal for the same reason INVALIDATED
+# is -- once resolved, _monitor_active_rows's ACTIVE_MONITOR_STATES filter
+# already means a terminal row is never fetched by a later tick again (see
+# test_terminal_memory_never_touched's own coverage of that contract for
+# INVALIDATED; TARGET_HIT gets it for free from the same filter).
+TERMINAL_MONITOR_STATES = {"WITHDRAWN", "INVALIDATED", "SUPERSEDED", "TARGET_HIT"}
 
 
 def _row_to_approved_setup_memory(row: sqlite3.Row) -> dict:
@@ -5627,6 +5722,10 @@ def _row_to_approved_setup_monitor_state(row: sqlite3.Row) -> dict:
         "current_rr_at_last_check": row["current_rr_at_last_check"] if "current_rr_at_last_check" in keys else None,
         "entry_reached_at": row["entry_reached_at"] if "entry_reached_at" in keys else None,
         "entry_reached_price": row["entry_reached_price"] if "entry_reached_price" in keys else None,
+        "current_stop": row["current_stop"] if "current_stop" in keys else None,
+        "breakeven_set_at": row["breakeven_set_at"] if "breakeven_set_at" in keys else None,
+        "last_trail_evaluated_bar_time": row["last_trail_evaluated_bar_time"] if "last_trail_evaluated_bar_time" in keys else None,
+        "partial_profit_suggested_at": row["partial_profit_suggested_at"] if "partial_profit_suggested_at" in keys else None,
     }
 
 
@@ -6186,6 +6285,221 @@ def list_approved_setup_memories(
         conn.close()
 
 
+MANUAL_CANDIDATE_SOURCE = "manual"
+
+
+@router.post("/candidates/manual", response_model=ApprovedSetupMemoryRecordOut)
+def submit_manual_candidate(
+    body: ManualCandidateIn,
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Manual candidate submission -- a setup Erica is putting on Kairos's
+    radar herself, not one the scanner surfaced. Creates exactly the same
+    approved_setup_memories + approved_setup_monitor_state row pair a
+    scanner-sourced approval does (via _create_approved_setup_memory), so
+    it flows through the IDENTICAL downstream lifecycle -- including the
+    invalidation and TARGET_HIT checks in run_approved_setup_monitor_tick,
+    which apply unconditionally to every active row regardless of source.
+
+    source is always the literal "manual" -- not user-settable -- so
+    manual and scanner-sourced ("ma_pipeline" etc.) setups stay
+    distinguishable later (setup_key itself embeds source, so the two
+    pipelines can never collide on identity either).
+
+    Initial monitor state, from _create_approved_setup_memory's own
+    existing logic: WAITING_FOR_TRIGGER if trigger_rule/trigger_level are
+    given at submission, otherwise plain APPROVED -- correctly getting
+    ONLY stop/target monitoring (this is a setup already decided, live now,
+    with nothing left to wait for) until/unless a trigger is added via
+    set_manual_candidate_trigger below.
+
+    Disclosed simplification: no live quote is fetched here (unlike the
+    review-queue path's _compute_review_queue_preview) -- current_price_at_
+    approval and entry_distance_pct_at_approval are left None rather than
+    fabricated from a price this endpoint never actually observed. Nothing
+    downstream requires them (see _create_approved_setup_memory's own
+    preview.get(...) calls, all null-safe).
+    """
+    _check_api_key(x_api_key, scanner_session)
+    ticker = body.ticker.strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=422, detail="ticker must not be blank.")
+    for label, value in (("entry", body.entry), ("stop", body.stop), ("target", body.target)):
+        if not math.isfinite(value) or value <= 0:
+            raise HTTPException(status_code=422, detail=f"{label} must be a positive, finite number.")
+
+    # Direction-consistent ordering, validated HERE rather than left
+    # implicit -- the one new entry point in this codebase where a human
+    # types stop/target directly (every other path derives them from real
+    # swing/order-block structure, never typo-able). This is exactly the
+    # malformed-data shape the TARGET_HIT ordering fix's own test
+    # (test_invalidation_wins_over_target_hit_on_malformed_stop_target)
+    # defends against downstream -- better to reject it here than rely on
+    # that fallback ever being exercised.
+    if body.direction == "long" and not (body.stop < body.entry < body.target):
+        raise HTTPException(
+            status_code=422,
+            detail=f"For a long, stop ({body.stop}) must be below entry ({body.entry}), "
+                   f"which must be below target ({body.target}).",
+        )
+    if body.direction == "short" and not (body.stop > body.entry > body.target):
+        raise HTTPException(
+            status_code=422,
+            detail=f"For a short, stop ({body.stop}) must be above entry ({body.entry}), "
+                   f"which must be above target ({body.target}).",
+        )
+
+    has_trigger_rule = body.trigger_rule is not None
+    has_trigger_level = body.trigger_level is not None
+    if has_trigger_rule != has_trigger_level:
+        raise HTTPException(status_code=422, detail="trigger_rule and trigger_level must both be set together, or both omitted.")
+    trigger_timeframe = (body.trigger_timeframe or "30m") if has_trigger_rule else None
+
+    risk = abs(body.entry - body.stop)
+    risk_reward = (abs(body.target - body.entry) / risk) if risk > 0 else None
+    setup_key = f"{ticker}|{MANUAL_CANDIDATE_SOURCE}|{body.direction}|{round(body.stop, 2):.2f}|{round(body.target, 2):.2f}"
+
+    conn = _get_db()
+    try:
+        existing_active = _active_monitor_state_row_for_setup_key(conn, setup_key)
+        if existing_active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"An active manual setup already exists for this exact ticker/direction/stop/target "
+                       f"(setup_key={setup_key}). Submit a materially different stop or target, or use "
+                       f"set_manual_candidate_trigger to add/change a trigger on the existing one.",
+            )
+        submitted_at = datetime.now(timezone.utc).isoformat()
+        preview = {
+            "entry_price": body.entry, "stop": body.stop, "target": body.target, "risk_reward": risk_reward,
+            "current_price": None, "entry_distance_pct": None, "entry_proximity_threshold_pct": None,
+        }
+        memory_id = _create_approved_setup_memory(
+            conn,
+            ticker=ticker, source=MANUAL_CANDIDATE_SOURCE, direction=body.direction, setup_key=setup_key,
+            approved_at=submitted_at, visual_review_id=None, preview=preview,
+            market_structure=None, location_read=None, clear_path_to_target=None, lower_tf_confirmation=None,
+            review_note=body.rationale,
+            snapshot_origin="approval_event", snapshot_exact=True,
+            trigger_timeframe=trigger_timeframe, trigger_rule=body.trigger_rule,
+            trigger_level=body.trigger_level, trigger_reason=body.trigger_reason,
+            source_decision="approve",
+        )
+        conn.commit()
+        memory_row = conn.execute("SELECT * FROM approved_setup_memories WHERE id=?", (memory_id,)).fetchone()
+        state_row = conn.execute(
+            "SELECT * FROM approved_setup_monitor_state WHERE approved_memory_id=? ORDER BY id DESC LIMIT 1",
+            (memory_id,),
+        ).fetchone()
+        return {
+            "memory": _row_to_approved_setup_memory(memory_row),
+            "monitor_state": _row_to_approved_setup_monitor_state(state_row) if state_row else None,
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/candidates/{ticker}/manual-trigger", response_model=ApprovedSetupMemoryRecordOut)
+def set_manual_candidate_trigger(
+    ticker: str,
+    body: ManualTriggerIn,
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Adds (or changes) a trigger on a setup currently sitting in plain
+    APPROVED with no trigger/confirmation yet -- the "settable ... added
+    later" half of manual candidate submission. Not restricted to
+    source="manual" specifically: the same real gap (approve now, decide
+    the trigger level later) applies to any APPROVED memory regardless of
+    origin, and gating this arbitrarily to one source would be a
+    distinction this endpoint has no real reason to enforce.
+
+    Deliberately does NOT UPDATE the existing approved_setup_memories row
+    in place -- every other place in this codebase treats that table as
+    immutable once written (see _create_or_revise_active_memory's own
+    docstring: an evidence change is always a NEW memory generation with
+    revision_of_memory_id set, never a mutation). This reuses that exact
+    same revision path: a new memory row is created (same setup_key,
+    trigger fields now populated, revision_of_memory_id pointing back),
+    and the old monitor_state is retired to SUPERSEDED via
+    supersede_monitor_state_id -- not a new pattern, the same one
+    _create_approved_setup_memory already exists to serve.
+
+    422s if no active memory exists for this ticker+source, or if it
+    exists but is not in plain APPROVED (already has a trigger, already
+    confirmed, or already terminal) -- adding a trigger only makes sense
+    for the one state that has neither yet.
+    """
+    _check_api_key(x_api_key, scanner_session)
+    normalized_ticker = ticker.strip().upper()
+    conn = _get_db()
+    try:
+        active = conn.execute(
+            """
+            SELECT ms.* FROM approved_setup_monitor_state ms
+            JOIN approved_setup_memories m ON m.id = ms.approved_memory_id
+            WHERE m.ticker=? AND m.source=? AND ms.state IN ({})
+            ORDER BY ms.id DESC LIMIT 1
+            """.format(",".join("?" for _ in ACTIVE_MONITOR_STATES)),
+            (normalized_ticker, body.source, *ACTIVE_MONITOR_STATES),
+        ).fetchone()
+        if active is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"No active setup found for {normalized_ticker} (source={body.source}) to add a trigger to.",
+            )
+        if active["state"] != "APPROVED":
+            raise HTTPException(
+                status_code=422,
+                detail=f"Cannot add a trigger -- this setup's current state is {active['state']}, not APPROVED "
+                       f"(a trigger only makes sense before any confirmation/trigger evidence exists yet).",
+            )
+        old_memory_row = conn.execute(
+            "SELECT * FROM approved_setup_memories WHERE id=?", (active["approved_memory_id"],),
+        ).fetchone()
+
+        risk = abs(old_memory_row["approved_entry"] - old_memory_row["approved_stop"]) if old_memory_row["approved_entry"] is not None and old_memory_row["approved_stop"] is not None else 0
+        risk_reward = (
+            abs(old_memory_row["approved_target"] - old_memory_row["approved_entry"]) / risk
+            if risk > 0 and old_memory_row["approved_target"] is not None else old_memory_row["approved_risk_reward"]
+        )
+        preview = {
+            "entry_price": old_memory_row["approved_entry"], "stop": old_memory_row["approved_stop"],
+            "target": old_memory_row["approved_target"], "risk_reward": risk_reward,
+            "current_price": None, "entry_distance_pct": None, "entry_proximity_threshold_pct": None,
+        }
+        revised_at = datetime.now(timezone.utc).isoformat()
+        memory_id = _create_approved_setup_memory(
+            conn,
+            ticker=normalized_ticker, source=body.source, direction=old_memory_row["direction"],
+            setup_key=old_memory_row["setup_key"], approved_at=revised_at,
+            visual_review_id=old_memory_row["visual_review_id"], preview=preview,
+            market_structure=old_memory_row["market_structure"], location_read=old_memory_row["location_read"],
+            clear_path_to_target=old_memory_row["clear_path_to_target"],
+            lower_tf_confirmation=old_memory_row["lower_tf_confirmation"],
+            review_note=old_memory_row["review_note"],
+            snapshot_origin=old_memory_row["snapshot_origin"], snapshot_exact=bool(old_memory_row["snapshot_exact"]),
+            trigger_timeframe=body.trigger_timeframe or "30m", trigger_rule=body.trigger_rule,
+            trigger_level=body.trigger_level, trigger_reason=body.trigger_reason,
+            revision_of_memory_id=old_memory_row["id"], revision_reason="trigger_added_after_submission",
+            supersede_monitor_state_id=active["id"],
+            source_decision=(old_memory_row["source_decision"] if "source_decision" in old_memory_row.keys() and old_memory_row["source_decision"] else "approve"),
+        )
+        conn.commit()
+        memory_row = conn.execute("SELECT * FROM approved_setup_memories WHERE id=?", (memory_id,)).fetchone()
+        state_row = conn.execute(
+            "SELECT * FROM approved_setup_monitor_state WHERE approved_memory_id=? ORDER BY id DESC LIMIT 1",
+            (memory_id,),
+        ).fetchone()
+        return {
+            "memory": _row_to_approved_setup_memory(memory_row),
+            "monitor_state": _row_to_approved_setup_monitor_state(state_row) if state_row else None,
+        }
+    finally:
+        conn.close()
+
+
 @router.post("/candidates/approved-setup-memory/backfill")
 def backfill_approved_setup_memories(
     x_api_key: Optional[str] = Header(default=None),
@@ -6421,6 +6735,139 @@ def _is_invalidated(direction: str, current_price: float, approved_stop: float) 
     if direction == "short":
         return current_price >= approved_stop
     return False
+
+
+def _is_target_hit(direction: str, current_price: float, approved_target: float) -> bool:
+    """2026-09 session: the mirror-image of _is_invalidated -- same
+    intrabar-crossing contract (does not wait for a completed candle,
+    same reasoning as invalidation: a real take-profit order does not
+    wait for a candle to close either), against the FROZEN approved_target
+    instead of the frozen approved_stop. Symmetric: LONG hit at price >=
+    target, SHORT at price <= target.
+
+    Added because, before this, the monitor could resolve a setup as a
+    loss (INVALIDATED) but had no code path that could ever resolve one
+    as a win -- every setup that actually ran to target was
+    indistinguishable from one that just sat there going nowhere; both
+    silently ended up STALE. See run_approved_setup_monitor_tick's own
+    ordering comment for how this interacts with _is_invalidated when a
+    single tick's price move could satisfy both (a gap)."""
+    if direction == "long":
+        return current_price >= approved_target
+    if direction == "short":
+        return current_price <= approved_target
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Trade-Management Automation (2026-09 session): breakeven stop, ATR trail,
+# partial-profit alert -- all gated on the position actually being live
+# (entry_reached_at set), all layered ON TOP OF whatever
+# approved_setup_monitor_state.state the primary state machine above
+# already resolved this tick, none of them a new state value themselves
+# (a setup can be ACTIONABLE with breakeven set AND a pending partial-
+# profit suggestion, all at once -- these are independent flags, not a
+# single-value enum the way TARGET_HIT was).
+# ---------------------------------------------------------------------------
+
+BREAKEVEN_R_MULTIPLE = 1.0
+PARTIAL_PROFIT_R_MULTIPLE = 2.0
+ATR_TRAIL_MULTIPLIER = 1.5
+# _compute_atr's (scanner.py, imported at the top of this file) default
+# period=14 (an EWM, not a hard window) can
+# technically compute on fewer bars, but reads as noise rather than a real
+# ATR(14) with much less history behind it -- this is the same kind of
+# disclosed, unvalidated-but-reasonable minimum-bars threshold this
+# codebase already uses elsewhere (e.g. EXECUTION_SHADOW_RECENT_RANGE_BARS),
+# not a value backed by real forward evidence yet.
+ATR_TRAIL_MIN_BARS = 15
+
+
+def _r_multiple(direction: str, current_price: float, approved_entry: float, original_risk: float) -> Optional[float]:
+    """Favorable R-multiple, using the FROZEN entry-to-stop distance
+    captured at approval time (original_risk = abs(approved_entry -
+    approved_stop)) -- NEVER recomputed off a since-moved current_stop.
+    R is a fixed yardstick set once at approval; letting it drift as the
+    stop trails would mean "+1R" quietly meant a different price gap
+    depending on when you asked, which defeats the whole point of a fixed
+    breakeven/partial-profit trigger. Positive = favorable move, negative
+    = adverse. None when there's no real risk distance to measure
+    against (a malformed or zero-risk setup)."""
+    if original_risk <= 0:
+        return None
+    if direction == "long":
+        return (current_price - approved_entry) / original_risk
+    if direction == "short":
+        return (approved_entry - current_price) / original_risk
+    return None
+
+
+def _is_breakeven_due(r_multiple: Optional[float]) -> bool:
+    return r_multiple is not None and r_multiple >= BREAKEVEN_R_MULTIPLE
+
+
+def _is_partial_profit_due(r_multiple: Optional[float]) -> bool:
+    return r_multiple is not None and r_multiple >= PARTIAL_PROFIT_R_MULTIPLE
+
+
+def _trailed_stop(direction: str, latest_close: float, atr: float) -> float:
+    """1.5x ATR off the latest COMPLETED candle's close -- reuses
+    _compute_atr (scanner.py), the same ATR calculation already used for
+    displacement scoring elsewhere in this codebase, not a new one.
+    Direction-symmetric: a LONG's trail sits below price, a SHORT's above."""
+    offset = ATR_TRAIL_MULTIPLIER * atr
+    return (latest_close - offset) if direction == "long" else (latest_close + offset)
+
+
+def _trail_tightens(direction: str, candidate_stop: float, effective_stop: float) -> bool:
+    """The trailed stop may only tighten toward price, never loosen away
+    from it -- a LONG's stop may only move UP, a SHORT's only DOWN.
+    Symmetric with _is_invalidated's own LONG-below/SHORT-above stop
+    orientation."""
+    if direction == "long":
+        return candidate_stop > effective_stop
+    if direction == "short":
+        return candidate_stop < effective_stop
+    return False
+
+
+def _record_trade_management_event(
+    conn,
+    *,
+    approved_memory_id: int,
+    setup_key: str,
+    ticker: str,
+    source: str,
+    state: str,
+    occurred_at: str,
+    current_price: Optional[float],
+    current_rr: Optional[float],
+    event_type: str,
+    detail: str,
+) -> None:
+    """BREAKEVEN_SET / STOP_TRAILED / PARTIAL_PROFIT_SUGGESTED -- deliberately
+    bypasses _record_monitor_event's generic to_state dedup, same reason
+    and same precedent as _record_entry_reached_event: these are NOT
+    approved_setup_monitor_state.state transitions (from_state == to_state
+    == the row's own unchanged state, on purpose), so the generic "only
+    log when to_state differs from the last logged event" rule would
+    silently swallow one of these the moment an ordinary state-transition
+    event with the same to_state had already been logged first. Each of
+    the three callers already carries its own sufficient dedup guard
+    BEFORE ever reaching this function (breakeven_set_at/
+    partial_profit_suggested_at being NULL, or last_trail_evaluated_bar_time
+    differing from the latest bar's own time) -- this function performs no
+    deduplication itself, on purpose, same division of responsibility
+    _record_entry_reached_event already established."""
+    conn.execute(
+        """
+        INSERT INTO approved_setup_monitor_events (
+            approved_memory_id, setup_key, ticker, source, event_type,
+            from_state, to_state, occurred_at, current_price, current_rr, detail
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (approved_memory_id, setup_key, ticker, source, event_type, state, state, occurred_at, current_price, current_rr, detail),
+    )
 
 
 def _current_rr(direction: str, current_price: float, approved_stop: float, approved_target: float) -> Optional[float]:
@@ -6668,6 +7115,7 @@ WATCH_EVENT_TYPE_BY_STATE = {
     "EXTENDED": "WATCH_EXTENDED",
     "SUPERSEDED": "WATCH_SUPERSEDED",
     "ACTIONABLE": "WATCH_HANDED_OFF",
+    "TARGET_HIT": "WATCH_TARGET_HIT",  # 2026-09 session, same naming convention as WATCH_INVALIDATED
 }
 
 
@@ -7008,6 +7456,20 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
         })
         bars_by_ticker = {ticker: _fetch_recent_30m_bars(ticker) for ticker in waiting_tickers}
 
+        # Trade-Management Automation (2026-09 session): the ATR trail
+        # needs recent 4H bars, but ONLY for rows where a position is
+        # genuinely live (entry_reached_at set) -- same "only fetch bars
+        # for tickers that actually need them" cost discipline as
+        # waiting_tickers/bars_by_ticker just above. Reuses
+        # _recent_4h_bars_for_execution_shadow verbatim -- the SAME,
+        # already-cached (TTL) 4H fetch _compute_review_queue_preview
+        # already uses elsewhere in this file, not a new data path.
+        entry_reached_tickers = sorted({
+            row["ticker"] for row in rows
+            if row["entry_reached_at"] is not None and row["approved_memory_id"] in memory_by_id
+        })
+        atr_bars_by_ticker = {ticker: _recent_4h_bars_for_execution_shadow(ticker) for ticker in entry_reached_tickers}
+
         checked = 0
         updated = 0
         for row in rows:
@@ -7031,6 +7493,19 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
             approved_target = memory_row["approved_target"]
             if approved_stop is None or direction not in ("long", "short"):
                 continue
+            # Trade-Management Automation (2026-09 session): effective_stop
+            # is the ONE place invalidation reads a live-recomputed stop
+            # instead of the frozen approved_stop -- current_stop is set
+            # by breakeven/trailing below, on a HUMAN-approved ratchet
+            # mechanism, not an independent recomputation of "what the
+            # stop should be" (the thing the frozen-approved_stop design
+            # exists to prevent). current_rr and the trigger/execution-
+            # window logic below are UNCHANGED and still use approved_stop
+            # -- this task didn't ask for those to move, and they answer a
+            # different question ("if entering fresh from here, what's the
+            # R:R") than invalidation does ("has THIS position's real,
+            # current stop been breached").
+            effective_stop = row["current_stop"] if row["current_stop"] is not None else approved_stop
 
             update_fields: dict[str, Any] = {"last_checked_at": now_iso, "last_live_price": current_price}
             current_state = row["state"]
@@ -7058,13 +7533,46 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
                     approved_entry=approved_entry, previous_price=row["last_live_price"],
                 )
 
-            if _is_invalidated(direction, current_price, approved_stop):
+            # Ordering contract (2026-09 session, TARGET_HIT addition;
+            # extended the same session Trade-Management Automation added
+            # a live current_stop): invalidation is checked FIRST, target-
+            # hit second, against effective_stop (current_stop when a
+            # breakeven/trail has fired, approved_stop otherwise) rather
+            # than the frozen stop directly. For a well-formed setup with
+            # NO trail yet (approved_stop and approved_target on the
+            # correct opposite sides of approved_entry) these two
+            # conditions are mutually exclusive by construction -- a LONG
+            # price at or below the stop is, by the stop-below-target
+            # ordering, necessarily still below the target too, and
+            # symmetrically for a SHORT. A trailed stop can only ever
+            # TIGHTEN toward price (see _trail_tightens), so it stays on
+            # the same side of target it started on in every realistic
+            # case too -- but "realistic" isn't "provably impossible," so
+            # this ordering is kept explicit and deliberate rather than
+            # incidental, protecting against two things at once: malformed/
+            # corrupted stop-target data (e.g. a future bug writing them on
+            # the wrong sides of entry), AND an aggressive trail that
+            # happens to land very close to target on a low-ATR, high-
+            # momentum move. Either way, this ordering guarantees the
+            # ambiguous case reads as a loss (INVALIDATED) rather than
+            # being silently miscredited as a win (TARGET_HIT) -- the
+            # conservative direction to fail in, same asymmetry reasoning
+            # _is_invalidated's own docstring already uses for intrabar vs
+            # completed-candle.
+            event_detail: Optional[str] = None
+            if _is_invalidated(direction, current_price, effective_stop):
                 new_state = "INVALIDATED"
                 update_fields["terminal_at"] = now_iso
                 comparator = "<=" if direction == "long" else ">="
+                stop_label = "current stop" if row["current_stop"] is not None else "approved stop"
                 update_fields["invalidation_reason"] = (
-                    f"current price {current_price} {comparator} approved stop {approved_stop}"
+                    f"current price {current_price} {comparator} {stop_label} {effective_stop}"
                 )
+            elif approved_target is not None and _is_target_hit(direction, current_price, approved_target):
+                new_state = "TARGET_HIT"
+                update_fields["terminal_at"] = now_iso
+                comparator = ">=" if direction == "long" else "<="
+                event_detail = f"current price {current_price} {comparator} approved target {approved_target}"
             else:
                 if current_state == "WAITING_FOR_TRIGGER" and memory_row["trigger_rule"] and memory_row["trigger_level"] is not None:
                     bars = bars_by_ticker.get(row["ticker"]) or []
@@ -7117,6 +7625,101 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
                     if _execution_window_state(current_rr) == "EXTENDED":
                         new_state = "EXTENDED"
 
+            # Trade-Management Automation (2026-09 session): breakeven /
+            # ATR trail / partial-profit alert. Gated on the position
+            # being genuinely live (entry_reached_at set -- you can't move
+            # your own stop to breakeven on a trade you were never
+            # actually in) and on this SAME tick not having just resolved
+            # to a terminal outcome above (moving a stop or suggesting a
+            # partial exit on a setup that just got stopped out or hit
+            # target this same tick has no meaning). Runs independently of
+            # which non-terminal state the primary resolution above landed
+            # on (WAITING_FOR_TRIGGER, CONFIRMED, ACTIONABLE, EXTENDED,
+            # STALE all pass this gate alike) -- these three checks are a
+            # risk-management layer alongside the state machine, not a
+            # replacement for any part of it.
+            trade_mgmt_events: list[tuple[str, str]] = []
+            if row["entry_reached_at"] is not None and new_state not in ("INVALIDATED", "TARGET_HIT") and approved_entry is not None:
+                original_risk = abs(approved_entry - approved_stop)
+                r_multiple = _r_multiple(direction, current_price, approved_entry, original_risk)
+                # effective_stop was computed above for the invalidation
+                # check (start-of-tick value); mgmt_stop tracks it forward
+                # through THIS tick as breakeven/trail apply, so trailing
+                # correctly measures "tighten vs. breakeven" even when
+                # both fire in the same tick (e.g. a big single-tick move
+                # crosses +1R for the first time AND a fresh completed bar
+                # is available) -- never retroactively affects the
+                # invalidation check above, which already ran against the
+                # pre-tick value.
+                mgmt_stop = effective_stop
+
+                # 1. Breakeven at +1R -- fires exactly once (guarded on
+                # breakeven_set_at being NULL), intrabar/immediate like
+                # invalidation and target-hit (not candle-close-gated --
+                # there's no "wait for confirmation" reason to delay
+                # locking in a risk-free stop once price genuinely gets
+                # there).
+                if row["breakeven_set_at"] is None and _is_breakeven_due(r_multiple):
+                    update_fields["current_stop"] = approved_entry
+                    update_fields["breakeven_set_at"] = now_iso
+                    mgmt_stop = approved_entry
+                    trade_mgmt_events.append((
+                        "BREAKEVEN_SET",
+                        f"current price {current_price} reached +{BREAKEVEN_R_MULTIPLE:g}R "
+                        f"(original risk {original_risk:.4f}); stop moved to entry {approved_entry}",
+                    ))
+
+                # 2. ATR trail -- ONLY once breakeven has fired (this tick
+                # or previously), on each NEW completed 4H candle close
+                # (last_trail_evaluated_bar_time is the dedup/idempotency
+                # anchor, same pattern last_evaluated_bar_time already is
+                # for the trigger check's own completed-bar cadence, just
+                # a separate field since these are two independent
+                # cadences over two different timeframes). Only ever
+                # tightens (_trail_tightens) -- a candidate level that
+                # would loosen the stop is silently discarded, not logged.
+                breakeven_is_active = row["breakeven_set_at"] is not None or "breakeven_set_at" in update_fields
+                if breakeven_is_active:
+                    trail_bars = atr_bars_by_ticker.get(row["ticker"]) or []
+                    if len(trail_bars) >= ATR_TRAIL_MIN_BARS:
+                        latest_bar = trail_bars[-1]
+                        latest_bar_time = latest_bar.get("time")
+                        latest_close = _as_float(latest_bar.get("close"))
+                        if (
+                            latest_bar_time
+                            and latest_bar_time != row["last_trail_evaluated_bar_time"]
+                            and latest_close is not None
+                        ):
+                            update_fields["last_trail_evaluated_bar_time"] = latest_bar_time
+                            atr_frame = pd.DataFrame(trail_bars).rename(
+                                columns={"high": "High", "low": "Low", "close": "Close"}
+                            )
+                            atr_value = _compute_atr(atr_frame)
+                            candidate_stop = _trailed_stop(direction, latest_close, atr_value)
+                            if _trail_tightens(direction, candidate_stop, mgmt_stop):
+                                update_fields["current_stop"] = candidate_stop
+                                mgmt_stop = candidate_stop
+                                trade_mgmt_events.append((
+                                    "STOP_TRAILED",
+                                    f"stop tightened to {candidate_stop:.4f} (1.5x ATR={atr_value:.4f} off the "
+                                    f"{latest_bar_time} completed-4H close {latest_close})",
+                                ))
+
+                # 3. Partial-profit alert at +2R -- informational only,
+                # fires exactly once (guarded on partial_profit_suggested_at
+                # being NULL). Deliberately never changes size/state itself
+                # -- Kairos has no execution access to actually reduce a
+                # Robinhood position; this is a flag for Erica to act on
+                # herself, same "recommend, never execute" boundary the
+                # AI chart-review feature already draws.
+                if row["partial_profit_suggested_at"] is None and _is_partial_profit_due(r_multiple):
+                    update_fields["partial_profit_suggested_at"] = now_iso
+                    trade_mgmt_events.append((
+                        "PARTIAL_PROFIT_SUGGESTED",
+                        f"current price {current_price} reached +{PARTIAL_PROFIT_R_MULTIPLE:g}R -- consider "
+                        f"reducing size ~50% (informational only, not an automatic size change)",
+                    ))
+
             if new_state != current_state:
                 update_fields["state"] = new_state
                 updated += 1
@@ -7142,7 +7745,25 @@ def run_approved_setup_monitor_tick(reason: str = "periodic") -> dict:
                     occurred_at=now_iso,
                     current_price=current_price,
                     current_rr=current_rr,
+                    detail=event_detail,
                     event_type=_monitor_event_type(source_decision, new_state),
+                )
+
+            # Logged AFTER the UPDATE above commits this row's new
+            # current_stop/breakeven_set_at/etc -- these events are a
+            # record of what was JUST persisted, not a prediction of it.
+            # Independent of the new_state != current_state gate just
+            # above: a trade-mgmt event can fire on a tick where `state`
+            # itself never changes (e.g. price grinds through +1R while
+            # sitting in ACTIONABLE the whole time).
+            for event_type, detail in trade_mgmt_events:
+                _record_trade_management_event(
+                    conn,
+                    approved_memory_id=row["approved_memory_id"],
+                    setup_key=row["setup_key"], ticker=row["ticker"], source=row["source"],
+                    state=new_state, occurred_at=now_iso,
+                    current_price=current_price, current_rr=current_rr,
+                    event_type=event_type, detail=detail,
                 )
 
         conn.commit()
@@ -7673,5 +8294,236 @@ def track_candidate_outcome(
         conn.commit()
         stored = conn.execute("SELECT * FROM candidate_promotions WHERE id=?", (promotion_id,)).fetchone()
         return _row_to_promotion(stored)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Kairos Dashboard Sprint 1 -- Strategy State Read Model (2026-09 session).
+#
+# Additive, read-only. Normalizes the ALREADY-EXISTING Approved/Watch
+# monitor lifecycle (approved_setup_memories/approved_setup_monitor_state,
+# built across Execution Layer V1/Watch Lifecycle V1/Entry-Reached Alert
+# V1) plus a ticker-only journal_store.py position overlay into the
+# dashboard_state module's stable vocabulary. Computes NO new trading
+# decision, calls NO live network/data provider, writes to NO table.
+#
+# Deliberately does NOT touch: run_approved_setup_monitor_tick, any
+# ApprovedSetupMonitorStateName transition, _stage1_mechanical_ready,
+# rank_stage1_candidates, list_review_queue's Review Value scoring,
+# journal_store.entry_status/JournalRepository, or any scanner.py
+# function (see tests/stock_strategy_freeze_v1.py, run byte-identical
+# before and after this sprint).
+#
+# Scope decision, disclosed rather than silently narrowed: this endpoint
+# reads ONLY from the Approved/Watch monitor -- not scanner.py's separate
+# scan_cached()/ENTER_NOW pipeline, and not not-yet-reviewed review-queue
+# candidates. dashboard_state.map_scanner_lifecycle_result exists and is
+# tested (proving the required ENTER_NOW -> ENTRY_READY mapping against
+# scanner.py's REAL, unmodified stock_execution_lifecycle_presentation/
+# _ranking_status_bucket functions), but wiring scan_cached() itself into
+# a live, synchronous read-model endpoint was deferred -- see the Sprint 1
+# report's "architectural risks" section for the latency/cost reasoning.
+# DISCOVERED is consequently schema-valid but never emitted by THIS
+# endpoint today (every approved_setup_memories row already has a
+# watch/approve decision behind it by construction) -- reserved, not
+# broken.
+
+_dashboard_journal_repository_lock = threading.Lock()
+_dashboard_journal_repository_singleton: Optional[SQLiteJournalRepository] = None
+
+
+def _dashboard_journal_repository() -> SQLiteJournalRepository:
+    global _dashboard_journal_repository_singleton
+    with _dashboard_journal_repository_lock:
+        if _dashboard_journal_repository_singleton is None:
+            _dashboard_journal_repository_singleton = SQLiteJournalRepository(default_journal_db_path())
+        return _dashboard_journal_repository_singleton
+
+
+def _dashboard_position_overlay(ticker: str) -> Optional[str]:
+    """Read-only lookup against the EXISTING journal (journal_store.py) --
+    that module and its schema are completely untouched by this sprint.
+    Ticker-only correlation: there is no native link between a journal
+    entry and a specific setup_key today, so this can only answer "is
+    there ANY open/closed position for this ticker," not "for this exact
+    setup." A real, disclosed limitation -- see the Sprint 1 report.
+    Fails open (returns None, no overlay applied) on any read error --
+    a journal hiccup must never break the dashboard read model or
+    misreport a setup's lifecycle state, same "warn and skip, never
+    guess" convention as the rest of this file."""
+    try:
+        repo = _dashboard_journal_repository()
+        if repo.list_entries({"ticker": ticker, "status": "open", "limit": 1}):
+            return dashboard_state.position_overlay_state(True, False)
+        if repo.list_entries({"ticker": ticker, "status": "closed", "limit": 1}):
+            return dashboard_state.position_overlay_state(False, True)
+    except Exception:
+        return None
+    return None
+
+
+# Dashboard-only exclusion set: WITHDRAWN/SUPERSEDED (a human reversed the
+# decision, or a newer setup generation already replaced this exact row).
+# Deliberately DIFFERENT from ACTIVE_MONITOR_STATES/_monitor_active_rows,
+# which ALSO exclude INVALIDATED -- a dashboard's whole point is to show
+# a human "this setup invalidated," not hide it. ACTIVE_MONITOR_STATES
+# and _monitor_active_rows themselves are untouched by this distinction.
+DASHBOARD_STATE_EXCLUDED_MONITOR_STATES = dashboard_state.APPROVED_MONITOR_EXCLUDED_STATES
+
+
+def _dashboard_rows_for_approved_monitor(conn) -> list[sqlite3.Row]:
+    placeholders = ", ".join("?" for _ in DASHBOARD_STATE_EXCLUDED_MONITOR_STATES)
+    return conn.execute(
+        f"""
+        SELECT m.*, s.state AS monitor_state, s.updated_at AS monitor_updated_at,
+               s.entry_reached_at AS entry_reached_at, s.entry_reached_price AS entry_reached_price,
+               s.last_live_price AS last_live_price, s.terminal_at AS terminal_at,
+               s.invalidation_reason AS invalidation_reason,
+               s.current_stop AS current_stop, s.breakeven_set_at AS breakeven_set_at,
+               s.partial_profit_suggested_at AS partial_profit_suggested_at
+        FROM approved_setup_memories m
+        JOIN approved_setup_monitor_state s ON s.approved_memory_id = m.id
+        WHERE s.state NOT IN ({placeholders})
+        ORDER BY m.approved_at DESC
+        """,
+        tuple(DASHBOARD_STATE_EXCLUDED_MONITOR_STATES),
+    ).fetchall()
+
+
+def _dashboard_option_contract(conn, ticker: str, source: str) -> Optional[dict]:
+    """Dashboard Sprint 3: read-only lookup of the last computed option
+    contract SUGGESTION for this (ticker, source) -- candidate_plan_previews
+    is the same table the existing review-queue preview flow already
+    writes (_compute_candidate_plan_preview /
+    _safe_option_contract_for_candidate), read here exactly as stored. No
+    live options-chain fetch, no re-scoring -- see
+    dashboard_state.trade_type_for's own docstring for the disclosed
+    (ticker, source)-not-setup_key staleness caveat. Fails open (returns
+    None) on any read/parse error, same "never let a side-lookup break the
+    dashboard" convention as _dashboard_position_overlay."""
+    try:
+        row = conn.execute(
+            "SELECT option_contract_json FROM candidate_plan_previews WHERE ticker=? AND source=?",
+            (ticker, source),
+        ).fetchone()
+        if not row or not row["option_contract_json"]:
+            return None
+        parsed = json.loads(row["option_contract_json"])
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _build_dashboard_row(row: sqlite3.Row, conn=None) -> dict:
+    raw_state = row["monitor_state"]
+    mapped_state = dashboard_state.map_approved_monitor_state(raw_state, row["entry_reached_at"])
+    ticker = str(row["ticker"] or "").upper()
+    overlay_state = _dashboard_position_overlay(ticker)
+    final_state = overlay_state or mapped_state
+
+    option_contract = _dashboard_option_contract(conn, ticker, row["source"]) if conn is not None else None
+    option_fields = dashboard_state.option_contract_fields(option_contract)
+
+    # Trade-Management Automation (2026-09 session): "Stop / Exit" now
+    # reflects the REAL, current stop -- current_stop once breakeven/trail
+    # has fired, the original approved_stop otherwise -- same effective-
+    # stop logic run_approved_setup_monitor_tick's own invalidation check
+    # already uses. original_stop is kept separately so the dashboard can
+    # still show "was $95, now breakeven at $100" rather than losing the
+    # starting point once it moves.
+    effective_stop = row["current_stop"] if row["current_stop"] is not None else row["approved_stop"]
+
+    return {
+        "symbol": ticker,
+        # Dashboard Sprint 2: derived from the real approved_setup_memories
+        # .source column (see dashboard_state.market_for_source's own
+        # docstring for the disclosed naming-convention heuristic this
+        # uses) -- Sprint 1 hardcoded this to the literal "stock".
+        "market": dashboard_state.market_for_source(row["source"]),
+        "direction": row["direction"],
+        # Dashboard Sprint 3: CALL/PUT when a real, already-computed
+        # option contract exists for this (ticker, source); otherwise the
+        # plain LONG/SHORT direction. See dashboard_state.trade_type_for.
+        "trade_type": dashboard_state.trade_type_for(row["direction"], option_contract),
+        "option_strike": option_fields["strike"],
+        "option_expiration": option_fields["expiration"],
+        "state": final_state,
+        "state_label": dashboard_state.dashboard_state_label(final_state),
+        "next_step": dashboard_state.dashboard_state_next_step(final_state),
+        "last_change": row["monitor_updated_at"] or row["terminal_at"],
+        "planned_entry": row["approved_entry"],
+        "entry": row["approved_entry"],
+        "stop": effective_stop,
+        "exit": effective_stop,
+        "original_stop": row["approved_stop"],
+        "target": row["approved_target"],
+        "targets": [row["approved_target"]] if row["approved_target"] is not None else [],
+        "source": row["source"],
+        "source_decision": row["source_decision"] if "source_decision" in row.keys() else "approve",
+        "setup_key": row["setup_key"],
+        # Backward compatibility: the exact, real, currently-used state
+        # value, completely unmapped/unchanged -- a caller that only
+        # understands today's vocabulary keeps working off this field.
+        "legacy_state": raw_state,
+        "entry_reached_at": row["entry_reached_at"],
+        "entry_reached_price": row["entry_reached_price"],
+        "current_price": row["last_live_price"],
+        "invalidation_reason": row["invalidation_reason"],
+        # Trade-Management Automation (2026-09 session): independent flags,
+        # not new state values -- a row can be ACTIONABLE with breakeven
+        # set AND a pending partial-profit suggestion at once. None means
+        # "hasn't happened yet," not "no" -- these are one-way ratchets.
+        "breakeven_set": row["breakeven_set_at"] is not None,
+        "breakeven_set_at": row["breakeven_set_at"],
+        "partial_profit_suggested": row["partial_profit_suggested_at"] is not None,
+        "partial_profit_suggested_at": row["partial_profit_suggested_at"],
+    }
+
+
+@router.get("/candidates/dashboard-state")
+def list_dashboard_state(
+    x_api_key: Optional[str] = Header(default=None),
+    scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
+):
+    """Kairos Dashboard Sprint 1 -- Strategy State Read Model.
+
+    Additive, brand-new endpoint. Reads today's Approved/Watch monitor
+    (approved_setup_memories JOIN approved_setup_monitor_state, excluding
+    WITHDRAWN/SUPERSEDED only -- INVALIDATED IS included, see
+    DASHBOARD_STATE_EXCLUDED_MONITOR_STATES's own comment for why this
+    differs from ACTIVE_MONITOR_STATES), normalizes each row's real state
+    via dashboard_state.map_approved_monitor_state, and overlays a
+    ticker-only journal_store.py position check
+    (_dashboard_position_overlay). No live quote fetch, no daily-bar
+    fetch, no network call at all -- every field returned is already
+    persisted; "current_price" is whatever run_approved_setup_monitor_tick
+    last observed (last_live_price), not fetched fresh here.
+
+    Every existing endpoint/table/function this reads from is completely
+    unmodified by this sprint. See dashboard_state.py's own module
+    docstring and the Sprint 1 report for the full mapping table and its
+    disclosed judgment calls (APPROVED, EXTENDED, STALE) and known
+    limitation (ticker-only journal correlation).
+    """
+    _check_api_key(x_api_key, scanner_session)
+    conn = _get_db()
+    try:
+        rows = _dashboard_rows_for_approved_monitor(conn)
+        setups = [_build_dashboard_row(row, conn) for row in rows]
+        return {
+            "mechanism": dashboard_state.DASHBOARD_STATE_MECHANISM_VERSION,
+            "disclaimer": (
+                "Additive read model -- normalizes today's Approved/Watch "
+                "monitor lifecycle (plus a ticker-only journal position "
+                "overlay) into a stable dashboard vocabulary. Does not yet "
+                "include scanner.py's separate ENTER_NOW/scan_cached "
+                "pipeline or not-yet-reviewed review-queue candidates -- "
+                "see the Sprint 1 report for why."
+            ),
+            "count": len(setups),
+            "setups": setups,
+            "supported_states": sorted(dashboard_state.DASHBOARD_STATE_SUPPORTED_TODAY),
+        }
     finally:
         conn.close()

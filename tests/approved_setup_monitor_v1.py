@@ -272,6 +272,117 @@ def test_invalidation_uses_frozen_stop_not_live_recomputed_stop(client, headers,
 
 
 # ==========================================================================
+# Target-hit -- the mirror-image outcome of invalidation (2026-09 session).
+# Before this, the monitor could resolve a setup as a loss but had no path
+# to ever resolve one as a win -- see _is_target_hit's own docstring.
+# ==========================================================================
+
+def test_is_target_hit_unit():
+    assert router._is_target_hit("long", 110.0, 110.0) is True
+    assert router._is_target_hit("long", 109.99, 110.0) is False
+    assert router._is_target_hit("short", 90.0, 90.0) is True
+    assert router._is_target_hit("short", 90.01, 90.0) is False
+
+
+def test_long_target_hit_when_price_at_or_above_approved_target(client, headers, tmp_path, monkeypatch):
+    db_path = str(tmp_path / "candidates.db")
+    monkeypatch.setenv("KAIROS_CANDIDATES_DB", db_path)
+    _seed(client, headers, "AMD")
+    _review(client, headers, "AMD", "approve", lower_tf_confirmation="yes",
+            confirmation_rule="close_above", confirmation_level=100.0)
+    record = _memory_record(client, headers, "AMD")
+    approved_target = record["memory"]["approved_target"]
+    memory_id = record["memory"]["id"]
+
+    monkeypatch.setattr(router, "_latest_quotes_for_previews", lambda previews: {
+        "AMD": {"price": approved_target + 0.5, "timestamp": "2026-08-20T18:30:00Z",
+                "source": "mock_latest_quote", "price_branch": "mid"},
+    })
+    import datetime as dt
+    now = dt.datetime(2026, 8, 20, 18, 30, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(router, "datetime", type("_dt", (dt.datetime,), {"now": staticmethod(lambda tz=None: now)}))
+    try:
+        result = router.run_approved_setup_monitor_tick("test")
+    finally:
+        monkeypatch.setattr(router, "datetime", dt.datetime)
+    assert result["checked"] == 1
+    assert result["updated"] == 1
+
+    after = _monitor_state_row(db_path, record["monitor_state"]["id"])
+    assert after["state"] == "TARGET_HIT"
+    assert after["terminal_at"] is not None
+    # invalidation_reason stays None -- that column is specifically for
+    # INVALIDATED, a TARGET_HIT's explanation lives on the event instead
+    # (see event_detail below) rather than overloading a same-named column.
+    assert after["invalidation_reason"] is None
+
+    events = _events(db_path, memory_id)
+    transitions = [e for e in events if e["event_type"] != "ENTRY_REACHED"]
+    assert len(transitions) == 1
+    assert transitions[0]["to_state"] == "TARGET_HIT"
+    assert "approved target" in transitions[0]["detail"]
+    assert str(approved_target) in transitions[0]["detail"]
+
+
+def test_terminal_target_hit_memory_never_touched(client, headers, tmp_path, monkeypatch):
+    monkeypatch.setenv("KAIROS_CANDIDATES_DB", str(tmp_path / "candidates.db"))
+    db_path = str(tmp_path / "candidates.db")
+    _seed(client, headers, "AMD")
+    _review(client, headers, "AMD", "approve", lower_tf_confirmation="not_yet",
+            trigger_rule="close_above", trigger_level=999.0)
+    record = _memory_record(client, headers, "AMD")
+    monitor_state_id = record["monitor_state"]["id"]
+
+    # Manually mark it TARGET_HIT (simulating a prior tick) -- terminal,
+    # same contract INVALIDATED already has (test_terminal_memory_never_touched).
+    _backdate(db_path, "approved_setup_monitor_state", monitor_state_id, state="TARGET_HIT", terminal_at="2026-08-20T00:00:00Z")
+
+    result = router.run_approved_setup_monitor_tick("test")
+    assert result["checked"] == 0, "a terminal-state row must not even be fetched by the monitor"
+
+    after = _monitor_state_row(db_path, monitor_state_id)
+    assert after["state"] == "TARGET_HIT"
+    assert after["last_checked_at"] is None, "a terminal row must never be updated by a later tick"
+
+
+def test_invalidation_wins_over_target_hit_on_malformed_stop_target(client, headers, tmp_path, monkeypatch):
+    """Not a normal-operation scenario -- a well-formed setup's stop and
+    target are on opposite sides of entry, which makes these two
+    conditions mutually exclusive by construction (see the ordering
+    comment in run_approved_setup_monitor_tick). This directly exercises
+    the documented defensive fallback for malformed/corrupted stop-target
+    data (e.g. a future bug elsewhere writing them on the wrong sides of
+    entry) by backdating the memory's stored stop/target into an inverted,
+    degenerate shape and confirming invalidation still wins."""
+    db_path = str(tmp_path / "candidates.db")
+    monkeypatch.setenv("KAIROS_CANDIDATES_DB", db_path)
+    _seed(client, headers, "AMD")
+    _review(client, headers, "AMD", "approve", lower_tf_confirmation="yes",
+            confirmation_rule="close_above", confirmation_level=100.0)
+    record = _memory_record(client, headers, "AMD")
+
+    # Degenerate/malformed: target placed BELOW stop for a long (normal
+    # data never looks like this -- this is deliberately testing the
+    # defensive ordering, not a realistic setup).
+    _backdate(db_path, "approved_setup_memories", record["memory"]["id"], approved_stop=95.0, approved_target=90.0)
+
+    monkeypatch.setattr(router, "_latest_quotes_for_previews", lambda previews: {
+        "AMD": {"price": 90.0, "timestamp": "2026-08-20T18:30:00Z",
+                "source": "mock_latest_quote", "price_branch": "mid"},
+    })
+    import datetime as dt
+    now = dt.datetime(2026, 8, 20, 18, 30, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(router, "datetime", type("_dt", (dt.datetime,), {"now": staticmethod(lambda tz=None: now)}))
+    try:
+        router.run_approved_setup_monitor_tick("test")
+    finally:
+        monkeypatch.setattr(router, "datetime", dt.datetime)
+
+    after = _monitor_state_row(db_path, record["monitor_state"]["id"])
+    assert after["state"] == "INVALIDATED", "invalidation must win when a price could satisfy both conditions at once"
+
+
+# ==========================================================================
 # Type A (CONFIRMED) -- current-price R:R gates ACTIONABLE/EXTENDED
 # ==========================================================================
 
