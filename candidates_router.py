@@ -39,13 +39,15 @@ from scanner import (
     _flatten_columns,
     _macro_bias,
     detect_liquidity_sweep,
+    scan_cached_readonly,
+    stock_execution_lifecycle_presentation,
 )
 from structural_resistance import clamp_target, levels_near_target, resolve_stop
 from displacement_score import score_displacement
 from location_score import score_location
 from confluence_summary import summarize_confluence
 import dashboard_state
-from journal_store import SQLiteJournalRepository, default_journal_db_path
+from journal_store import SQLiteJournalRepository, core_value, default_journal_db_path, entry_status
 
 logger = logging.getLogger(__name__)
 
@@ -8336,8 +8338,22 @@ _dashboard_journal_repository_singleton: Optional[SQLiteJournalRepository] = Non
 def _dashboard_journal_repository() -> SQLiteJournalRepository:
     global _dashboard_journal_repository_singleton
     with _dashboard_journal_repository_lock:
-        if _dashboard_journal_repository_singleton is None:
-            _dashboard_journal_repository_singleton = SQLiteJournalRepository(default_journal_db_path())
+        current_path = str(default_journal_db_path())
+        # Rebuild whenever the resolved path has changed, not merely on
+        # first use -- catches JOURNAL_DB_PATH changing between calls
+        # (every real production process sets it once at startup and
+        # never changes it, so this never fires there; it matters in a
+        # single test process running many test modules back to back,
+        # where a stale cached singleton pointed at an earlier test's
+        # own tmp_path could otherwise leak that test's journal entries
+        # into an unrelated, later test that never touches JOURNAL_DB_PATH
+        # itself -- exactly the kind of bleed the standalone open-position
+        # row (2026-09 session) is the first caller to make visible,
+        # since it's the first thing here that reads the journal
+        # independent of any approved_setup_memories row already
+        # existing).
+        if _dashboard_journal_repository_singleton is None or _dashboard_journal_repository_singleton.db_path != current_path:
+            _dashboard_journal_repository_singleton = SQLiteJournalRepository(current_path)
         return _dashboard_journal_repository_singleton
 
 
@@ -8481,6 +8497,275 @@ def _build_dashboard_row(row: sqlite3.Row, conn=None) -> dict:
     }
 
 
+def _scanner_row_ranking_status_bucket(row: dict) -> Optional[str]:
+    """Same extraction main.py's own _summary_status_bucket already uses
+    for the identical purpose (the live GET .../?view=summary path) --
+    duplicated rather than imported to avoid a circular import
+    (main.py already imports FROM candidates_router.py). Prefers an
+    already-embedded ranking.status_bucket over recomputing one, same
+    precedence _summary_row's own override already established as the
+    live, in-production behavior for this exact field."""
+    ranking = row.get("ranking") if isinstance(row.get("ranking"), dict) else {}
+    for candidate in (
+        ranking.get("status_bucket"), row.get("status_bucket"),
+        row.get("scanner_status"), row.get("entryStatus"),
+    ):
+        if candidate:
+            return candidate
+    return None
+
+
+def _build_scanner_dashboard_row(row: dict) -> Optional[dict]:
+    """One scan_cached() row -> one dashboard row, or None if it has no
+    clean dashboard_state mapping (SKIP/PLAN_REPLACED buckets, or a
+    ranking bucket dashboard_state.py's own map doesn't recognize at
+    all) -- same "map only what's supported today, never guess" rule
+    the rest of this read model already follows. Deliberately minimal:
+    no option-contract hydration (that lives in main.py's own
+    _summary_selected_contract/_summary_option_plan, importing them here
+    would risk a circular import back into main.py) -- trade_type falls
+    back to the plain LONG/SHORT direction via dashboard_state.trade_type_for's
+    own existing "no contract" branch, exactly as it already does for an
+    Approved/Watch row with no computed contract."""
+    ticker = str(row.get("ticker") or row.get("symbol") or "").upper()
+    if not ticker:
+        return None
+    presentation = stock_execution_lifecycle_presentation(row)
+    presentation["ranking_status_bucket"] = _scanner_row_ranking_status_bucket(row)
+    result = dashboard_state.map_scanner_lifecycle_result(presentation)
+    if result["excluded"] or result["state"] is None:
+        return None
+
+    direction = row.get("direction")
+    target = row.get("tp1")
+    targets = [t for t in (row.get("tp1"), row.get("tp2")) if t is not None]
+
+    return {
+        "symbol": ticker,
+        "market": dashboard_state.market_for_source("scanner"),
+        "direction": direction,
+        "trade_type": dashboard_state.trade_type_for(direction, None),
+        "option_strike": None,
+        "option_expiration": None,
+        "state": result["state"],
+        "state_label": dashboard_state.dashboard_state_label(result["state"]),
+        "next_step": dashboard_state.dashboard_state_next_step(result["state"]),
+        "last_change": row.get("scannedAt") or row.get("signal_timestamp"),
+        "planned_entry": row.get("entry"),
+        "entry": row.get("entry"),
+        "stop": row.get("sl"),
+        "exit": row.get("sl"),
+        "original_stop": row.get("sl"),
+        "target": target,
+        "targets": targets,
+        "source": "scanner",
+        "source_decision": None,
+        # Synthetic -- a scan row has no approved_setup_memories identity
+        # to key off; unique per ticker+direction, stable enough for the
+        # frontend's row-reuse/expand-state map across a poll.
+        "setup_key": f"scanner:{ticker}:{str(direction or '').lower()}",
+        "legacy_state": presentation.get("state") or result.get("raw_bucket"),
+        "entry_reached_at": None,
+        "entry_reached_price": None,
+        "current_price": row.get("current_price") or row.get("price"),
+        "invalidation_reason": None,
+        "breakeven_set": False,
+        "breakeven_set_at": None,
+        "partial_profit_suggested": False,
+        "partial_profit_suggested_at": None,
+    }
+
+
+def _dashboard_rows_for_scanner(covered_tickers: set[str]) -> list[dict]:
+    """scanner.py's ENTER_NOW/scan_cached pipeline, merged in as the
+    LOWEST-precedence tier -- covered_tickers (every ticker with an
+    ACTIVE, non-terminal Approved/Watch monitor row -- see the caller's
+    own comment for why terminal states like INVALIDATED/TARGET_HIT are
+    deliberately excluded from this set) is checked first and skipped
+    before any per-row mapping work; the journal-position check (a
+    SEPARATE, senior precedence tier) happens per-candidate below. Full
+    chain, most to least authoritative:
+      1. OPEN/CLOSED journal position for this ticker
+      2. an ACTIVE (non-terminal) Approved/Watch monitor row for this ticker
+      3. scanner ENTER_NOW/ranking-bucket row
+    A TERMINAL old monitor row (INVALIDATED, TARGET_HIT, WITHDRAWN,
+    SUPERSEDED) never reaches tier 2 -- it does not suppress a fresh
+    scanner signal for the same ticker, by construction (covered_tickers
+    was never given its ticker in the first place).
+
+    Correction, made before this shipped (caught by testing, not
+    assumed): scan_cached() itself never BLOCKS its caller -- that part
+    was verified and is true, warm or cold cache alike. But it is NOT
+    side-effect-free: on a stale OR missing cache it unconditionally
+    calls _submit_analysis_refresh, which enqueues a real background
+    scan job. That is exactly the "opening the dashboard must never
+    cause scanner computation" violation this task exists to fix, so
+    this function calls scan_cached_readonly() instead -- scanner.py's
+    own genuinely side-effect-free sibling, added the same session,
+    which reads _analysis_cache directly and never submits a refresh
+    under any condition. A stale or missing cache here just means an
+    older (or empty) scanner snapshot is shown -- correct, since "opening
+    /dashboard" must consume the latest ALREADY-COMPLETED scan, never
+    trigger a new one. Whatever last populated the cache (the periodic
+    background scan, or a human explicitly using the scanner page) is
+    what the dashboard shows.
+
+    Only scan_cached_readonly()'s own `rows` (ENTER_NOW-eligible
+    candidates and everything else the ranking pipeline already promoted
+    into that list) -- deliberately NOT `near_miss`, which is explicitly
+    not entry-ready by definition and out of scope for this task.
+    """
+    try:
+        result = scan_cached_readonly()
+    except Exception:
+        logger.warning("[dashboard_state] scan_cached_readonly() failed; scanner rows omitted this request", exc_info=True)
+        return []
+    raw_rows = result.get("rows") or []
+    rows: list[dict] = []
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, dict):
+            continue
+        ticker = str(raw_row.get("ticker") or raw_row.get("symbol") or "").upper()
+        if not ticker or ticker in covered_tickers:
+            continue
+        # Journal position check happens here, not in the covered_tickers
+        # set the caller built -- that set is cheap (already-fetched
+        # monitor rows); a journal position check is a real per-ticker
+        # DB read, so it's only ever done for candidates that already
+        # survived the free monitor-row check, bounding it to real
+        # scanner candidates rather than the full scan universe (which
+        # can be up to 200 symbols -- see scan_cached's own max_symbols
+        # default).
+        if _dashboard_position_overlay(ticker) is not None:
+            continue
+        built = _build_scanner_dashboard_row(raw_row)
+        if built is not None:
+            rows.append(built)
+    return rows
+
+
+def _dashboard_row_from_open_journal_entry(entry: dict) -> Optional[dict]:
+    """One OPEN journal_store.py entry -> one minimal, standalone
+    POSITION_OPEN dashboard row -- used ONLY for a ticker with an open
+    position and NO approved_setup_memories row at all (see
+    _dashboard_rows_for_open_journal_positions's own docstring for why
+    that gap exists and why this exists to close it). Deliberately
+    thin: this reads ONLY fields already present on the journal entry
+    (via journal_store.core_value's own established alias lists --
+    see canonicalize_replay_fields for the same aliases) and never
+    infers/recomputes a setup-lifecycle fact that isn't actually
+    there. Any field this codebase's setup-lifecycle rows normally
+    carry but a bare journal entry has no equivalent for (entry_reached_at,
+    current_price, invalidation_reason, breakeven/partial-profit flags,
+    an option contract, a real setup_key) stays None/false -- "unavailable
+    fields stay null," never a guess.
+    """
+    ticker = str(core_value(entry, "ticker") or "").upper()
+    if not ticker:
+        return None
+    direction = core_value(entry, "direction", "option_type", "optionType")
+    entry_price = core_value(entry, "planned_underlying_entry", "entry_price", "entry")
+    stop = core_value(entry, "original_stop", "stop_price", "plannedStop")
+    target = core_value(entry, "original_tp1", "target_price", "plannedTp1", "tp1")
+    last_change = entry.get("updated_at") or core_value(
+        entry, "tracking_started_at", "entry_timestamp", "actual_entry_at", "position_opened_at", "signal_timestamp"
+    )
+    return {
+        "symbol": ticker,
+        "market": dashboard_state.market_for_source(None),
+        "direction": direction,
+        "trade_type": dashboard_state.trade_type_for(direction, None),
+        "option_strike": None,
+        "option_expiration": None,
+        "state": "POSITION_OPEN",
+        "state_label": dashboard_state.dashboard_state_label("POSITION_OPEN"),
+        "next_step": dashboard_state.dashboard_state_next_step("POSITION_OPEN"),
+        "last_change": last_change,
+        "planned_entry": entry_price,
+        "entry": entry_price,
+        "stop": stop,
+        "exit": stop,
+        "original_stop": stop,
+        "target": target,
+        "targets": [target] if target is not None else [],
+        # Real, honest provenance -- this row exists ONLY because of a
+        # journal position, no approved_setup_memories/scanner row backs
+        # it. Distinct from "manual"/"scanner"/ma_pipeline-style sources
+        # so a caller can tell this row apart, same "never guess" rule
+        # as everything else in this module.
+        "source": "journal",
+        "source_decision": None,
+        # Synthetic, ticker-only identity -- there is no approved_setup_memories
+        # id or scan candidate behind this row, same reasoning as the
+        # scanner tier's own synthetic setup_key just above.
+        "setup_key": f"journal:{ticker}",
+        "legacy_state": None,
+        "entry_reached_at": None,
+        "entry_reached_price": None,
+        "current_price": None,
+        "invalidation_reason": None,
+        "breakeven_set": False,
+        "breakeven_set_at": None,
+        "partial_profit_suggested": False,
+        "partial_profit_suggested_at": None,
+    }
+
+
+def _dashboard_rows_for_open_journal_positions(existing_tickers: set[str]) -> list[dict]:
+    """Closes the exact gap disclosed (never fixed) since Sprint 1: an
+    OPEN journal position for a ticker with NO approved_setup_memories
+    row at all previously vanished from the dashboard entirely --
+    _dashboard_rows_for_approved_monitor is an INNER JOIN on
+    approved_setup_memories, so a journal-only ticker produces zero
+    rows there, and _dashboard_position_overlay only ever RECOLORS an
+    existing monitor row, it cannot manufacture one. "An OPEN journal
+    position must ALWAYS have a dashboard row" (2026-09 session
+    correction) -- this is that row, for exactly that one missing case.
+
+    existing_tickers must be every ticker with ANY approved_setup_memories
+    row already in `rows` (active OR terminal) -- NOT the narrower
+    ACTIVE_MONITOR_STATES-only covered_tickers set used for scanner-row
+    suppression. Reason: if a monitor row already exists for this
+    ticker (active or terminal), _build_dashboard_row's own overlay
+    already recolors THAT row to POSITION_OPEN/CLOSED -- adding a
+    second, standalone row here for the same ticker would duplicate it.
+    Only a ticker with ZERO monitor rows needs one manufactured here.
+
+    Deliberately CLOSED-position-safe: only ever called with the
+    OPEN-only entries this function's own caller fetched (status=
+    "open") -- a closed position with no monitor row correctly gets no
+    row at all, unchanged from today's behavior; this patch is about
+    open positions disappearing, not about surfacing closed history.
+    """
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for entry in _dashboard_open_journal_entries():
+        ticker = str(core_value(entry, "ticker") or "").upper()
+        if not ticker or ticker in existing_tickers or ticker in seen:
+            continue
+        built = _dashboard_row_from_open_journal_entry(entry)
+        if built is not None:
+            seen.add(ticker)
+            rows.append(built)
+    return rows
+
+
+def _dashboard_open_journal_entries() -> list[dict]:
+    """Bulk fetch of every OPEN journal entry, across all tickers --
+    SQLiteJournalRepository.list_entries' own `ticker` filter is
+    optional (omitting it returns every matching entry), so this is a
+    single query, not one-per-ticker. Fails open (returns []) on any
+    read error, same "warn and skip, never guess, never break the
+    dashboard" convention as _dashboard_position_overlay right above."""
+    try:
+        repo = _dashboard_journal_repository()
+        entries = repo.list_entries({"status": "open", "limit": 1000})
+    except Exception:
+        logger.warning("[dashboard_state] open journal entries lookup failed; standalone position rows omitted this request", exc_info=True)
+        return []
+    return [entry for entry in entries if isinstance(entry, dict) and entry_status(entry) == "open"]
+
+
 @router.get("/candidates/dashboard-state")
 def list_dashboard_state(
     x_api_key: Optional[str] = Header(default=None),
@@ -8511,15 +8796,64 @@ def list_dashboard_state(
     try:
         rows = _dashboard_rows_for_approved_monitor(conn)
         setups = [_build_dashboard_row(row, conn) for row in rows]
+        # Scanner ENTER_NOW integration (2026-09 session, corrected same
+        # session): lowest-precedence tier. covered_tickers gates scanner-
+        # row suppression and is DELIBERATELY narrower than `rows` above --
+        # `rows` (what's actually DISPLAYED) correctly includes terminal
+        # states like INVALIDATED/TARGET_HIT (a dashboard's whole point is
+        # to show "this invalidated," not hide it -- see
+        # DASHBOARD_STATE_EXCLUDED_MONITOR_STATES's own comment), but an
+        # 8-day-old INVALIDATED row must NOT be treated as still "owning"
+        # this ticker for suppression purposes -- that would let a dead
+        # setup permanently hide a genuinely fresh scanner ENTER_NOW for
+        # the same ticker forever. Suppression is scoped to ACTIVE_MONITOR_STATES
+        # only (the same existing, already-tested set _monitor_active_rows
+        # uses) -- a real, currently-live setup generation, not "a row
+        # with this ticker exists somewhere in history." See
+        # _dashboard_rows_for_scanner's own docstring for the full
+        # precedence chain (journal > ACTIVE monitor row > scanner) and
+        # why scan_cached_readonly() (not scan_cached()) is what's called.
+        covered_tickers = {
+            str(row["ticker"] or "").upper() for row in rows
+            if row["monitor_state"] in ACTIVE_MONITOR_STATES
+        }
+        # Standalone open-journal-position rows (2026-09 session,
+        # correction 4): senior to BOTH tiers below -- an OPEN journal
+        # position must always have a row even with zero
+        # approved_setup_memories history. existing_monitor_tickers is
+        # every ticker already represented in `rows` (active OR
+        # terminal, unlike the narrower ACTIVE_MONITOR_STATES-only
+        # covered_tickers just above) -- _build_dashboard_row's own
+        # overlay already recolors any of those to POSITION_OPEN/CLOSED,
+        # so only a ticker with NO monitor row at all needs one
+        # manufactured here. See _dashboard_rows_for_open_journal_positions's
+        # own docstring for the full reasoning.
+        existing_monitor_tickers = {str(row["ticker"] or "").upper() for row in rows}
+        open_position_rows = _dashboard_rows_for_open_journal_positions(existing_monitor_tickers)
+        setups.extend(open_position_rows)
+        # These same tickers must also be excluded from the scanner
+        # tier -- otherwise a ticker with an open position but no
+        # monitor row could show BOTH the standalone POSITION_OPEN row
+        # just added and a scanner ENTER_NOW row. (In practice
+        # _dashboard_rows_for_scanner's own per-candidate
+        # _dashboard_position_overlay check already suppresses this
+        # independently -- any open/closed journal position for a
+        # ticker already skips that ticker's scanner row -- but adding
+        # these tickers to covered_tickers too makes the precedence
+        # explicit and belt-and-suspenders rather than relying on a
+        # second mechanism to catch it.)
+        covered_tickers |= {row["symbol"] for row in open_position_rows}
+        setups.extend(_dashboard_rows_for_scanner(covered_tickers))
         return {
             "mechanism": dashboard_state.DASHBOARD_STATE_MECHANISM_VERSION,
             "disclaimer": (
                 "Additive read model -- normalizes today's Approved/Watch "
-                "monitor lifecycle (plus a ticker-only journal position "
-                "overlay) into a stable dashboard vocabulary. Does not yet "
-                "include scanner.py's separate ENTER_NOW/scan_cached "
-                "pipeline or not-yet-reviewed review-queue candidates -- "
-                "see the Sprint 1 report for why."
+                "monitor lifecycle, a ticker-only journal position "
+                "overlay, and scanner.py's ENTER_NOW/scan_cached ranking "
+                "pipeline (lowest precedence -- suppressed for any ticker "
+                "already covered by a monitor row or journal position) "
+                "into a stable dashboard vocabulary. Not-yet-reviewed "
+                "review-queue candidates are still out of scope."
             ),
             "count": len(setups),
             "setups": setups,

@@ -11503,6 +11503,46 @@ def scan_cached(
         }
 
 
+def scan_cached_readonly(
+    watchlist: Optional[list] = None,
+    *,
+    discover: bool = False,
+    universe: str = "default",
+) -> dict:
+    """True read-only sibling of scan_cached() -- returns whatever is
+    currently in _analysis_cache and NOTHING else. Never calls
+    _submit_analysis_refresh, regardless of cache staleness or absence.
+
+    Why this exists (2026-09 session, Kairos dashboard scanner
+    integration): scan_cached() itself never BLOCKS its caller -- that
+    part was already true and verified -- but it is not side-effect-free.
+    On a stale OR missing cache, it unconditionally calls
+    _submit_analysis_refresh, which enqueues a real background scan job.
+    That's the right behavior for a caller that WANTS fresh data (e.g. a
+    human explicitly loading the scanner page) -- it is the wrong
+    behavior for a read model that must never cause scanner computation
+    merely because a page was viewed. This function is the "cached-result
+    accessor with no refresh path" the dashboard actually needs: it reads
+    _analysis_cache under the same _cache_lock scan_cached() uses, and
+    returns either the last completed scan's rows or an explicitly-empty,
+    explicitly-labeled "no scan has ever completed for this key" result --
+    it never starts one.
+    """
+    key = _analysis_cache_key(watchlist, discover=discover, universe=universe)
+    with _cache_lock:
+        cached = _analysis_cache.get(key)
+    if not cached:
+        return {
+            "rows": [], "near_miss": [],
+            "meta": {"cache": "miss", "refreshing": False, "stale": None, "generated_at": None, "age_seconds": None},
+        }
+    return {
+        "rows": _hydrate_scan_rows_from_cache(list(cached.get("rows", []))),
+        "near_miss": _hydrate_scan_rows_from_cache(list(cached.get("near_miss", []))),
+        "meta": _analysis_cache_meta(key, cached, refreshing=False),
+    }
+
+
 def scan_ticker(
     ticker: str,
     _daily_df: Optional[pd.DataFrame] = None,

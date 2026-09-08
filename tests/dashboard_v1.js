@@ -193,11 +193,24 @@ async function run() {
   await dashboard.loadDashboard();
   assert.strictEqual(rowClassOf('D-2'), 'setup-row row-accent-red', 'D: INVALIDATED is red even for a long/bullish setup');
 
-  // --- D2. TARGET_HIT (2026-09 session) is a resolved win -- full-row
-  // green, the same reasoning as INVALIDATED's own restrained-red inclusion. ---
+  // --- D2. TARGET_HIT (corrected 2026-09 session -- GREEN IS SACRED): a
+  // resolved win gets its OWN restrained, muted-green tint -- it must
+  // NEVER share ENTRY_READY's solid-fill row-accent-green class, or a
+  // completed/resolved setup would be visually indistinguishable from
+  // "act now". ---
   fetchQueue = [{ status: 200, body: payload([row({ setup_key: 'D-3', symbol: 'OXY', direction: 'long', state: 'TARGET_HIT', state_label: 'Target Hit' })]) }];
   await dashboard.loadDashboard();
-  assert.strictEqual(rowClassOf('D-3'), 'setup-row row-accent-green', 'D2: TARGET_HIT row is a resolved-win green');
+  assert.strictEqual(rowClassOf('D-3'), 'setup-row row-accent-green-muted', 'D2: TARGET_HIT gets its own muted-green class, distinct from ENTRY_READY');
+  assert.notStrictEqual(rowClassOf('D-3'), 'setup-row row-accent-green', 'D2: TARGET_HIT must NEVER render with the exact ENTRY_READY green-fill class');
+
+  // --- D3. GREEN IS SACRED, structurally, not just for TARGET_HIT:
+  // exactly one state in the whole exported ROW_ACCENT map may ever
+  // resolve to the literal 'green' (solid-fill) accent value. This is a
+  // permanent guard, not a one-off check -- if a future state is ever
+  // added to ROW_ACCENT with value 'green', this fails immediately
+  // rather than silently diluting the one full-row-green meaning. ---
+  const statesAccentedGreen = Object.keys(dashboard.ROW_ACCENT).filter((s) => dashboard.ROW_ACCENT[s] === 'green');
+  assert.deepStrictEqual(statesAccentedGreen, ['ENTRY_READY'], 'D3: GREEN IS SACRED -- ENTRY_READY must be the ONLY state mapped to the solid-fill green accent');
 
   // --- E. Row expands inline on click; collapses on a second click.
   // Uses EXECUTION_READY (no SHORT_NEXT_STEP entry) so the main-table

@@ -154,10 +154,14 @@
   const ROW_ACCENT = {
     ENTRY_READY: 'green',
     INVALIDATED: 'red',
-    // TARGET_HIT (2026-09 session): a resolved win is exactly as
-    // notable/terminal as a resolved loss -- gets full-row accent too,
-    // same reasoning as INVALIDATED's own inclusion here.
-    TARGET_HIT: 'green',
+    // TARGET_HIT (corrected 2026-09 session -- GREEN IS SACRED): a
+    // resolved win is notable/terminal, same as INVALIDATED, so it still
+    // gets a full-row accent -- but 'green' (solid fill, see
+    // dashboard.html's .row-accent-green) is reserved for exactly one
+    // meaning: "this setup is ready for entry, right now." TARGET_HIT
+    // gets its own restrained 'green-muted' (tint, not solid) so it can
+    // never be visually confused with ENTRY_READY.
+    TARGET_HIT: 'green-muted',
   };
 
   function rowAccentFor(row) {

@@ -49,6 +49,24 @@ def headers():
     return {"X-API-Key": "test-scanner-key"}
 
 
+@pytest.fixture(autouse=True)
+def _mock_scan_cached(monkeypatch):
+    # Scanner ENTER_NOW integration (2026-09 session, corrected same
+    # session): list_dashboard_state calls scan_cached_readonly() -- NOT
+    # scan_cached() -- on every request (see that function's own
+    # docstring in scanner.py for why: scan_cached() unconditionally
+    # enqueues a real background scan job on a stale/missing cache, which
+    # is exactly the "opening the dashboard causes scanner computation"
+    # violation this was corrected to avoid). scan_cached_readonly() is
+    # genuinely side-effect-free, but it's still mocked here so every
+    # test in this file gets a controlled, empty result by default,
+    # independent of whatever real cache state happens to exist in the
+    # test process. A test that wants to exercise the scanner-merge path
+    # overrides this with its own monkeypatch.setattr(router,
+    # "scan_cached_readonly", ...).
+    monkeypatch.setattr(router, "scan_cached_readonly", lambda **kwargs: {"rows": [], "near_miss": [], "meta": {}})
+
+
 def _db_path():
     return router.default_candidates_db_path()
 
@@ -389,3 +407,274 @@ def test_review_queue_endpoint_still_responds_normally(client, headers):
 def test_ranked_endpoint_still_responds_normally(client, headers):
     resp = client.get("/api/v1/scanner/candidates/ranked", headers=headers)
     assert resp.status_code == 200, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Scanner ENTER_NOW integration (2026-09 session): scanner.py's ranking
+# pipeline merged in as the lowest-precedence tier. dashboard_state.py's
+# own mapping (ENTER_NOW -> ENTRY_READY etc.) and dashboard.js's own
+# full-row-green-for-ENTRY_READY logic are BOTH pre-existing and untouched
+# -- these tests only exercise the new merge/precedence/exclusion logic
+# in candidates_router.py.
+# ---------------------------------------------------------------------------
+
+def _scan_row(ticker="NVDA", direction="long", status_bucket="ENTER_NOW", **overrides):
+    return {
+        "ticker": ticker, "direction": direction,
+        "entry": 500.0, "sl": 480.0, "tp1": 550.0, "tp2": 600.0,
+        "ranking": {"status_bucket": status_bucket},
+        **overrides,
+    }
+
+
+def _mock_scan(monkeypatch, rows):
+    monkeypatch.setattr(router, "scan_cached_readonly", lambda **kwargs: {"rows": rows, "near_miss": [], "meta": {}})
+
+
+def test_enter_now_scanner_row_surfaces_as_entry_ready(client, headers, monkeypatch):
+    _mock_scan(monkeypatch, [_scan_row(ticker="NVDA", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    row = next((r for r in body["setups"] if r["symbol"] == "NVDA"), None)
+    assert row is not None, "an ENTER_NOW scanner row must appear in the dashboard-state response"
+    assert row["state"] == "ENTRY_READY", "ENTER_NOW must normalize to ENTRY_READY -- the pre-existing mapping this task was about restoring"
+    assert row["source"] == "scanner"
+    assert row["direction"] == "long"
+    assert row["entry"] == 500.0
+    assert row["stop"] == 480.0
+    assert row["target"] == 550.0
+
+
+def test_scanner_row_suppressed_when_ticker_already_has_an_active_monitor_row(client, headers, monkeypatch):
+    _insert_setup(ticker="NVDA", monitor_state="ACTIONABLE")  # any active state works for this test
+    _mock_scan(monkeypatch, [_scan_row(ticker="NVDA", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    nvda_rows = [r for r in body["setups"] if r["symbol"] == "NVDA"]
+    assert len(nvda_rows) == 1, "a ticker already covered by an Approved/Watch monitor row must never get a second, scanner-sourced row"
+    assert nvda_rows[0]["source"] != "scanner", "the monitor row must win, not the scanner row"
+
+
+def test_scanner_row_suppressed_when_ticker_has_a_journal_position_but_no_monitor_row(client, headers, monkeypatch):
+    """Superseded (2026-09 session, correction 4) by the standalone
+    open-journal-position fix: this used to document NVDA disappearing
+    entirely (no monitor row to recolor, so the journal-covered ticker
+    was suppressed with no substitute row shown -- "that violates the
+    dashboard's purpose," per the correction that required this fix).
+    Now the standalone POSITION_OPEN row IS the substitute: the ticker
+    still never shows the unvetted scanner suggestion, but it also never
+    goes missing."""
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(ticker="NVDA"))
+    _mock_scan(monkeypatch, [_scan_row(ticker="NVDA", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    nvda_rows = [r for r in body["setups"] if r["symbol"] == "NVDA"]
+    assert len(nvda_rows) == 1, "an open journal position with no monitor row must get exactly one standalone row, and the scanner row must still be suppressed"
+    assert nvda_rows[0]["state"] == "POSITION_OPEN"
+    assert nvda_rows[0]["source"] == "journal"
+
+
+def test_scanner_row_with_a_different_ticker_than_an_existing_monitor_row_is_not_suppressed(client, headers, monkeypatch):
+    _insert_setup(ticker="AMD", monitor_state="ACTIONABLE")
+    _mock_scan(monkeypatch, [_scan_row(ticker="NVDA", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    symbols = {r["symbol"] for r in body["setups"]}
+    assert {"AMD", "NVDA"} <= symbols, "an unrelated ticker's monitor row must not suppress a different ticker's scanner row"
+
+
+def test_scanner_row_with_excluded_bucket_is_omitted_not_shown_unmapped(client, headers, monkeypatch):
+    _mock_scan(monkeypatch, [_scan_row(ticker="ZZZZ", status_bucket="SKIP")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    assert not any(r["symbol"] == "ZZZZ" for r in body["setups"]), "a SKIP-bucket scanner row must not appear at all"
+
+
+def test_scanner_row_with_non_enter_now_bucket_stays_restrained_not_green(client, headers, monkeypatch):
+    # WAITING -> DISCOVERED per dashboard_state.py's own existing map --
+    # this is the "everything else stays restrained" half of the task.
+    _mock_scan(monkeypatch, [_scan_row(ticker="AMD", status_bucket="WAITING")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    row = next(r for r in body["setups"] if r["symbol"] == "AMD")
+    assert row["state"] == "DISCOVERED"
+    assert row["state"] != "ENTRY_READY", "a non-ENTER_NOW scanner bucket must never render as the sacred green state"
+
+
+def test_scan_cached_failure_does_not_break_the_dashboard_endpoint(client, headers, monkeypatch):
+    def _boom(**kwargs):
+        raise RuntimeError("simulated scan_cached_readonly failure")
+    monkeypatch.setattr(router, "scan_cached_readonly", _boom)
+    resp = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers)
+    assert resp.status_code == 200, "a scan_cached_readonly() failure must not take down the whole dashboard endpoint"
+    assert resp.json()["setups"] == []
+
+
+def test_scanner_rows_do_not_appear_when_scan_cached_returns_nothing(client, headers):
+    # Default _mock_scan_cached autouse fixture -- confirms the merge is a
+    # true no-op (not an error, not extra rows) when there's nothing to add.
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    assert body["setups"] == []
+    assert body["count"] == 0
+
+
+def test_dashboard_endpoint_never_calls_the_refresh_triggering_scan_cached(client, headers):
+    """Check #2, made permanent: candidates_router.py must not even be
+    ABLE to reach the refresh-triggering scan_cached() -- confirmed here
+    by the fact that it isn't importable as router.scan_cached at all
+    (only scan_cached_readonly is), which is a stronger, load-time
+    guarantee than a runtime monkeypatch trap would be. If a future edit
+    ever re-adds `scan_cached` to candidates_router.py's `from scanner
+    import (...)` block, this fails immediately rather than silently
+    reopening the side-effect."""
+    assert not hasattr(router, "scan_cached"), (
+        "candidates_router.py must import ONLY scan_cached_readonly, never the refresh-triggering scan_cached"
+    )
+    assert hasattr(router, "scan_cached_readonly")
+
+
+# ---------------------------------------------------------------------------
+# Precedence correction (2026-09 session): a TERMINAL old monitor row
+# (INVALIDATED, TARGET_HIT, WITHDRAWN, SUPERSEDED) must not suppress a
+# genuinely fresh scanner ENTER_NOW for the same ticker.
+# ---------------------------------------------------------------------------
+
+def test_invalidated_old_setup_does_not_hide_a_fresh_enter_now_same_ticker(client, headers, monkeypatch):
+    _insert_setup(ticker="NVDA", monitor_state="INVALIDATED", invalidation_reason="stop_hit 8 days ago")
+    _mock_scan(monkeypatch, [_scan_row(ticker="NVDA", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    nvda_rows = [r for r in body["setups"] if r["symbol"] == "NVDA"]
+    # Both must be present: the old invalidated row (still shown, per this
+    # read model's own "never hide INVALIDATED" design) AND the fresh
+    # scanner row -- these are two DIFFERENT setup generations sharing a
+    # ticker, not one row overwriting the other.
+    assert len(nvda_rows) == 2, f"expected the old INVALIDATED row plus the fresh scanner row, got {nvda_rows}"
+    states = {r["state"] for r in nvda_rows}
+    assert states == {"INVALIDATED", "ENTRY_READY"}
+    scanner_row = next(r for r in nvda_rows if r["source"] == "scanner")
+    assert scanner_row["state"] == "ENTRY_READY", "the fresh ENTER_NOW must reach ENTRY_READY, undiminished by the old terminal row"
+
+
+def test_target_hit_old_setup_does_not_hide_a_fresh_enter_now_same_ticker(client, headers, monkeypatch):
+    _insert_setup(ticker="OXY", monitor_state="TARGET_HIT")
+    _mock_scan(monkeypatch, [_scan_row(ticker="OXY", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    states = {r["state"] for r in body["setups"] if r["symbol"] == "OXY"}
+    assert states == {"TARGET_HIT", "ENTRY_READY"}, "a completed win must not suppress a fresh scanner signal in the same ticker either"
+
+
+def test_active_watch_setup_still_suppresses_the_duplicate_scanner_row(client, headers, monkeypatch):
+    """Contrast case -- an ACTIVE (non-terminal) row for the SAME ticker
+    still correctly suppresses the scanner row; only TERMINAL rows stop
+    suppressing. This is the case the original (too-broad) ticker-only
+    rule got right; confirming it still holds after the fix."""
+    _insert_setup(ticker="TSLA", monitor_state="WAITING_FOR_TRIGGER")
+    _mock_scan(monkeypatch, [_scan_row(ticker="TSLA", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    tsla_rows = [r for r in body["setups"] if r["symbol"] == "TSLA"]
+    assert len(tsla_rows) == 1, "an ACTIVE monitor row must still suppress a duplicate scanner row for the same ticker"
+    assert tsla_rows[0]["source"] != "scanner"
+
+
+# ---------------------------------------------------------------------------
+# Standalone open-journal-position row (2026-09 session, correction 4):
+# "An OPEN journal position must ALWAYS have a dashboard row even when
+# there is no backing approved_setup_memory record." The 6 tests below
+# match the required list from that correction exactly, in order.
+# ---------------------------------------------------------------------------
+
+def test_open_position_with_no_memory_row_gets_a_standalone_row(client, headers):
+    """Required test #1: open journal position, zero approved_setup_memories
+    history -- the ticker must still produce a row, using only fields
+    actually present on the journal entry."""
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(
+        ticker="RIVN", direction="LONG", planned_underlying_entry=12.0,
+        original_stop=10.5, original_tp1=15.0,
+    ))
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rivn_rows = [r for r in body["setups"] if r["symbol"] == "RIVN"]
+    assert len(rivn_rows) == 1, "an open journal position with no monitor row must always produce exactly one dashboard row"
+    row = rivn_rows[0]
+    assert row["state"] == "POSITION_OPEN"
+    assert row["state_label"] == "Position Open"
+    # Existing POSITION_OPEN presentation, not a new one -- same text
+    # every already-recolored monitor row uses today.
+    assert row["next_step"] == router.dashboard_state.dashboard_state_next_step("POSITION_OPEN")
+    assert row["source"] == "journal"
+    assert row["direction"] == "LONG"
+    assert row["entry"] == 12.0
+    assert row["stop"] == 10.5
+    assert row["target"] == 15.0
+    # No manufactured strategy fields -- these have no journal equivalent
+    # and must stay null, never guessed.
+    assert row["entry_reached_at"] is None
+    assert row["current_price"] is None
+    assert row["invalidation_reason"] is None
+    assert row["legacy_state"] is None
+
+
+def test_open_position_plus_scanner_entry_ready_shows_only_position_open(client, headers, monkeypatch):
+    """Required test #2: open position (no monitor row) + a fresh scanner
+    ENTER_NOW for the same ticker -- must show ONLY POSITION_OPEN, never
+    a second ENTRY_READY row for the same ticker."""
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(ticker="RIVN"))
+    _mock_scan(monkeypatch, [_scan_row(ticker="RIVN", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rivn_rows = [r for r in body["setups"] if r["symbol"] == "RIVN"]
+    assert len(rivn_rows) == 1, "an open position must suppress the duplicate scanner ENTRY_READY row for the same ticker"
+    assert rivn_rows[0]["state"] == "POSITION_OPEN"
+
+
+def test_open_position_plus_active_monitor_row_has_no_duplicate(client, headers):
+    """Required test #3: open position AND an ACTIVE Approved/Watch
+    monitor row for the same ticker -- must be ONE position-owned row
+    (the existing overlay recoloring), never a second, standalone one."""
+    _insert_setup(ticker="AMD", monitor_state="WAITING_FOR_TRIGGER")
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(ticker="AMD"))
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    amd_rows = [r for r in body["setups"] if r["symbol"] == "AMD"]
+    assert len(amd_rows) == 1, "an existing monitor row already recolored to POSITION_OPEN must not also get a second, standalone journal row"
+    assert amd_rows[0]["state"] == "POSITION_OPEN"
+    assert amd_rows[0]["legacy_state"] == "WAITING_FOR_TRIGGER", "the recolored row must still be the real monitor row, not the synthetic standalone one"
+
+
+def test_closed_position_with_no_monitor_row_gets_no_standalone_row(client, headers):
+    """Required test #4: a CLOSED journal position with no monitor row
+    must NOT get a standalone historical row -- this patch is only about
+    OPEN positions disappearing."""
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(
+        ticker="SNAP", result="Win", outcome="Win", tracking_status="completed",
+        tracking_completed_at="2026-08-21T14:00:00Z",
+    ))
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    assert not any(r["symbol"] == "SNAP" for r in body["setups"]), "a closed position with no monitor row must not get a manufactured standalone row"
+
+
+def test_invalidated_plus_fresh_enter_now_unchanged_by_the_journal_fix(client, headers, monkeypatch):
+    """Required test #5: the just-implemented INVALIDATED-does-not-hide-a-
+    fresh-ENTER_NOW behavior must be untouched by this fix -- same
+    scenario as test_invalidated_old_setup_does_not_hide_a_fresh_enter_now_same_ticker,
+    re-run here to confirm the new standalone-journal-row logic (which
+    also touches covered_tickers/setups) doesn't regress it."""
+    _insert_setup(ticker="NVDA", monitor_state="INVALIDATED", invalidation_reason="stop_hit 8 days ago")
+    _mock_scan(monkeypatch, [_scan_row(ticker="NVDA", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    nvda_rows = [r for r in body["setups"] if r["symbol"] == "NVDA"]
+    assert len(nvda_rows) == 2, f"expected the old INVALIDATED row plus the fresh scanner row, got {nvda_rows}"
+    assert {r["state"] for r in nvda_rows} == {"INVALIDATED", "ENTRY_READY"}
+
+
+def test_open_position_lookup_triggers_no_scanner_refresh_or_background_call(client, headers, monkeypatch):
+    """Required test #6: the new bulk open-journal-positions lookup must
+    never call out to the scanner in any way -- confirmed here directly
+    against the real, unmocked scanner._submit_analysis_refresh /
+    _submit_background_job (not a stand-in), same "prove it against the
+    real function" standard as tests/scan_cached_readonly_v1.py."""
+    import scanner as scanner_module
+    calls = []
+    monkeypatch.setattr(scanner_module, "_submit_analysis_refresh", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(scanner_module, "_submit_background_job", lambda *a, **k: calls.append((a, k)))
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(ticker="RIVN"))
+    resp = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers)
+    assert resp.status_code == 200
+    assert calls == [], "looking up open journal positions for the standalone-row fix must never submit or trigger a scanner refresh/background job"
