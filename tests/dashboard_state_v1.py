@@ -251,16 +251,18 @@ def test_unknown_or_missing_source_defaults_to_stock():
     assert ds.market_for_source("some_future_source") == "stock"
 
 
-def test_dashboard_states_is_the_exact_eleven_state_schema_requested():
+def test_dashboard_states_is_the_exact_fourteen_state_schema_requested():
     # Originally the exact 10-state schema Dashboard Sprint 1 requested;
     # extended to 11 the session TARGET_HIT was added to the backend
-    # monitor (candidates_router.py's _is_target_hit) -- the mirror-image
-    # outcome of INVALIDATED needed a dashboard-side home too, same
-    # reasoning as INVALIDATED's own original inclusion here.
+    # monitor (candidates_router.py's _is_target_hit); extended to 14 the
+    # session the Watch Contract shipped (WAITING_FOR_LOCATION and
+    # PULLBACK_REACHED are real backend states that object's own lifecycle
+    # emits; NEEDS_REVIEW is reserved, same "schema-valid, never
+    # automatically emitted" convention as DISCOVERED/STALE).
     assert ds.DASHBOARD_STATES == (
-        "DISCOVERED", "WATCHING", "LOCATION_REACHED", "CONFIRMED",
-        "WAITING_FOR_PULLBACK", "EXECUTION_READY", "ENTRY_READY",
-        "INVALIDATED", "TARGET_HIT", "POSITION_OPEN", "CLOSED",
+        "DISCOVERED", "WAITING_FOR_LOCATION", "WATCHING", "LOCATION_REACHED", "CONFIRMED",
+        "WAITING_FOR_PULLBACK", "PULLBACK_REACHED", "EXECUTION_READY", "ENTRY_READY",
+        "INVALIDATED", "TARGET_HIT", "POSITION_OPEN", "CLOSED", "NEEDS_REVIEW",
     )
 
 

@@ -122,13 +122,25 @@
   //     approaching entry. See the Sprint 2 report for the full writeup.
   const STATE_COLOR = {
     DISCOVERED: 'gray',
+    // Watch Contract (2026-09 session): grouped with DISCOVERED -- a
+    // contract still waiting on its own approved location is the
+    // earliest, least-urgent point in this progression.
+    WAITING_FOR_LOCATION: 'gray',
     WATCHING: 'blue',
     LOCATION_REACHED: 'yellow',
     CONFIRMED: 'yellow',
     WAITING_FOR_PULLBACK: 'orange',
+    // Watch Contract: grouped with WAITING_FOR_PULLBACK/EXECUTION_READY --
+    // confirmed, pulled back, now waiting on the final 5M trigger.
+    PULLBACK_REACHED: 'orange',
     EXECUTION_READY: 'orange',
     ENTRY_READY: 'green',
     INVALIDATED: 'red',
+    // Watch Contract: reserved (see dashboard_state.py's own comment --
+    // never automatically emitted this sprint). Yellow, distinct from
+    // INVALIDATED's red and ENTRY_READY's green -- "needs a look," not
+    // "resolved."
+    NEEDS_REVIEW: 'yellow',
     // TARGET_HIT (2026-09 session): the mirror-image outcome of
     // INVALIDATED, added the same session as manual candidate submission
     // -- a resolved win, colored green same as ENTRY_READY (this codebase's
@@ -174,13 +186,21 @@
   // pattern as public/setup_board.js's filterAndOrder/STATE_ORDER.
   const STATE_PRIORITY = {
     ENTRY_READY: 0,
+    // Watch Contract: sorts right after ENTRY_READY -- a contract flagged
+    // NEEDS_REVIEW wants human attention sooner than an ordinary
+    // in-progress row, even though it's reserved/never auto-emitted yet.
+    NEEDS_REVIEW: 1,
     POSITION_OPEN: 1,
     EXECUTION_READY: 2,
     WAITING_FOR_PULLBACK: 2,
+    // Watch Contract: grouped with the same "almost ready" tier.
+    PULLBACK_REACHED: 2,
     CONFIRMED: 3,
     LOCATION_REACHED: 3,
     WATCHING: 4,
     DISCOVERED: 5,
+    // Watch Contract: grouped with DISCOVERED -- earliest, least-urgent.
+    WAITING_FOR_LOCATION: 5,
     CLOSED: 5,
     INVALIDATED: 6,
     // TARGET_HIT (2026-09 session): grouped with INVALIDATED -- both are
@@ -241,6 +261,10 @@
     WATCHING: 'Keep watching',
     INVALIDATED: 'Setup invalid',
     TARGET_HIT: 'Target hit',
+    // Watch Contract (2026-09 session): new real backend states.
+    WAITING_FOR_LOCATION: 'Wait for approved location',
+    PULLBACK_REACHED: 'Wait for 5M trigger',
+    NEEDS_REVIEW: 'Needs review',
   };
 
   function shortNextStep(row) {
@@ -388,6 +412,180 @@
       rowIndex.delete(key);
     });
   }
+
+  // ---------------------------------------------------------------------
+  // Add Setup form (2026-09 session) -- manual candidate submission,
+  // wired to the existing POST /candidates/manual +
+  // POST /candidates/{ticker}/manual-trigger endpoints (candidates_router.py).
+  // Client-side validation below is a pure mirror of that endpoint's own
+  // rejection rules (ticker non-blank, entry/stop/target positive-finite,
+  // stop/entry/target ordering consistent with direction) -- exported,
+  // DOM-free, so it can be unit-tested directly and so a malformed
+  // long/short never even reaches the network. The backend's own 422/409
+  // remains the actual source of truth; this only saves a round trip for
+  // the common typo case and surfaces the identical wording.
+  const MANUAL_TRIGGER_RULES = ['close_above', 'close_below'];
+  // Matches candidates_router.py's MANUAL_CANDIDATE_SOURCE literal exactly
+  // -- also the "source" set_manual_candidate_trigger looks up the active
+  // APPROVED memory by.
+  const MANUAL_CANDIDATE_SOURCE = 'manual';
+
+  function validateManualSetupForm(fields) {
+    fields = fields || {};
+    const ticker = String(fields.ticker || '').trim();
+    if (!ticker) return { valid: false, error: 'Ticker must not be blank.' };
+    if (fields.direction !== 'long' && fields.direction !== 'short') {
+      return { valid: false, error: 'Direction must be long or short.' };
+    }
+    const numbers = {};
+    for (const label of ['entry', 'stop', 'target']) {
+      const value = Number(fields[label]);
+      if (fields[label] === '' || fields[label] == null || !Number.isFinite(value) || value <= 0) {
+        return { valid: false, error: `${label} must be a positive, finite number.` };
+      }
+      numbers[label] = value;
+    }
+    const { entry, stop, target } = numbers;
+    if (fields.direction === 'long' && !(stop < entry && entry < target)) {
+      return {
+        valid: false,
+        error: `For a long, stop (${stop}) must be below entry (${entry}), which must be below target (${target}).`,
+      };
+    }
+    if (fields.direction === 'short' && !(stop > entry && entry > target)) {
+      return {
+        valid: false,
+        error: `For a short, stop (${stop}) must be above entry (${entry}), which must be above target (${target}).`,
+      };
+    }
+    if (!String(fields.rationale || '').trim()) {
+      return { valid: false, error: 'Rationale must not be blank.' };
+    }
+    // Trigger fields: all-or-nothing, same rule the backend applies to
+    // its own trigger_rule/trigger_level pair (ManualCandidateIn /
+    // ManualTriggerIn) -- half-filled is rejected here rather than sent.
+    const triggerPriceRaw = fields.triggerPrice;
+    const hasTriggerPrice = triggerPriceRaw !== '' && triggerPriceRaw != null;
+    const hasTriggerRule = !!fields.triggerRule;
+    if (hasTriggerPrice !== hasTriggerRule) {
+      return { valid: false, error: 'Trigger price and trigger direction must both be filled in, or both left blank.' };
+    }
+    if (hasTriggerPrice) {
+      const triggerPrice = Number(triggerPriceRaw);
+      if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) {
+        return { valid: false, error: 'Trigger price must be a positive, finite number.' };
+      }
+      if (MANUAL_TRIGGER_RULES.indexOf(fields.triggerRule) === -1) {
+        return { valid: false, error: 'Trigger direction must be close_above or close_below.' };
+      }
+    }
+    return { valid: true, error: null };
+  }
+
+  function readManualSetupForm() {
+    const val = (id) => {
+      const el = document.getElementById(id);
+      return el ? el.value : '';
+    };
+    return {
+      ticker: val('manualTicker'),
+      direction: val('manualDirection'),
+      entry: val('manualEntry'),
+      stop: val('manualStop'),
+      target: val('manualTarget'),
+      rationale: val('manualRationale'),
+      triggerPrice: val('manualTriggerPrice'),
+      triggerRule: val('manualTriggerRule'),
+    };
+  }
+
+  function resetManualSetupForm() {
+    ['manualTicker', 'manualEntry', 'manualStop', 'manualTarget', 'manualRationale', 'manualTriggerPrice'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    const direction = document.getElementById('manualDirection');
+    if (direction) direction.value = 'long';
+    const triggerRule = document.getElementById('manualTriggerRule');
+    if (triggerRule) triggerRule.value = '';
+    setManualSetupError(null);
+  }
+
+  function setManualSetupError(message) {
+    const el = document.getElementById('manualSetupError');
+    if (!el) return;
+    el.hidden = !message;
+    el.textContent = message || '';
+  }
+
+  function openAddSetupModal() {
+    resetManualSetupForm();
+    const overlay = document.getElementById('addSetupModal');
+    if (overlay) overlay.classList.add('open');
+  }
+  window.openAddSetupModal = openAddSetupModal;
+
+  function closeAddSetupModal(event) {
+    // Clicking the overlay's own backdrop closes it; clicking inside the
+    // panel (event.target is a descendant) must not -- same convention
+    // as public/index.html's Log Review modal. The header/footer close
+    // buttons call this with no event at all, which always closes.
+    if (event && event.target !== document.getElementById('addSetupModal')) return;
+    const overlay = document.getElementById('addSetupModal');
+    if (overlay) overlay.classList.remove('open');
+  }
+  window.closeAddSetupModal = closeAddSetupModal;
+
+  async function submitManualSetup() {
+    const fields = readManualSetupForm();
+    const validation = validateManualSetupForm(fields);
+    if (!validation.valid) {
+      setManualSetupError(validation.error);
+      return;
+    }
+    setManualSetupError(null);
+    const ticker = fields.ticker.trim().toUpperCase();
+    const hasTrigger = fields.triggerPrice !== '' && fields.triggerPrice != null && !!fields.triggerRule;
+    const submitBtn = document.getElementById('manualSetupSubmitBtn');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      await fetchJson(`${API_BASE}/candidates/manual`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ticker,
+          direction: fields.direction,
+          entry: Number(fields.entry),
+          stop: Number(fields.stop),
+          target: Number(fields.target),
+          rationale: fields.rationale.trim(),
+        }),
+      });
+      // A trigger is added as a SEPARATE call, after creation succeeds --
+      // matching the existing two-step API (create, then
+      // set_manual_candidate_trigger), not a reason to fail the whole
+      // submission if creation itself already succeeded.
+      if (hasTrigger) {
+        await fetchJson(`${API_BASE}/candidates/${encodeURIComponent(ticker)}/manual-trigger`, {
+          method: 'POST',
+          body: JSON.stringify({
+            source: MANUAL_CANDIDATE_SOURCE,
+            trigger_rule: fields.triggerRule,
+            trigger_level: Number(fields.triggerPrice),
+          }),
+        });
+      }
+      closeAddSetupModal();
+      // Same in-place refresh a normal auto-refresh tick uses -- no full
+      // page reload, and any other row's expand state survives (render()
+      // only touches rows by setup_key, see updateRow/render above).
+      await loadDashboard();
+    } catch (err) {
+      setManualSetupError(err.message);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  }
+  window.submitManualSetup = submitManualSetup;
 
   // ---------------------------------------------------------------------
   // Networking / auth -- identical convention to public/setup_board.js.
@@ -592,5 +790,13 @@
     ROW_ACCENT,
     STATE_PRIORITY,
     SHORT_NEXT_STEP,
+    validateManualSetupForm,
+    readManualSetupForm,
+    resetManualSetupForm,
+    openAddSetupModal,
+    closeAddSetupModal,
+    submitManualSetup,
+    MANUAL_TRIGGER_RULES,
+    MANUAL_CANDIDATE_SOURCE,
   };
 });

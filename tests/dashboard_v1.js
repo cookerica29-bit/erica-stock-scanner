@@ -75,6 +75,17 @@ const elements = {
   dashboardDisclaimer: makeElement('div'),
   dashboardCount: makeElement('div'),
   freshnessBar: makeElement('div'),
+  addSetupModal: makeElement('div'),
+  manualSetupError: makeElement('div'),
+  manualSetupSubmitBtn: makeElement('button'),
+  manualTicker: makeElement('input'),
+  manualDirection: makeElement('select'),
+  manualEntry: makeElement('input'),
+  manualStop: makeElement('input'),
+  manualTarget: makeElement('input'),
+  manualRationale: makeElement('textarea'),
+  manualTriggerPrice: makeElement('input'),
+  manualTriggerRule: makeElement('select'),
 };
 
 global.document = {
@@ -87,7 +98,9 @@ global.localStorage = { getItem: () => 'test-key', setItem: () => {}, removeItem
 global.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
 
 let fetchQueue = [];
-global.fetch = async (url) => {
+let fetchCalls = [];
+global.fetch = async (url, options) => {
+  fetchCalls.push({ url, options });
   const next = fetchQueue.shift();
   if (!next) throw new Error(`Unexpected fetch call with nothing queued: ${url}`);
   return {
@@ -407,6 +420,143 @@ async function run() {
 
   const mFieldsNoBE = Object.fromEntries(dashboard.detailFields(row({})));
   assert.ok(!('Breakeven Stop' in mFieldsNoBE), 'M: Breakeven Stop detail field is absent when not set');
+
+  // ---------------------------------------------------------------------
+  // N. Add Setup form (2026-09 session): manual candidate submission.
+  // ---------------------------------------------------------------------
+
+  function fillManualForm(overrides = {}) {
+    const values = {
+      ticker: 'OVV', direction: 'long', entry: '55', stop: '52', target: '64',
+      rationale: 'liquidity sweep + reclaim', triggerPrice: '', triggerRule: '',
+      ...overrides,
+    };
+    elements.manualTicker.value = values.ticker;
+    elements.manualDirection.value = values.direction;
+    elements.manualEntry.value = values.entry;
+    elements.manualStop.value = values.stop;
+    elements.manualTarget.value = values.target;
+    elements.manualRationale.value = values.rationale;
+    elements.manualTriggerPrice.value = values.triggerPrice;
+    elements.manualTriggerRule.value = values.triggerRule;
+  }
+
+  // N0. Pure validation, no DOM/network involved -- mirrors the backend's
+  // own ordering rule exactly.
+  assert.strictEqual(dashboard.validateManualSetupForm({
+    ticker: 'OVV', direction: 'long', entry: '55', stop: '52', target: '64', rationale: 'x',
+  }).valid, true, 'N0: a well-formed long passes validation');
+  assert.strictEqual(dashboard.validateManualSetupForm({
+    ticker: 'OVV', direction: 'long', entry: '55', stop: '58', target: '64', rationale: 'x',
+  }).valid, false, 'N0: a long with stop above entry fails validation');
+  assert.strictEqual(dashboard.validateManualSetupForm({
+    ticker: 'OVV', direction: 'short', entry: '55', stop: '58', target: '48', rationale: 'x',
+  }).valid, true, 'N0: a well-formed short passes validation');
+  assert.strictEqual(dashboard.validateManualSetupForm({
+    ticker: 'OVV', direction: 'short', entry: '55', stop: '52', target: '64', rationale: 'x',
+  }).valid, false, 'N0: a short with target above entry fails validation (long-shaped ordering on a short)');
+  assert.strictEqual(dashboard.validateManualSetupForm({
+    ticker: '', direction: 'long', entry: '55', stop: '52', target: '64', rationale: 'x',
+  }).valid, false, 'N0: a blank ticker fails validation');
+  assert.strictEqual(dashboard.validateManualSetupForm({
+    ticker: 'OVV', direction: 'long', entry: '55', stop: '52', target: '64', rationale: '',
+  }).valid, false, 'N0: a blank rationale fails validation');
+
+  // N1. Valid submission with no trigger: exactly one create call, no
+  // manual-trigger call, then the normal in-place refresh -- modal closes.
+  dashboard.openAddSetupModal();
+  fillManualForm();
+  assert.ok(elements.addSetupModal.classList.contains('open'), 'N1: openAddSetupModal opens the modal');
+  fetchCalls = [];
+  fetchQueue = [
+    { status: 200, body: { memory: { ticker: 'OVV', setup_key: 'OVV|manual|long|52.00|64.00' }, monitor_state: null } },
+    { status: 200, body: payload([row({ setup_key: 'OVV|manual|long|52.00|64.00', symbol: 'OVV', state: 'WATCHING' })]) },
+  ];
+  await dashboard.submitManualSetup();
+  assert.strictEqual(fetchCalls.length, 2, 'N1: a no-trigger submission makes exactly 2 calls (create, then the dashboard refresh) -- no manual-trigger call');
+  assert.ok(fetchCalls[0].url.endsWith('/candidates/manual'), 'N1: first call is the manual-candidate endpoint');
+  const n1Body = JSON.parse(fetchCalls[0].options.body);
+  assert.deepStrictEqual(n1Body, { ticker: 'OVV', direction: 'long', entry: 55, stop: 52, target: 64, rationale: 'liquidity sweep + reclaim' }, 'N1: submitted payload matches the backend contract exactly, ticker uppercased');
+  assert.ok(!elements.addSetupModal.classList.contains('open'), 'N1: modal closes on success');
+  assert.ok(elements.manualSetupError.hidden, 'N1: no error shown on success');
+
+  // N2. Client-side validation blocks a malformed long BEFORE any network
+  // call -- fetchQueue is left empty on purpose; a network attempt here
+  // would throw "Unexpected fetch call".
+  dashboard.openAddSetupModal();
+  fillManualForm({ direction: 'long', entry: '55', stop: '58', target: '64' }); // stop above entry -- invalid for a long
+  fetchCalls = [];
+  fetchQueue = [];
+  await dashboard.submitManualSetup();
+  assert.strictEqual(fetchCalls.length, 0, 'N2: an invalid long/short ordering must never reach the network');
+  assert.ok(!elements.manualSetupError.hidden, 'N2: validation error is shown inline');
+  assert.ok(elements.manualSetupError.textContent.includes('stop'), 'N2: the error mirrors the backend\'s own ordering-rejection wording');
+  assert.ok(elements.addSetupModal.classList.contains('open'), 'N2: the modal stays open after a validation failure');
+
+  // N3. Duplicate-ticker 409 from the backend surfaces verbatim to the user.
+  dashboard.openAddSetupModal();
+  fillManualForm();
+  fetchCalls = [];
+  fetchQueue = [
+    { status: 409, body: { detail: 'An active manual setup already exists for this exact ticker/direction/stop/target (setup_key=OVV|manual|long|52.00|64.00).' } },
+  ];
+  await dashboard.submitManualSetup();
+  assert.strictEqual(fetchCalls.length, 1, 'N3: a 409 stops after the single failed create call -- no follow-up refresh');
+  assert.ok(!elements.manualSetupError.hidden, 'N3: the 409 error is shown');
+  assert.ok(elements.manualSetupError.textContent.includes('already exists'), 'N3: the ACTUAL backend error message is surfaced, not a generic one');
+  assert.ok(elements.addSetupModal.classList.contains('open'), 'N3: the modal stays open after a backend rejection');
+
+  // N4. A 422 validation error from the backend also surfaces verbatim
+  // (client-side validation cannot catch every backend rule, e.g. a
+  // duplicate setup_key it hasn't seen yet -- this is the network-error path).
+  dashboard.openAddSetupModal();
+  fillManualForm();
+  fetchCalls = [];
+  fetchQueue = [{ status: 422, body: { detail: 'entry must be a positive, finite number.' } }];
+  await dashboard.submitManualSetup();
+  assert.ok(elements.manualSetupError.textContent.includes('positive, finite number'), 'N4: a 422 from the backend surfaces verbatim');
+
+  // N5. Trigger fields are correctly optional: both filled fires the
+  // manual-trigger call right after creation succeeds, with the ticker in
+  // the URL and the correct body shape.
+  dashboard.openAddSetupModal();
+  fillManualForm({ triggerPrice: '54.5', triggerRule: 'close_above' });
+  fetchCalls = [];
+  fetchQueue = [
+    { status: 200, body: { memory: { ticker: 'OVV' }, monitor_state: null } },
+    { status: 200, body: { memory: { ticker: 'OVV' }, monitor_state: null } },
+    { status: 200, body: payload([]) },
+  ];
+  await dashboard.submitManualSetup();
+  assert.strictEqual(fetchCalls.length, 3, 'N5: both trigger fields filled adds exactly one extra call (create, trigger, refresh)');
+  assert.ok(fetchCalls[1].url.includes('/candidates/OVV/manual-trigger'), 'N5: the trigger call targets the just-created ticker');
+  const n5TriggerBody = JSON.parse(fetchCalls[1].options.body);
+  assert.deepStrictEqual(n5TriggerBody, { source: 'manual', trigger_rule: 'close_above', trigger_level: 54.5 }, 'N5: trigger call body matches ManualTriggerIn exactly');
+
+  // N6. Half-filled trigger fields are rejected client-side, before any
+  // network call -- "all or nothing", same rule the backend enforces.
+  dashboard.openAddSetupModal();
+  fillManualForm({ triggerPrice: '54.5', triggerRule: '' });
+  fetchCalls = [];
+  fetchQueue = [];
+  await dashboard.submitManualSetup();
+  assert.strictEqual(fetchCalls.length, 0, 'N6: a half-filled trigger (price with no rule) never reaches the network');
+  assert.ok(elements.manualSetupError.textContent.includes('both'), 'N6: the error explains trigger fields are all-or-nothing');
+
+  fillManualForm({ triggerPrice: '', triggerRule: 'close_below' });
+  fetchCalls = [];
+  fetchQueue = [];
+  await dashboard.submitManualSetup();
+  assert.strictEqual(fetchCalls.length, 0, 'N6: a half-filled trigger (rule with no price) never reaches the network either');
+
+  // N7. Closing the modal via the overlay backdrop (not its inner panel)
+  // works; clicking inside the panel must not close it.
+  dashboard.openAddSetupModal();
+  const modalPanelClick = { target: { /* a descendant node, not the overlay itself */ } };
+  dashboard.closeAddSetupModal(modalPanelClick);
+  assert.ok(elements.addSetupModal.classList.contains('open'), 'N7: a click whose target is not the overlay itself must not close the modal');
+  dashboard.closeAddSetupModal({ target: elements.addSetupModal });
+  assert.ok(!elements.addSetupModal.classList.contains('open'), 'N7: a click on the overlay backdrop itself closes the modal');
 
   console.log('Dashboard Sprint 2 / 2.1 (dashboard.js) tests passed');
 }

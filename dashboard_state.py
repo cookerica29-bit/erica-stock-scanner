@@ -34,10 +34,22 @@ DASHBOARD_STATE_MECHANISM_VERSION = "dashboard_state_read_model_v1"
 # progression (roughly early -> late), not a priority/sort order.
 DASHBOARD_STATES = (
     "DISCOVERED",
+    # WAITING_FOR_LOCATION (2026-09 session, Watch Contract): earlier than
+    # WATCHING in this progression -- a Watch Contract whose approved
+    # location has not yet been reached at all, one stage before "wait
+    # for 30M confirmation."
+    "WAITING_FOR_LOCATION",
     "WATCHING",
     "LOCATION_REACHED",
     "CONFIRMED",
     "WAITING_FOR_PULLBACK",
+    # PULLBACK_REACHED (2026-09 session, Watch Contract): the Watch
+    # Contract's own real backend state once a qualifying post-
+    # confirmation pullback has occurred -- sits between
+    # WAITING_FOR_PULLBACK and EXECUTION_READY/ENTRY_READY in this
+    # progression, "confirmed and pulled back, now waiting on a fresh 5M
+    # trigger."
+    "PULLBACK_REACHED",
     "EXECUTION_READY",
     "ENTRY_READY",
     "INVALIDATED",
@@ -51,6 +63,11 @@ DASHBOARD_STATES = (
     "TARGET_HIT",
     "POSITION_OPEN",
     "CLOSED",
+    # NEEDS_REVIEW (2026-09 session, Watch Contract): reserved, same
+    # "schema-valid, never automatically emitted this sprint" convention
+    # as DISCOVERED/STALE below -- watch_contract_engine.py's own monitor
+    # tick never writes this state yet (see its module docstring).
+    "NEEDS_REVIEW",
 )
 
 # Every state in DASHBOARD_STATES has a genuine, real data source
@@ -70,16 +87,19 @@ DASHBOARD_STATE_SUPPORTED_TODAY = frozenset(DASHBOARD_STATES)
 
 DASHBOARD_STATE_LABELS: dict[str, str] = {
     "DISCOVERED": "Discovered",
+    "WAITING_FOR_LOCATION": "Waiting for Location",
     "WATCHING": "Watching",
     "LOCATION_REACHED": "Entry Location Reached",
     "CONFIRMED": "Confirmed",
     "WAITING_FOR_PULLBACK": "Waiting for Pullback",
+    "PULLBACK_REACHED": "Pullback Reached",
     "EXECUTION_READY": "Execution Ready",
     "ENTRY_READY": "Entry Ready",
     "INVALIDATED": "Invalidated",
     "TARGET_HIT": "Target Hit",
     "POSITION_OPEN": "Position Open",
     "CLOSED": "Closed",
+    "NEEDS_REVIEW": "Needs Review",
 }
 
 # Purely descriptive of the ALREADY-decided condition behind each state --
@@ -88,16 +108,19 @@ DASHBOARD_STATE_LABELS: dict[str, str] = {
 # does this); it does not tell a human what to do.
 DASHBOARD_STATE_NEXT_STEP: dict[str, str] = {
     "DISCOVERED": "Awaiting human chart review.",
+    "WAITING_FOR_LOCATION": "Waiting for price to reach the approved location.",
     "WATCHING": "Kairos is monitoring for the stated trigger/entry condition.",
     "LOCATION_REACHED": "Price reached the reviewed entry; the stated confirmation is not yet satisfied.",
     "CONFIRMED": "Confirmation was observed; awaiting the execution-window/safety-gate check.",
     "WAITING_FOR_PULLBACK": "The execution window has extended; awaiting a pullback/retest.",
+    "PULLBACK_REACHED": "A qualifying pullback occurred; awaiting a fresh execution trigger.",
     "EXECUTION_READY": "Near-ready; awaiting the final confirmation/lifecycle check before entry.",
     "ENTRY_READY": "This setup has cleared all current safety gates.",
     "INVALIDATED": "This setup is no longer valid.",
     "TARGET_HIT": "Price reached the approved target.",
     "POSITION_OPEN": "A journal entry shows an open position for this ticker.",
     "CLOSED": "A journal entry shows this position as closed.",
+    "NEEDS_REVIEW": "This setup needs a human look before continuing.",
 }
 
 

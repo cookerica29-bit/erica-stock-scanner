@@ -219,6 +219,50 @@
     .detail-field .detail-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
     .detail-field .detail-value { font-size: 0.9rem; font-weight: 600; margin-top: 2px; }
     .detail-empty { color: var(--muted); font-size: 0.82rem; }
+
+    /* ── Add Setup modal (2026-09 session) ────────────────────────────────
+       Same modal convention as the rest of this app (public/index.html's
+       "Log Review" modal: fixed overlay + centered panel, header/body/
+       footer sections, .form-row/.form-grid for field layout) -- themed
+       with this page's own dark CSS variables rather than sharing a
+       stylesheet, matching this codebase's existing "one self-contained
+       file per page" convention. */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      z-index: 100; align-items: center; justify-content: center; padding: 16px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      width: 480px; max-width: 100%; max-height: 90vh; overflow-y: auto;
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+    }
+    .modal-header h2 { font-size: 0.95rem; margin: 0; }
+    .modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 0 4px; min-height: unset; }
+    .modal-close:hover { color: var(--text); border: none; background: none; }
+    .modal-body { padding: 20px; }
+    .modal-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+    .form-row { margin-bottom: 14px; }
+    .form-row label { display: block; color: var(--muted); font-size: 0.7rem; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .form-row input, .form-row select, .form-row textarea {
+      width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+      border-radius: 8px; padding: 8px 10px; min-height: 38px; font: inherit;
+    }
+    .form-row textarea { min-height: 64px; resize: vertical; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+    .modal-section { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 14px; }
+    .modal-section-title { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px; }
+    .modal-section-hint { color: var(--muted); font-size: 0.76rem; margin: -4px 0 12px; }
+    .modal-error {
+      color: var(--fail); background: rgba(251, 113, 133, 0.12); border: 1px solid rgba(251, 113, 133, 0.4);
+      border-radius: 8px; padding: 8px 10px; font-size: 0.8rem; margin-bottom: 14px;
+    }
+    .btn-primary { border-color: var(--accent); color: var(--bg); background: var(--accent); font-weight: 600; }
+    .btn-primary:hover { background: var(--accent); opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -228,6 +272,7 @@
         <h1>Kairos Dashboard</h1>
         <div class="subtitle">Every active setup's state, in one spreadsheet-style view.</div>
       </div>
+      <button type="button" id="addSetupBtn" onclick="openAddSetupModal()">+ Add Setup</button>
     </header>
     <nav class="kairos-nav" aria-label="Kairos navigation">
       <a class="nav-link" href="/candidates">Candidates Dashboard</a>
@@ -268,6 +313,72 @@
     </main>
   </div>
 
-  <script src="/static/dashboard.js?v=20260906-dashboard-sprint2-1"></script>
+  <!-- Add Setup modal (2026-09 session): submits POST /candidates/manual,
+       then POST /candidates/{ticker}/manual-trigger when the optional
+       trigger fields are filled in -- see dashboard.js's submitManualSetup. -->
+  <div class="modal-overlay" id="addSetupModal" onclick="closeAddSetupModal(event)">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Add Setup</h2>
+        <button type="button" class="modal-close" onclick="closeAddSetupModal()">&#10005;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-error" id="manualSetupError" hidden></div>
+        <div class="form-row">
+          <label for="manualTicker">Ticker</label>
+          <input id="manualTicker" type="text" autocomplete="off" placeholder="e.g. OVV" />
+        </div>
+        <div class="form-row">
+          <label for="manualDirection">Direction</label>
+          <select id="manualDirection">
+            <option value="long">Long</option>
+            <option value="short">Short</option>
+          </select>
+        </div>
+        <div class="form-row form-grid">
+          <div>
+            <label for="manualEntry">Entry</label>
+            <input id="manualEntry" type="number" step="any" inputmode="decimal" />
+          </div>
+          <div>
+            <label for="manualStop">Stop</label>
+            <input id="manualStop" type="number" step="any" inputmode="decimal" />
+          </div>
+          <div>
+            <label for="manualTarget">Target</label>
+            <input id="manualTarget" type="number" step="any" inputmode="decimal" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="manualRationale">Rationale</label>
+          <textarea id="manualRationale" placeholder="Why this setup, in your own words"></textarea>
+        </div>
+        <div class="modal-section">
+          <div class="modal-section-title">Trigger (optional)</div>
+          <div class="modal-section-hint">Leave both blank to submit as APPROVED with no trigger -- add one later from the row's detail panel, or fill both in now to submit as WAITING_FOR_TRIGGER in one step.</div>
+          <div class="form-row form-grid" style="grid-template-columns: 1fr 1fr;">
+            <div>
+              <label for="manualTriggerPrice">Trigger Price</label>
+              <input id="manualTriggerPrice" type="number" step="any" inputmode="decimal" />
+            </div>
+            <div>
+              <label for="manualTriggerRule">Trigger Direction</label>
+              <select id="manualTriggerRule">
+                <option value="">--</option>
+                <option value="close_above">Close above</option>
+                <option value="close_below">Close below</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" onclick="closeAddSetupModal()">Cancel</button>
+        <button type="button" class="btn-primary" id="manualSetupSubmitBtn" onclick="submitManualSetup()">Add Setup</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/dashboard.js?v=20260908-manual-setup-form"></script>
 </body>
 </html>

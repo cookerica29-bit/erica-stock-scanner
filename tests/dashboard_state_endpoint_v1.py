@@ -131,13 +131,14 @@ def test_empty_when_no_setups(client, headers):
     assert body["count"] == 0
     assert body["setups"] == []
     assert body["mechanism"] == "dashboard_state_read_model_v1"
-    # 11 states as of the TARGET_HIT addition (candidates_router.py's
-    # _is_target_hit, same session) -- see dashboard_state_v1.py's own
-    # test_dashboard_states_is_the_exact_eleven_state_schema_requested.
+    # 14 states as of the Watch Contract addition (WAITING_FOR_LOCATION/
+    # PULLBACK_REACHED/NEEDS_REVIEW, same session) -- see
+    # dashboard_state_v1.py's own
+    # test_dashboard_states_is_the_exact_fourteen_state_schema_requested.
     assert set(body["supported_states"]) == {
-        "DISCOVERED", "WATCHING", "LOCATION_REACHED", "CONFIRMED",
-        "WAITING_FOR_PULLBACK", "EXECUTION_READY", "ENTRY_READY",
-        "INVALIDATED", "TARGET_HIT", "POSITION_OPEN", "CLOSED",
+        "DISCOVERED", "WAITING_FOR_LOCATION", "WATCHING", "LOCATION_REACHED", "CONFIRMED",
+        "WAITING_FOR_PULLBACK", "PULLBACK_REACHED", "EXECUTION_READY", "ENTRY_READY",
+        "INVALIDATED", "TARGET_HIT", "POSITION_OPEN", "CLOSED", "NEEDS_REVIEW",
     }
 
 
@@ -678,3 +679,117 @@ def test_open_position_lookup_triggers_no_scanner_refresh_or_background_call(cli
     resp = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers)
     assert resp.status_code == 200
     assert calls == [], "looking up open journal positions for the standalone-row fix must never submit or trigger a scanner refresh/background job"
+
+
+# ---------------------------------------------------------------------------
+# Watch Contract dashboard precedence (2026-09 session, pre-deploy
+# hardening pass). Exact policy under test:
+#   A. Watch Contract alone -> exactly one row.
+#   B. Watch Contract + scanner candidate, same ticker -> Watch Contract
+#      row shown, the scanner duplicate suppressed.
+#   C. Watch Contract + OPEN journal position, same ticker -> the OPEN
+#      POSITION wins; no separate, loud Watch Contract row.
+#   D. Watch Contract + an active approved-monitor row, same ticker ->
+#      shown INDEPENDENTLY (no shared identity between the two
+#      persistence systems -- see the router's own precedence comment).
+#   E. An INVALIDATED (terminal) Watch Contract must not hide a
+#      genuinely fresh scanner candidate for the same ticker.
+# ---------------------------------------------------------------------------
+
+import watch_contract_store as wc_store  # noqa: E402
+
+
+def _insert_watch_contract(**overrides):
+    fields = {
+        "ticker": "OVV",
+        "direction": "long",
+        "approved_htf_thesis": "BULLISH",
+        "approved_current_leg": "BEARISH_CORRECTION",
+        "location_type": "PRIOR_BREAKOUT_SUPPORT",
+        "location_lower": 63.5,
+        "location_upper": 64.5,
+        "location_status_at_approval": "REACHED",
+        "location_reached_at": "2026-09-01T14:00:00Z",
+        "confirmation_timeframe": "30m",
+        "confirmation_direction": "long",
+        "confirmation_allowed_events": ["BOS", "CHoCH"],
+        "confirmation_min_displacement": "STRONG",
+        "execution_timeframe": "5m",
+        "execution_direction": "long",
+        "execution_allowed_events": ["BOS", "CHoCH"],
+        "execution_min_displacement": "STRONG",
+        "approved_invalidation_rule": "close_below",
+        "approved_invalidation_level": 62.0,
+        "state": "WATCHING",
+    }
+    fields.update(overrides)
+    conn = router._get_db()
+    try:
+        record = wc_store.create_watch_contract(conn, **fields)
+    finally:
+        conn.close()
+    return record
+
+
+def test_a_watch_contract_alone_produces_exactly_one_row(client, headers):
+    _insert_watch_contract(ticker="OVV")
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rows = [r for r in body["setups"] if r["symbol"] == "OVV"]
+    assert len(rows) == 1
+    assert rows[0]["state"] == "WATCHING"
+    assert rows[0]["source"] == "watch_contract"
+
+
+def test_b_watch_contract_suppresses_the_duplicate_scanner_row(client, headers, monkeypatch):
+    _insert_watch_contract(ticker="OVV", state="WATCHING")
+    _mock_scan(monkeypatch, [_scan_row(ticker="OVV", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rows = [r for r in body["setups"] if r["symbol"] == "OVV"]
+    assert len(rows) == 1, "an active Watch Contract must suppress the duplicate scanner row for the same ticker"
+    assert rows[0]["source"] == "watch_contract"
+
+
+def test_c_open_journal_position_wins_over_watch_contract(client, headers):
+    _insert_watch_contract(ticker="OVV", state="PULLBACK_REACHED")
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(ticker="OVV"))
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rows = [r for r in body["setups"] if r["symbol"] == "OVV"]
+    assert len(rows) == 1, "an open position must win -- no second, loud Watch Contract row beside a live position"
+    assert rows[0]["state"] == "POSITION_OPEN"
+    assert rows[0]["source"] == "journal"
+
+
+def test_c2_closed_journal_position_does_not_suppress_the_watch_contract(client, headers):
+    """Contrast case -- only an OPEN position wins; a resolved, historical
+    position is not senior evidence over a still-open Watch Contract."""
+    _insert_watch_contract(ticker="OVV", state="WATCHING")
+    journal = journal_store.SQLiteJournalRepository(journal_store.default_journal_db_path())
+    journal.create_entry(_open_journal_entry(
+        ticker="OVV", result="Win", outcome="Win", tracking_status="completed",
+        tracking_completed_at="2026-08-21T14:00:00Z",
+    ))
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rows = [r for r in body["setups"] if r["symbol"] == "OVV"]
+    assert len(rows) == 1
+    assert rows[0]["state"] == "WATCHING"
+    assert rows[0]["source"] == "watch_contract"
+
+
+def test_d_watch_contract_and_active_approved_monitor_row_shown_independently(client, headers):
+    _insert_setup(ticker="OVV", monitor_state="WAITING_FOR_TRIGGER")
+    _insert_watch_contract(ticker="OVV", state="WATCHING")
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rows = [r for r in body["setups"] if r["symbol"] == "OVV"]
+    assert len(rows) == 2, "no shared identity exists between the two systems -- both rows must be shown, not deduplicated"
+    sources = {r["source"] for r in rows}
+    assert sources == {"ma_pipeline", "watch_contract"}
+
+
+def test_e_invalidated_watch_contract_does_not_hide_a_fresh_scanner_candidate(client, headers, monkeypatch):
+    _insert_watch_contract(ticker="OVV", state="INVALIDATED", invalidation_reason="closed below approved level")
+    _mock_scan(monkeypatch, [_scan_row(ticker="OVV", status_bucket="ENTER_NOW")])
+    body = client.get("/api/v1/scanner/candidates/dashboard-state", headers=headers).json()
+    rows = [r for r in body["setups"] if r["symbol"] == "OVV"]
+    assert len(rows) == 2, f"expected the old INVALIDATED Watch Contract plus the fresh scanner row, got {rows}"
+    assert {r["state"] for r in rows} == {"INVALIDATED", "ENTRY_READY"}

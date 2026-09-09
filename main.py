@@ -118,10 +118,13 @@ import momentum_pullback_shadow as momentum_pullback
 import momentum_pullback_short_lifecycle_experiment as short_lifecycle_experiment
 from smc_shadow_engine import smc_shadow_enabled
 from smc_shadow_router import router as smc_shadow_router, safe_run_smc_shadow_tick
+from watch_contract_engine import watch_contract_enabled, run_watch_contract_monitor_tick_standalone
+from watch_contract_router import router as watch_contract_router
 
 app = FastAPI(title="Stock Options Scanner")
 app.include_router(candidates_router)
 app.include_router(smc_shadow_router)
+app.include_router(watch_contract_router)
 logger = logging.getLogger(__name__)
 
 DISCOVERY_POOL_VERSION = "kairos-weekly-discovery-pool-v1"
@@ -1664,6 +1667,13 @@ def _safe_run_approved_setup_monitor_tick(reason: str = "periodic") -> None:
         logger.warning("[approved_setup_monitor] failed reason=%s error=%s", reason, exc)
 
 
+def _safe_run_watch_contract_monitor_tick(reason: str = "periodic") -> None:
+    try:
+        run_watch_contract_monitor_tick_standalone(reason)
+    except Exception as exc:
+        logger.warning("[watch_contract_monitor] failed reason=%s error=%s", reason, exc)
+
+
 def _register_discovery_background_refresh() -> None:
     register_background_periodic_task(
         "discovery_universe",
@@ -1716,6 +1726,18 @@ def _register_discovery_background_refresh() -> None:
             "smc_shadow_engine",
             MONITOR_TICK_SECONDS,
             lambda: safe_run_smc_shadow_tick("periodic"),
+        )
+    # Watch Contract (2026-09 session): same "registered only when
+    # explicitly enabled" convention as smc_shadow_engine just above --
+    # with the flag off (the default; this sprint is implement-only, not
+    # deploy), this periodic tick is never scheduled at all. See
+    # watch_contract_engine.py's own module docstring for what it does
+    # each tick.
+    if watch_contract_enabled():
+        register_background_periodic_task(
+            "watch_contract_monitor",
+            MONITOR_TICK_SECONDS,
+            lambda: _safe_run_watch_contract_monitor_tick("periodic"),
         )
 
 app.add_middleware(

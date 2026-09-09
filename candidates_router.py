@@ -48,6 +48,7 @@ from location_score import score_location
 from confluence_summary import summarize_confluence
 import dashboard_state
 from journal_store import SQLiteJournalRepository, core_value, default_journal_db_path, entry_status
+import watch_contract_store
 
 logger = logging.getLogger(__name__)
 
@@ -8766,6 +8767,97 @@ def _dashboard_open_journal_entries() -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict) and entry_status(entry) == "open"]
 
 
+# Watch Contract dashboard row (2026-09 session) -- direction-specific
+# Next Step text per this sprint's own spec, computed here rather than
+# through dashboard_state.DASHBOARD_STATE_NEXT_STEP's shared, state-only
+# dict: WATCHING/PULLBACK_REACHED read differently for a Watch Contract
+# ("wait for 30M bullish confirmation") than dashboard_state.py's generic
+# text for the SAME state name used by the price-trigger monitor. Falls
+# back to the shared dict for any state without a Watch-Contract-specific
+# phrase, so a future state added there is never silently blank here.
+_WATCH_CONTRACT_NEXT_STEP_BY_STATE = {
+    "WAITING_FOR_LOCATION": "Wait for approved location",
+    "PULLBACK_REACHED": "Wait for {word} 5M trigger",
+    "WATCHING": "Wait for 30M {word} confirmation",
+    "ENTRY_READY": "Entry ready",
+    "INVALIDATED": "Setup invalidated",
+    "NEEDS_REVIEW": "Needs review",
+}
+
+
+def _watch_contract_next_step(state: str, direction: Optional[str]) -> Optional[str]:
+    template = _WATCH_CONTRACT_NEXT_STEP_BY_STATE.get(state)
+    if template is None:
+        return dashboard_state.dashboard_state_next_step(state)
+    word = "bullish" if str(direction or "").strip().lower() == "long" else "bearish"
+    return template.format(word=word)
+
+
+def _build_watch_contract_dashboard_row(contract: dict) -> dict:
+    """One persisted Watch Contract -> one dashboard row. Deliberately
+    carries NO entry/stop/target -- a Watch Contract has no trade plan
+    at all, only a frozen chart read + an objective structural sequence
+    (see watch_contract_store.py's own module docstring); fabricating a
+    plan here would violate the exact "do not invent unavailable values"
+    rule this sprint's spec states explicitly. Additional Watch-Contract-
+    specific fields (approved_htf_thesis, location bounds, confirmation/
+    execution event identity) are appended past the shared row shape --
+    additive only, no existing field's meaning changed for any other
+    row source."""
+    state = contract.get("state")
+    direction = contract.get("direction")
+    return {
+        "symbol": str(contract.get("ticker") or "").upper(),
+        "market": dashboard_state.market_for_source(None),
+        "direction": direction,
+        "trade_type": dashboard_state.trade_type_for(direction, None),
+        "option_strike": None,
+        "option_expiration": None,
+        "state": state,
+        "state_label": dashboard_state.dashboard_state_label(state),
+        "next_step": _watch_contract_next_step(state, direction),
+        "last_change": contract.get("updated_at"),
+        "planned_entry": None,
+        "entry": None,
+        "stop": None,
+        "exit": None,
+        "original_stop": None,
+        "target": None,
+        "targets": [],
+        # Real, honest provenance -- distinct from every other source this
+        # read model already emits ("manual", "scanner", "journal", or a
+        # real approved_setup_memories .source value).
+        "source": "watch_contract",
+        "source_decision": None,
+        "setup_key": f"watch_contract:{contract.get('watch_contract_id')}",
+        "legacy_state": None,
+        "entry_reached_at": None,
+        "entry_reached_price": None,
+        "current_price": contract.get("last_live_price"),
+        "invalidation_reason": contract.get("invalidation_reason"),
+        "breakeven_set": False,
+        "breakeven_set_at": None,
+        "partial_profit_suggested": False,
+        "partial_profit_suggested_at": None,
+        # Watch-Contract-specific detail -- additive.
+        "watch_contract_id": contract.get("watch_contract_id"),
+        "approved_htf_thesis": contract.get("approved_htf_thesis"),
+        "approved_current_leg": contract.get("approved_current_leg"),
+        "location_type": contract.get("location_type"),
+        "location_lower": contract.get("location_lower"),
+        "location_upper": contract.get("location_upper"),
+        "location_reached_at": contract.get("location_reached_at"),
+        "confirmation_event_type": contract.get("confirmation_event_type"),
+        "confirmation_level": contract.get("confirmation_level"),
+        "confirmation_bar_time": contract.get("confirmation_bar_time"),
+        "pullback_reached_at": contract.get("pullback_reached_at"),
+        "execution_event_type": contract.get("execution_event_type"),
+        "execution_level": contract.get("execution_level"),
+        "execution_bar_time": contract.get("execution_bar_time"),
+        "execution_rejection_event_type": contract.get("execution_rejection_event_type"),
+    }
+
+
 @router.get("/candidates/dashboard-state")
 def list_dashboard_state(
     x_api_key: Optional[str] = Header(default=None),
@@ -8843,6 +8935,46 @@ def list_dashboard_state(
         # explicit and belt-and-suspenders rather than relying on a
         # second mechanism to catch it.)
         covered_tickers |= {row["symbol"] for row in open_position_rows}
+        # Watch Contracts (2026-09 session): a genuinely new, third tier.
+        # Precedence audit (pre-deploy hardening pass), exact policy:
+        #   - Watch Contract vs. approved-monitor row for the same ticker:
+        #     SHOWN INDEPENDENTLY, deliberately not suppressed either way.
+        #     Confirmed in this session's own architecture audit that these
+        #     two persistence systems share no identity/setup_key link --
+        #     a Watch Contract is not proven to be "the same setup" as an
+        #     approved_setup_memories row just because they share a ticker
+        #     (one is a frozen structural read Kairos is monitoring for an
+        #     objective sequence; the other is a price-trigger trade plan).
+        #     Suppressing one on ticker-only correlation risks hiding real,
+        #     independently-tracked information -- the same reasoning this
+        #     dashboard has applied to every other ticker-only correlation
+        #     it has (journal overlay's own disclosed limitation). Revisit
+        #     if this proves confusing in practice with real dual-tracked
+        #     tickers.
+        #   - Watch Contract vs. an OPEN journal position for the same
+        #     ticker: the OPEN POSITION WINS (explicit product rule for
+        #     MVP) -- a live position is real, senior evidence a pre-entry
+        #     structural read is not; showing both would put a second,
+        #     loud, still-actionable Watch row beside a position already
+        #     taken. A CLOSED position does NOT suppress it -- a resolved,
+        #     historical position is not senior to a genuinely still-open
+        #     Watch Contract the way a currently-open one is.
+        #   - Watch Contract vs. scanner ENTER_NOW: unchanged from the
+        #     original design -- only ACTIVE (non-terminal) contracts
+        #     suppress the scanner row for that ticker; a TERMINAL contract
+        #     (ENTRY_READY/INVALIDATED/NEEDS_REVIEW) never hides a
+        #     genuinely fresh scanner candidate, same reasoning already
+        #     applied to terminal approved-monitor rows above.
+        watch_contracts = [
+            c for c in watch_contract_store.list_watch_contracts(conn)
+            if _dashboard_position_overlay(str(c["ticker"] or "").upper()) != "POSITION_OPEN"
+        ]
+        watch_contract_rows = [_build_watch_contract_dashboard_row(c) for c in watch_contracts]
+        setups.extend(watch_contract_rows)
+        covered_tickers |= {
+            str(c["ticker"] or "").upper() for c in watch_contracts
+            if c["state"] not in watch_contract_store.TERMINAL_WATCH_CONTRACT_STATES
+        }
         setups.extend(_dashboard_rows_for_scanner(covered_tickers))
         return {
             "mechanism": dashboard_state.DASHBOARD_STATE_MECHANISM_VERSION,
