@@ -162,7 +162,7 @@ def test_8_existing_same_key_dedupe_still_works():
 # ---------------------------------------------------------------------------
 
 def _patch_scan_all(monkeypatch_calls, rows=None, near_miss=None, meta=None, raise_exc=None):
-    def _fake_scan_all(watchlist, max_workers=12, discover=False, max_symbols=200, trusted_options_symbols=None):
+    def _fake_scan_all(watchlist, max_workers=12, discover=False, max_symbols=200, trusted_options_symbols=None, heavy_job_id=None):
         monkeypatch_calls.append({
             "watchlist": watchlist, "max_workers": max_workers, "discover": discover, "max_symbols": max_symbols,
         })

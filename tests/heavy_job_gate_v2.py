@@ -61,7 +61,7 @@ class _FailingExecutor:
 
 
 def _patch_scan_all(calls, rows=None, near_miss=None, meta=None, raise_exc=None):
-    def _fake_scan_all(watchlist, max_workers=12, discover=False, max_symbols=200, trusted_options_symbols=None):
+    def _fake_scan_all(watchlist, max_workers=12, discover=False, max_symbols=200, trusted_options_symbols=None, heavy_job_id=None):
         calls.append(True)
         if raise_exc is not None:
             raise raise_exc

@@ -2226,10 +2226,18 @@ def _refresh_analysis_cache(
     this repo already drives this function without a reservation."""
     started = time.perf_counter()
     state_key = _analysis_state_key(key)
+    # Telemetry job_id (2026-09 session, Railway OOM telemetry follow-up):
+    # production always supplies `job_id` (from _submit_analysis_refresh);
+    # this fallback only matters for a direct test call that omits it, so
+    # record_job_start/checkpoint/end never silently no-op in that case.
+    telemetry_job_id = job_id or f"{state_key}:{int(time.time())}"
     rss_start = heavy_job_gate.current_rss_mb()
     logger.info(
         "HEAVY_JOB_START job_type=scan_all key=%s symbol_count=%s discover=%s max_symbols=%s rss_mb=%s timestamp=%s",
         state_key, len(watchlist) if watchlist else None, discover, max_symbols, rss_start, _utc_now().isoformat(),
+    )
+    heavy_job_gate.record_job_start(
+        telemetry_job_id, "scan_all", key, symbol_count=len(watchlist) if watchlist else None,
     )
     try:
         try:
@@ -2240,6 +2248,7 @@ def _refresh_analysis_cache(
                 discover=discover,
                 max_symbols=max_symbols,
                 trusted_options_symbols=trusted_options_symbols,
+                heavy_job_id=telemetry_job_id,
             )
             _store_analysis_cache(key, rows, near_miss, scan_meta)
             if isinstance(key, tuple) and len(key) >= 2 and key[0] == "universe" and key[1] == "discovered":
@@ -2264,17 +2273,25 @@ def _refresh_analysis_cache(
                 )
             _mark_analysis_refresh_finished(key, started)
             logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", state_key, job_id, len(rows), len(near_miss))
+            _duration = round(time.perf_counter() - started, 1)
+            _rss_end = heavy_job_gate.current_rss_mb()
             logger.info(
                 "HEAVY_JOB_END job_type=scan_all key=%s duration_s=%s rss_mb=%s success=True",
-                state_key, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+                state_key, _duration, _rss_end,
             )
+            heavy_job_gate.record_job_end(telemetry_job_id, status="completed", duration_seconds=_duration, rss_end=_rss_end)
         except Exception as exc:
             _mark_analysis_refresh_finished(key, started, exc)
             logger.exception("[analysis refresh] failed key=%s job=%s", state_key, job_id)
+            _duration = round(time.perf_counter() - started, 1)
+            _rss_end = heavy_job_gate.current_rss_mb()
             logger.info(
                 "HEAVY_JOB_END job_type=scan_all key=%s duration_s=%s rss_mb=%s success=False",
-                state_key, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+                state_key, _duration, _rss_end,
             )
+            # status="failed", never the exception/traceback object itself
+            # (see heavy_job_gate.record_job_end's own docstring).
+            heavy_job_gate.record_job_end(telemetry_job_id, status="failed", duration_seconds=_duration, rss_end=_rss_end)
             raise
     finally:
         # Release ONLY the specific token this call was handed -- never the
@@ -11157,7 +11174,15 @@ def scan_all(
     discover: bool = False,
     max_symbols: Optional[int] = 200,
     trusted_options_symbols: Optional[set[str]] = None,
+    heavy_job_id: Optional[str] = None,
 ) -> tuple:
+    """`heavy_job_id` (2026-09 session, Railway OOM telemetry follow-up):
+    optional, defaults to None so every pre-existing caller/test is
+    completely unaffected. When provided (only _refresh_analysis_cache
+    does, passing its own job_id through), the three existing RSS
+    checkpoint log lines below ALSO durably record into
+    heavy_job_gate's telemetry ring buffer -- no new sampling points, no
+    behavior change, purely observability."""
     scan_start = time.perf_counter()
     scan_started_at = _utc_now()
     universe_resolution_start = time.perf_counter()
@@ -11231,19 +11256,23 @@ def scan_all(
         # weekly/4h) are resident in memory but before per-ticker fan-out
         # starts -- see heavy_job_gate.py's module docstring for why this
         # moment matters for the confirmed OOM mechanism.
+        _checkpoint_rss = heavy_job_gate.current_rss_mb()
         logger.info(
             "HEAVY_JOB_CHECKPOINT job_type=scan_all stage=after_batch_ohlcv_download symbol_count=%s filtered_count=%s rss_mb=%s",
-            original_count, len(filtered_watchlist), heavy_job_gate.current_rss_mb(),
+            original_count, len(filtered_watchlist), _checkpoint_rss,
         )
+        heavy_job_gate.record_job_checkpoint(heavy_job_id, rss_after_ohlcv=_checkpoint_rss)
 
         # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
         rows, near_miss = [], []
         processing_failures = []
         process_stage_start = time.perf_counter()
+        _checkpoint_rss = heavy_job_gate.current_rss_mb()
         logger.info(
             "HEAVY_JOB_CHECKPOINT job_type=scan_all stage=before_per_ticker_fanout symbol_count=%s max_workers=%s rss_mb=%s",
-            len(filtered_watchlist), max_workers, heavy_job_gate.current_rss_mb(),
+            len(filtered_watchlist), max_workers, _checkpoint_rss,
         )
+        heavy_job_gate.record_job_checkpoint(heavy_job_id, rss_pre_fanout=_checkpoint_rss)
 
         def _process(ticker: str):
             return scan_ticker(
@@ -11283,10 +11312,12 @@ def scan_all(
         rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
         near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
         process_stage_ms = round((time.perf_counter() - process_stage_start) * 1000, 1)
+        _checkpoint_rss = heavy_job_gate.current_rss_mb()
         logger.info(
             "HEAVY_JOB_CHECKPOINT job_type=scan_all stage=after_per_ticker_processing qualified=%s near_miss=%s rss_mb=%s",
-            len(rows), len(near_miss), heavy_job_gate.current_rss_mb(),
+            len(rows), len(near_miss), _checkpoint_rss,
         )
+        heavy_job_gate.record_job_checkpoint(heavy_job_id, rss_post_processing=_checkpoint_rss)
         all_results = [*rows, *near_miss]
         quote_stage_start = time.perf_counter()
         _attach_current_quotes(all_results)

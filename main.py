@@ -1227,6 +1227,9 @@ def _run_discovery_universe_job(job_id: str, refresh_reason: str = "weekly_pool_
         "HEAVY_JOB_START job_type=discovery_universe key=%s symbol_count=%s rss_mb=%s timestamp=%s",
         job_id, len(WATCHLIST) if WATCHLIST else None, rss_start, started_at.isoformat(),
     )
+    heavy_job_gate.record_job_start(
+        job_id, "discovery_universe", job_id, symbol_count=len(WATCHLIST) if WATCHLIST else None,
+    )
     try:
         result = build_ranked_discovery_universe(static_watchlist=WATCHLIST)
         now = _utc_now()
@@ -1296,10 +1299,13 @@ def _run_discovery_universe_job(job_id: str, refresh_reason: str = "weekly_pool_
             metrics.get("effective_cap"),
         )
         _maybe_enqueue_discovered_scan_handoff("discovery_completed_no_scanner_cache")
+        _duration = round(time.perf_counter() - started, 1)
+        _rss_end = heavy_job_gate.current_rss_mb()
         logger.info(
             "HEAVY_JOB_END job_type=discovery_universe key=%s duration_s=%s rss_mb=%s success=True",
-            job_id, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+            job_id, _duration, _rss_end,
         )
+        heavy_job_gate.record_job_end(job_id, status="completed", duration_seconds=_duration, rss_end=_rss_end)
     except Exception as exc:
         with _discovery_universe_lock:
             _discovery_universe_cache.update({
@@ -1310,10 +1316,13 @@ def _run_discovery_universe_job(job_id: str, refresh_reason: str = "weekly_pool_
                 "started_at": None,
                 "completed_at": _utc_now(),
             })
+        _duration = round(time.perf_counter() - started, 1)
+        _rss_end = heavy_job_gate.current_rss_mb()
         logger.info(
             "HEAVY_JOB_END job_type=discovery_universe key=%s duration_s=%s rss_mb=%s success=False",
-            job_id, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+            job_id, _duration, _rss_end,
         )
+        heavy_job_gate.record_job_end(job_id, status="failed", duration_seconds=_duration, rss_end=_rss_end)
     finally:
         heavy_job_gate.release()
 
@@ -1487,10 +1496,12 @@ def _run_ma_pipeline_ingestion(reason: str = "manual") -> dict:
         return {"status": "skipped_busy", "message": message, "discovery_status": discovery_status}
 
     heavy_started = time.perf_counter()
+    job_id = f"ma_pipeline:{int(time.time())}:{reason}"
     logger.info(
         "HEAVY_JOB_START job_type=ma_pipeline key=%s symbol_count=%s rss_mb=%s timestamp=%s",
         reason, len(symbols), heavy_job_gate.current_rss_mb(), started_at.isoformat(),
     )
+    heavy_job_gate.record_job_start(job_id, "ma_pipeline", reason, symbol_count=len(symbols))
     try:
         merged_symbols, symbol_origins = _merge_curated_watchlist_into_universe(symbols)
         max_symbols = _ma_pipeline_max_symbols()
@@ -1522,7 +1533,21 @@ def _run_ma_pipeline_ingestion(reason: str = "manual") -> dict:
             last_ingest=ingest.dict(),
             last_meta=result["meta"],
         )
+        heavy_job_gate.record_job_end(
+            job_id, status="completed",
+            duration_seconds=round(time.perf_counter() - heavy_started, 1), rss_end=heavy_job_gate.current_rss_mb(),
+        )
         return result
+    except Exception:
+        # status="failed", never the exception/traceback object itself
+        # (see heavy_job_gate.record_job_end's own docstring); the
+        # exception itself still propagates unchanged to
+        # _submit_ma_pipeline_scan_if_due's own except clause.
+        heavy_job_gate.record_job_end(
+            job_id, status="failed",
+            duration_seconds=round(time.perf_counter() - heavy_started, 1), rss_end=heavy_job_gate.current_rss_mb(),
+        )
+        raise
     finally:
         logger.info(
             "HEAVY_JOB_END job_type=ma_pipeline key=%s duration_s=%s rss_mb=%s",
@@ -2866,6 +2891,31 @@ def api_ma_pipeline_status():
     }
 
 
+@app.get("/api/v1/scanner/heavy-job-status")
+def api_heavy_job_status(x_kairos_admin_token: str = Header(default="")):
+    """Read-only inspection of heavy_job_gate's durable telemetry ring
+    buffer (2026-09 session, Railway OOM telemetry follow-up) -- see
+    heavy_job_gate.telemetry_snapshot's own docstring. Exists because
+    Railway's own stdout log ingestion was confirmed to drop the
+    HEAVY_JOB_START/CHECKPOINT/END lines during a scan's high-volume
+    per-symbol burst, and actual single-job RSS is exactly what decides
+    whether Phase 2 chunking is needed.
+
+    Protected with the same admin-token convention this file already uses
+    for every other sensitive endpoint in this immediate area
+    (api_ma_pipeline_run, api_promotion_outcome_watcher_run) -- unlike
+    those, this is a GET with no side effects: it does not acquire the
+    heavy-job gate, does not submit or trigger any scan/discovery/refresh
+    job, and does not mutate anything. Every value in the response is
+    already a plain scalar recorded by the fix itself (see
+    heavy_job_gate.py's module docstring for the exact "never store"
+    list) -- no environment variables, secrets, API keys, or filesystem
+    paths are read or returned here.
+    """
+    _require_discovery_admin_token(x_kairos_admin_token)
+    return heavy_job_gate.telemetry_snapshot()
+
+
 @app.post("/api/v1/scanner/ma-pipeline/run")
 def api_ma_pipeline_run(x_kairos_admin_token: str = Header(default="")):
     _require_discovery_admin_token(x_kairos_admin_token)
@@ -3235,6 +3285,7 @@ def _momentum_short_lifecycle_ingest(symbols: Optional[list[str]] = None, reason
         "errors": [],
     }
     gate_acquired = False
+    job_id = None
     try:
         universe = _momentum_short_lifecycle_symbols(symbols)
         metrics["symbols"] = len(universe)
@@ -3257,10 +3308,12 @@ def _momentum_short_lifecycle_ingest(symbols: Optional[list[str]] = None, reason
             logger.info(heavy_job_gate.skipped_busy_message("momentum_short_lifecycle_ingestion", reason))
             metrics["errors"].append({"stage": "ingestion", "error": "skipped_busy"})
             return metrics
+        job_id = f"momentum_short_lifecycle_ingestion:{int(time.time())}:{reason}"
         logger.info(
             "HEAVY_JOB_START job_type=momentum_short_lifecycle_ingestion key=%s symbol_count=%s rss_mb=%s timestamp=%s",
             reason, len(universe), heavy_job_gate.current_rss_mb(), started.isoformat(),
         )
+        heavy_job_gate.record_job_start(job_id, "momentum_short_lifecycle_ingestion", reason, symbol_count=len(universe))
         daily = _momentum_short_lifecycle_fetch_daily(universe)
         spy_daily = _momentum_short_lifecycle_fetch_daily(["SPY"]).get("SPY")
         ledger = short_lifecycle_experiment.load_ledger()
@@ -3293,14 +3346,24 @@ def _momentum_short_lifecycle_ingest(symbols: Optional[list[str]] = None, reason
         metrics["errors"].append({"stage": "ingestion", "error": exc.__class__.__name__, "message": str(exc)[:240]})
         return metrics
     finally:
-        if gate_acquired:
-            logger.info(
-                "HEAVY_JOB_END job_type=momentum_short_lifecycle_ingestion key=%s duration_s=%s rss_mb=%s",
-                reason, round((_utc_now() - started).total_seconds(), 1), heavy_job_gate.current_rss_mb(),
-            )
-            heavy_job_gate.release()
         completed = _utc_now()
         success = not metrics.get("errors")
+        if gate_acquired:
+            _duration = round((completed - started).total_seconds(), 1)
+            _rss_end = heavy_job_gate.current_rss_mb()
+            logger.info(
+                "HEAVY_JOB_END job_type=momentum_short_lifecycle_ingestion key=%s duration_s=%s rss_mb=%s",
+                reason, _duration, _rss_end,
+            )
+            # Reuses this function's own existing success/failure notion
+            # (any recorded error, including a per-symbol replay/capture
+            # issue, already counts as "not success" for last_success/
+            # last_error bookkeeping below) rather than inventing a
+            # separate failure definition just for telemetry.
+            heavy_job_gate.record_job_end(
+                job_id, status="completed" if success else "failed", duration_seconds=_duration, rss_end=_rss_end,
+            )
+            heavy_job_gate.release()
         _momentum_short_lifecycle_update_state(
             "ingestion",
             last_completed_at=_format_timestamp(completed),
