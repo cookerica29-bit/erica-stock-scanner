@@ -120,6 +120,7 @@ from smc_shadow_engine import smc_shadow_enabled
 from smc_shadow_router import router as smc_shadow_router, safe_run_smc_shadow_tick
 from watch_contract_engine import watch_contract_enabled, run_watch_contract_monitor_tick_standalone
 from watch_contract_router import router as watch_contract_router
+import heavy_job_gate
 
 app = FastAPI(title="Stock Options Scanner")
 app.include_router(candidates_router)
@@ -1204,6 +1205,28 @@ def _maybe_enqueue_discovered_scan_handoff(reason: str = "discovery_ready_no_sca
 def _run_discovery_universe_job(job_id: str, refresh_reason: str = "weekly_pool_due") -> None:
     started = time.perf_counter()
     started_at = _utc_now()
+    # Global heavy-job gate (2026-09 session, Railway OOM Phase 1 fix): see
+    # heavy_job_gate.py's module docstring. `_submit_discovery_universe_job`
+    # already set _discovery_universe_cache["running"]=True before this ran
+    # (its own same-key guard) -- a busy-skip here must reset that back to
+    # False itself (mirroring the exception branch below), since nothing
+    # else will: `_discovery_universe_executor` has no `finally`-based
+    # cleanup of its own the way scanner._submit_background_job does.
+    # Skipping (not queuing) lets the next hourly watchdog tick retry.
+    if not heavy_job_gate.try_acquire("discovery_universe", key=job_id):
+        logger.info(heavy_job_gate.skipped_busy_message("discovery_universe", job_id))
+        with _discovery_universe_lock:
+            _discovery_universe_cache.update({
+                "running": False,
+                "started_at": None,
+                "last_error": None,
+            })
+        return
+    rss_start = heavy_job_gate.current_rss_mb()
+    logger.info(
+        "HEAVY_JOB_START job_type=discovery_universe key=%s symbol_count=%s rss_mb=%s timestamp=%s",
+        job_id, len(WATCHLIST) if WATCHLIST else None, rss_start, started_at.isoformat(),
+    )
     try:
         result = build_ranked_discovery_universe(static_watchlist=WATCHLIST)
         now = _utc_now()
@@ -1273,6 +1296,10 @@ def _run_discovery_universe_job(job_id: str, refresh_reason: str = "weekly_pool_
             metrics.get("effective_cap"),
         )
         _maybe_enqueue_discovered_scan_handoff("discovery_completed_no_scanner_cache")
+        logger.info(
+            "HEAVY_JOB_END job_type=discovery_universe key=%s duration_s=%s rss_mb=%s success=True",
+            job_id, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+        )
     except Exception as exc:
         with _discovery_universe_lock:
             _discovery_universe_cache.update({
@@ -1283,6 +1310,12 @@ def _run_discovery_universe_job(job_id: str, refresh_reason: str = "weekly_pool_
                 "started_at": None,
                 "completed_at": _utc_now(),
             })
+        logger.info(
+            "HEAVY_JOB_END job_type=discovery_universe key=%s duration_s=%s rss_mb=%s success=False",
+            job_id, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+        )
+    finally:
+        heavy_job_gate.release()
 
 
 def _submit_discovery_universe_job(force: bool = False, reason: str = "weekly_pool_due", now: Optional[datetime] = None) -> tuple[bool, str]:
@@ -1438,37 +1471,64 @@ def _run_ma_pipeline_ingestion(reason: str = "manual") -> dict:
         _update_ma_pipeline_state(status="waiting_for_discovery", last_error=message, last_result=message)
         return {"status": "waiting_for_discovery", "message": message, "discovery_status": discovery_status}
 
-    merged_symbols, symbol_origins = _merge_curated_watchlist_into_universe(symbols)
-    max_symbols = _ma_pipeline_max_symbols()
-    scan = scan_ma_pipeline_candidates(merged_symbols, max_symbols=max_symbols, symbol_origins=symbol_origins)
-    candidates = [CandidateIn(**candidate) for candidate in scan.get("candidates") or []]
-    payload = ShortlistIn(source=MA_PIPELINE_SOURCE, scanned_at=_utc_now(), candidates=candidates)
-    ingest = upsert_candidate_shortlist(payload)
-    completed_at = _utc_now()
-    curated_only_count = sum(1 for origin in symbol_origins.values() if origin == "curated_watchlist")
-    result = {
-        "status": "completed",
-        "source": MA_PIPELINE_SOURCE,
-        "reason": reason,
-        "discovery_symbol_count": len(symbols),
-        "merged_symbol_count": len(merged_symbols),
-        "curated_only_symbol_count": curated_only_count,
-        "scanned_symbol_count": (scan.get("meta") or {}).get("requested"),
-        "candidate_count": len(candidates),
-        "ingest": ingest.dict(),
-        "meta": scan.get("meta") or {},
-        "completed_at": _format_timestamp(completed_at),
-    }
-    _update_ma_pipeline_state(
-        status="completed",
-        last_completed_at=_format_timestamp(completed_at),
-        last_result="completed",
-        last_symbol_count=len(merged_symbols),
-        last_candidate_count=len(candidates),
-        last_ingest=ingest.dict(),
-        last_meta=result["meta"],
+    # Global heavy-job gate (2026-09 session, Railway OOM Phase 1 fix) --
+    # see heavy_job_gate.py. Only guards the genuinely heavy part of this
+    # function (the batch OHLCV scan below) -- the cheap readiness check
+    # above always runs regardless of gate state. A busy-skip moves status
+    # to "skipped_busy" (never "running"/"completed") so
+    # _submit_ma_pipeline_scan_if_due's own "already handled this run_key"
+    # guard does not treat this as having run -- the same scheduled
+    # run_key can retry on the next 60s periodic tick, still inside its
+    # 10-minute due window.
+    if not heavy_job_gate.try_acquire("ma_pipeline", key=reason):
+        logger.info(heavy_job_gate.skipped_busy_message("ma_pipeline", reason))
+        message = "another heavy scan/discovery job is currently running"
+        _update_ma_pipeline_state(status="skipped_busy", last_result="skipped_busy", last_error=None)
+        return {"status": "skipped_busy", "message": message, "discovery_status": discovery_status}
+
+    heavy_started = time.perf_counter()
+    logger.info(
+        "HEAVY_JOB_START job_type=ma_pipeline key=%s symbol_count=%s rss_mb=%s timestamp=%s",
+        reason, len(symbols), heavy_job_gate.current_rss_mb(), started_at.isoformat(),
     )
-    return result
+    try:
+        merged_symbols, symbol_origins = _merge_curated_watchlist_into_universe(symbols)
+        max_symbols = _ma_pipeline_max_symbols()
+        scan = scan_ma_pipeline_candidates(merged_symbols, max_symbols=max_symbols, symbol_origins=symbol_origins)
+        candidates = [CandidateIn(**candidate) for candidate in scan.get("candidates") or []]
+        payload = ShortlistIn(source=MA_PIPELINE_SOURCE, scanned_at=_utc_now(), candidates=candidates)
+        ingest = upsert_candidate_shortlist(payload)
+        completed_at = _utc_now()
+        curated_only_count = sum(1 for origin in symbol_origins.values() if origin == "curated_watchlist")
+        result = {
+            "status": "completed",
+            "source": MA_PIPELINE_SOURCE,
+            "reason": reason,
+            "discovery_symbol_count": len(symbols),
+            "merged_symbol_count": len(merged_symbols),
+            "curated_only_symbol_count": curated_only_count,
+            "scanned_symbol_count": (scan.get("meta") or {}).get("requested"),
+            "candidate_count": len(candidates),
+            "ingest": ingest.dict(),
+            "meta": scan.get("meta") or {},
+            "completed_at": _format_timestamp(completed_at),
+        }
+        _update_ma_pipeline_state(
+            status="completed",
+            last_completed_at=_format_timestamp(completed_at),
+            last_result="completed",
+            last_symbol_count=len(merged_symbols),
+            last_candidate_count=len(candidates),
+            last_ingest=ingest.dict(),
+            last_meta=result["meta"],
+        )
+        return result
+    finally:
+        logger.info(
+            "HEAVY_JOB_END job_type=ma_pipeline key=%s duration_s=%s rss_mb=%s",
+            reason, round(time.perf_counter() - heavy_started, 1), heavy_job_gate.current_rss_mb(),
+        )
+        heavy_job_gate.release()
 
 
 def _submit_ma_pipeline_scan_if_due(now: Optional[datetime] = None) -> tuple[bool, str]:
@@ -3174,11 +3234,33 @@ def _momentum_short_lifecycle_ingest(symbols: Optional[list[str]] = None, reason
         "duplicates_skipped": 0,
         "errors": [],
     }
+    gate_acquired = False
     try:
         universe = _momentum_short_lifecycle_symbols(symbols)
         metrics["symbols"] = len(universe)
         if not universe:
             return metrics
+        # Global heavy-job gate (2026-09 session, Railway OOM Phase 1 fix)
+        # -- see heavy_job_gate.py. Guards only the whole-universe daily
+        # batch download below, the genuinely heavy part of this job;
+        # `_momentum_short_lifecycle_submit`'s own same-job "running" guard
+        # (checked before this function is even submitted) already
+        # prevents two ingestion runs from overlapping with EACH OTHER --
+        # this additionally prevents overlap with the three other heavy
+        # job types. A busy-skip records a distinguishable errors-list
+        # entry (not a real failure) and returns early; this function's
+        # own `finally` below already resets running=False regardless of
+        # how it returns, so the next hourly periodic tick can retry with
+        # no special-casing needed here.
+        gate_acquired = heavy_job_gate.try_acquire("momentum_short_lifecycle_ingestion", key=reason)
+        if not gate_acquired:
+            logger.info(heavy_job_gate.skipped_busy_message("momentum_short_lifecycle_ingestion", reason))
+            metrics["errors"].append({"stage": "ingestion", "error": "skipped_busy"})
+            return metrics
+        logger.info(
+            "HEAVY_JOB_START job_type=momentum_short_lifecycle_ingestion key=%s symbol_count=%s rss_mb=%s timestamp=%s",
+            reason, len(universe), heavy_job_gate.current_rss_mb(), started.isoformat(),
+        )
         daily = _momentum_short_lifecycle_fetch_daily(universe)
         spy_daily = _momentum_short_lifecycle_fetch_daily(["SPY"]).get("SPY")
         ledger = short_lifecycle_experiment.load_ledger()
@@ -3211,6 +3293,12 @@ def _momentum_short_lifecycle_ingest(symbols: Optional[list[str]] = None, reason
         metrics["errors"].append({"stage": "ingestion", "error": exc.__class__.__name__, "message": str(exc)[:240]})
         return metrics
     finally:
+        if gate_acquired:
+            logger.info(
+                "HEAVY_JOB_END job_type=momentum_short_lifecycle_ingestion key=%s duration_s=%s rss_mb=%s",
+                reason, round((_utc_now() - started).total_seconds(), 1), heavy_job_gate.current_rss_mb(),
+            )
+            heavy_job_gate.release()
         completed = _utc_now()
         success = not metrics.get("errors")
         _momentum_short_lifecycle_update_state(

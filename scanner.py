@@ -27,6 +27,7 @@ from market_data import (
     provider_name_for_timeframe,
     reset_provider_metrics,
 )
+import heavy_job_gate
 
 logger = logging.getLogger(__name__)
 yf = MarketDataFacade()
@@ -985,13 +986,31 @@ def _submit_analysis_refresh(
     """Submit an analysis refresh job.
 
     Returns True only when a new job was accepted by the background executor.
-    Returns False when the refresh is already active or executor submission fails.
+    Returns False when the refresh is already active, the global heavy-job
+    slot is busy, or executor submission fails.
     """
     refresh_key = _analysis_refresh_key(key)
     snapshot = _analysis_refresh_snapshot(key)
     if snapshot.get("refreshing"):
         return False
-    job_id = f"{_analysis_state_key(key)}:{int(time.time())}:{reason}"
+    state_key = _analysis_state_key(key)
+    # Global heavy-job gate, reserved HERE -- before _submit_background_job
+    # is ever called (2026-09 session, Railway OOM Phase 1A fix). Phase 1
+    # originally acquired this gate inside _refresh_analysis_cache itself,
+    # which let a busy-skip still reach _background_executor.submit() first:
+    # MULTIPLE DIFFERENT cache keys each pass the same-key check above
+    # trivially, so several could get admitted to the shared, multi-worker
+    # executor (and sit busy-waiting on _scan_is_active() there) before any
+    # of them discovered the gate was held. Reserving atomically here means
+    # a busy heavy refresh never calls _submit_background_job/
+    # _background_executor.submit() at all -- zero executor-queue
+    # footprint, exactly the "skip, don't enqueue" semantics required. See
+    # heavy_job_gate.py's own module docstring for the full design.
+    reservation = heavy_job_gate.try_reserve("scan_all", key=state_key)
+    if reservation is None:
+        logger.info(heavy_job_gate.skipped_busy_message("scan_all", state_key))
+        return False
+    job_id = f"{state_key}:{int(time.time())}:{reason}"
     submitted = _submit_background_job(
         refresh_key,
         _refresh_analysis_cache,
@@ -1002,9 +1021,17 @@ def _submit_analysis_refresh(
         max_symbols,
         coverage_context,
         trusted_options_symbols,
+        heavy_reservation=reservation,
     )
     if submitted:
         _mark_analysis_refresh_started(key, job_id)
+    else:
+        # _background_executor.submit() itself failed (e.g. executor
+        # shutting down) -- the reservation was never handed to a worker
+        # that could release it in its own finally, so it must be released
+        # here instead. HeavyJobReservation.release() is idempotent, so
+        # this is safe even in the (impossible today) case both paths ran.
+        reservation.release()
     return submitted
 
 
@@ -2180,44 +2207,84 @@ def _refresh_analysis_cache(
     max_symbols: Optional[int] = 200,
     coverage_context: Optional[dict] = None,
     trusted_options_symbols: Optional[set[str]] = None,
+    heavy_reservation: "Optional[heavy_job_gate.HeavyJobReservation]" = None,
 ) -> None:
+    """`heavy_reservation` (2026-09 session, Railway OOM Phase 1A fix):
+    the global heavy-job slot is now reserved by the SUBMITTER
+    (_submit_analysis_refresh), atomically, BEFORE this function is ever
+    scheduled onto _background_executor -- see heavy_job_gate.py's own
+    module docstring for why. This function therefore does NOT call
+    heavy_job_gate.try_acquire()/try_reserve() itself (a worker
+    independently re-acquiring the same non-reentrant gate its own
+    submitter already reserved would be exactly the double-acquisition
+    the fix explicitly forbids); it only ever releases the token it was
+    handed, in `finally`, below. Direct callers of this function (only
+    _submit_analysis_refresh in production; tests may call it directly to
+    exercise the success/failure paths in isolation) that omit
+    `heavy_reservation` simply get no gate coordination at all -- there is
+    nothing to release -- which matches how every pre-Phase-1A test in
+    this repo already drives this function without a reservation."""
     started = time.perf_counter()
+    state_key = _analysis_state_key(key)
+    rss_start = heavy_job_gate.current_rss_mb()
+    logger.info(
+        "HEAVY_JOB_START job_type=scan_all key=%s symbol_count=%s discover=%s max_symbols=%s rss_mb=%s timestamp=%s",
+        state_key, len(watchlist) if watchlist else None, discover, max_symbols, rss_start, _utc_now().isoformat(),
+    )
     try:
-        logger.info("[analysis refresh] start key=%s job=%s", _analysis_state_key(key), job_id)
-        rows, near_miss, scan_meta = scan_all(
-            watchlist,
-            max_workers=BACKGROUND_ANALYSIS_SCAN_WORKERS,
-            discover=discover,
-            max_symbols=max_symbols,
-            trusted_options_symbols=trusted_options_symbols,
-        )
-        _store_analysis_cache(key, rows, near_miss, scan_meta)
-        if isinstance(key, tuple) and len(key) >= 2 and key[0] == "universe" and key[1] == "discovered":
-            coverage = build_discovered_scan_coverage_snapshot(rows, near_miss, scan_meta, coverage_context)
-            _store_coverage_baseline_snapshot(coverage)
-            scan = coverage.get("scan") or {}
-            stages = coverage.get("stage_distribution") or {}
-            logger.info(
-                "coverage.scan.complete duration_ms=%s symbols_requested=%s symbols_processed=%s symbols_returned=%s symbols_failed=%s symbols_skipped=%s a_plus_ready=%s b_plus_tradeable=%s range_no_trade=%s building_watchlist=%s failed=%s partial_result=%s",
-                scan.get("scan_duration_ms"),
-                scan.get("symbols_requested"),
-                scan.get("symbols_processed"),
-                scan.get("symbols_returned"),
-                scan.get("symbols_failed"),
-                scan.get("symbols_skipped"),
-                stages.get("A+ READY", 0),
-                stages.get("B+ TRADEABLE", 0),
-                stages.get("RANGE / NO TRADE", 0),
-                stages.get("BUILDING / WATCHLIST", 0),
-                scan.get("symbols_failed"),
-                scan.get("partial_result"),
+        try:
+            logger.info("[analysis refresh] start key=%s job=%s", state_key, job_id)
+            rows, near_miss, scan_meta = scan_all(
+                watchlist,
+                max_workers=BACKGROUND_ANALYSIS_SCAN_WORKERS,
+                discover=discover,
+                max_symbols=max_symbols,
+                trusted_options_symbols=trusted_options_symbols,
             )
-        _mark_analysis_refresh_finished(key, started)
-        logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", _analysis_state_key(key), job_id, len(rows), len(near_miss))
-    except Exception as exc:
-        _mark_analysis_refresh_finished(key, started, exc)
-        logger.exception("[analysis refresh] failed key=%s job=%s", _analysis_state_key(key), job_id)
-        raise
+            _store_analysis_cache(key, rows, near_miss, scan_meta)
+            if isinstance(key, tuple) and len(key) >= 2 and key[0] == "universe" and key[1] == "discovered":
+                coverage = build_discovered_scan_coverage_snapshot(rows, near_miss, scan_meta, coverage_context)
+                _store_coverage_baseline_snapshot(coverage)
+                scan = coverage.get("scan") or {}
+                stages = coverage.get("stage_distribution") or {}
+                logger.info(
+                    "coverage.scan.complete duration_ms=%s symbols_requested=%s symbols_processed=%s symbols_returned=%s symbols_failed=%s symbols_skipped=%s a_plus_ready=%s b_plus_tradeable=%s range_no_trade=%s building_watchlist=%s failed=%s partial_result=%s",
+                    scan.get("scan_duration_ms"),
+                    scan.get("symbols_requested"),
+                    scan.get("symbols_processed"),
+                    scan.get("symbols_returned"),
+                    scan.get("symbols_failed"),
+                    scan.get("symbols_skipped"),
+                    stages.get("A+ READY", 0),
+                    stages.get("B+ TRADEABLE", 0),
+                    stages.get("RANGE / NO TRADE", 0),
+                    stages.get("BUILDING / WATCHLIST", 0),
+                    scan.get("symbols_failed"),
+                    scan.get("partial_result"),
+                )
+            _mark_analysis_refresh_finished(key, started)
+            logger.info("[analysis refresh] complete key=%s job=%s rows=%s near=%s", state_key, job_id, len(rows), len(near_miss))
+            logger.info(
+                "HEAVY_JOB_END job_type=scan_all key=%s duration_s=%s rss_mb=%s success=True",
+                state_key, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+            )
+        except Exception as exc:
+            _mark_analysis_refresh_finished(key, started, exc)
+            logger.exception("[analysis refresh] failed key=%s job=%s", state_key, job_id)
+            logger.info(
+                "HEAVY_JOB_END job_type=scan_all key=%s duration_s=%s rss_mb=%s success=False",
+                state_key, round(time.perf_counter() - started, 1), heavy_job_gate.current_rss_mb(),
+            )
+            raise
+    finally:
+        # Release ONLY the specific token this call was handed -- never the
+        # bare module-level heavy_job_gate.release(), which would release
+        # whatever ELSE happens to be active right now if this function is
+        # ever invoked without a reservation (e.g. directly from a test).
+        # HeavyJobReservation.release() is idempotent and self-checks it is
+        # still the current holder, so this is safe even if called twice.
+        if heavy_reservation is not None:
+            heavy_reservation.release()
 
 
 def get_finviz_watchlist() -> list:
@@ -11159,11 +11226,24 @@ def scan_all(
             weekly_fetch_ms = 0.0
             h4_fetch_ms = 0.0
         price_stage_ms = round((time.perf_counter() - price_stage_start) * 1000, 1)
+        # HEAVY_JOB checkpoint (2026-09 session, Railway OOM Phase 1 fix):
+        # RSS right after all three whole-watchlist OHLCV batches (daily/
+        # weekly/4h) are resident in memory but before per-ticker fan-out
+        # starts -- see heavy_job_gate.py's module docstring for why this
+        # moment matters for the confirmed OOM mechanism.
+        logger.info(
+            "HEAVY_JOB_CHECKPOINT job_type=scan_all stage=after_batch_ohlcv_download symbol_count=%s filtered_count=%s rss_mb=%s",
+            original_count, len(filtered_watchlist), heavy_job_gate.current_rss_mb(),
+        )
 
         # ── Step 2: parallel-process each ticker (pure CPU/logic, no I/O) ─────────
         rows, near_miss = [], []
         processing_failures = []
         process_stage_start = time.perf_counter()
+        logger.info(
+            "HEAVY_JOB_CHECKPOINT job_type=scan_all stage=before_per_ticker_fanout symbol_count=%s max_workers=%s rss_mb=%s",
+            len(filtered_watchlist), max_workers, heavy_job_gate.current_rss_mb(),
+        )
 
         def _process(ticker: str):
             return scan_ticker(
@@ -11203,6 +11283,10 @@ def scan_all(
         rows.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
         near_miss.sort(key=lambda x: x.get("quality", {}).get("score", 0), reverse=True)
         process_stage_ms = round((time.perf_counter() - process_stage_start) * 1000, 1)
+        logger.info(
+            "HEAVY_JOB_CHECKPOINT job_type=scan_all stage=after_per_ticker_processing qualified=%s near_miss=%s rss_mb=%s",
+            len(rows), len(near_miss), heavy_job_gate.current_rss_mb(),
+        )
         all_results = [*rows, *near_miss]
         quote_stage_start = time.perf_counter()
         _attach_current_quotes(all_results)
