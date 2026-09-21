@@ -54,16 +54,24 @@
   .dot.reclaimed { background: var(--accent2); }
   .dot.correcting { background: var(--accent); }
 
-  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
-  .card .row1 { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
-  .card .ticker { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.02em; }
-  .card .bias { font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+  .wl-table-wrap { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  table.wl-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  table.wl-table th { text-align: left; padding: 8px 12px; font-weight: 600; color: var(--muted); background: var(--surface2); white-space: nowrap; }
+  table.wl-table th.num, table.wl-table td.num { text-align: right; }
+  table.wl-table td { padding: 8px 12px; border-top: 1px solid var(--border); white-space: nowrap; }
+  table.wl-table tbody tr.main-row { cursor: pointer; }
+  table.wl-table tbody tr.main-row:hover { background: var(--surface2); }
+  table.wl-table td.ticker-cell { font-weight: 700; letter-spacing: 0.02em; }
+  .bias { font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; display: inline-block; }
   .bias.LONG { background: rgba(34, 197, 94, 0.15); color: var(--accent2); }
   .bias.SHORT { background: rgba(251, 113, 133, 0.15); color: var(--fail); }
-  .card .price-line { color: var(--muted); font-size: 0.82rem; margin-bottom: 8px; }
-  .card .reason { font-size: 0.88rem; line-height: 1.4; }
-  .card .levels { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 0.78rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 10px; }
+  .muted-cell { color: var(--muted); }
+  .chevron { display: inline-block; color: var(--muted); transition: transform 0.15s; margin-right: 4px; }
+  tr.main-row.expanded .chevron { transform: rotate(90deg); }
+  tr.detail-row { display: none; }
+  tr.detail-row.expanded { display: table-row; }
+  tr.detail-row td { border-top: none; padding: 0 12px 12px 12px; color: var(--text); font-size: 0.85rem; line-height: 1.45; background: var(--surface2); white-space: normal; }
+  @media (max-width: 700px) { .wl-table-wrap { overflow-x: auto; } table.wl-table { min-width: 640px; } }
 
   .empty-state { color: var(--muted); font-size: 0.9rem; padding: 24px; text-align: center; border: 1px dashed var(--border); border-radius: 10px; }
   .status-line { color: var(--muted); font-size: 0.9rem; margin: 20px 0; }
@@ -144,37 +152,52 @@ function refreshActiveTab() {
   if (activeTab === 'morning') loadMorning(); else loadPullbacks();
 }
 
-function renderCard(row, kind) {
-  const levels = kind === 'morning'
-    ? `<span>Daily: ${escapeHtml(row.daily_trend)} / ${escapeHtml(row.daily_structure)}</span>
-       <span>4H: ${escapeHtml(row.h4_trend)} / ${escapeHtml(row.h4_structure)}</span>
-       <span>4H BOS: ${fmtLevel(row.h4_bos_level)}</span>
-       <span>4H OB: ${fmtLevel(row.h4_ob_low)}&ndash;${fmtLevel(row.h4_ob_high)}</span>`
-    : `<span>Correction: ${fmtLevel(row.correction_start_price)} &rarr; ${fmtLevel(row.correction_extreme_price)}</span>
-       <span>Depth: ${row.correction_depth_pct != null ? row.correction_depth_pct.toFixed(2) + '%' : '&mdash;'}</span>
-       <span>Bars in correction: ${row.bars_in_correction != null ? row.bars_in_correction : '&mdash;'}</span>
-       <span>Last 30M close: ${fmtLevel(row.last_close_30m)}</span>`;
+let rowSeq = 0;
+
+function renderRow(row, kind) {
+  const id = 'row' + (rowSeq++);
+  const cols = kind === 'morning'
+    ? `<td class="num">$${Number(row.price).toFixed(2)}</td>
+       <td class="num muted-cell">$${Number(row.sma200_daily).toFixed(2)}</td>
+       <td class="muted-cell">${escapeHtml(row.daily_trend)} / ${escapeHtml(row.h4_trend)}</td>
+       <td class="num muted-cell">${fmtLevel(row.h4_bos_level)}</td>
+       <td class="num muted-cell">${fmtLevel(row.h4_ob_low)}&ndash;${fmtLevel(row.h4_ob_high)}</td>`
+    : `<td class="num">$${Number(row.price).toFixed(2)}</td>
+       <td class="num muted-cell">$${Number(row.sma200_daily).toFixed(2)}</td>
+       <td class="num muted-cell">${fmtLevel(row.correction_start_price)}&rarr;${fmtLevel(row.correction_extreme_price)}</td>
+       <td class="num muted-cell">${row.correction_depth_pct != null ? row.correction_depth_pct.toFixed(2) + '%' : '&mdash;'}</td>
+       <td class="num muted-cell">${row.bars_in_correction != null ? row.bars_in_correction : '&mdash;'}</td>`;
   return `
-    <div class="card">
-      <div class="row1">
-        <span class="ticker">${escapeHtml(row.ticker)}</span>
-        <span class="bias ${escapeHtml(row.bias)}">${escapeHtml(row.bias)}</span>
-      </div>
-      <div class="price-line">Price $${Number(row.price).toFixed(2)} &middot; 200SMA $${Number(row.sma200_daily).toFixed(2)}</div>
-      <div class="reason">${escapeHtml(row.reason)}</div>
-      <div class="levels">${levels}</div>
-    </div>
+    <tr class="main-row" id="${id}" onclick="toggleRow('${id}')">
+      <td><span class="chevron">&#9656;</span><span class="ticker-cell">${escapeHtml(row.ticker)}</span></td>
+      <td><span class="bias ${escapeHtml(row.bias)}">${escapeHtml(row.bias)}</span></td>
+      ${cols}
+    </tr>
+    <tr class="detail-row" id="${id}-detail"><td colspan="7">${escapeHtml(row.reason)}</td></tr>
   `;
+}
+
+function toggleRow(id) {
+  document.getElementById(id).classList.toggle('expanded');
+  document.getElementById(id + '-detail').classList.toggle('expanded');
 }
 
 function renderSection(title, dotClass, rows, kind) {
   const count = rows.length;
-  const body = count
-    ? `<div class="card-grid">${rows.map(r => renderCard(r, kind)).join('')}</div>`
-    : `<div class="empty-state">Nothing here right now.</div>`;
+  if (!count) {
+    return `<div class="section-title"><span class="dot ${dotClass}"></span> ${title} <span class="count">(0)</span></div><div class="empty-state">Nothing here right now.</div>`;
+  }
+  const headers = kind === 'morning'
+    ? `<th>Ticker</th><th>Bias</th><th class="num">Price</th><th class="num">200SMA</th><th>Daily / 4H</th><th class="num">4H BOS</th><th class="num">4H OB range</th>`
+    : `<th>Ticker</th><th>Bias</th><th class="num">Price</th><th class="num">200SMA</th><th class="num">Correction</th><th class="num">Depth</th><th class="num">Bars</th>`;
   return `
     <div class="section-title"><span class="dot ${dotClass}"></span> ${title} <span class="count">(${count})</span></div>
-    ${body}
+    <div class="wl-table-wrap">
+      <table class="wl-table">
+        <thead><tr>${headers}</tr></thead>
+        <tbody>${rows.map(r => renderRow(r, kind)).join('')}</tbody>
+      </table>
+    </div>
   `;
 }
 
