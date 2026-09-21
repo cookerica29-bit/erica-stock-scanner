@@ -108,11 +108,21 @@ def _watchlist_entry_for_ticker(ticker: str, daily_raw, h4_raw) -> dict | None:
     }
 
 
+def _frame_missing(frame) -> bool:
+    return frame is None or getattr(frame, "empty", True)
+
+
 def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
     """Scan `tickers` (defaults to the full stock WATCHLIST) and bucket each
     into 'aligned' or 'watch_reversal', or omit it if there's nothing notable.
     Read-only, side-effect-free, does not touch the grading/caching machinery
     in scanner.py or main.py.
+
+    `errors` reports only genuine fetch/processing failures -- a ticker with
+    no clear signal today is just omitted, not an error. This distinction
+    matters: without it, a ticker that failed to fetch from Yahoo looks
+    identical to one that fetched fine and simply had nothing notable, and
+    there's no way to tell "quiet market" from "the data feed broke."
     """
     symbols = tickers if tickers is not None else WATCHLIST
     aligned: list[dict] = []
@@ -125,10 +135,23 @@ def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
     h4_frames = _batch_download(symbols, period="60d", interval="4h")
 
     for ticker in symbols:
+        daily_raw = daily_frames.get(ticker)
+        h4_raw = h4_frames.get(ticker)
+
+        if _frame_missing(daily_raw) and _frame_missing(h4_raw):
+            errors.append({"ticker": ticker, "reason": "no_data", "detail": "Daily and 4H data both failed to fetch."})
+            continue
+        if _frame_missing(daily_raw):
+            errors.append({"ticker": ticker, "reason": "no_daily_data", "detail": "Daily data failed to fetch (200SMA/daily trend unavailable)."})
+            continue
+        if _frame_missing(h4_raw):
+            errors.append({"ticker": ticker, "reason": "no_4h_data", "detail": "4H data failed to fetch (structure/reversal check unavailable)."})
+            continue
+
         try:
-            entry = _watchlist_entry_for_ticker(ticker, daily_frames.get(ticker), h4_frames.get(ticker))
+            entry = _watchlist_entry_for_ticker(ticker, daily_raw, h4_raw)
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
-            errors.append({"ticker": ticker, "error": str(exc)})
+            errors.append({"ticker": ticker, "reason": "processing_error", "detail": str(exc)})
             continue
         if entry is None:
             continue
@@ -136,6 +159,7 @@ def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
 
     aligned.sort(key=lambda row: row["ticker"])
     watch_reversal.sort(key=lambda row: row["ticker"])
+    errors.sort(key=lambda row: row["ticker"])
 
     return {
         "version": MORNING_WATCHLIST_VERSION,

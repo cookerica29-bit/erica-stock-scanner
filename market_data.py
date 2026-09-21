@@ -41,8 +41,21 @@ DEFAULT_ALPACA_QUOTE_CHUNK_SIZE = 200
 # failure, so one bad/rate-limited request can silently zero out every
 # ticker in the batch. Chunking means a hiccup only takes out its own chunk,
 # and each chunk gets one retry before being marked failed.
-DEFAULT_YAHOO_SYMBOL_CHUNK_SIZE = 25
+#
+# Evidence (2026-09-21 session): a real chunked scan of the 113-symbol stock
+# watchlist at chunk_size=25 with no pacing hit yfinance.exceptions.
+# YFRateLimitError on later chunks -- daily (period=1y) always succeeded,
+# but by the time the 4H (period=60d) batch ran second, cumulative request
+# volume from the daily pass had already used up Yahoo's rate-limit budget,
+# and roughly a third of the watchlist silently failed 4H. Raising the chunk
+# size to cut the number of round trips, plus pacing between chunks and a
+# backoff before retrying a failed chunk (instead of retrying instantly into
+# the same active rate-limit window), directly addresses the mechanism, not
+# just the symptom.
+DEFAULT_YAHOO_SYMBOL_CHUNK_SIZE = 40
 DEFAULT_YAHOO_CHUNK_RETRY_ATTEMPTS = 2
+DEFAULT_YAHOO_CHUNK_PACING_SECONDS = 1.5
+DEFAULT_YAHOO_RETRY_BACKOFF_SECONDS = 4.0
 # Evidence-backed pacing between sequential Alpaca bar requests (pagination pages
 # and per-symbol fallback retries). A clean, isolated test of 250 consecutive
 # single-symbol /v2/stocks/bars calls at this exact pace (0.3s between calls,
@@ -248,6 +261,29 @@ def _chunks(items: list[str], size: int):
         yield items[index:index + size]
 
 
+# Global (process-wide, not per-call) pacing: separate top-level download()
+# calls -- e.g. the morning watchlist's daily fetch followed immediately by
+# its 4H fetch -- were observed to trip Yahoo's rate limit cumulatively even
+# though each individual call's own internal chunk pacing was fine. Tracking
+# the last request time at module scope, rather than per-call, means any two
+# Yahoo requests from this process are spaced out regardless of which caller
+# or which download() invocation issued them.
+_yahoo_pacing_lock = threading.Lock()
+_yahoo_last_request_at: float = 0.0
+
+
+def _yahoo_pace_request(min_gap_seconds: float) -> None:
+    global _yahoo_last_request_at
+    if min_gap_seconds <= 0:
+        return
+    with _yahoo_pacing_lock:
+        now = time.monotonic()
+        wait_for = min_gap_seconds - (now - _yahoo_last_request_at)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        _yahoo_last_request_at = time.monotonic()
+
+
 class YahooMarketDataProvider(MarketDataProvider):
     name = YAHOO_PROVIDER_NAME
 
@@ -265,9 +301,18 @@ class YahooMarketDataProvider(MarketDataProvider):
         if not symbols:
             return pd.DataFrame()
 
-        # Single-symbol calls (e.g. a live quote refresh for one ticker) go
-        # straight through -- chunking/retry only matters once a batch is
-        # large enough that one bad chunk shouldn't take out the rest.
+        pacing_seconds = float(os.getenv("YAHOO_CHUNK_PACING_SECONDS", str(DEFAULT_YAHOO_CHUNK_PACING_SECONDS)) or DEFAULT_YAHOO_CHUNK_PACING_SECONDS)
+        backoff_seconds = float(os.getenv("YAHOO_RETRY_BACKOFF_SECONDS", str(DEFAULT_YAHOO_RETRY_BACKOFF_SECONDS)) or DEFAULT_YAHOO_RETRY_BACKOFF_SECONDS)
+
+        # Single-symbol calls (e.g. analyze_ticker's per-ticker weekly-EMA
+        # fetch, or a live quote refresh) go straight through, unpaced --
+        # these were never implicated in the rate-limit failure (see the
+        # note above DEFAULT_YAHOO_SYMBOL_CHUNK_SIZE, which was specifically
+        # about large watchlist-wide batch calls) and there are many of them
+        # per scan. Pacing them too was tried and measured: it serialized
+        # ~113 unrelated single-ticker calls behind a shared lock and turned
+        # a ~7s scan into ~160s for zero reliability benefit. Chunking/
+        # pacing/backoff below applies only to the actual large-batch path.
         chunk_size = _parse_positive_int_env("YAHOO_SYMBOL_CHUNK_SIZE", DEFAULT_YAHOO_SYMBOL_CHUNK_SIZE)
         if len(symbols) <= chunk_size:
             return yahoo_finance.download(
@@ -281,6 +326,12 @@ class YahooMarketDataProvider(MarketDataProvider):
             chunk_frame = None
             last_error = None
             for attempt in range(DEFAULT_YAHOO_CHUNK_RETRY_ATTEMPTS):
+                # Global (process-wide) pacing, not just within this call --
+                # see _yahoo_pace_request for why that matters. Retries wait
+                # the longer backoff instead of the normal inter-chunk gap,
+                # since retrying instantly into an active rate-limit window
+                # just fails again.
+                _yahoo_pace_request(backoff_seconds if attempt > 0 else pacing_seconds)
                 try:
                     chunk_frame = yahoo_finance.download(
                         chunk, period=period, interval=interval,

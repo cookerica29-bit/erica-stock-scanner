@@ -55,6 +55,16 @@
   .empty-state { color: var(--muted); font-size: 0.9rem; padding: 24px; text-align: center; border: 1px dashed var(--border); border-radius: 10px; }
   .status-line { color: var(--muted); font-size: 0.9rem; margin: 20px 0; }
   .status-line.error { color: var(--fail); }
+
+  .errors-panel {
+    margin-top: 14px; padding: 10px 14px; border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.35);
+    font-size: 0.82rem;
+  }
+  .errors-panel summary { cursor: pointer; color: var(--warn); font-weight: 600; }
+  .errors-panel ul { margin: 8px 0 0; padding-left: 18px; color: var(--text); }
+  .errors-panel li { margin-bottom: 3px; }
+  .errors-panel .err-reason { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -123,6 +133,24 @@ function renderSection(title, dotClass, rows) {
   `;
 }
 
+const REASON_LABELS = {
+  no_data: 'no data at all',
+  no_daily_data: 'daily data failed',
+  no_4h_data: '4H data failed',
+  processing_error: 'processing error',
+};
+
+function renderErrors(errors) {
+  if (!errors || !errors.length) return '';
+  const items = errors.map(e => `<li><strong>${escapeHtml(e.ticker)}</strong> &mdash; ${escapeHtml(REASON_LABELS[e.reason] || e.reason || 'failed')} <span class="err-reason">(${escapeHtml(e.detail || '')})</span></li>`).join('');
+  return `
+    <details class="errors-panel">
+      <summary>${errors.length} ticker(s) failed to fetch &mdash; not silently missing, click to see which</summary>
+      <ul>${items}</ul>
+    </details>
+  `;
+}
+
 async function loadWatchlist() {
   const statusText = document.getElementById('statusText');
   const refreshBtn = document.getElementById('refreshBtn');
@@ -135,9 +163,9 @@ async function loadWatchlist() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     const generated = new Date(data.generated_at);
-    statusText.textContent = `Scanned ${data.scanned_count} tickers · generated ${generated.toLocaleTimeString()}` +
-      (data.errors && data.errors.length ? ` · ${data.errors.length} ticker(s) failed to fetch` : '');
+    statusText.textContent = `Scanned ${data.scanned_count} tickers · generated ${generated.toLocaleTimeString()}`;
     content.innerHTML =
+      renderErrors(data.errors || []) +
       renderSection('Aligned', 'aligned', data.aligned || []) +
       renderSection('Watch — early reversal', 'reversal', data.watch_reversal || []);
   } catch (err) {
