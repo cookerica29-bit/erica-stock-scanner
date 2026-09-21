@@ -40,8 +40,21 @@ from morning_watchlist import _sma200_bias
 from research_30m_corrective_leg_v2 import raw_pivots, reconstruct_correction, score_pivot_significance
 from research_30m_corrective_leg_v4_threshold_fix import check_reclaim_variants
 
-PULLBACK_WATCHLIST_VERSION = "pullback-watchlist-v1"
+PULLBACK_WATCHLIST_VERSION = "pullback-watchlist-v2"
 BASE_PIVOT_MARGIN = 2  # the margin validated in Phase 4 -- see module docstring
+# reconstruct_correction's own MIN_IMPULSE_ATR (1.0) already gates the
+# IMPULSE leg (the move INTO the correction) -- it does not gate the
+# correction's own depth, so a real but tiny, very-recent wiggle (found
+# live: ticker F, 2026-09-21, 0.42% / 0.89 ATR deep, 6 bars) can still
+# pass through and get flagged as "reclaimed" even though a much larger,
+# more meaningful correction is visible a few days earlier on the same
+# chart -- the mechanism always anchors to the MOST RECENT pivot pair,
+# not the most significant one (same root cause as the XOM case in
+# research_30m_corrective_leg_v3_reclaim_batch2_report.md). Reusing
+# MIN_IMPULSE_ATR's own value here, rather than picking a new number, so
+# the correction leg is held to the same "at least a full ATR" bar the
+# impulse leg already is.
+MIN_CORRECTION_DEPTH_ATR = 1.0
 
 
 def _frame_missing(frame) -> bool:
@@ -65,6 +78,8 @@ def _pullback_entry_for_ticker(ticker: str, daily_raw, m30_raw) -> dict | None:
     pivots = score_pivot_significance(raw_pivots(m30_df, BASE_PIVOT_MARGIN), atr)
     correction = reconstruct_correction(m30_df, pivots, bias, atr)
     if correction.state not in ("CORRECTION_DEVELOPING", "CORRECTION_AMBIGUOUS"):
+        return None
+    if correction.correction_depth_atr is None or correction.correction_depth_atr < MIN_CORRECTION_DEPTH_ATR:
         return None
 
     reclaim = check_reclaim_variants(m30_df, correction, bias, atr)
