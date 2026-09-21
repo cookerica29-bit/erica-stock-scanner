@@ -69,7 +69,7 @@ WATCHLIST = [
     # ── Asset Managers / Brokers ──────────────────────────────────────────────
     "SCHW", "BLK",
     # ── Payments / Fintech ────────────────────────────────────────────────────
-    "V", "MA", "AXP", "PYPL", "SQ",
+    "V", "MA", "AXP", "PYPL", "XYZ",
     # ── Retail / Consumer Discretionary ──────────────────────────────────────
     "WMT", "TGT", "COST", "HD", "LOW", "MCD", "SBUX", "NKE", "F",
     # ── Consumer Staples ──────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ STOCK_SECTOR_MAP = {
     "XOM": "Energy", "CVX": "Energy", "OXY": "Energy", "DVN": "Energy", "HAL": "Energy", "SLB": "Energy", "FANG": "Energy",
     "JPM": "Financials", "BAC": "Financials", "GS": "Financials", "MS": "Financials", "WFC": "Financials",
     "SCHW": "Financials", "BLK": "Financials",
-    "V": "Financials", "MA": "Financials", "AXP": "Financials", "PYPL": "Financials", "SQ": "Financials",
+    "V": "Financials", "MA": "Financials", "AXP": "Financials", "PYPL": "Financials", "XYZ": "Financials",
     "WMT": "Consumer Staples", "TGT": "Consumer Discretionary", "COST": "Consumer Staples", "HD": "Consumer Discretionary",
     "LOW": "Consumer Discretionary", "MCD": "Consumer Discretionary", "SBUX": "Consumer Discretionary", "NKE": "Consumer Discretionary",
     "F": "Consumer Discretionary",

@@ -132,11 +132,13 @@ def test_merge_adds_curated_only_symbols_not_in_discovered_universe():
     # Real production numbers (confirmed via /api/discovery/status this
     # session): REGN, SQ, UNG are on WATCHLIST but were NOT in the broker-fed
     # universe. Use a discovered list that deliberately excludes them.
-    discovered = [s for s in WATCHLIST if s not in {"REGN", "SQ", "UNG"}]
+    # (SQ renamed to XYZ 2026-09-21 -- Block's ticker changed, SQ was
+    # permanently delisted -- see scanner.WATCHLIST.)
+    discovered = [s for s in WATCHLIST if s not in {"REGN", "XYZ", "UNG"}]
 
     merged, origins = merge(discovered)
 
-    for symbol in ("REGN", "SQ", "UNG"):
+    for symbol in ("REGN", "XYZ", "UNG"):
         assert symbol in merged
         assert origins[symbol] == "curated_watchlist"
 
