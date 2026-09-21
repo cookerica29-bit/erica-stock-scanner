@@ -35,6 +35,14 @@ DEFAULT_ALPACA_MAX_PAGES = 25
 MAX_ALPACA_MAX_PAGES = 100
 DEFAULT_ALPACA_BAR_SYMBOL_CHUNK_SIZE = 200
 DEFAULT_ALPACA_QUOTE_CHUNK_SIZE = 200
+# Yahoo has no pagination ceiling like Alpaca does, so this chunk size exists
+# purely for failure isolation: a single yfinance.download() call for the
+# whole watchlist has no retry and no way to tell which symbol caused a
+# failure, so one bad/rate-limited request can silently zero out every
+# ticker in the batch. Chunking means a hiccup only takes out its own chunk,
+# and each chunk gets one retry before being marked failed.
+DEFAULT_YAHOO_SYMBOL_CHUNK_SIZE = 25
+DEFAULT_YAHOO_CHUNK_RETRY_ATTEMPTS = 2
 # Evidence-backed pacing between sequential Alpaca bar requests (pagination pages
 # and per-symbol fallback retries). A clean, isolated test of 250 consecutive
 # single-symbol /v2/stocks/bars calls at this exact pace (0.3s between calls,
@@ -253,15 +261,54 @@ class YahooMarketDataProvider(MarketDataProvider):
         group_by: str = "ticker",
         **kwargs,
     ):
-        return yahoo_finance.download(
-            tickers,
-            period=period,
-            interval=interval,
-            progress=progress,
-            auto_adjust=auto_adjust,
-            group_by=group_by,
-            **kwargs,
-        )
+        symbols = _as_symbol_list(tickers)
+        if not symbols:
+            return pd.DataFrame()
+
+        # Single-symbol calls (e.g. a live quote refresh for one ticker) go
+        # straight through -- chunking/retry only matters once a batch is
+        # large enough that one bad chunk shouldn't take out the rest.
+        chunk_size = _parse_positive_int_env("YAHOO_SYMBOL_CHUNK_SIZE", DEFAULT_YAHOO_SYMBOL_CHUNK_SIZE)
+        if len(symbols) <= chunk_size:
+            return yahoo_finance.download(
+                symbols, period=period, interval=interval,
+                progress=progress, auto_adjust=auto_adjust, group_by=group_by, **kwargs,
+            )
+
+        frames = []
+        failed_symbols: list[str] = []
+        for chunk in _chunks(symbols, chunk_size):
+            chunk_frame = None
+            last_error = None
+            for attempt in range(DEFAULT_YAHOO_CHUNK_RETRY_ATTEMPTS):
+                try:
+                    chunk_frame = yahoo_finance.download(
+                        chunk, period=period, interval=interval,
+                        progress=progress, auto_adjust=auto_adjust, group_by=group_by, **kwargs,
+                    )
+                    if chunk_frame is not None and not chunk_frame.empty:
+                        break
+                except Exception as exc:  # noqa: BLE001 - yfinance can raise several distinct types
+                    last_error = exc
+                    chunk_frame = None
+            if chunk_frame is None or chunk_frame.empty:
+                failed_symbols.extend(chunk)
+                logger.warning(
+                    "[yahoo] chunk download failed symbols=%s interval=%s attempts=%s error=%s",
+                    len(chunk), interval, DEFAULT_YAHOO_CHUNK_RETRY_ATTEMPTS,
+                    _classify_error(last_error) if last_error is not None else "empty_result",
+                )
+                continue
+            frames.append(chunk_frame)
+
+        if failed_symbols:
+            logger.warning(
+                "[yahoo] %s of %s symbols failed after chunked retry, interval=%s: %s",
+                len(failed_symbols), len(symbols), interval, ", ".join(failed_symbols),
+            )
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, axis=1) if len(frames) > 1 else frames[0]
 
 
 class AlpacaMarketDataProvider(MarketDataProvider):
