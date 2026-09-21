@@ -55,6 +55,7 @@ BASE_PIVOT_MARGIN = 2  # the margin validated in Phase 4 -- see module docstring
 # the correction leg is held to the same "at least a full ATR" bar the
 # impulse leg already is.
 MIN_CORRECTION_DEPTH_ATR = 1.0
+MAX_OVEREXTENSION_ATR = 2.0  # see the overextension guard below for why
 
 
 def _frame_missing(frame) -> bool:
@@ -84,6 +85,18 @@ def _pullback_entry_for_ticker(ticker: str, daily_raw, m30_raw) -> dict | None:
 
     reclaim = check_reclaim_variants(m30_df, correction, bias, atr)
     if not reclaim.get("applicable"):
+        return None
+
+    # Overextension guard (found live via QCOM, 2026-09-21): a real
+    # weekend gap-and-rally swept a tiny Friday-afternoon dip along with
+    # it, so price closed 8+ ATR beyond the reclaim level. Technically
+    # "reclaimed," but calling an 8-ATR-old, long-since-resolved dip
+    # "correction may be resolving" is misleading noise, not a signal --
+    # the actual story (a large unrelated move) has nothing to do with
+    # that correction. Negative distance means already past the level;
+    # exclude once it's this far gone rather than mislabel it.
+    distance_atr = reclaim.get("distance_from_full_reclaim_atr")
+    if distance_atr is not None and distance_atr < -MAX_OVEREXTENSION_ATR:
         return None
 
     bucket = "reclaimed" if reclaim["near_reclaim"] else "correcting"

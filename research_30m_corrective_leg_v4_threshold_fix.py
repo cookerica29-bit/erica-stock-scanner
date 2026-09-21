@@ -78,7 +78,18 @@ def check_reclaim_variants(df: pd.DataFrame, correction, thesis_direction: str, 
         "full_reclaim": full_reclaim,
         "near_reclaim": near_reclaim,
         "half_reclaim": half_reclaim,
-        "distance_from_full_reclaim_atr": round((start - last_close) / atr, 3) if atr and thesis_direction == "LONG" else None,
+        # Signed so the convention is the same for both directions:
+        # positive = last_close hasn't reached the full-reclaim level yet,
+        # negative = last_close is already past it (overextended beyond a
+        # simple "just reclaimed" read -- found live via QCOM, 2026-09-21,
+        # a real weekend gap-and-rally that swept a tiny Friday-afternoon
+        # dip along with it, 8+ ATR beyond the level, which is not a
+        # meaningful "correction resolving" signal). Previously computed
+        # for LONG only; SHORT silently returned None here.
+        "distance_from_full_reclaim_atr": (
+            round(((start - last_close) if thesis_direction == "LONG" else (last_close - start)) / atr, 3)
+            if atr else None
+        ),
     }
 
 
