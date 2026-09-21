@@ -2753,6 +2753,20 @@ def api_watchlist_morning():
     return build_morning_watchlist()
 
 
+@app.get("/api/watchlist/pullbacks")
+def api_watchlist_pullbacks():
+    """Pullback screener: which tickers are currently in -- or just out of
+    -- a corrective leg of their dominant trend, per the 200SMA bias +
+    30M corrective-leg reclaim research (research_30m_corrective_leg_v2/
+    v4). Deliberately separate from /api/watchlist/morning (different
+    question) and from /api/scan's grading pipeline (no entries/stops/
+    targets/ENTER_NOW here either).
+    """
+    from pullback_watchlist import build_pullback_watchlist
+
+    return build_pullback_watchlist()
+
+
 @app.get("/api/cache/status")
 def api_cache_status(
     universe: str = Query(default="discovered"),
