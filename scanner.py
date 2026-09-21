@@ -9757,17 +9757,25 @@ def analyze_ticker(
             )
             choch, choch_reason, bearish_choch_lvl, bullish_choch_lvl, choch_bar_idx = _detect_choch(htf_swings, trend)
 
-            # Update structure label if CHoCH overrides the vote
+            # Update structure label if CHoCH overrides the vote -- but only
+            # while the CHoCH is still live (price hasn't already cleared the
+            # broken level). A stale CHoCH from weeks ago that price has long
+            # since blown past (e.g. AMD 2026-09-21: a bearish CHoCH from a
+            # $451 low broken on 2026-09-03, with price now at $615) is not a
+            # real reversal signal and must not override a vote that macro
+            # bias + HH/HL already correctly read as bullish.
             if bearish_choch_lvl is not None and price < bearish_choch_lvl:
                 structure = "bearish"
                 print(
                     f"[{ticker}] note: price {price:.2f} below bearish CHoCH level "
                     f"{bearish_choch_lvl:.2f} → structure reads bearish"
                 )
-            elif "bearish CHoCH" in choch_reason:
-                structure = "bearish"
-            elif "bullish CHoCH" in choch_reason:
+            elif bullish_choch_lvl is not None and price > bullish_choch_lvl:
                 structure = "bullish"
+                print(
+                    f"[{ticker}] note: price {price:.2f} above bullish CHoCH level "
+                    f"{bullish_choch_lvl:.2f} → structure reads bullish"
+                )
 
             print(f"[{ticker}] trend={trend} structure={structure} choch={choch}")
             for r in struct_reasons:
@@ -10142,9 +10150,7 @@ def debug_ticker(ticker: str) -> dict:
         choch, choch_reason, bearish_choch_lvl, bullish_choch_lvl, choch_bar_idx = _detect_choch(htf_swings, trend)
         if bearish_choch_lvl is not None and price < bearish_choch_lvl:
             structure = "bearish"
-        elif "bearish CHoCH" in choch_reason:
-            structure = "bearish"
-        elif "bullish CHoCH" in choch_reason:
+        elif bullish_choch_lvl is not None and price > bullish_choch_lvl:
             structure = "bullish"
         out["structure"]        = structure
         out["choch"]            = choch
