@@ -40,6 +40,8 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .dot.aligned { background: var(--accent2); }
   .dot.reversal { background: var(--warn); }
+  .dot.spotlight { background: var(--fail); }
+  .relvol-cell { font-weight: 700; }
 
   .wl-table-wrap { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   table.wl-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -134,6 +136,36 @@ function toggleRow(id) {
   document.getElementById(id + '-detail').classList.toggle('expanded');
 }
 
+function renderSpotlightRow(row) {
+  const id = 'row' + (rowSeq++);
+  return `
+    <tr class="main-row" id="${id}" onclick="toggleRow('${id}')">
+      <td><span class="chevron">&#9656;</span><span class="ticker-cell">${escapeHtml(row.ticker)}</span></td>
+      <td><span class="bias ${escapeHtml(row.bias)}">${escapeHtml(row.bias)}</span></td>
+      <td class="num">$${Number(row.price).toFixed(2)}</td>
+      <td class="num relvol-cell">${row.relative_volume_today.toFixed(2)}&times;</td>
+      <td class="muted-cell">${row.bucket === 'aligned' ? 'Aligned' : 'Watch — early reversal'}</td>
+    </tr>
+    <tr class="detail-row" id="${id}-detail"><td colspan="5">${escapeHtml(row.reason)}</td></tr>
+  `;
+}
+
+function renderSpotlightSection(rows) {
+  const count = rows.length;
+  if (!count) {
+    return `<div class="section-title"><span class="dot spotlight"></span> Spotlight — elevated volume today <span class="count">(0)</span></div><div class="empty-state">Nothing showing unusual volume right now.</div>`;
+  }
+  return `
+    <div class="section-title"><span class="dot spotlight"></span> Spotlight — elevated volume today <span class="count">(${count})</span></div>
+    <div class="wl-table-wrap">
+      <table class="wl-table">
+        <thead><tr><th>Ticker</th><th>Bias</th><th class="num">Price</th><th class="num">Rel vol (so far today)</th><th>From</th></tr></thead>
+        <tbody>${rows.map(renderSpotlightRow).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderSection(title, dotClass, rows) {
   const count = rows.length;
   if (!count) {
@@ -182,6 +214,7 @@ async function loadWatchlist() {
     const generated = new Date(data.generated_at);
     statusText.textContent = `Scanned ${data.scanned_count} tickers · generated ${generated.toLocaleTimeString()}`;
     content.innerHTML =
+      renderSpotlightSection(data.spotlight || []) +
       renderErrors(data.errors || []) +
       renderSection('Aligned', 'aligned', data.aligned || []) +
       renderSection('Watch — early reversal', 'reversal', data.watch_reversal || []);

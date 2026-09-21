@@ -15,6 +15,14 @@ Two buckets only:
     watching, not yet confirmed.
 Anything else (no clear 200SMA bias yet, or nothing notable either way) is
 omitted so the list stays short.
+
+Plus a "spotlight" list: aligned/watch_reversal tickers ALSO showing
+unusually high volume today. This is deliberately a simple statistical
+comparison (today's volume vs a trailing average), not a structural
+pattern-match -- the Pullbacks tab was removed the same day this was added
+specifically because a structural "which correction matters" judgment call
+didn't hold up in live use (see project memory). Relative volume needs no
+such judgment: it's one number vs another.
 """
 
 from __future__ import annotations
@@ -23,10 +31,31 @@ from datetime import datetime, timezone
 
 from scanner import WATCHLIST, _batch_download, _flatten_columns, analyze_ticker
 
-MORNING_WATCHLIST_VERSION = "morning-watchlist-v2"
+MORNING_WATCHLIST_VERSION = "morning-watchlist-v3"
 
 _DIRECTION_TO_STRUCTURE = {"LONG": "bullish", "SHORT": "bearish"}
 _OPPOSITE_STRUCTURE = {"bullish": "bearish", "bearish": "bullish"}
+RELATIVE_VOLUME_LOOKBACK_DAYS = 20
+RELATIVE_VOLUME_SPOTLIGHT_THRESHOLD = 1.5  # 50% above the 20-day average
+
+
+def _relative_volume(daily_df) -> float | None:
+    """Today's volume so far vs the average of the prior N full trading
+    days. NOT time-of-day adjusted -- this will read low early in the
+    session simply because less of today has happened yet, and become a
+    fair comparison later in the day. Deliberately kept this simple for a
+    first version rather than estimating a full-day pace projection.
+    """
+    if daily_df is None or "Volume" not in daily_df.columns:
+        return None
+    volume = daily_df["Volume"].astype(float)
+    if len(volume) < RELATIVE_VOLUME_LOOKBACK_DAYS + 1:
+        return None
+    today_volume = volume.iloc[-1]
+    avg_volume = volume.iloc[-(RELATIVE_VOLUME_LOOKBACK_DAYS + 1):-1].mean()
+    if not avg_volume or avg_volume != avg_volume:  # zero or NaN guard
+        return None
+    return float(today_volume / avg_volume)
 
 
 def _sma200_bias(daily_df) -> tuple[str | None, float | None, float | None]:
@@ -95,6 +124,7 @@ def _watchlist_entry_for_ticker(ticker: str, daily_raw, h4_raw) -> dict | None:
     if not aligned and not watch_reversal:
         return None
 
+    relative_volume = _relative_volume(daily_df)
     bucket = "aligned" if aligned else "watch_reversal"
     direction_word = "bullish" if sma_bias == "LONG" else "bearish"
 
@@ -134,6 +164,7 @@ def _watchlist_entry_for_ticker(ticker: str, daily_raw, h4_raw) -> dict | None:
         "h4_bos_level": (h4_result or {}).get("bos_level"),
         "h4_ob_high": (h4_result or {}).get("ob_high"),
         "h4_ob_low": (h4_result or {}).get("ob_low"),
+        "relative_volume_today": round(relative_volume, 2) if relative_volume is not None else None,
     }
 
 
@@ -186,6 +217,16 @@ def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
             continue
         (aligned if entry["bucket"] == "aligned" else watch_reversal).append(entry)
 
+    spotlight = sorted(
+        (
+            row for row in (aligned + watch_reversal)
+            if row.get("relative_volume_today") is not None
+            and row["relative_volume_today"] >= RELATIVE_VOLUME_SPOTLIGHT_THRESHOLD
+        ),
+        key=lambda row: row["relative_volume_today"],
+        reverse=True,
+    )
+
     aligned.sort(key=lambda row: row["ticker"])
     watch_reversal.sort(key=lambda row: row["ticker"])
     errors.sort(key=lambda row: row["ticker"])
@@ -196,5 +237,6 @@ def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
         "scanned_count": len(symbols),
         "aligned": aligned,
         "watch_reversal": watch_reversal,
+        "spotlight": spotlight,
         "errors": errors,
     }
