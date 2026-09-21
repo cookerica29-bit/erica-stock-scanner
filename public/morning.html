@@ -30,18 +30,7 @@
   .kairos-nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
   .kairos-nav .nav-link.active { border-color: var(--accent); color: var(--accent); background: var(--surface3); font-weight: 600; }
 
-  .tab-bar { display: flex; gap: 6px; margin: 18px 0 4px; border-bottom: 1px solid var(--border); }
-  .tab-btn {
-    border: 1px solid transparent; border-bottom: none; background: transparent; color: var(--muted);
-    padding: 10px 16px; cursor: pointer; font-size: 0.92rem; font-weight: 600; border-radius: 8px 8px 0 0;
-    position: relative; top: 1px;
-  }
-  .tab-btn:hover { color: var(--text); }
-  .tab-btn.active { color: var(--accent); background: var(--surface); border-color: var(--border); border-bottom: 1px solid var(--surface); }
-  .tab-panel { display: none; }
-  .tab-panel.active { display: block; }
-
-  .status-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; color: var(--muted); font-size: 0.85rem; flex-wrap: wrap; }
+  .status-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 0 10px; color: var(--muted); font-size: 0.85rem; flex-wrap: wrap; }
   button.refresh { border: 1px solid var(--border); background: var(--surface2); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-weight: 600; }
   button.refresh:hover { border-color: rgba(56, 189, 248, 0.55); background: var(--surface3); }
   button.refresh:disabled { opacity: 0.5; cursor: default; }
@@ -51,8 +40,6 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .dot.aligned { background: var(--accent2); }
   .dot.reversal { background: var(--warn); }
-  .dot.reclaimed { background: var(--accent2); }
-  .dot.correcting { background: var(--accent); }
 
   .wl-table-wrap { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   table.wl-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -93,7 +80,7 @@
   <header>
     <div>
       <h1>Morning Watchlist</h1>
-      <div class="subtitle">Where to look today, and who's pulling back &mdash; not what to trade.</div>
+      <div class="subtitle">200SMA bias + daily/4H SMC structure &mdash; where to look today, not what to trade.</div>
     </div>
   </header>
   <nav class="kairos-nav" aria-label="Kairos navigation">
@@ -105,24 +92,15 @@
     <a class="nav-link active" href="/morning" aria-current="page">Morning Watchlist</a>
   </nav>
 
-  <div class="tab-bar" role="tablist">
-    <button class="tab-btn active" id="tabBtnMorning" type="button" onclick="switchTab('morning')">Morning List</button>
-    <button class="tab-btn" id="tabBtnPullbacks" type="button" onclick="switchTab('pullbacks')">Pullbacks</button>
-  </div>
-
   <div class="status-bar">
     <span id="statusText">Loading&hellip;</span>
-    <button class="refresh" id="refreshBtn" type="button" onclick="refreshActiveTab()">Refresh</button>
+    <button class="refresh" id="refreshBtn" type="button" onclick="loadWatchlist()">Refresh</button>
   </div>
 
-  <div id="panelMorning" class="tab-panel active"><div id="contentMorning"></div></div>
-  <div id="panelPullbacks" class="tab-panel"><div id="contentPullbacks"></div></div>
+  <div id="content"></div>
 </div>
 
 <script>
-let activeTab = 'morning';
-const loaded = { morning: false, pullbacks: false };
-
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str == null ? '' : String(str);
@@ -133,45 +111,19 @@ function fmtLevel(value) {
   return (value === null || value === undefined) ? '&mdash;' : ('$' + Number(value).toFixed(2));
 }
 
-function switchTab(tab) {
-  activeTab = tab;
-  document.getElementById('tabBtnMorning').classList.toggle('active', tab === 'morning');
-  document.getElementById('tabBtnPullbacks').classList.toggle('active', tab === 'pullbacks');
-  document.getElementById('panelMorning').classList.toggle('active', tab === 'morning');
-  document.getElementById('panelPullbacks').classList.toggle('active', tab === 'pullbacks');
-  if (!loaded[tab]) {
-    if (tab === 'morning') loadMorning(); else loadPullbacks();
-  } else {
-    const statusText = document.getElementById('statusText');
-    statusText.textContent = tab === 'morning' ? morningStatusCache : pullbackStatusCache;
-  }
-}
-
-function refreshActiveTab() {
-  loaded[activeTab] = false;
-  if (activeTab === 'morning') loadMorning(); else loadPullbacks();
-}
-
 let rowSeq = 0;
 
-function renderRow(row, kind) {
+function renderRow(row) {
   const id = 'row' + (rowSeq++);
-  const cols = kind === 'morning'
-    ? `<td class="num">$${Number(row.price).toFixed(2)}</td>
-       <td class="num muted-cell">$${Number(row.sma200_daily).toFixed(2)}</td>
-       <td class="muted-cell">${escapeHtml(row.daily_trend)} / ${escapeHtml(row.h4_trend)}</td>
-       <td class="num muted-cell">${fmtLevel(row.h4_bos_level)}</td>
-       <td class="num muted-cell">${fmtLevel(row.h4_ob_low)}&ndash;${fmtLevel(row.h4_ob_high)}</td>`
-    : `<td class="num">$${Number(row.price).toFixed(2)}</td>
-       <td class="num muted-cell">$${Number(row.sma200_daily).toFixed(2)}</td>
-       <td class="num muted-cell">${fmtLevel(row.correction_start_price)}&rarr;${fmtLevel(row.correction_extreme_price)}</td>
-       <td class="num muted-cell">${row.correction_depth_pct != null ? row.correction_depth_pct.toFixed(2) + '%' : '&mdash;'}</td>
-       <td class="num muted-cell">${row.bars_in_correction != null ? row.bars_in_correction : '&mdash;'}</td>`;
   return `
     <tr class="main-row" id="${id}" onclick="toggleRow('${id}')">
       <td><span class="chevron">&#9656;</span><span class="ticker-cell">${escapeHtml(row.ticker)}</span></td>
       <td><span class="bias ${escapeHtml(row.bias)}">${escapeHtml(row.bias)}</span></td>
-      ${cols}
+      <td class="num">$${Number(row.price).toFixed(2)}</td>
+      <td class="num muted-cell">$${Number(row.sma200_daily).toFixed(2)}</td>
+      <td class="muted-cell">${escapeHtml(row.daily_trend)} / ${escapeHtml(row.h4_trend)}</td>
+      <td class="num muted-cell">${fmtLevel(row.h4_bos_level)}</td>
+      <td class="num muted-cell">${fmtLevel(row.h4_ob_low)}&ndash;${fmtLevel(row.h4_ob_high)}</td>
     </tr>
     <tr class="detail-row" id="${id}-detail"><td colspan="7">${escapeHtml(row.reason)}</td></tr>
   `;
@@ -182,20 +134,17 @@ function toggleRow(id) {
   document.getElementById(id + '-detail').classList.toggle('expanded');
 }
 
-function renderSection(title, dotClass, rows, kind) {
+function renderSection(title, dotClass, rows) {
   const count = rows.length;
   if (!count) {
     return `<div class="section-title"><span class="dot ${dotClass}"></span> ${title} <span class="count">(0)</span></div><div class="empty-state">Nothing here right now.</div>`;
   }
-  const headers = kind === 'morning'
-    ? `<th>Ticker</th><th>Bias</th><th class="num">Price</th><th class="num">200SMA</th><th>Daily / 4H</th><th class="num">4H BOS</th><th class="num">4H OB range</th>`
-    : `<th>Ticker</th><th>Bias</th><th class="num">Price</th><th class="num">200SMA</th><th class="num">Correction</th><th class="num">Depth</th><th class="num">Bars</th>`;
   return `
     <div class="section-title"><span class="dot ${dotClass}"></span> ${title} <span class="count">(${count})</span></div>
     <div class="wl-table-wrap">
       <table class="wl-table">
-        <thead><tr>${headers}</tr></thead>
-        <tbody>${rows.map(r => renderRow(r, kind)).join('')}</tbody>
+        <thead><tr><th>Ticker</th><th>Bias</th><th class="num">Price</th><th class="num">200SMA</th><th>Daily / 4H</th><th class="num">4H BOS</th><th class="num">4H OB range</th></tr></thead>
+        <tbody>${rows.map(renderRow).join('')}</tbody>
       </table>
     </div>
   `;
@@ -205,7 +154,6 @@ const REASON_LABELS = {
   no_data: 'no data at all',
   no_daily_data: 'daily data failed',
   no_4h_data: '4H data failed',
-  no_30m_data: '30M data failed',
   processing_error: 'processing error',
 };
 
@@ -220,13 +168,10 @@ function renderErrors(errors) {
   `;
 }
 
-let morningStatusCache = '';
-let pullbackStatusCache = '';
-
-async function loadMorning() {
+async function loadWatchlist() {
   const statusText = document.getElementById('statusText');
   const refreshBtn = document.getElementById('refreshBtn');
-  const content = document.getElementById('contentMorning');
+  const content = document.getElementById('content');
   refreshBtn.disabled = true;
   statusText.textContent = 'Scanning watchlist… (this can take a little while on a cold cache)';
   content.innerHTML = '';
@@ -235,51 +180,20 @@ async function loadMorning() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     const generated = new Date(data.generated_at);
-    morningStatusCache = `Scanned ${data.scanned_count} tickers · generated ${generated.toLocaleTimeString()}`;
-    statusText.textContent = morningStatusCache;
+    statusText.textContent = `Scanned ${data.scanned_count} tickers · generated ${generated.toLocaleTimeString()}`;
     content.innerHTML =
       renderErrors(data.errors || []) +
-      renderSection('Aligned', 'aligned', data.aligned || [], 'morning') +
-      renderSection('Watch — early reversal', 'reversal', data.watch_reversal || [], 'morning');
-    loaded.morning = true;
+      renderSection('Aligned', 'aligned', data.aligned || []) +
+      renderSection('Watch — early reversal', 'reversal', data.watch_reversal || []);
   } catch (err) {
-    morningStatusCache = 'Failed to load.';
-    statusText.textContent = morningStatusCache;
+    statusText.textContent = 'Failed to load.';
     content.innerHTML = `<div class="status-line error">Error: ${escapeHtml(err.message)}</div>`;
   } finally {
     refreshBtn.disabled = false;
   }
 }
 
-async function loadPullbacks() {
-  const statusText = document.getElementById('statusText');
-  const refreshBtn = document.getElementById('refreshBtn');
-  const content = document.getElementById('contentPullbacks');
-  refreshBtn.disabled = true;
-  statusText.textContent = 'Scanning 30M charts for corrective legs… (30M data takes a bit longer than the morning list)';
-  content.innerHTML = '';
-  try {
-    const res = await fetch('/api/watchlist/pullbacks');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    const generated = new Date(data.generated_at);
-    pullbackStatusCache = `Scanned ${data.scanned_count} tickers · generated ${generated.toLocaleTimeString()}`;
-    statusText.textContent = pullbackStatusCache;
-    content.innerHTML =
-      renderErrors(data.errors || []) +
-      renderSection('Reclaimed — correction may be resolving', 'reclaimed', data.reclaimed || [], 'pullbacks') +
-      renderSection('Correcting — not yet reclaimed', 'correcting', data.correcting || [], 'pullbacks');
-    loaded.pullbacks = true;
-  } catch (err) {
-    pullbackStatusCache = 'Failed to load.';
-    statusText.textContent = pullbackStatusCache;
-    content.innerHTML = `<div class="status-line error">Error: ${escapeHtml(err.message)}</div>`;
-  } finally {
-    refreshBtn.disabled = false;
-  }
-}
-
-loadMorning();
+loadWatchlist();
 </script>
 </body>
 </html>
