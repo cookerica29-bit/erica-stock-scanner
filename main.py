@@ -2723,9 +2723,34 @@ def api_debug(ticker: str):
     return debug_ticker(ticker)
 
 
+@app.get("/morning")
+def morning_watchlist_page():
+    # Deliberately standalone, not a tab inside candidates.html -- this is
+    # the "where should I look today" screener, kept fully decoupled from
+    # the A+/B+/C grading UI so it doesn't inherit that pipeline's
+    # complexity or its known grade-field inconsistencies. See
+    # morning_watchlist.py for the backend logic.
+    return FileResponse(
+        "public/morning.html",
+        headers=NO_STORE_HEADERS,
+    )
+
+
 @app.get("/api/watchlist")
 def api_watchlist():
     return {"watchlist": WATCHLIST}
+
+
+@app.get("/api/watchlist/morning")
+def api_watchlist_morning():
+    """Morning screener: which tickers are worth looking at today, based on
+    200SMA bias + daily/4H SMC trend and structure alignment. Deliberately
+    separate from /api/scan's grading pipeline — no entries, stops, targets,
+    or live-quote-dependent status here, just where to point your attention.
+    """
+    from morning_watchlist import build_morning_watchlist
+
+    return build_morning_watchlist()
 
 
 @app.get("/api/cache/status")
