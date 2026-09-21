@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from scanner import WATCHLIST, _batch_download, _flatten_columns, analyze_ticker
 
-MORNING_WATCHLIST_VERSION = "morning-watchlist-v1"
+MORNING_WATCHLIST_VERSION = "morning-watchlist-v2"
 
 _DIRECTION_TO_STRUCTURE = {"LONG": "bullish", "SHORT": "bearish"}
 _OPPOSITE_STRUCTURE = {"bullish": "bearish", "bearish": "bullish"}
@@ -59,6 +59,26 @@ def _watchlist_entry_for_ticker(ticker: str, daily_raw, h4_raw) -> dict | None:
     daily_structure = daily_result.get("structure") or "ranging"
     h4_trend = (h4_result or {}).get("trend") or "NEUTRAL"
     h4_structure = (h4_result or {}).get("structure") or "ranging"
+    h4_price = (h4_result or {}).get("price")
+    h4_ob_low = (h4_result or {}).get("ob_low")
+    h4_ob_high = (h4_result or {}).get("ob_high")
+
+    # Live-invalidation check (found via a real ticker, CLF, 2026-09-21):
+    # daily_trend/h4_trend/h4_structure are all computed from completed-bar
+    # swing/CHoCH detection, so a LONG thesis can still read "bullish
+    # structure" even after the most recent 4H bar has already closed
+    # BELOW the order block that structure depends on -- the labels don't
+    # know the floor broke, only the raw price vs. level comparison does.
+    # This is the same class of gap the original scanner audit found in
+    # the old grading pipeline (completed-bar grade, no live-price
+    # recheck); it applies here too since h4_result's own price/ob_low/
+    # ob_high were already being computed and just never compared.
+    structure_broken = False
+    if h4_price is not None:
+        if sma_bias == "LONG" and h4_ob_low is not None and h4_price < h4_ob_low:
+            structure_broken = True
+        elif sma_bias == "SHORT" and h4_ob_high is not None and h4_price > h4_ob_high:
+            structure_broken = True
 
     bias_structure = _DIRECTION_TO_STRUCTURE[sma_bias]
     opposing_structure = _OPPOSITE_STRUCTURE[bias_structure]
@@ -68,8 +88,9 @@ def _watchlist_entry_for_ticker(ticker: str, daily_raw, h4_raw) -> dict | None:
         and daily_structure == bias_structure
         and h4_trend == sma_bias
         and h4_structure == bias_structure
+        and not structure_broken
     )
-    watch_reversal = (not aligned) and h4_structure == opposing_structure
+    watch_reversal = (not aligned) and (h4_structure == opposing_structure or structure_broken)
 
     if not aligned and not watch_reversal:
         return None
@@ -82,6 +103,14 @@ def _watchlist_entry_for_ticker(ticker: str, daily_raw, h4_raw) -> dict | None:
             f"Price {'above' if sma_bias == 'LONG' else 'below'} 200SMA "
             f"(${sma200:.2f}) with daily and 4H trend both {direction_word} — "
             f"structure confirms, no conflicting CHoCH."
+        )
+    elif structure_broken:
+        ob_level = h4_ob_low if sma_bias == "LONG" else h4_ob_high
+        reason = (
+            f"Price still {'above' if sma_bias == 'LONG' else 'below'} 200SMA "
+            f"(${sma200:.2f}, longer-term {direction_word} bias intact), but the 4H "
+            f"order block (${ob_level:.2f}) has already broken — live price (${h4_price:.2f}) "
+            f"is past the level this thesis depended on, structure labels haven't caught up yet."
         )
     else:
         reason = (
