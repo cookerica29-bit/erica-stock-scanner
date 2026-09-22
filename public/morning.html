@@ -41,7 +41,16 @@
   .dot.aligned { background: var(--accent2); }
   .dot.reversal { background: var(--warn); }
   .dot.spotlight { background: var(--fail); }
+  .dot.sweep { background: var(--accent); }
   .relvol-cell { font-weight: 700; }
+  .experimental-badge {
+    font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--warn); border: 1px solid rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.1);
+    border-radius: 999px; padding: 2px 8px;
+  }
+  .status-pill { font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; display: inline-block; }
+  .status-pill.confirmed { background: rgba(34, 197, 94, 0.15); color: var(--accent2); }
+  .status-pill.forming { background: rgba(142, 163, 185, 0.15); color: var(--muted); }
 
   .wl-table-wrap { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   table.wl-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -166,6 +175,39 @@ function renderSpotlightSection(rows) {
   `;
 }
 
+function renderSweepRow(row) {
+  const id = 'row' + (rowSeq++);
+  return `
+    <tr class="main-row" id="${id}" onclick="toggleRow('${id}')">
+      <td><span class="chevron">&#9656;</span><span class="ticker-cell">${escapeHtml(row.ticker)}</span></td>
+      <td><span class="bias ${row.direction === 'bullish' ? 'LONG' : 'SHORT'}">${row.direction.toUpperCase()}</span></td>
+      <td class="num">$${Number(row.price).toFixed(2)}</td>
+      <td class="num muted-cell">$${Number(row.level).toFixed(2)}</td>
+      <td class="num muted-cell">${Number(row.distance_atr).toFixed(2)} ATR</td>
+      <td><span class="status-pill ${escapeHtml(row.status)}">${row.status === 'confirmed' ? 'Confirmed' : 'Forming'}</span></td>
+    </tr>
+    <tr class="detail-row" id="${id}-detail"><td colspan="6">${escapeHtml(row.reason)}</td></tr>
+  `;
+}
+
+function renderSweepSection(rows) {
+  const count = rows.length;
+  const header = `<div class="section-title"><span class="dot sweep"></span> Liquidity Sweeps <span class="experimental-badge">Experimental</span> <span class="count">(${count})</span></div>`;
+  const caption = `<div class="subtitle" style="margin: -6px 0 12px;">A real equal-highs/equal-lows level was swept in the last few 4H bars and price hasn't run far since. New today, not yet proven over multiple mornings — watch it, don't trust it blindly.</div>`;
+  if (!count) {
+    return header + caption + `<div class="empty-state">No fresh liquidity sweeps right now.</div>`;
+  }
+  return `
+    ${header}${caption}
+    <div class="wl-table-wrap">
+      <table class="wl-table">
+        <thead><tr><th>Ticker</th><th>Direction</th><th class="num">Price</th><th class="num">Swept level</th><th class="num">Distance</th><th>Status</th></tr></thead>
+        <tbody>${rows.map(renderSweepRow).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderSection(title, dotClass, rows) {
   const count = rows.length;
   if (!count) {
@@ -215,6 +257,7 @@ async function loadWatchlist() {
     statusText.textContent = `Scanned ${data.scanned_count} tickers · generated ${generated.toLocaleTimeString()}`;
     content.innerHTML =
       renderSpotlightSection(data.spotlight || []) +
+      renderSweepSection(data.liquidity_sweeps || []) +
       renderErrors(data.errors || []) +
       renderSection('Aligned', 'aligned', data.aligned || []) +
       renderSection('Watch — early reversal', 'reversal', data.watch_reversal || []);

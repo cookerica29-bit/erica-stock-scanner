@@ -23,20 +23,45 @@ pattern-match -- the Pullbacks tab was removed the same day this was added
 specifically because a structural "which correction matters" judgment call
 didn't hold up in live use (see project memory). Relative volume needs no
 such judgment: it's one number vs another.
+
+Plus an EXPERIMENTAL "liquidity_sweeps" list: aligned/watch_reversal tickers
+where a real equal-highs/equal-lows liquidity pool (via the third-party
+`smartmoneyconcepts` library) was swept in the last few 4H bars, price
+hasn't run far from that level since (<= 1 ATR), split into "confirmed"
+(price has already closed back through the level -- a real rejection) vs.
+"forming" (swept but not yet rejected). This directly answers "closer to
+entry", unlike prior attempts this same day (see project memory
+entry_proximity_attempts) which were either wrong (a corrective-leg
+detector) or uninformative (a static ATR-distance number). Marked
+experimental because it has only been spot-checked against a handful of
+real tickers, not run across many real mornings yet -- treat it as
+something to watch and calibrate, not something to trust outright.
 """
 
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("SMC_CREDIT", "0")  # suppress the library's stdout banner
+
 from datetime import datetime, timezone
 
-from scanner import WATCHLIST, _batch_download, _flatten_columns, analyze_ticker
+from smartmoneyconcepts import smc
 
-MORNING_WATCHLIST_VERSION = "morning-watchlist-v3"
+from scanner import WATCHLIST, _batch_download, _compute_atr, _flatten_columns, analyze_ticker
+
+MORNING_WATCHLIST_VERSION = "morning-watchlist-v4"
 
 _DIRECTION_TO_STRUCTURE = {"LONG": "bullish", "SHORT": "bearish"}
 _OPPOSITE_STRUCTURE = {"bullish": "bearish", "bearish": "bullish"}
 RELATIVE_VOLUME_LOOKBACK_DAYS = 20
 RELATIVE_VOLUME_SPOTLIGHT_THRESHOLD = 1.5  # 50% above the 20-day average
+
+LIQUIDITY_SWEEP_LOOKBACK_PERIOD = "1y"  # 4H swing/liquidity detection needs real history, not just 60d
+LIQUIDITY_SWEEP_SWING_LENGTH = 5
+LIQUIDITY_SWEEP_RANGE_PERCENT = 0.02  # how close prior highs/lows must be to count as "equal"
+LIQUIDITY_SWEEP_RECENT_BARS = 3  # how many bars ago the sweep itself must have happened
+LIQUIDITY_SWEEP_MAX_DISTANCE_ATR = 1.0  # how far price may have already run from the level
 
 
 def _relative_volume(daily_df) -> float | None:
@@ -60,9 +85,18 @@ def _relative_volume(daily_df) -> float | None:
 
 def _sma200_bias(daily_df) -> tuple[str | None, float | None, float | None]:
     """Return (bias, price, sma200) from a daily OHLC frame, or (None, None, None)."""
-    if daily_df is None or daily_df.empty or len(daily_df) < 200:
+    if daily_df is None or daily_df.empty:
         return None, None, None
-    close = daily_df["Close"].astype(float)
+    # Yahoo sometimes returns a stub row for the current session (real
+    # Volume, but NaN Open/High/Low/Close) during some after-hours window
+    # before the daily bar is finalized. Found 2026-09-21 evening: this
+    # silently zeroed out the entire Aligned/Watch list (not just this
+    # ticker) because a NaN last-close poisons the rolling mean and trips
+    # the NaN guard below. Drop NaN closes so a not-yet-finalized "today"
+    # row is treated as not-yet-existing rather than corrupting the result.
+    close = daily_df["Close"].astype(float).dropna()
+    if len(close) < 200:
+        return None, None, None
     sma200 = float(close.rolling(200).mean().iloc[-1])
     price = float(close.iloc[-1])
     if sma200 != sma200:  # NaN guard
@@ -172,6 +206,124 @@ def _frame_missing(frame) -> bool:
     return frame is None or getattr(frame, "empty", True)
 
 
+def _find_liquidity_sweep(ticker: str, df) -> dict | None:
+    """Look for a recent, still-fresh equal-highs/equal-lows liquidity sweep
+    on this ticker's 4H data. Returns the single most relevant hit (most
+    recent, ties broken by closest to the level) or None.
+
+    Liquidity==1 from the library is built from equal HIGHS (buy-side
+    liquidity) -- sweeping it (a new high) is the classic setup for a
+    BEARISH reversal. Liquidity==-1 is equal LOWS (sell-side liquidity) --
+    sweeping it (a new low) sets up a BULLISH reversal. The library's own
+    "bullish"/"bearish" naming just labels which swing type formed the
+    pool, not the expected direction after a sweep -- confirmed by reading
+    its source (smc.py's liquidity()) after an initial pass here had the
+    direction backwards.
+    """
+    min_bars = LIQUIDITY_SWEEP_SWING_LENGTH * 2 + 10
+    if df is None or len(df) < min_bars:
+        return None
+
+    smc_df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+    smc_df = smc_df[["open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
+    try:
+        swing_highs_lows = smc.swing_highs_lows(smc_df, swing_length=LIQUIDITY_SWEEP_SWING_LENGTH)
+        liq = smc.liquidity(smc_df, swing_highs_lows, range_percent=LIQUIDITY_SWEEP_RANGE_PERCENT)
+    except Exception:  # noqa: BLE001 - experimental signal, must not kill the scan
+        return None
+
+    atr = _compute_atr(df)
+    if not atr:
+        return None
+
+    last_idx = len(smc_df) - 1
+    current_close = float(df["Close"].iloc[-1])
+    swept_recently = liq[liq["Swept"] > 0]
+
+    best = None
+    for _, row in swept_recently.iterrows():
+        swept_bar = int(row["Swept"])
+        bars_ago = last_idx - swept_bar
+        if bars_ago > LIQUIDITY_SWEEP_RECENT_BARS:
+            continue
+
+        level = float(row["Level"])
+        distance_atr = abs(current_close - level) / atr
+        if distance_atr > LIQUIDITY_SWEEP_MAX_DISTANCE_ATR:
+            continue  # real sweep, but price already ran away from it -- stale
+
+        candidate = {
+            "level": round(level, 2),
+            "bars_ago": bars_ago,
+            "swept_at": df.index[swept_bar].isoformat() if swept_bar < len(df) else None,
+            "distance_atr": round(distance_atr, 2),
+            "direction": "bearish" if row["Liquidity"] == 1 else "bullish",
+            "rejected": current_close < level if row["Liquidity"] == 1 else current_close > level,
+            "current_price_4h": round(current_close, 2),
+        }
+        if best is None or (candidate["bars_ago"], candidate["distance_atr"]) < (best["bars_ago"], best["distance_atr"]):
+            best = candidate
+
+    return best
+
+
+def _attach_liquidity_sweeps(entries: list[dict]) -> list[dict]:
+    """Second pass, only for tickers that already made the Aligned/Watch
+    list: fetch a full year of 4H data (swing/liquidity detection needs
+    real history) and look for a fresh sweep. Returns a separate list --
+    does not mutate the aligned/watch_reversal entries -- since this is an
+    experimental, independent signal, not part of the aligned/reversal
+    classification itself. Never raises; a ticker whose sweep-check fails
+    just doesn't show up here.
+    """
+    if not entries:
+        return []
+    tickers = [e["ticker"] for e in entries]
+    h4_1y_frames = _batch_download(tickers, period=LIQUIDITY_SWEEP_LOOKBACK_PERIOD, interval="4h")
+
+    results = []
+    for entry in entries:
+        raw = h4_1y_frames.get(entry["ticker"])
+        if _frame_missing(raw):
+            continue
+        df = _flatten_columns(raw)
+        try:
+            hit = _find_liquidity_sweep(entry["ticker"], df)
+        except Exception:  # noqa: BLE001 - experimental signal, must not kill the scan
+            hit = None
+        if hit is None:
+            continue
+
+        status = "confirmed" if hit["rejected"] else "forming"
+        pool_type = "equal-lows (sell-side)" if hit["direction"] == "bullish" else "equal-highs (buy-side)"
+        if hit["rejected"]:
+            outcome = "price has already closed back through the level, confirming the reversal."
+        else:
+            outcome = "reversal not yet confirmed -- watch for a close back through the level."
+        reason = (
+            f"Swept an {pool_type} liquidity level at ${hit['level']:.2f} "
+            f"{hit['bars_ago']} bar(s) ago; price is still close ({hit['distance_atr']:.2f} ATR away) -- {outcome}"
+        )
+
+        results.append({
+            "ticker": entry["ticker"],
+            "bias": entry["bias"],
+            "bucket": entry["bucket"],
+            "price": hit["current_price_4h"],
+            "direction": hit["direction"],
+            "level": hit["level"],
+            "bars_ago": hit["bars_ago"],
+            "swept_at": hit["swept_at"],
+            "distance_atr": hit["distance_atr"],
+            "status": status,
+            "reason": reason,
+        })
+
+    results.sort(key=lambda r: (r["bars_ago"], r["distance_atr"]))
+    return results
+
+
 def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
     """Scan `tickers` (defaults to the full stock WATCHLIST) and bucket each
     into 'aligned' or 'watch_reversal', or omit it if there's nothing notable.
@@ -227,6 +379,8 @@ def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
         reverse=True,
     )
 
+    liquidity_sweeps = _attach_liquidity_sweeps(aligned + watch_reversal)
+
     aligned.sort(key=lambda row: row["ticker"])
     watch_reversal.sort(key=lambda row: row["ticker"])
     errors.sort(key=lambda row: row["ticker"])
@@ -238,5 +392,6 @@ def build_morning_watchlist(tickers: list[str] | None = None) -> dict:
         "aligned": aligned,
         "watch_reversal": watch_reversal,
         "spotlight": spotlight,
+        "liquidity_sweeps": liquidity_sweeps,
         "errors": errors,
     }

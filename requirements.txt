@@ -5,3 +5,4 @@ pandas
 numpy
 ta
 finvizfinance
+smartmoneyconcepts==0.0.27
