@@ -46,6 +46,7 @@ from scanner import (
     WATCHLIST,
     coverage_baseline_snapshot,
     register_background_periodic_task,
+    scanner_background_enabled,
     start_market_cache_refresh,
 )
 from discovery import build_ranked_discovery_universe, discovery_universe_max_symbols_resolution
@@ -1760,36 +1761,49 @@ def _safe_run_watch_contract_monitor_tick(reason: str = "periodic") -> None:
 
 
 def _register_discovery_background_refresh() -> None:
-    register_background_periodic_task(
-        "discovery_universe",
-        DISCOVERY_REFRESH_WATCHDOG_SECONDS,
-        _submit_discovery_universe_job_if_needed,
-    )
-    register_background_periodic_task(
-        "discovered_scan_handoff",
-        30,
-        lambda: _maybe_enqueue_discovered_scan_handoff("periodic_discovery_ready_no_scanner_cache"),
-    )
-    register_background_periodic_task(
-        "scheduled_discovered_scan_10am_et",
-        60,
-        _submit_scheduled_discovered_scan_if_due,
-    )
-    register_background_periodic_task(
-        "ma_pipeline_candidate_ingestion",
-        60,
-        _submit_ma_pipeline_scan_if_due,
-    )
-    register_background_periodic_task(
-        "momentum_pullback_short_lifecycle_ingestion",
-        60 * 60,
-        lambda: _safe_submit_momentum_short_lifecycle_ingestion("periodic"),
-    )
-    register_background_periodic_task(
-        "momentum_pullback_short_lifecycle_watcher",
-        60 * 60,
-        lambda: _submit_momentum_short_lifecycle_watcher("periodic"),
-    )
+    # Scanning tasks (2026-10): registered ONLY when KAIROS_SCANNER_ENABLED
+    # is set -- same convention as smc_shadow_engine / watch_contract_monitor
+    # below. These six are what fed the universe-wide analysis cache that
+    # ran the service to its 8GB memory ceiling and got it OOM-killed on
+    # 2026-10-09. Kairos now PRESENTS candidates ingested over
+    # POST /candidates rather than scanning for them, so with the flag off
+    # they are genuinely absent from the background task list, not
+    # registered-but-inert.
+    #
+    # The two watchers BELOW this block stay unconditional: they are
+    # presentation/tracking work (approved-setup stop/target resolution and
+    # promotion outcomes), not scanning, and the dashboard depends on them.
+    if scanner_background_enabled():
+        register_background_periodic_task(
+            "discovery_universe",
+            DISCOVERY_REFRESH_WATCHDOG_SECONDS,
+            _submit_discovery_universe_job_if_needed,
+        )
+        register_background_periodic_task(
+            "discovered_scan_handoff",
+            30,
+            lambda: _maybe_enqueue_discovered_scan_handoff("periodic_discovery_ready_no_scanner_cache"),
+        )
+        register_background_periodic_task(
+            "scheduled_discovered_scan_10am_et",
+            60,
+            _submit_scheduled_discovered_scan_if_due,
+        )
+        register_background_periodic_task(
+            "ma_pipeline_candidate_ingestion",
+            60,
+            _submit_ma_pipeline_scan_if_due,
+        )
+        register_background_periodic_task(
+            "momentum_pullback_short_lifecycle_ingestion",
+            60 * 60,
+            lambda: _safe_submit_momentum_short_lifecycle_ingestion("periodic"),
+        )
+        register_background_periodic_task(
+            "momentum_pullback_short_lifecycle_watcher",
+            60 * 60,
+            lambda: _submit_momentum_short_lifecycle_watcher("periodic"),
+        )
     register_background_periodic_task(
         "candidate_promotion_outcome_watcher",
         60 * 60,
@@ -1845,14 +1859,23 @@ async def add_no_store_headers(request: Request, call_next):
 
 @app.on_event("startup")
 def startup_market_cache_refresh():
+    # _register_discovery_background_refresh() and start_market_cache_refresh()
+    # both gate their own scanning work on KAIROS_SCANNER_ENABLED; the refresh
+    # thread and the two presentation watchers start either way.
     _register_discovery_background_refresh()
     start_market_cache_refresh()
+    # Reading persisted JSON state is cheap and keeps the status endpoints
+    # answering truthfully instead of erroring, so it runs regardless.
     _load_scheduled_scan_state_from_disk()
     _load_discovery_pool_from_disk()
-    _submit_discovery_universe_job_if_needed()
-    _maybe_enqueue_discovered_scan_handoff("startup_discovery_ready_no_scanner_cache")
-    _submit_scheduled_discovered_scan_if_due()
     _momentum_short_lifecycle_mark_startup_ready()
+    # The three scan submits below kick off universe-wide work immediately at
+    # boot -- the single biggest memory spike of the process lifetime. Opt-in
+    # with the rest of the scanning (2026-10).
+    if scanner_background_enabled():
+        _submit_discovery_universe_job_if_needed()
+        _maybe_enqueue_discovered_scan_handoff("startup_discovery_ready_no_scanner_cache")
+        _submit_scheduled_discovered_scan_if_due()
 
 
 @app.get("/")

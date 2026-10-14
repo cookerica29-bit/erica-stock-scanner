@@ -1003,6 +1003,90 @@ def test_discovery_auto_submit_skips_fresh_cache_and_running_job():
                 os.environ[main.DISCOVERY_POOL_PATH_ENV] = previous_path
 
 
+def _startup_calls_with_scanner_flag(flag_value):
+    """Run startup_market_cache_refresh() with KAIROS_SCANNER_ENABLED set to
+    flag_value (None = unset) and return the ordered list of calls made."""
+    previous_env = os.environ.get("KAIROS_SCANNER_ENABLED")
+    originals = {
+        name: getattr(main, name)
+        for name in (
+            "register_background_periodic_task",
+            "_load_discovery_pool_from_disk",
+            "_load_scheduled_scan_state_from_disk",
+            "_submit_discovery_universe_job_if_needed",
+            "start_market_cache_refresh",
+            "_maybe_enqueue_discovered_scan_handoff",
+            "_submit_scheduled_discovered_scan_if_due",
+        )
+    }
+    calls = []
+    main.register_background_periodic_task = lambda key, ttl, callback: calls.append(("register", key))
+    main._load_discovery_pool_from_disk = lambda: calls.append(("load_pool",)) or False
+    main._load_scheduled_scan_state_from_disk = lambda: calls.append(("load_scheduled",)) or False
+    main._submit_discovery_universe_job_if_needed = lambda: calls.append(("submit",)) or (True, "job")
+    main.start_market_cache_refresh = lambda: calls.append(("market_cache",))
+    main._maybe_enqueue_discovered_scan_handoff = lambda reason="": calls.append(("handoff",)) or (False, "stubbed")
+    main._submit_scheduled_discovered_scan_if_due = lambda: calls.append(("scheduled",)) or (False, "not due")
+    try:
+        if flag_value is None:
+            os.environ.pop("KAIROS_SCANNER_ENABLED", None)
+        else:
+            os.environ["KAIROS_SCANNER_ENABLED"] = flag_value
+        main.startup_market_cache_refresh()
+        return calls
+    finally:
+        for name, value in originals.items():
+            setattr(main, name, value)
+        if previous_env is None:
+            os.environ.pop("KAIROS_SCANNER_ENABLED", None)
+        else:
+            os.environ["KAIROS_SCANNER_ENABLED"] = previous_env
+
+
+def test_startup_scanning_gated_by_kairos_scanner_enabled():
+    """2026-10: universe scanning is opt-in via KAIROS_SCANNER_ENABLED.
+
+    Kairos presents candidates ingested over POST /candidates; it no longer
+    scans for them by default. The scanning background tasks held ~7GB
+    against an 8GB limit and OOM-killed the service on 2026-10-09.
+
+    The two presentation/tracking watchers must keep ticking either way --
+    the dashboard depends on them.
+    """
+    scanning = {
+        "discovery_universe",
+        "discovered_scan_handoff",
+        "scheduled_discovered_scan_10am_et",
+        "ma_pipeline_candidate_ingestion",
+        "momentum_pullback_short_lifecycle_ingestion",
+        "momentum_pullback_short_lifecycle_watcher",
+    }
+    presentation = {"candidate_promotion_outcome_watcher", "approved_setup_monitor"}
+
+    # Flag unset (the default): no scanning registered, no scan submitted.
+    off = _startup_calls_with_scanner_flag(None)
+    off_keys = {key for kind, key in ((c[0], c[1] if len(c) > 1 else None) for c in off) if kind == "register"}
+    assert not (off_keys & scanning), f"scanning registered with flag off: {off_keys & scanning}"
+    assert presentation <= off_keys, f"presentation watchers missing: {presentation - off_keys}"
+    assert ("submit",) not in off
+    assert ("handoff",) not in off
+    assert ("scheduled",) not in off
+    # Cheap persisted-state reads still happen so status endpoints stay honest.
+    assert ("load_scheduled",) in off
+    assert ("load_pool",) in off
+    # The refresh thread still starts -- the watchers tick inside it.
+    assert ("market_cache",) in off
+
+    # Flag on: the previous behaviour is restored in full.
+    on = _startup_calls_with_scanner_flag("true")
+    on_keys = {key for kind, key in ((c[0], c[1] if len(c) > 1 else None) for c in on) if kind == "register"}
+    assert scanning <= on_keys, f"scanning missing with flag on: {scanning - on_keys}"
+    assert presentation <= on_keys
+    assert ("submit",) in on
+    assert ("handoff",) in on
+    assert ("scheduled",) in on
+
+
 def test_startup_registers_and_submits_discovery_refresh():
     previous_register = main.register_background_periodic_task
     previous_submit = main._submit_discovery_universe_job_if_needed
@@ -1520,6 +1604,7 @@ def main_test() -> int:
     test_scheduled_scan_completed_run_does_not_duplicate_same_day()
     test_coverage_baseline_endpoint_warms_without_completed_discovered_scan()
     test_coverage_baseline_endpoint_returns_latest_snapshot_without_starting_work()
+    test_startup_scanning_gated_by_kairos_scanner_enabled()
     print("Discovery endpoints v1 tests passed")
     return 0
 

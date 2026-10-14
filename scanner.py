@@ -9423,8 +9423,39 @@ def _ensure_background_refresh_started() -> None:
     thread.start()
 
 
+SCANNER_BACKGROUND_ENABLED_ENV_VAR = "KAIROS_SCANNER_ENABLED"
+
+
+def scanner_background_enabled() -> bool:
+    """Whether universe-wide background scanning runs at all.
+
+    Defaults to DISABLED as of 2026-10. The perpetual analysis cache this
+    warms held ~6.95GB average / 7.91GB peak against the service's 8GB
+    memory limit and the container was OOM-killed on 2026-10-09 -- which
+    is why that crash left no traceback and no recorded failure reason
+    (SIGKILL gives Python nothing to raise).
+
+    Kairos's job is now to PRESENT candidates ingested over
+    POST /candidates, not to scan for them, so the warm-up is opt-in.
+    Same "registered only when explicitly enabled" convention as
+    smc_shadow_enabled() / watch_contract_enabled().
+
+    Set KAIROS_SCANNER_ENABLED=true to restore the previous behaviour.
+    """
+    raw = os.environ.get(SCANNER_BACKGROUND_ENABLED_ENV_VAR)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def start_market_cache_refresh() -> None:
+    # The refresh thread itself still starts even with scanning disabled:
+    # approved_setup_monitor and candidate_promotion_outcome_watcher tick
+    # inside this same loop, and those are presentation/tracking work that
+    # must survive. Only the universe-wide analysis warm-up is gated.
     _ensure_background_refresh_started()
+    if not scanner_background_enabled():
+        return
     key = _analysis_cache_key(None)
     _submit_analysis_refresh(key, None, reason="startup")
 
