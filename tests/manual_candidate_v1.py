@@ -347,3 +347,202 @@ def test_set_trigger_on_a_setup_that_already_has_one_is_rejected(client, headers
     )
     assert resp.status_code == 422
     assert "APPROVED" in resp.json()["detail"]
+
+
+# ==========================================================================
+# 5. Anchored plan: stop and/or target derived from marked structure
+#
+# The product rule this encodes: the human picks the ticker, the direction
+# and the order block; Kairos does the arithmetic. A level she typed is
+# always used verbatim -- deriving is strictly opt-in by omission -- and a
+# block she marked is never silently swapped for a generic ATR stop.
+#
+# _daily_frame() has ATR14 == 1.0 exactly, so every expected stop below is
+# arithmetic, not an approximation: order-block stop = OB edge -/+ 0.1 ATR
+# (DEFAULT_CLAMP_BUFFER_ATR), flat ATR stop = entry -/+ 1.5 ATR.
+# ==========================================================================
+
+def test_omitted_stop_is_derived_from_the_marked_order_block(client, headers):
+    resp = _submit(client, headers, ticker="NVDA", stop=None, order_block_high=98.0, order_block_low=97.0)
+    assert resp.status_code == 200, resp.text
+    memory = resp.json()["memory"]
+    # 97.0 (OB low, the long's invalidation level) - 0.1 ATR buffer
+    assert memory["approved_stop"] == pytest.approx(96.9)
+    assert memory["approved_entry"] == 100.0
+    assert memory["approved_target"] == 115.0, "a supplied target is still used verbatim"
+    assert "order_block" in memory["review_note"], "provenance records which half Kairos computed"
+    assert "98.5" in memory["review_note"], "the flat ATR stop is preserved in the note for comparison"
+    assert "R:R" not in memory["review_note"], "no R:R warning on a healthy plan (15 / 3.1 = 4.8)"
+
+
+def test_derived_short_stop_uses_the_order_block_high(client, headers):
+    resp = _submit(
+        client, headers, ticker="NVDA", direction="short", entry=100.0, stop=None, target=85.0,
+        order_block_high=103.0, order_block_low=102.0,
+    )
+    assert resp.status_code == 200, resp.text
+    # 103.0 (OB high) + 0.1 ATR buffer
+    assert resp.json()["memory"]["approved_stop"] == pytest.approx(103.1)
+
+
+def test_order_block_too_close_to_entry_is_refused_not_replaced(client, headers):
+    # Stop would be 99.85 -- 0.15 ATR away, under resolve_stop's
+    # MIN_STOP_DISTANCE_ATR floor of 0.25. On the scanner path that falls
+    # back to the flat ATR stop; for a block she marked it must not.
+    resp = _submit(client, headers, ticker="NVDA", stop=None, order_block_high=99.98, order_block_low=99.95)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "0.15x ATR" in detail and "0.25x ATR minimum" in detail
+    assert "won't swap in a generic ATR stop" in detail
+
+
+def test_order_block_on_the_wrong_side_of_entry_is_refused(client, headers):
+    # A long whose marked block sits above entry: the "stop" would be 104.9.
+    resp = _submit(client, headers, ticker="NVDA", stop=None, order_block_high=106.0, order_block_low=105.0)
+    assert resp.status_code == 422
+    assert "not below entry" in resp.json()["detail"]
+
+
+def test_wrong_side_order_block_on_a_short_is_refused(client, headers):
+    resp = _submit(
+        client, headers, ticker="NVDA", direction="short", entry=100.0, stop=None, target=85.0,
+        order_block_high=96.0, order_block_low=95.0,
+    )
+    assert resp.status_code == 422
+    assert "not above entry" in resp.json()["detail"]
+
+
+def test_order_block_with_an_explicit_stop_is_rejected(client, headers):
+    # Accepting it would mean silently ignoring it -- the stored row would
+    # never show that a block was sent.
+    resp = _submit(client, headers, ticker="NVDA", order_block_high=98.0, order_block_low=97.0)
+    assert resp.status_code == 422
+    assert "can't be combined with an explicit stop" in resp.json()["detail"]
+
+
+def test_omitting_stop_without_an_order_block_is_rejected(client, headers):
+    resp = _submit(client, headers, stop=None)
+    assert resp.status_code == 422
+    assert "order_block_high" in resp.json()["detail"]
+
+
+def test_half_specified_order_block_is_rejected(client, headers):
+    resp = _submit(client, headers, stop=None, order_block_high=98.0)
+    assert resp.status_code == 422
+    assert "both" in resp.json()["detail"]
+
+
+def test_inverted_order_block_is_rejected(client, headers):
+    resp = _submit(client, headers, stop=None, order_block_high=97.0, order_block_low=98.0)
+    assert resp.status_code == 422
+    assert "must be below" in resp.json()["detail"]
+
+
+def test_derived_stop_with_supplied_target_warns_on_low_rr(client, headers):
+    # A wide structural stop (89.9) against her own close target (102):
+    # R:R = 2 / 10.1 = 0.198. Still accepted -- it's her plan -- but the
+    # weak R:R is recorded, same as when the target is the derived half.
+    resp = _submit(client, headers, ticker="NVDA", stop=None, target=102.0, order_block_high=91.0, order_block_low=90.0)
+    assert resp.status_code == 200, resp.text
+    memory = resp.json()["memory"]
+    assert memory["approved_stop"] == pytest.approx(89.9)
+    assert "R:R 0.2 below 1.5" in memory["review_note"]
+
+
+def test_omitted_target_is_derived_and_validated(client, headers, monkeypatch):
+    # _nearest_structural_target itself is covered by structural_resistance_v1;
+    # stubbed here so this test is about the WIRING -- that the derived target
+    # reaches the stored row and the clamp/R:R math runs against the live stop.
+    monkeypatch.setattr(router, "_nearest_structural_target", lambda entry, direction, swings, min_dist: 112.0)
+    resp = _submit(client, headers, ticker="NVDA", target=None)
+    assert resp.status_code == 200, resp.text
+    memory = resp.json()["memory"]
+    assert memory["approved_target"] == pytest.approx(112.0)
+    assert memory["approved_stop"] == 95.0, "a supplied stop is still used verbatim"
+    assert "target derived from structure" in memory["review_note"]
+
+
+def test_derived_target_with_low_rr_is_warned(client, headers, monkeypatch):
+    monkeypatch.setattr(router, "_nearest_structural_target", lambda entry, direction, swings, min_dist: 103.0)
+    resp = _submit(client, headers, ticker="NVDA", target=None)
+    assert resp.status_code == 200, resp.text
+    # 3 / 5 = 0.6
+    assert "R:R 0.6 below 1.5" in resp.json()["memory"]["review_note"]
+
+
+def test_no_structural_target_is_refused_rather_than_invented(client, headers, monkeypatch):
+    monkeypatch.setattr(router, "_nearest_structural_target", lambda entry, direction, swings, min_dist: None)
+    resp = _submit(client, headers, target=None)
+    assert resp.status_code == 422
+    assert "won't invent one" in resp.json()["detail"]
+
+
+def test_both_halves_derived_together(client, headers, monkeypatch):
+    monkeypatch.setattr(router, "_nearest_structural_target", lambda entry, direction, swings, min_dist: 112.0)
+    resp = _submit(
+        client, headers, ticker="NVDA", stop=None, target=None,
+        order_block_high=98.0, order_block_low=97.0,
+    )
+    assert resp.status_code == 200, resp.text
+    memory = resp.json()["memory"]
+    assert memory["approved_stop"] == pytest.approx(96.9)
+    assert memory["approved_target"] == pytest.approx(112.0)
+    note = memory["review_note"]
+    assert "order_block" in note and "target derived" in note
+    assert note.startswith("Test rationale:"), "the submitter's own rationale stays first and unedited"
+
+
+def test_derived_values_drive_the_setup_key(client, headers):
+    # Two submissions on the same ticker whose only difference is the marked
+    # order block must not collide on setup_key -- it is built from the
+    # resolved stop, not the (absent) submitted one.
+    first = _submit(client, headers, ticker="NVDA", stop=None, order_block_high=98.0, order_block_low=97.0)
+    second = _submit(client, headers, ticker="NVDA", stop=None, order_block_high=94.0, order_block_low=93.0)
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["memory"]["approved_stop"] != second.json()["memory"]["approved_stop"]
+
+
+def test_fully_specified_submission_fetches_no_market_data(client, headers, monkeypatch):
+    # Regression guard on the pre-existing contract: when nothing needs
+    # deriving, this endpoint still does no network I/O at all (the
+    # "no live quote is fetched here" simplification in its docstring).
+    def _boom(tickers, period, interval):
+        raise AssertionError("market data was fetched for a fully-specified manual submission")
+    monkeypatch.setattr(router, "_batch_download", _boom)
+    resp = _submit(client, headers, ticker="NVDA")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["memory"]["review_note"] == "Test rationale: clean daily structure, retesting a prior breakout zone.", \
+        "no provenance line is appended when nothing was derived"
+
+
+def _forbid_download(monkeypatch):
+    def _boom(tickers, period, interval):
+        raise AssertionError("market data was fetched before a typed level was checked against entry")
+    monkeypatch.setattr(router, "_batch_download", _boom)
+
+
+def test_wrong_side_typed_stop_is_rejected_before_any_download(client, headers, monkeypatch):
+    # Long with the typed stop above entry, target left for Kairos to derive.
+    _forbid_download(monkeypatch)
+    resp = _submit(client, headers, ticker="NVDA", stop=105.0, target=None)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "For a long, stop (105.0) must be below entry (100.0)."
+
+
+def test_wrong_side_typed_target_is_rejected_before_any_download(client, headers, monkeypatch):
+    # Long with the typed target below entry, stop left for Kairos to derive.
+    _forbid_download(monkeypatch)
+    resp = _submit(
+        client, headers, ticker="NVDA", stop=None, target=99.0,
+        order_block_high=98.0, order_block_low=97.0,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "For a long, target (99.0) must be above entry (100.0)."
+
+
+def test_wrong_side_typed_stop_on_a_short_is_rejected_before_any_download(client, headers, monkeypatch):
+    _forbid_download(monkeypatch)
+    resp = _submit(client, headers, ticker="NVDA", direction="short", entry=100.0, stop=100.0, target=None)
+    assert resp.status_code == 422, "a stop exactly at entry is on the wrong side too"
+    assert resp.json()["detail"] == "For a short, stop (100.0) must be above entry (100.0)."
