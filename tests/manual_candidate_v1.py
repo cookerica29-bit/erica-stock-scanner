@@ -514,3 +514,35 @@ def test_fully_specified_submission_fetches_no_market_data(client, headers, monk
     assert resp.status_code == 200, resp.text
     assert resp.json()["memory"]["review_note"] == "Test rationale: clean daily structure, retesting a prior breakout zone.", \
         "no provenance line is appended when nothing was derived"
+
+
+def _forbid_download(monkeypatch):
+    def _boom(tickers, period, interval):
+        raise AssertionError("market data was fetched before a typed level was checked against entry")
+    monkeypatch.setattr(router, "_batch_download", _boom)
+
+
+def test_wrong_side_typed_stop_is_rejected_before_any_download(client, headers, monkeypatch):
+    # Long with the typed stop above entry, target left for Kairos to derive.
+    _forbid_download(monkeypatch)
+    resp = _submit(client, headers, ticker="NVDA", stop=105.0, target=None)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "For a long, stop (105.0) must be below entry (100.0)."
+
+
+def test_wrong_side_typed_target_is_rejected_before_any_download(client, headers, monkeypatch):
+    # Long with the typed target below entry, stop left for Kairos to derive.
+    _forbid_download(monkeypatch)
+    resp = _submit(
+        client, headers, ticker="NVDA", stop=None, target=99.0,
+        order_block_high=98.0, order_block_low=97.0,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "For a long, target (99.0) must be above entry (100.0)."
+
+
+def test_wrong_side_typed_stop_on_a_short_is_rejected_before_any_download(client, headers, monkeypatch):
+    _forbid_download(monkeypatch)
+    resp = _submit(client, headers, ticker="NVDA", direction="short", entry=100.0, stop=100.0, target=None)
+    assert resp.status_code == 422, "a stop exactly at entry is on the wrong side too"
+    assert resp.json()["detail"] == "For a short, stop (100.0) must be above entry (100.0)."

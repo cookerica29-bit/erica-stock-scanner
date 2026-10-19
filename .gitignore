@@ -1,0 +1,17 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Secrets and local environment (e.g. .env.agent-v2-paper)
+.env*
+# ...except a committed template of required variables, if one is added
+!.env.example
+
+# Local SQLite databases and their WAL/shared-memory sidecars
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

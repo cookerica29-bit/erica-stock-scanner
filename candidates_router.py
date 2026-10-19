@@ -6548,6 +6548,21 @@ def submit_manual_candidate(
                    "explicit stop. Send one or the other.",
         )
 
+    # A typed level on the wrong side of entry is wrong whatever gets derived
+    # for the other half, so reject it before _derive_manual_plan pulls a year
+    # of daily candles. The full ordering check on the resolved plan below
+    # still runs -- this only moves the no-data-needed half of it earlier.
+    for label, value in (("stop", body.stop), ("target", body.target)):
+        if value is None:
+            continue
+        must_be_below = (label == "stop") == (body.direction == "long")
+        if (value >= body.entry) if must_be_below else (value <= body.entry):
+            raise HTTPException(
+                status_code=422,
+                detail=f"For a {body.direction}, {label} ({value}) must be "
+                       f"{'below' if must_be_below else 'above'} entry ({body.entry}).",
+            )
+
     derived: dict[str, Any] = {}
     if need_stop or need_target:
         derived = _derive_manual_plan(
