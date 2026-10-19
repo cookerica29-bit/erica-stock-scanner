@@ -42,7 +42,13 @@ from scanner import (
     scan_cached_readonly,
     stock_execution_lifecycle_presentation,
 )
-from structural_resistance import clamp_target, levels_near_target, resolve_stop
+from structural_resistance import (
+    DEFAULT_CLAMP_BUFFER_ATR,
+    MIN_STOP_DISTANCE_ATR,
+    clamp_target,
+    levels_near_target,
+    resolve_stop,
+)
 from displacement_score import score_displacement
 from location_score import score_location
 from confluence_summary import summarize_confluence
@@ -1958,8 +1964,24 @@ class ManualCandidateIn(BaseModel):
     ticker: str = Field(min_length=1)
     direction: Literal["long", "short"]
     entry: float
-    stop: float
-    target: float
+    # Both optional as of the anchored-plan change. Supplied -> used verbatim
+    # (the human's own level always wins; this endpoint exists precisely so
+    # Erica's chart read is authoritative). Omitted -> derived from real
+    # structure by _derive_manual_plan below: the stop from the order block
+    # SHE marked via order_block_high/low (never one the code picked itself --
+    # that unanchored path is the one that produced a meaningless target on
+    # OVV), the target from _nearest_structural_target plus the clamp_target
+    # validation. Mix and match freely: supply a stop and derive the target,
+    # or vice versa.
+    stop: Optional[float] = None
+    target: Optional[float] = None
+    # The order block as marked on the chart -- required only when `stop` is
+    # omitted. Shape deliberately mirrors scanner._find_order_block()'s own
+    # return value ({"high", "low"}) so resolve_stop receives the identical
+    # structure it already consumes on the scanner path, with no translation
+    # layer and no second definition of what an order block is.
+    order_block_high: Optional[float] = None
+    order_block_low: Optional[float] = None
     # Freeform written rationale -- stored in review_note, the same column
     # a review-queue chart review's own note uses. No categorical market_
     # structure/location_read/etc. fields: those describe a formal chart
@@ -6291,6 +6313,138 @@ def list_approved_setup_memories(
 MANUAL_CANDIDATE_SOURCE = "manual"
 
 
+def _derive_manual_plan(
+    ticker: str,
+    direction: str,
+    entry_price: float,
+    order_block: Optional[dict[str, float]],
+    supplied_stop: Optional[float],
+    need_stop: bool,
+    need_target: bool,
+) -> dict[str, Any]:
+    """Fill in whichever of stop/target the submitter left off, using the
+    SAME structural math the scanner path uses in _compute_candidate_promotion
+    -- resolve_stop() for the stop, _nearest_structural_target() plus
+    clamp_target()/levels_near_target() for the target.
+
+    The one deliberate difference from the scanner path: the order block is
+    NOT discovered here by _find_order_block. It is passed in, because it is
+    the one the human marked on her own chart. That is the whole point of the
+    anchored plan -- the judgment (which zone matters) stays with her, the
+    arithmetic (where exactly the stop sits, whether the target survives
+    structure) is Kairos's. An order block the code chose for itself is the
+    unanchored path this endpoint exists to avoid.
+
+    Returns {stop, target, stop_source, raw_stop, raw_target, target_clamped,
+    target_clamp_badge, target_clamp_reason, atr14} with only the derived
+    halves meaningful; callers keep any value the submitter gave verbatim, and
+    judge R:R on the final combined plan. Raises 422 rather than inventing a
+    level (or swapping in a generic one) when the data isn't there -- a
+    refusal is a real answer here, not a failure.
+    """
+    daily = _batch_download([ticker], period="1y", interval="1d").get(ticker)
+    if daily is None or getattr(daily, "empty", True):
+        raise HTTPException(
+            status_code=422,
+            detail=f"No daily candles available for {ticker}, so stop/target can't be derived. "
+                   f"Submit explicit stop and target values instead.",
+        )
+    try:
+        df = _flatten_columns(daily.copy()).dropna().astype(float)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Daily candles for {ticker} are not usable: {exc.__class__.__name__}")
+    if len(df) < 20:
+        raise HTTPException(status_code=422, detail=f"Not enough daily candles for {ticker} to derive a plan.")
+
+    atr14 = float(_compute_atr(df, period=14))
+    if atr14 <= 0:
+        raise HTTPException(status_code=422, detail=f"ATR14 is not usable for {ticker}")
+
+    swings = _find_swings(df)
+
+    out: dict[str, Any] = {
+        "stop": None, "target": None,
+        "stop_source": None, "raw_stop": None, "raw_target": None,
+        "target_clamped": False, "target_clamp_badge": None,
+        "target_clamp_reason": None, "atr14": atr14,
+    }
+
+    if need_stop:
+        resolution = resolve_stop(entry_price, direction, atr14, ATR_MULTIPLIER, order_block)
+        # resolve_stop falls back to the flat ATR stop when the order block
+        # isn't usable. That fallback is right on the scanner path, where the
+        # block was the code's own guess -- but here the block is the one she
+        # marked, so swapping in a generic stop would quietly discard her
+        # read. Refuse instead and say why. The decision itself is still
+        # resolve_stop's (stop_source); the arithmetic below only explains it.
+        if resolution["stop_source"] != "order_block":
+            buf = DEFAULT_CLAMP_BUFFER_ATR * atr14
+            if direction == "long":
+                candidate_stop = order_block["low"] - buf
+                wrong_side = candidate_stop >= entry_price
+                side_word, edge_word = "below", "low"
+            else:
+                candidate_stop = order_block["high"] + buf
+                wrong_side = candidate_stop <= entry_price
+                side_word, edge_word = "above", "high"
+            if wrong_side:
+                reason = (f"the marked order block's {edge_word} edge puts the stop at {round(candidate_stop, 4)}, "
+                          f"which is not {side_word} entry ({entry_price}) for a {direction}")
+            else:
+                distance_atr = abs(entry_price - candidate_stop) / atr14
+                reason = (f"the stop it implies ({round(candidate_stop, 4)}) is only {round(distance_atr, 2)}x ATR "
+                          f"from entry, under the {MIN_STOP_DISTANCE_ATR}x ATR minimum")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Can't derive a stop for {ticker} from the marked order block: {reason}. "
+                       f"Kairos won't swap in a generic ATR stop -- re-mark the block or supply an explicit stop.",
+            )
+        out["stop"] = resolution["stop"]
+        out["raw_stop"] = resolution["raw_stop"]
+        out["stop_source"] = resolution["stop_source"]
+
+    if need_target:
+        min_target_distance = _min_target_atr_multiple() * atr14
+        target = _nearest_structural_target(entry_price, direction, swings, min_target_distance)
+        if target is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"No structural target at least {_min_target_atr_multiple()}x ATR away could be found for "
+                       f"{ticker} {direction}. Kairos won't invent one -- submit an explicit target, or treat "
+                       f"this as the setup failing its own math.",
+            )
+        out["raw_target"] = target
+        out["target"] = target
+
+        # Clamp runs against the stop that will actually be live -- the one
+        # just derived, or the one the submitter typed. clamp_target needs
+        # real risk to recompute R:R, so this has to happen after the stop
+        # is settled, never in parallel with it.
+        effective_stop = out["stop"] if need_stop else supplied_stop
+        if effective_stop is None:
+            raise HTTPException(status_code=422, detail="Internal: no stop available to validate the target against.")
+        risk = abs(entry_price - effective_stop)
+        if risk <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Derived stop for {ticker} sits at entry, so risk is zero and no target can be validated.",
+            )
+
+        findings = levels_near_target(df, swings, target, atr14, direction)
+        if findings:
+            clamp = clamp_target(
+                entry_price, effective_stop, target, atr14, findings,
+                direction=direction, min_viable_rr=RR_WARNING_THRESHOLD,
+            )
+            out["target_clamp_badge"] = clamp["badge"]
+            out["target_clamp_reason"] = clamp["clamp_refused_reason"]
+            if clamp["clamped"]:
+                out["target"] = clamp["adjusted_target"]
+                out["target_clamped"] = True
+
+    return out
+
+
 @router.post("/candidates/manual", response_model=ApprovedSetupMemoryRecordOut)
 def submit_manual_candidate(
     body: ManualCandidateIn,
@@ -6298,7 +6452,18 @@ def submit_manual_candidate(
     scanner_session: Optional[str] = Cookie(default=None, alias=SCANNER_SESSION_COOKIE),
 ):
     """Manual candidate submission -- a setup Erica is putting on Kairos's
-    radar herself, not one the scanner surfaced. Creates exactly the same
+    radar herself, not one the scanner surfaced.
+
+    Stop and target are both optional. Whatever is supplied is used verbatim;
+    whatever is omitted is derived by _derive_manual_plan from the order block
+    marked on the chart (order_block_high/low, required when stop is omitted).
+    That split is the product itself: the judgment of which zone and which
+    ticker matters stays with the human, and Kairos does the arithmetic --
+    stop at the real invalidation level via resolve_stop, target validated
+    against structure via clamp_target, and a 422 rather than an invented
+    level when the setup doesn't survive its own math.
+
+    Creates exactly the same
     approved_setup_memories + approved_setup_monitor_state row pair a
     scanner-sourced approval does (via _create_approved_setup_memory), so
     it flows through the IDENTICAL downstream lifecycle -- including the
@@ -6328,29 +6493,92 @@ def submit_manual_candidate(
     ticker = body.ticker.strip().upper()
     if not ticker:
         raise HTTPException(status_code=422, detail="ticker must not be blank.")
-    for label, value in (("entry", body.entry), ("stop", body.stop), ("target", body.target)):
+
+    supplied: list[tuple[str, float]] = [("entry", body.entry)]
+    if body.stop is not None:
+        supplied.append(("stop", body.stop))
+    if body.target is not None:
+        supplied.append(("target", body.target))
+    if body.order_block_high is not None:
+        supplied.append(("order_block_high", body.order_block_high))
+    if body.order_block_low is not None:
+        supplied.append(("order_block_low", body.order_block_low))
+    for label, value in supplied:
         if not math.isfinite(value) or value <= 0:
             raise HTTPException(status_code=422, detail=f"{label} must be a positive, finite number.")
+
+    need_stop = body.stop is None
+    need_target = body.target is None
+
+    # Order block is all-or-nothing, and required exactly when the stop is
+    # being derived. Rejecting a half-specified block here (rather than
+    # quietly passing None to resolve_stop) matters: resolve_stop's own
+    # documented fallback for order_block=None is the flat ATR-multiple
+    # stop, so a typo'd single edge would silently produce the generic stop
+    # this feature exists to replace -- looking like it worked.
+    has_ob_high = body.order_block_high is not None
+    has_ob_low = body.order_block_low is not None
+    if has_ob_high != has_ob_low:
+        raise HTTPException(
+            status_code=422,
+            detail="order_block_high and order_block_low must both be set together, or both omitted.",
+        )
+    order_block: Optional[dict[str, float]] = None
+    if has_ob_high:
+        if not (body.order_block_low < body.order_block_high):
+            raise HTTPException(
+                status_code=422,
+                detail=f"order_block_low ({body.order_block_low}) must be below "
+                       f"order_block_high ({body.order_block_high}).",
+            )
+        order_block = {"high": float(body.order_block_high), "low": float(body.order_block_low)}
+    if need_stop and order_block is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Omitting stop means Kairos derives it from the order block you marked, so "
+                   "order_block_high and order_block_low are required. Otherwise supply an explicit stop.",
+        )
+    # The order block is only ever an input to the derived stop. Sent next to
+    # an explicit stop it would be accepted and ignored, and nothing in the
+    # stored row would say so -- so the two are mutually exclusive.
+    if not need_stop and order_block is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="order_block_high/low are only used to derive the stop, so they can't be combined with an "
+                   "explicit stop. Send one or the other.",
+        )
+
+    derived: dict[str, Any] = {}
+    if need_stop or need_target:
+        derived = _derive_manual_plan(
+            ticker, body.direction, body.entry, order_block,
+            supplied_stop=body.stop, need_stop=need_stop, need_target=need_target,
+        )
+    stop = derived["stop"] if need_stop else body.stop
+    target = derived["target"] if need_target else body.target
 
     # Direction-consistent ordering, validated HERE rather than left
     # implicit -- the one new entry point in this codebase where a human
     # types stop/target directly (every other path derives them from real
-    # swing/order-block structure, never typo-able). This is exactly the
+    # swing/order-block structure, never typo-able). Still enforced on the
+    # derived values too: resolve_stop/clamp_target each have their own
+    # guards, but this is the single place every manual plan passes through
+    # regardless of which half came from where. This is exactly the
     # malformed-data shape the TARGET_HIT ordering fix's own test
     # (test_invalidation_wins_over_target_hit_on_malformed_stop_target)
     # defends against downstream -- better to reject it here than rely on
     # that fallback ever being exercised.
-    if body.direction == "long" and not (body.stop < body.entry < body.target):
+    if body.direction == "long" and not (stop < body.entry < target):
         raise HTTPException(
             status_code=422,
-            detail=f"For a long, stop ({body.stop}) must be below entry ({body.entry}), "
-                   f"which must be below target ({body.target}).",
+            detail=f"For a long, stop ({stop}) must be below entry ({body.entry}), "
+                   f"which must be below target ({target}).",
         )
-    if body.direction == "short" and not (body.stop > body.entry > body.target):
+    if body.direction == "short" and not (stop > body.entry > target):
         raise HTTPException(
             status_code=422,
-            detail=f"For a short, stop ({body.stop}) must be above entry ({body.entry}), "
-                   f"which must be above target ({body.target}).",
+            detail=f"For a short, stop ({stop}) must be above entry ({body.entry}), "
+                   f"which must be above target ({target}).",
         )
 
     has_trigger_rule = body.trigger_rule is not None
@@ -6359,9 +6587,40 @@ def submit_manual_candidate(
         raise HTTPException(status_code=422, detail="trigger_rule and trigger_level must both be set together, or both omitted.")
     trigger_timeframe = (body.trigger_timeframe or "30m") if has_trigger_rule else None
 
-    risk = abs(body.entry - body.stop)
-    risk_reward = (abs(body.target - body.entry) / risk) if risk > 0 else None
-    setup_key = f"{ticker}|{MANUAL_CANDIDATE_SOURCE}|{body.direction}|{round(body.stop, 2):.2f}|{round(body.target, 2):.2f}"
+    risk = abs(body.entry - stop)
+    risk_reward = (abs(target - body.entry) / risk) if risk > 0 else None
+    setup_key = f"{ticker}|{MANUAL_CANDIDATE_SOURCE}|{body.direction}|{round(stop, 2):.2f}|{round(target, 2):.2f}"
+
+    # Provenance line appended to the rationale. The memory table has no
+    # stop_source/raw_stop/target_clamped columns (the scanner path keeps
+    # those only on the candidate card), and adding them is a schema change
+    # out of scope here -- but a plan that is half her levels and half
+    # Kairos's must not be indistinguishable later from one she typed
+    # entirely herself, or the outcome record it feeds is unreadable.
+    provenance: list[str] = []
+    if need_stop:
+        provenance.append(
+            f"stop derived from marked order block "
+            f"({body.order_block_low}-{body.order_block_high}) via resolve_stop "
+            f"[source={derived['stop_source']}, raw_atr_stop={round(derived['raw_stop'], 4)}]"
+        )
+    if need_target:
+        bits = [f"target derived from structure [raw={round(derived['raw_target'], 4)}"]
+        if derived["target_clamped"]:
+            bits.append(f"clamped to {round(target, 4)}")
+        if derived["target_clamp_badge"]:
+            bits.append(f"badge={derived['target_clamp_badge']}")
+        if derived["target_clamp_reason"]:
+            bits.append(f"clamp_refused={derived['target_clamp_reason']}")
+        provenance.append(", ".join(bits) + "]")
+    # R:R is judged on the final plan, not inside the target derivation, so a
+    # derived stop paired with her own target gets the same warning as the
+    # other way round -- a wide structural stop can wreck R:R on its own.
+    if provenance and risk_reward is not None and risk_reward < RR_WARNING_THRESHOLD:
+        provenance.append(f"R:R {round(risk_reward, 2)} below {RR_WARNING_THRESHOLD}")
+    review_note = body.rationale
+    if provenance:
+        review_note = f"{body.rationale}\n\n[Kairos] " + "; ".join(provenance)
 
     conn = _get_db()
     try:
@@ -6375,7 +6634,7 @@ def submit_manual_candidate(
             )
         submitted_at = datetime.now(timezone.utc).isoformat()
         preview = {
-            "entry_price": body.entry, "stop": body.stop, "target": body.target, "risk_reward": risk_reward,
+            "entry_price": body.entry, "stop": stop, "target": target, "risk_reward": risk_reward,
             "current_price": None, "entry_distance_pct": None, "entry_proximity_threshold_pct": None,
         }
         memory_id = _create_approved_setup_memory(
@@ -6383,7 +6642,7 @@ def submit_manual_candidate(
             ticker=ticker, source=MANUAL_CANDIDATE_SOURCE, direction=body.direction, setup_key=setup_key,
             approved_at=submitted_at, visual_review_id=None, preview=preview,
             market_structure=None, location_read=None, clear_path_to_target=None, lower_tf_confirmation=None,
-            review_note=body.rationale,
+            review_note=review_note,
             snapshot_origin="approval_event", snapshot_exact=True,
             trigger_timeframe=trigger_timeframe, trigger_rule=body.trigger_rule,
             trigger_level=body.trigger_level, trigger_reason=body.trigger_reason,
